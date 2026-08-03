@@ -82,9 +82,9 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
     except Exception as e:
         raise gr.Error(f"❌ Lỗi xử lý: {str(e)}")
 
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"), css=CUSTOM_CSS, title="AI Video Upscaler 4K") as app:
+with gr.Blocks(title="AI Video Upscaler 4K") as app:
     with gr.Column(elem_classes=["container"]):
-        with gr.Box(elem_classes=["header-box"]):
+        with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
             # ✨ AI Anime Video Super-Resolution & 4K Upscaler
             Nâng cấp chất lượng video Anime / Video sắc nét 4K bằng mạng nơ-ron nhân tạo **Real-ESRGAN (SRVGGNetCompact)**.
@@ -133,5 +133,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="indigo"
         )
 
 if __name__ == '__main__':
-    # Chạy Web UI hỗ trợ truy cập public/GCP via 0.0.0.0:7860
-    app.queue().launch(server_name="0.0.0.0", server_port=7860, share=False)
+    theme = gr.themes.Soft(primary_hue="purple", secondary_hue="indigo")
+    app.queue().launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        theme=theme,
+        css=CUSTOM_CSS
+    )
