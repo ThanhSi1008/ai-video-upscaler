@@ -253,11 +253,21 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         
     model.load_state_dict(state_dict, strict=True)
     model.eval()
-    if device.type in ['mps', 'cuda']:
-        model = model.half()
 
     if device.type == 'cuda':
-        model = model.to(memory_format=torch.channels_last)
+        model = model.half().to(memory_format=torch.channels_last)
+        if torch.cuda.device_count() > 1:
+            print(f"🔥 Kích hoạt DUAL GPU T4 x2 (Sử dụng 100% cả 2 Card Đồ Họa NVIDIA T4 trên Kaggle)!")
+            model = nn.DataParallel(model)
+            batch_size = 4
+        else:
+            batch_size = 2
+        queue_size = 8
+    else:
+        if device.type == 'mps':
+            model = model.half()
+        batch_size = 1
+        queue_size = 2
 
     model = model.to(device)
 
@@ -287,7 +297,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
 
-    # Đặt chuẩn 4K Ultra-HD (3840x2160) để tránh nghẽn bộ đệm pipe FFmpeg
     if keep_highest:
         target_w, target_h = upscaled_w, upscaled_h
     else:
@@ -342,15 +351,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
-    
-    if device.type == 'cuda':
-        batch_size = 2 if src_h <= 1080 else 1
-        queue_size = 4
-    else:
-        batch_size = 1
-        queue_size = 2
 
-    print(f"🔥 Cấu hình siêu tốc GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
+    print(f"🔥 Cấu hình siêu tốc DUAL GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
 
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
