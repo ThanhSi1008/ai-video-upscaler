@@ -428,8 +428,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
         chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 0]
 
-        if len(chunk_files) == 2:
-            print("📦 Đang nối 2 đoạn video và ghép âm thanh gốc...", flush=True)
+        if chunk_files:
+            print("📦 Đang nối các đoạn video và ghép âm thanh gốc...", flush=True)
             concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
             with open(concat_txt, "w") as f:
                 for c_path in chunk_files:
@@ -465,6 +465,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
                 except Exception: pass
             return video_output
+
+        # LUÔN KHUNG RETURN SAU KHI XỬ LÝ DUAL GPU THÀNH CÔNG, KHÔNG BAO GIỜ CHẠY LẠI THÊM 1 LẦN NỮA
+        return video_output
 
     # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC CHẠY MPS/CPU)
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
