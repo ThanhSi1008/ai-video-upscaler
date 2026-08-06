@@ -61,6 +61,12 @@ def upscale_tiled(model, img_t, device, tile=800, pad=16, scale=4):
 def get_device_and_codec(requested_codec="auto"):
     if torch.cuda.is_available():
         device = torch.device('cuda')
+        # Tối ưu hóa hiệu năng CUDA & Tensor Cores cho NVIDIA GPUs
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch.backends.cuda, 'matmul'):
+            torch.backends.cuda.matmul.allow_tf32 = True
+        if hasattr(torch.backends.cudnn, 'allow_tf32'):
+            torch.backends.cudnn.allow_tf32 = True
         default_codec = 'h264_nvenc'
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = torch.device('mps')
@@ -235,7 +241,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-cq', '20', '-preset', 'p4']
+        quality_opts = ['-cq', '20', '-preset', 'p4', '-tune', 'hq', '-rc-lookahead', '20']
     else:
         quality_opts = ['-crf', '18']
 
@@ -258,8 +264,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     idx = 0
     print("🚀 Bắt đầu quá trình AI Super-Resolution...")
     
-    input_queue = Queue(maxsize=4)
-    output_queue = Queue(maxsize=4)
+    # Tối ưu kích thước queue pre-fetch cho CUDA GPU để tránh nghẽn I/O
+    queue_size = 8 if device.type == 'cuda' else 4
+    input_queue = Queue(maxsize=queue_size)
+    output_queue = Queue(maxsize=queue_size)
 
     def reader_worker():
         try:
