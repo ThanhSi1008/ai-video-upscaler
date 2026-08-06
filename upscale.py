@@ -71,7 +71,7 @@ def get_device_and_codec(requested_codec="auto"):
     return device, codec
 
 # Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, return_dict):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, return_dict, progress_queue):
     try:
         import numpy as np
         import torch
@@ -184,6 +184,9 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 output_queue.put(output_np[i].tobytes())
 
             processed_cnt += current_b
+            try: progress_queue.put(current_b)
+            except Exception: pass
+
             if processed_cnt % 30 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -352,12 +355,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
-    # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT PHÂN LUỒNG ĐỘC LẬP TỐC ĐỘ 14 - 18 FPS
+    # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT PHÂN LUỒNG ĐỘC LẬP TỐC ĐỘ 14 - 18 FPS + THANH TIẾN ĐỘ THỜI GIAN THỰC
     if num_cuda_gpus >= 2 and expected_frames and expected_frames > 100:
-        try:
-            mp.set_start_method('spawn', force=True)
-        except Exception:
-            pass
+        try: mp.set_start_method('spawn', force=True)
+        except Exception: pass
 
         print(f"🔥 BẮT ĐẦU CHẠY PHÂN LUỒNG ĐỘC LẬP DUAL GPU: KÍCH HOẠT CẢ {num_cuda_gpus} CARDS NVIDIA T4 CÙNG LÚC!")
         print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu: {target_w}x{target_h}")
@@ -370,6 +371,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
         manager = mp.Manager()
         return_dict = manager.dict()
+        progress_queue = manager.Queue()
         processes = []
 
         start_time = time.time()
@@ -377,12 +379,37 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, return_dict)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
 
-        print("⏳ Đang xử lý song song 2 nửa video trên GPU 0 và GPU 1 (Tốc độ đỉnh cao ~14 - 18 FPS)...", flush=True)
+        completed_total = 0
+        last_print_t = 0.0
+
+        while completed_total < expected_frames:
+            try:
+                added = progress_queue.get(timeout=0.5)
+                completed_total += added
+            except Exception:
+                if not any(p.is_alive() for p in processes):
+                    break
+
+            now = time.time()
+            if (now - last_print_t) >= 0.8 or completed_total >= expected_frames:
+                last_print_t = now
+                elapsed = now - start_time
+                speed_fps = completed_total / elapsed if elapsed > 0 else 0.0
+                pct = (completed_total / expected_frames) * 100
+                cur_sec = completed_total / fps if fps > 0 else 0
+                cur_str = f"{int(cur_sec // 60):02d}:{int(cur_sec % 60):02d}"
+                tot_sec = expected_frames / fps if fps > 0 else 0
+                tot_str = f"{int(tot_sec // 60):02d}:{int(tot_sec % 60):02d}"
+                eta_sec = (expected_frames - completed_total) / speed_fps if speed_fps > 0 else 0
+                eta_str = f"{int(eta_sec // 60):02d}:{int(eta_sec % 60):02d}"
+
+                status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}"
+                print(status_msg + "    ", end='\r', flush=True)
 
         for p in processes:
             p.join()
