@@ -383,8 +383,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
                 with torch.inference_mode():
                     if ort_session is not None:
-                        # Thực thi qua NVIDIA TensorRT Engine (Nâng cao)
-                        ort_inputs = {ort_session.get_inputs()[0].name: img_t.cpu().numpy()}
+                        # Thực thi qua NVIDIA TensorRT Engine (Nâng cao) - Đảm bảo tensor contiguous khi chuyển sang numpy
+                        ort_inputs = {ort_session.get_inputs()[0].name: img_t.contiguous().cpu().numpy()}
                         ort_outs = ort_session.run(None, ort_inputs)
                         output = torch.from_numpy(ort_outs[0]).to(device)
                     else:
