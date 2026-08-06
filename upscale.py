@@ -182,13 +182,24 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 torch.cuda.empty_cache()
 
         output_queue.put(None)
-        writer_thread.join(timeout=10)
-        try: process_read.stdout.close(); process_read.wait()
-        except Exception: pass
+        writer_thread.join(timeout=5)
+
         try:
-            if process_write.stdin: process_write.stdin.close()
-            process_write.wait()
-        except Exception: pass
+            if process_read.poll() is None:
+                process_read.terminate()
+                process_read.wait(timeout=2)
+        except Exception:
+            try: process_read.kill()
+            except Exception: pass
+
+        try:
+            if process_write.stdin and not process_write.stdin.closed:
+                process_write.stdin.close()
+            if process_write.poll() is None:
+                process_write.wait(timeout=3)
+        except Exception:
+            try: process_write.kill()
+            except Exception: pass
 
         return_dict[gpu_id] = True
     except Exception as e:
@@ -541,7 +552,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     total_video_time_str = f"{int(total_video_time // 60):02d}:{int(total_video_time % 60):02d}"
                     remaining_frames = expected_frames - idx
                     eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
-                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
+                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_str % 60):02d}" if 'eta_str' in locals() else f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
                     pct = (idx / expected_frames) * 100
                     status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
                     print(status_msg + "    ", end='\r', flush=True)
@@ -552,14 +563,25 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     finally:
         print("\n", flush=True)
         print("🎬 Hoàn tất luồng xử lý khung hình...", flush=True)
-        try: output_queue.put(None); writer_thread.join(timeout=10)
+        try: output_queue.put(None); writer_thread.join(timeout=5)
         except Exception: pass
-        try: process_read.stdout.close(); process_read.wait()
-        except Exception: pass
+
         try:
-            if process_write.stdin: process_write.stdin.close()
-            process_write.wait()
-        except Exception: pass
+            if process_read.poll() is None:
+                process_read.terminate()
+                process_read.wait(timeout=2)
+        except Exception:
+            try: process_read.kill()
+            except Exception: pass
+
+        try:
+            if process_write.stdin and not process_write.stdin.closed:
+                process_write.stdin.close()
+            if process_write.poll() is None:
+                process_write.wait(timeout=3)
+        except Exception:
+            try: process_write.kill()
+            except Exception: pass
 
         if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
             print("🔊 Đang ghép âm thanh gốc và xuất video 4K hoàn chỉnh 100%...", flush=True)
