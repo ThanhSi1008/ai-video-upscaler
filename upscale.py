@@ -202,24 +202,20 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 torch.cuda.empty_cache()
 
         output_queue.put(None)
-        writer_thread.join(timeout=5)
+        writer_thread.join(timeout=10)
 
         try:
             if process_read.poll() is None:
                 process_read.terminate()
-                process_read.wait(timeout=2)
-        except Exception:
-            try: process_read.kill()
-            except Exception: pass
+                process_read.wait(timeout=5)
+        except Exception: pass
 
         try:
             if process_write.stdin and not process_write.stdin.closed:
                 process_write.stdin.close()
-            if process_write.poll() is None:
-                process_write.wait(timeout=3)
-        except Exception:
-            try: process_write.kill()
-            except Exception: pass
+            process_write.wait(timeout=30)
+        except Exception as e_w:
+            print(f"⚠️ Cảnh báo đóng luồng ghi FFmpeg worker {gpu_id}: {e_w}")
 
         return_dict[gpu_id] = True
     except Exception as e:
