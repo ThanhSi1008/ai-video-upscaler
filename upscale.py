@@ -112,14 +112,31 @@ def get_tensorrt_session(weights_path, device):
         pass
     return None
 
-def get_vn_proxies():
+def fetch_vn_proxies():
+    proxies = []
     try:
-        url = 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=VN'
+        url = 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=VN'
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         res = urllib.request.urlopen(req, timeout=5)
-        return [p.strip() for p in res.read().decode().strip().splitlines() if p.strip()]
+        for line in res.read().decode().strip().splitlines():
+            if line.strip() and ':' in line:
+                proxies.append(line.strip())
     except Exception:
-        return []
+        pass
+        
+    try:
+        url = 'https://proxylist.geonode.com/api/proxy-list?limit=15&page=1&sort_by=lastChecked&sort_type=desc&country_code=VN'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(res.read().decode())
+        for item in data.get('data', []):
+            ip = item.get('ip')
+            port = item.get('port')
+            if ip and port:
+                proxies.append(f"{ip}:{port}")
+    except Exception:
+        pass
+    return list(dict.fromkeys(proxies))
 
 # --- 4. Hàm xử lý upscale chính tích hợp Tự Động Resume Progress & Dọn Dẹp File Rác ---
 def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, progress_callback=None):
@@ -136,7 +153,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if is_youtube:
         print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô...")
         if progress_callback:
-            progress_callback(0.01, desc="📥 Đang tải video từ YouTube...")
+            progress_callback(0.01, desc="📥 Đang kết nối tải video từ YouTube...")
         try:
             import yt_dlp
             import glob
@@ -158,46 +175,52 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 'nocheckcertificate': True,
             }
 
+            download_success = False
             video_title = "youtube_video"
-            downloaded = []
 
+            # 1. Thử tải trực tiếp
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(video_input, download=True)
                     video_title = info.get('title', 'youtube_video')
                     video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
                 downloaded = glob.glob('yt_temp_input.*')
+                if downloaded:
+                    download_success = True
+                    temp_input_file = downloaded[0]
             except Exception as direct_err:
-                err_str = str(direct_err)
-                if 'country' in err_str.lower() or 'available' in err_str.lower() or 'geo' in err_str.lower():
-                    print("🌐 Video bị giới hạn quốc gia (Geo-restricted). Đang kích hoạt Proxy Việt Nam tự động...")
-                    if progress_callback:
-                        progress_callback(0.01, desc="🌐 Đang kích hoạt Proxy Việt Nam để tải video bị giới hạn...")
-                    
-                    proxies = get_vn_proxies()
-                    print(f"📡 Tìm thấy {len(proxies)} Proxy Việt Nam sẵn sàng. Đang thử kết nối...")
-                    for p in proxies:
-                        try:
-                            p_opts = dict(opts)
-                            p_opts['proxy'] = f'http://{p}'
-                            with yt_dlp.YoutubeDL(p_opts) as ydl:
-                                info = ydl.extract_info(video_input, download=True)
-                                video_title = info.get('title', 'youtube_video')
-                                video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                            downloaded = glob.glob('yt_temp_input.*')
-                            if downloaded:
-                                print(f"✅ Vượt rào thành công qua Proxy {p}!")
-                                break
-                        except Exception:
-                            continue
+                print(f"⚠️ Tải trực tiếp không khả thi: {direct_err}")
 
-                if not downloaded:
-                    raise direct_err
+            # 2. Tự động chuyển qua Proxy Việt Nam nếu bị chặn địa lý
+            if not download_success:
+                print("🌐 Đang tự động tìm kiếm Proxy Việt Nam để vượt qua rào cản quốc gia...")
+                if progress_callback:
+                    progress_callback(0.01, desc="🌐 Đang kích hoạt Proxy Việt Nam vượt rào YouTube...")
+                
+                vn_proxies = fetch_vn_proxies()
+                print(f"📡 Đã quét được {len(vn_proxies)} địa chỉ Proxy Việt Nam...")
 
-            if not downloaded:
-                raise Exception("Không thể tải video từ YouTube!")
+                for p in vn_proxies:
+                    try:
+                        p_opts = dict(opts)
+                        p_opts['proxy'] = f'http://{p}'
+                        p_opts['socket_timeout'] = 8
+                        with yt_dlp.YoutubeDL(p_opts) as ydl:
+                            info = ydl.extract_info(video_input, download=True)
+                            video_title = info.get('title', 'youtube_video')
+                            video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
+                        downloaded = glob.glob('yt_temp_input.*')
+                        if downloaded:
+                            download_success = True
+                            temp_input_file = downloaded[0]
+                            print(f"🎉 Tải thành công qua Proxy {p}!")
+                            break
+                    except Exception:
+                        continue
 
-            temp_input_file = downloaded[0]
+            if not download_success:
+                raise Exception("Không thể tải video từ YouTube! Video bị chặn địa lý trên IP máy chủ cloud.")
+
             video_input = temp_input_file
             video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
             print(f"✅ Tải thành công video: '{video_title}'. Bắt đầu chạy upscale...")
