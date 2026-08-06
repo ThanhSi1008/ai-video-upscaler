@@ -256,13 +256,13 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
-        if torch.cuda.device_count() > 1:
-            print(f"🔥 Kích hoạt DUAL GPU T4 x2 (Sử dụng 100% cả 2 Card Đồ Họa NVIDIA T4 trên Kaggle)!")
-            model = nn.DataParallel(model)
-            batch_size = 4
-        else:
-            batch_size = 2
+        batch_size = 4
         queue_size = 8
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("⚡ Đã kích hoạt PyTorch Kernel Fusion Compiler!")
+        except Exception:
+            pass
     else:
         if device.type == 'mps':
             model = model.half()
@@ -316,7 +316,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if current_chunk_file not in active_chunks:
         active_chunks.append(current_chunk_file)
 
-    # Đặt -ss TRƯỚC -i video_input để đồng bộ audio mà KHÔNG BAO GIỜ làm nghẽn stdin pipe!
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
@@ -328,7 +327,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-cq', '20', '-preset', 'p2', '-tune', 'hq']
+        quality_opts = ['-cq', '20', '-preset', 'p1', '-tune', 'll']
     else:
         quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
@@ -352,7 +351,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
 
-    print(f"🔥 Cấu hình siêu tốc DUAL GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
+    print(f"🔥 Cấu hình siêu tốc GPU Direct: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
 
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
@@ -489,7 +488,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                         progress_callback(None, desc=status_msg)
 
     except KeyboardInterrupt:
-        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
+        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã me được lưu lại.")
         try:
             with open(checkpoint_file, "w") as f:
                 json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
