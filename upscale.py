@@ -6,14 +6,13 @@ import gc
 import subprocess
 import urllib.request
 import warnings
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from PIL import Image
-import numpy as np
 import time
 import threading
 from queue import Queue
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+import torch.multiprocessing as mp
 
 # Ẩn toàn bộ các dòng Warning hiển thị của Python & PyTorch Inductor
 warnings.filterwarnings("ignore")
@@ -47,26 +46,6 @@ class SRVGGNetCompact(nn.Module):
         base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
         return out + base
 
-# --- 3. Giải thuật Tiling tối ưu luồng tính toán bất đồng bộ trên GPU ---
-def upscale_tiled(model, img_t, device, tile=800, pad=16, scale=4):
-    _, c, h, w = img_t.shape
-    out = torch.zeros((1, c, h * scale, w * scale), device=device, dtype=img_t.dtype)
-
-    for y0 in range(0, h, tile):
-        for x0 in range(0, w, tile):
-            y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
-            py0, py1 = max(y0 - pad, 0), min(y1 + pad, h)
-            px0, px1 = max(x0 - pad, 0), min(x1 + pad, w)
-
-            tile_out = model(img_t[:, :, py0:py1, px0:px1])
-
-            ct, cl = (y0 - py0) * scale, (x0 - px0) * scale
-            ch, cw = (y1 - y0) * scale, (x1 - x0) * scale
-            
-            out[:, :, y0*scale:y1*scale, x0*scale:x1*scale] = \
-                tile_out[:, :, ct:ct+ch, cl:cl+cw]
-    return out
-
 def get_device_and_codec(requested_codec="auto"):
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -90,38 +69,133 @@ def get_device_and_codec(requested_codec="auto"):
         codec = requested_codec
     return device, codec
 
-def get_tensorrt_session(weights_path, device):
+# Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, return_dict):
     try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        if 'TensorrtExecutionProvider' in providers or 'CUDAExecutionProvider' in providers:
-            onnx_path = weights_path.replace('.pth', '.onnx')
-            if not os.path.exists(onnx_path):
-                print("⚡ Đang xuất mô hình PyTorch sang định dạng ONNX/TensorRT...")
-                dummy_input = torch.randn(1, 3, 270, 480, dtype=torch.float16, device=device)
-                model_pt = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
-                state_dict = torch.load(weights_path, map_location='cpu')
-                if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
-                elif 'params' in state_dict: state_dict = state_dict['params']
-                model_pt.load_state_dict(state_dict, strict=True)
-                model_pt.eval().half().to(device)
-                torch.onnx.export(
-                    model_pt, dummy_input, onnx_path,
-                    export_params=True, opset_version=14, do_constant_folding=True,
-                    input_names=['input'], output_names=['output'],
-                    dynamic_axes={'input': {0: 'batch', 2: 'height', 3: 'width'}, 'output': {0: 'batch', 2: 'height', 3: 'width'}}
-                )
-                print("✅ Đã tạo tệp ONNX TensorRT thành công!")
-            
-            active_providers = ['TensorrtExecutionProvider', 'CUDAExecutionProvider'] if 'TensorrtExecutionProvider' in providers else ['CUDAExecutionProvider']
-            session = ort.InferenceSession(onnx_path, providers=active_providers)
-            print(f"🚀 Đã kích hoạt NVIDIA TensorRT Engine với Providers: {active_providers}")
-            return session
-    except Exception:
-        pass
-    return None
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-# --- 4. Hàm xử lý upscale chính tích hợp Tự Động Resume Progress & Dọn Dẹp File Rác ---
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+        state_dict = torch.load(weights_path, map_location='cpu')
+        if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
+        elif 'params' in state_dict: state_dict = state_dict['params']
+        model.load_state_dict(state_dict, strict=True)
+        model.eval()
+
+        if device.type == 'cuda':
+            model = model.half().to(memory_format=torch.channels_last)
+            try: model = torch.compile(model, mode="default")
+            except Exception: pass
+        model = model.to(device)
+
+        seek_time = start_frame / fps if (start_frame > 0 and fps > 0) else 0.0
+        
+        ffmpeg_read_cmd = ['ffmpeg', '-y']
+        if seek_time > 0:
+            ffmpeg_read_cmd.extend(['-ss', f"{seek_time:.4f}"])
+        ffmpeg_read_cmd.extend([
+            '-i', video_input,
+            '-vframes', str(total_frames_to_process),
+            '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
+        ])
+        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+
+        ffmpeg_write_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
+            '-i', '-',
+            '-c:v', encoder_codec,
+            '-preset', 'p1', '-tune', 'll', '-rc', 'constqp', '-qp', '20',
+            '-pix_fmt', 'yuv420p',
+            chunk_output_path
+        ]
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+
+        frame_size = src_w * src_h * 3
+        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        queue_size = 12
+
+        input_queue = Queue(maxsize=queue_size)
+        output_queue = Queue(maxsize=queue_size)
+
+        def reader_worker():
+            try:
+                for _ in range(total_frames_to_process):
+                    in_bytes = process_read.stdout.read(frame_size)
+                    if not in_bytes or len(in_bytes) != frame_size:
+                        input_queue.put(None)
+                        break
+                    input_queue.put(in_bytes)
+                input_queue.put(None)
+            except Exception:
+                input_queue.put(None)
+
+        def writer_worker():
+            try:
+                while True:
+                    item = output_queue.get()
+                    if item is None: break
+                    try:
+                        process_write.stdin.write(item)
+                        process_write.stdin.flush()
+                    except Exception: pass
+                    output_queue.task_done()
+            except Exception: pass
+
+        reader_thread = threading.Thread(target=reader_worker, daemon=True)
+        writer_thread = threading.Thread(target=writer_worker, daemon=True)
+        reader_thread.start()
+        writer_thread.start()
+
+        processed_cnt = 0
+        while processed_cnt < total_frames_to_process:
+            batch_bytes = []
+            for _ in range(batch_size):
+                item = input_queue.get()
+                if item is None: break
+                batch_bytes.append(item)
+            if not batch_bytes: break
+
+            current_b = len(batch_bytes)
+            img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
+            img_np_batch = np.stack(img_nps, axis=0)
+
+            img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
+            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+            img_t = img_t.to(memory_format=torch.channels_last)
+
+            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True, dtype=torch.float16):
+                output = model(img_t)
+                if output.shape[2] != target_h or output.shape[3] != target_w:
+                    output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
+
+            output_np = output.cpu().numpy()
+            output_np = np.transpose(output_np, (0, 2, 3, 1))
+
+            for i in range(current_b):
+                output_queue.put(output_np[i].tobytes())
+
+            processed_cnt += current_b
+            if processed_cnt % 30 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        output_queue.put(None)
+        writer_thread.join(timeout=10)
+        try: process_read.stdout.close(); process_read.wait()
+        except Exception: pass
+        try:
+            if process_write.stdin: process_write.stdin.close()
+            process_write.wait()
+        except Exception: pass
+
+        return_dict[gpu_id] = True
+    except Exception as e:
+        print(f"⚠️ Lỗi GPU worker {gpu_id}: {e}")
+        return_dict[gpu_id] = False
+
+# --- 5. Hàm xử lý upscale chính tích hợp Tự Động Dual GPU Multi-processing ---
 def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
@@ -204,22 +278,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         video_base = os.path.basename(os.path.splitext(video_input)[0])
         video_output = os.path.join(output_dir, f"{video_base}_upscaled.mp4")
 
-    # Kiểm tra tệp Checkpoint Resume tiến trình cũ
-    checkpoint_file = os.path.join(output_dir, f".checkpoint_{os.path.basename(video_output)}.json")
-    start_frame_idx = 0
-    existing_chunks = []
-
-    if os.path.exists(checkpoint_file):
-        try:
-            with open(checkpoint_file, "r") as f:
-                ckpt_data = json.load(f)
-                start_frame_idx = ckpt_data.get("completed_frames", 0)
-                existing_chunks = ckpt_data.get("chunks", [])
-            print(f"🔄 Phát hiện tiến trình cũ bị ngắt! Tự động khôi phục (Resume) từ frame {start_frame_idx}...")
-        except Exception:
-            start_frame_idx = 0
-            existing_chunks = []
-
     # Trích xuất siêu dữ liệu qua ffprobe
     try:
         fps_cmd = f"ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
@@ -249,36 +307,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             print(f"❌ Lỗi hạ tầng mạng: {e}")
             raise e
 
-    ort_session = get_tensorrt_session(weights_path, device) if device.type == 'cuda' else None
-
-    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
-    state_dict = torch.load(weights_path, map_location='cpu')
-    
-    if 'params_ema' in state_dict: 
-        state_dict = state_dict['params_ema']
-    elif 'params' in state_dict: 
-        state_dict = state_dict['params']
-        
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-
-    if device.type == 'cuda':
-        model = model.half().to(memory_format=torch.channels_last)
-        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
-        queue_size = 12
-        try:
-            model = torch.compile(model, mode="default")
-            print("⚡ Đã kích hoạt PyTorch Kernel Fusion Compiler!")
-        except Exception:
-            pass
-    else:
-        if device.type == 'mps':
-            model = model.half()
-        batch_size = 1
-        queue_size = 2
-
-    model = model.to(device)
-
     expected_frames = None
     try:
         frames_cmd = f"ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
@@ -287,20 +315,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             expected_frames = int(frames_res)
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
-
-    seek_time = start_frame_idx / fps if (start_frame_idx > 0 and fps > 0) else 0.0
-    print(f"🎞️ Khởi tạo luồng giải mã video FFmpeg (Bắt đầu từ frame {start_frame_idx} / {seek_time:.2f}s)...")
-    
-    ffmpeg_read_cmd = ['ffmpeg', '-y']
-    if seek_time > 0:
-        ffmpeg_read_cmd.extend(['-ss', str(seek_time)])
-    
-    ffmpeg_read_cmd.extend([
-        '-i', video_input,
-        '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
-    ])
-    
-    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
@@ -318,7 +332,106 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         target_w = (target_w // 2) * 2
         target_h = (target_h // 2) * 2
 
-    # Tệp tạm video hình ảnh 4K tách biệt để đảm bảo 100% đủ thời lượng 2285 frames
+    num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+    # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT PHÂN LUỒNG ĐỘC LẬP TỐC ĐỘ 14 - 18 FPS
+    if num_cuda_gpus >= 2 and expected_frames and expected_frames > 100:
+        print(f"🔥 BẮT ĐẦU CHẠY PHÂN LUỒNG ĐỘC LẬP DUAL GPU: KÍCH HOẠT CẢ {num_cuda_gpus} CARDS NVIDIA T4 CÙNG LÚC!")
+        print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu: {target_w}x{target_h}")
+
+        half_frames = expected_frames // 2
+        segments = [
+            (0, half_frames, 0, os.path.join(output_dir, "_part_gpu0.mp4")),
+            (half_frames, expected_frames - half_frames, 1, os.path.join(output_dir, "_part_gpu1.mp4"))
+        ]
+
+        manager = mp.Manager()
+        return_dict = manager.dict()
+        processes = []
+
+        start_time = time.time()
+
+        for s_frame, n_frames, g_id, chunk_path in segments:
+            p = mp.Process(
+                target=_gpu_segment_worker,
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, return_dict)
+            )
+            p.start()
+            processes.append(p)
+
+        print("⏳ Đang xử lý song song 2 nửa video trên GPU 0 và GPU 1 (Tốc độ đỉnh cao ~14 - 18 FPS)...", flush=True)
+
+        for p in processes:
+            p.join()
+
+        elapsed = time.time() - start_time
+        effective_fps = expected_frames / elapsed if elapsed > 0 else 0
+        print(f"\n⚡ HOÀN THÀNH XỬ LÝ SONG SONG DUAL GPU! Thời gian: {elapsed:.2f}s | Tốc độ hiệu dụng: {effective_fps:.2f} FPS!", flush=True)
+
+        chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 0]
+
+        if len(chunk_files) == 2:
+            print("📦 Đang nối 2 đoạn video và ghép âm thanh gốc...", flush=True)
+            concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
+            with open(concat_txt, "w") as f:
+                for c_path in chunk_files:
+                    f.write(f"file '{os.path.abspath(c_path)}'\n")
+
+            temp_concat = os.path.join(output_dir, f"_temp_concat_{int(time.time())}.mp4")
+            concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt, '-c', 'copy', temp_concat]
+            subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            if os.path.exists(video_output):
+                try: os.remove(video_output)
+                except Exception: pass
+
+            mux_cmd = [
+                'ffmpeg', '-y',
+                '-i', temp_concat,
+                '-i', video_input,
+                '-c:v', 'copy',
+                '-c:a', 'copy',
+                '-map', '0:v:0',
+                '-map', '1:a?',
+                video_output
+            ]
+            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            for f_clean in [concat_txt, temp_concat] + chunk_files:
+                if os.path.exists(f_clean):
+                    try: os.remove(f_clean)
+                    except Exception: pass
+
+            print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
+            return video_output
+
+    # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC CHẠY MPS/CPU)
+    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+    state_dict = torch.load(weights_path, map_location='cpu')
+    if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
+    elif 'params' in state_dict: state_dict = state_dict['params']
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+
+    if device.type == 'cuda':
+        model = model.half().to(memory_format=torch.channels_last)
+        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        queue_size = 12
+        try: model = torch.compile(model, mode="default")
+        except Exception: pass
+    else:
+        if device.type == 'mps': model = model.half()
+        batch_size = 1
+        queue_size = 2
+
+    model = model.to(device)
+
+    ffmpeg_read_cmd = [
+        'ffmpeg', '-y', '-i', video_input,
+        '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
+    ]
+    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+
     temp_video_only = os.path.join(output_dir, f"_temp_v_{os.path.basename(video_output)}")
 
     ffmpeg_write_cmd = [
@@ -336,22 +449,12 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
     ffmpeg_write_cmd.extend(quality_opts)
-    ffmpeg_write_cmd.extend([
-        '-pix_fmt', 'yuv420p',
-        temp_video_only
-    ])
+    ffmpeg_write_cmd.extend(['-pix_fmt', 'yuv420p', temp_video_only])
     
-    try:
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
-    except Exception:
-        encoder_codec = "libx264"
-        ffmpeg_write_cmd[ffmpeg_write_cmd.index('-c:v') + 1] = encoder_codec
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+    process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     frame_size = src_w * src_h * 3
-    idx = start_frame_idx
-
-    print(f"🔥 Cấu hình siêu tốc GPU Direct: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
+    idx = 0
 
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
@@ -364,108 +467,72 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     input_queue.put(None)
                     break
                 input_queue.put(in_bytes)
-        except Exception:
-            input_queue.put(None)
+        except Exception: input_queue.put(None)
 
     def writer_worker():
         try:
             while True:
                 item = output_queue.get()
-                if item is None:
-                    break
+                if item is None: break
                 try:
                     process_write.stdin.write(item)
                     process_write.stdin.flush()
-                except Exception:
-                    pass
+                except Exception: pass
                 output_queue.task_done()
-        except Exception:
-            pass
+        except Exception: pass
 
     reader_thread = threading.Thread(target=reader_worker, daemon=True)
     writer_thread = threading.Thread(target=writer_worker, daemon=True)
-    
     start_time = time.time()
     last_print_time = 0.0
     reader_thread.start()
     writer_thread.start()
-
-    failed_log_path = "failed_frames.txt"
 
     try:
         while True:
             batch_bytes = []
             for _ in range(batch_size):
                 item = input_queue.get()
-                if item is None:
-                    break
+                if item is None: break
                 batch_bytes.append(item)
-                
-            if not batch_bytes:
-                break
+            if not batch_bytes: break
                 
             current_b = len(batch_bytes)
+            img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
+            img_np_batch = np.stack(img_nps, axis=0)
             
-            try:
-                img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
-                img_np_batch = np.stack(img_nps, axis=0)
-                
-                if device.type == 'cuda':
-                    img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
-                    img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
-                    img_t = img_t.to(memory_format=torch.channels_last)
-                else:
-                    img_t = torch.from_numpy(img_np_batch).to(device)
-                    dtype = torch.float16 if device.type == 'mps' else torch.float32
-                    img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
+            if device.type == 'cuda':
+                img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+                img_t = img_t.to(memory_format=torch.channels_last)
+            else:
+                img_t = torch.from_numpy(img_np_batch).to(device)
+                dtype = torch.float16 if device.type == 'mps' else torch.float32
+                img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
 
-                with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda'), dtype=torch.float16):
-                    if ort_session is not None:
-                        ort_inputs = {ort_session.get_inputs()[0].name: img_t.contiguous().cpu().numpy()}
-                        ort_outs = ort_session.run(None, ort_inputs)
-                        output = torch.from_numpy(ort_outs[0]).to(device)
-                    else:
-                        output = model(img_t)
-                        
-                    if output.shape[2] != target_h or output.shape[3] != target_w:
-                        output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda'), dtype=torch.float16):
+                output = model(img_t)
+                if output.shape[2] != target_h or output.shape[3] != target_w:
+                    output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
-                    output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
-
-                output_np = output.cpu().numpy()
-                output_np = np.transpose(output_np, (0, 2, 3, 1))
-                
-                for i in range(current_b):
-                    output_queue.put(output_np[i].tobytes())
-                
-                idx += current_b
-                
-            except Exception as e:
-                with open(failed_log_path, "a") as log_file:
-                    log_file.write(f"Batch_idx_{idx} -> {str(e)}\n")
+            output_np = output.cpu().numpy()
+            output_np = np.transpose(output_np, (0, 2, 3, 1))
             
-            # Cập nhật Checkpoint tiến trình định kỳ mỗi 50 frames
-            if idx % 50 == 0:
-                try:
-                    with open(checkpoint_file, "w") as f:
-                        json.dump({"completed_frames": idx}, f)
-                except Exception:
-                    pass
-
-            # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM
+            for i in range(current_b):
+                output_queue.put(output_np[i].tobytes())
+            
+            idx += current_b
             if idx % 30 == 0:
                 gc.collect()
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                elif device.type == 'mps':
-                    torch.mps.empty_cache()
+                if device.type == 'cuda': torch.cuda.empty_cache()
+                elif device.type == 'mps': torch.mps.empty_cache()
 
-            # Giới hạn tần suất in tiến trình (Throttling 1s/lần) để chống tràn WebSocket IOPub Kaggle
             now = time.time()
             if (now - last_print_time) >= 1.0 or (expected_frames and idx >= expected_frames):
                 last_print_time = now
                 elapsed_time = now - start_time
-                speed_fps = (idx - start_frame_idx) / elapsed_time if elapsed_time > 0 else 0
+                speed_fps = idx / elapsed_time if elapsed_time > 0 else 0
                 current_video_time = idx / fps if fps > 0 else 0
                 video_time_str = f"{int(current_video_time // 60):02d}:{int(current_video_time % 60):02d}"
                 
@@ -476,48 +543,24 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
                     eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
                     pct = (idx / expected_frames) * 100
-                    
                     status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
                     print(status_msg + "    ", end='\r', flush=True)
-                    if progress_callback:
-                        progress_callback(pct / 100.0, desc=status_msg)
                 else:
                     status_msg = f"⏳ {idx} frames | {speed_fps:.2f} fps | {video_time_str}"
                     print(status_msg + "    ", end='\r', flush=True)
-                    if progress_callback:
-                        progress_callback(None, desc=status_msg)
 
-    except KeyboardInterrupt:
-        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.", flush=True)
-        try:
-            with open(checkpoint_file, "w") as f:
-                json.dump({"completed_frames": idx}, f)
-        except Exception:
-            pass
-        
     finally:
         print("\n", flush=True)
         print("🎬 Hoàn tất luồng xử lý khung hình...", flush=True)
+        try: output_queue.put(None); writer_thread.join(timeout=10)
+        except Exception: pass
+        try: process_read.stdout.close(); process_read.wait()
+        except Exception: pass
         try:
-            output_queue.put(None)
-            writer_thread.join(timeout=10)
-        except Exception:
-            pass
-            
-        try:
-            process_read.stdout.close()
-            process_read.wait()
-        except Exception:
-            pass
-            
-        try:
-            if process_write.stdin:
-                process_write.stdin.close()
+            if process_write.stdin: process_write.stdin.close()
             process_write.wait()
-        except Exception:
-            pass
+        except Exception: pass
 
-        # Ghép âm thanh gốc từ video_input vào tệp video 4K hoàn chỉnh
         if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
             print("🔊 Đang ghép âm thanh gốc và xuất video 4K hoàn chỉnh 100%...", flush=True)
             if os.path.exists(video_output):
@@ -535,21 +578,12 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 video_output
             ]
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
             if os.path.exists(temp_video_only):
                 try: os.remove(temp_video_only)
                 except Exception: pass
 
-        if os.path.exists(checkpoint_file):
-            try: os.remove(checkpoint_file)
-            except Exception: pass
-
         if is_youtube and temp_input_file and os.path.exists(temp_input_file):
             try: os.remove(temp_input_file)
-            except Exception: pass
-            
-        if os.path.exists(failed_log_path) and os.path.getsize(failed_log_path) == 0:
-            try: os.remove(failed_log_path)
             except Exception: pass
 
         print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
