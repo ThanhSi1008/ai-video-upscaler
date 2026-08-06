@@ -10,7 +10,7 @@ An AI-powered video resolution upscaler and enhancement web application using **
 - **Web UI**: Modern, minimal Gradio web interface for uploading video files or processing YouTube video links directly.
 - **Hardware Acceleration**: Automatic hardware detection (NVIDIA CUDA `nvenc`, Apple Silicon `videotoolbox`, or CPU `libx264`).
 - **Zero-Disk Frame Pipes**: High-performance streaming processing using FFmpeg memory pipes (no temporary image frame files created on disk).
-- **Deploy Anywhere**: Pre-configured `Dockerfile` for GCP Compute Engine, Cloud Run, Kaggle Notebooks, or local deployment.
+- **Deploy Anywhere**: Pre-configured `Dockerfile` for containerized environments, Kaggle Notebooks, or local deployment.
 
 ---
 
@@ -56,8 +56,6 @@ if not os.path.exists('ai-video-upscaler'):
 import app
 app.app.queue().launch(share=True)
 ```
-
-See [README_GCP.md](README_GCP.md) for Google Cloud Platform deployment instructions.
 
 ---
 
