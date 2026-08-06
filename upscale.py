@@ -5,6 +5,7 @@ import json
 import gc
 import subprocess
 import urllib.request
+import concurrent.futures
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -116,25 +117,11 @@ def get_tensorrt_session(weights_path, device):
 def fetch_vn_proxies():
     proxies = []
     try:
-        url = 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=VN'
+        url = 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=VN'
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        res = urllib.request.urlopen(req, timeout=5)
+        res = urllib.request.urlopen(req, timeout=3)
         for line in res.read().decode().strip().splitlines():
-            if line.strip() and ':' in line:
-                proxies.append(line.strip())
-    except Exception:
-        pass
-        
-    try:
-        url = 'https://proxylist.geonode.com/api/proxy-list?limit=15&page=1&sort_by=lastChecked&sort_type=desc&country_code=VN'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        res = urllib.request.urlopen(req, timeout=5)
-        data = json.loads(res.read().decode())
-        for item in data.get('data', []):
-            ip = item.get('ip')
-            port = item.get('port')
-            if ip and port:
-                proxies.append(f"{ip}:{port}")
+            if line.strip() and ':' in line: proxies.append(line.strip())
     except Exception:
         pass
     return list(dict.fromkeys(proxies))
@@ -152,7 +139,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     temp_input_file = None
     if is_youtube:
-        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô...")
+        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video...")
         if progress_callback:
             progress_callback(0.01, desc="📥 Đang kết nối tải video từ YouTube...")
         try:
@@ -160,10 +147,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             import glob
             
             for f in glob.glob('yt_temp_input.*'):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+                try: os.remove(f)
+                except Exception: pass
 
             opts = {
                 'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
@@ -173,13 +158,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 'no_warnings': True,
                 'geo_bypass': True,
                 'geo_bypass_country': 'VN',
+                'socket_timeout': 6,
                 'nocheckcertificate': True,
             }
 
             download_success = False
             video_title = "youtube_video"
 
-            # 1. Thử tải trực tiếp
+            # 1. Thử tải trực tiếp (Timeout 6 giây)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(video_input, download=True)
@@ -192,35 +178,42 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             except Exception as direct_err:
                 print(f"⚠️ Tải trực tiếp không khả thi: {direct_err}")
 
-            # 2. Tự động chuyển qua Proxy Việt Nam nếu bị chặn địa lý
+            # 2. Tải song song qua Pool Proxy VN với thời gian phản hồi nhanh
             if not download_success:
-                print("🌐 Đang tự động tìm kiếm Proxy Việt Nam để vượt qua rào cản quốc gia...")
+                print("🌐 Đang kết nối nhanh qua Proxy Việt Nam...")
                 if progress_callback:
-                    progress_callback(0.01, desc="🌐 Đang kích hoạt Proxy Việt Nam vượt rào YouTube...")
+                    progress_callback(0.01, desc="🌐 Đang thử Proxy Việt Nam vượt rào YouTube...")
                 
-                vn_proxies = fetch_vn_proxies()
-                print(f"📡 Đã quét được {len(vn_proxies)} địa chỉ Proxy Việt Nam...")
+                vn_proxies = fetch_vn_proxies()[:6] # Lấy 6 proxy nhanh nhất
 
-                for p in vn_proxies:
+                def try_proxy_download(proxy):
+                    p_opts = dict(opts)
+                    p_opts['proxy'] = f'http://{proxy}'
+                    p_opts['socket_timeout'] = 5
+                    out_path = f"yt_temp_input_{proxy.replace(':', '_')}.mp4"
+                    p_opts['outtmpl'] = out_path
                     try:
-                        p_opts = dict(opts)
-                        p_opts['proxy'] = f'http://{p}'
-                        p_opts['socket_timeout'] = 8
                         with yt_dlp.YoutubeDL(p_opts) as ydl:
                             info = ydl.extract_info(video_input, download=True)
-                            video_title = info.get('title', 'youtube_video')
-                            video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                        downloaded = glob.glob('yt_temp_input.*')
-                        if downloaded:
-                            download_success = True
-                            temp_input_file = downloaded[0]
-                            print(f"🎉 Tải thành công qua Proxy {p}!")
-                            break
+                            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                                return out_path, info.get('title', 'youtube_video')
                     except Exception:
-                        continue
+                        pass
+                    return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(try_proxy_download, p) for p in vn_proxies]
+                    for future in concurrent.futures.as_completed(futures):
+                        res = future.result()
+                        if res:
+                            temp_input_file, video_title = res
+                            video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
+                            download_success = True
+                            print(f"🎉 Tải thành công qua Proxy!")
+                            break
 
             if not download_success:
-                raise Exception("Không thể tải video từ YouTube! Video bị chặn địa lý trên IP máy chủ cloud.")
+                raise Exception("Video YouTube này bị nhà mạng chặn địa lý trên IP Cloud. Vui lòng tải video lên từ tab 'Tải tệp Video'.")
 
             video_input = temp_input_file
             video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
@@ -396,7 +389,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
     
-    # Tối ưu kích thước queue siêu an toàn cho Kaggle RAM (< 500MB VRAM/RAM overhead)
     batch_size = 1
     queue_size = 2
     input_queue = Queue(maxsize=queue_size)
