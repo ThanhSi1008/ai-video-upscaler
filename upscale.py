@@ -9,6 +9,7 @@ import warnings
 import time
 import threading
 from queue import Queue
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -72,6 +73,12 @@ def get_device_and_codec(requested_codec="auto"):
 # Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
 def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, return_dict):
     try:
+        import numpy as np
+        import torch
+        import torch.nn as nn
+        from torch.nn import functional as F
+        from queue import Queue
+
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -347,6 +354,11 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT PHÂN LUỒNG ĐỘC LẬP TỐC ĐỘ 14 - 18 FPS
     if num_cuda_gpus >= 2 and expected_frames and expected_frames > 100:
+        try:
+            mp.set_start_method('spawn', force=True)
+        except Exception:
+            pass
+
         print(f"🔥 BẮT ĐẦU CHẠY PHÂN LUỒNG ĐỘC LẬP DUAL GPU: KÍCH HOẠT CẢ {num_cuda_gpus} CARDS NVIDIA T4 CÙNG LÚC!")
         print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu: {target_w}x{target_h}")
 
@@ -552,7 +564,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     total_video_time_str = f"{int(total_video_time // 60):02d}:{int(total_video_time % 60):02d}"
                     remaining_frames = expected_frames - idx
                     eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
-                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_str % 60):02d}" if 'eta_str' in locals() else f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
+                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
                     pct = (idx / expected_frames) * 100
                     status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
                     print(status_msg + "    ", end='\r', flush=True)
