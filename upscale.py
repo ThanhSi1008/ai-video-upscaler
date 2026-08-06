@@ -258,9 +258,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     if device.type == 'cuda':
         model = model.to(memory_format=torch.channels_last)
-        if torch.cuda.device_count() > 1:
-            print(f"🔥 Kích hoạt Multi-GPU DataParallel trên {torch.cuda.device_count()} GPUs (Kaggle NVIDIA T4 x2)!")
-            model = nn.DataParallel(model)
 
     model = model.to(device)
 
@@ -347,13 +344,15 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
     
-    # Tối ưu Batch Size tăng tốc tối đa công suất NVIDIA T4 x2 (25-45 FPS)
+    # Tối ưu Batch Size chuyên sâu cho độ phân giải 720p/1080p trên GPU CUDA
     if device.type == 'cuda':
-        batch_size = 4 if (src_h <= 1080 and src_w <= 1920) else 2
-        queue_size = 8
+        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        queue_size = 12
     else:
         batch_size = 1
         queue_size = 2
+
+    print(f"🔥 Cấu hình siêu tốc GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size}")
 
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
