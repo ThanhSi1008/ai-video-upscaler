@@ -150,6 +150,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 try: os.remove(f)
                 except Exception: pass
 
+            # Sử dụng Android / iOS Mobile Player Client để vượt rào địa lý YouTube & player response 100%
             opts = {
                 'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
                 'outtmpl': 'yt_temp_input.%(ext)s',
@@ -159,27 +160,28 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 'noprogress': True,
                 'geo_bypass': True,
                 'geo_bypass_country': 'VN',
-                'socket_timeout': 8,
+                'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}},
+                'socket_timeout': 10,
                 'nocheckcertificate': True,
             }
 
             download_success = False
             video_title = "youtube_video"
 
-            # 1. Thử tải trực tiếp
+            # 1. Tải bằng Android/iOS API client (Tải cực nhanh không bị chặn địa lý)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(video_input, download=True)
                     video_title = info.get('title', 'youtube_video')
                     video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
                 downloaded = glob.glob('yt_temp_input.*')
-                if downloaded:
+                if downloaded and os.path.getsize(downloaded[0]) > 100000:
                     download_success = True
                     temp_input_file = downloaded[0]
             except Exception as direct_err:
-                print(f"⚠️ Tải trực tiếp không khả thi: {direct_err}")
+                print(f"⚠️ Tải trực tiếp Android Client cần thêm fallback: {direct_err}")
 
-            # 2. Thử từng Proxy Việt Nam tuần tự an toàn (Im lặng hoàn toàn stdout chống sập IOPub Kaggle)
+            # 2. Thử từng Proxy Việt Nam tuần tự nếu có yêu cầu bổ sung
             if not download_success:
                 print("🌐 Đang tải qua Proxy Việt Nam...")
                 if progress_callback:
@@ -192,8 +194,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     p_opts = dict(opts)
                     p_opts['proxy'] = f'http://{p}'
                     p_opts['outtmpl'] = out_path
-                    p_opts['quiet'] = True
-                    p_opts['noprogress'] = True
                     try:
                         with yt_dlp.YoutubeDL(p_opts) as ydl:
                             info = ydl.extract_info(video_input, download=True)
