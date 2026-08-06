@@ -115,12 +115,18 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ffmpeg_write_cmd = [
             'ffmpeg', '-y',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
-            '-i', '-',
-            '-c:v', encoder_codec,
-            '-preset', 'p1', '-tune', 'll', '-rc', 'constqp', '-qp', '20',
-            '-pix_fmt', 'yuv420p',
-            chunk_output_path
+            '-i', '-'
         ]
+
+        if "nvenc" in encoder_codec or encoder_codec == "auto":
+            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+        elif "videotoolbox" in encoder_codec:
+            ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
+        else:
+            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p'])
+
+        ffmpeg_write_cmd.append(chunk_output_path)
+
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
@@ -442,7 +448,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             try: progress_callback(0.98, desc="📦 Đang nối 2 đoạn video và ghép âm thanh gốc...")
             except Exception: pass
 
-        chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 0]
+        chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 1000]
 
         if chunk_files:
             print("📦 Đang nối các đoạn video và ghép âm thanh gốc...", flush=True)
@@ -473,11 +479,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 '-map', '1:a?',
                 video_output
             ]
-            res_mux = subprocess.run(mux_cmd, capture_output=True, text=True)
+            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # NẾU MUX ÂM THÀNH BỊ LỖI HOẶC CHƯA TẠO FILE, COPY NGHỆT FILE TEMP CONCAT TRỰC TIẾP
             if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
-                print("⚠️ Đang sử dụng phương án sao chép trực tiếp video ghép...")
+                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...")
                 if os.path.exists(temp_concat) and os.path.getsize(temp_concat) > 1000:
                     shutil.copy(temp_concat, video_output)
                 elif chunk_files:
@@ -488,16 +493,16 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     try: os.remove(f_clean)
                     except Exception: pass
 
-            print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
-            if progress_callback:
-                try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
-                except Exception: pass
-            return video_output
+            if os.path.exists(video_output) and os.path.getsize(video_output) > 1000:
+                print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
+                if progress_callback:
+                    try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
+                    except Exception: pass
+                return video_output
 
-        # LUÔN KHUNG RETURN SAU KHI XỬ LÝ DUAL GPU THÀNH CÔNG, KHÔNG BAO GIỜ CHẠY LẠI THÊM 1 LẦN NỮA
-        return video_output
+        print("⚠️ Cảnh báo: Luồng Dual GPU chưa tạo được file kết quả. Tự động chuyển sang luồng GPU đơn an toàn...")
 
-    # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC CHẠY MPS/CPU)
+    # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC DUAL GPU CẦN DỰ PHÒNG AN TOÀN)
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
     state_dict = torch.load(weights_path, map_location='cpu')
     if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
@@ -687,7 +692,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 '-map', '1:a?',
                 video_output
             ]
-            res_mux = subprocess.run(mux_cmd, capture_output=True, text=True)
+            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
                 print("⚠️ Đang sử dụng phương án sao chép trực tiếp...")
