@@ -133,7 +133,7 @@ def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_
     output_path = output_result[0]
     yield video_file, output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả sẵn sàng tải về."
 
-with gr.Blocks(title="AI Video Upscaler 4K - WebUI") as app:
+with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
         with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
@@ -201,11 +201,8 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI") as app:
         )
 
 if __name__ == '__main__':
-    theme = gr.themes.Default()
     app.queue().launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False,
-        theme=theme,
-        css=CUSTOM_CSS
+        share=False
     )
