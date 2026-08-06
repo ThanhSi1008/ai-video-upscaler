@@ -14,6 +14,10 @@ import time
 import threading
 from queue import Queue
 
+# Ẩn các dòng Warning hiển thị của PyTorch Compiler Inductor
+os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TORCH_LOGS"] = "-inductor"
+
 # --- 1. Thuật toán Sắp xếp Tự nhiên (Natural Sort) ---
 def natural_key(s):
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
