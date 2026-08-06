@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 import threading
+import tempfile
 from queue import Queue
 import importlib
 import torch
@@ -201,8 +203,10 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         )
 
 if __name__ == '__main__':
+    allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd()]
     app.queue().launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False
+        share=False,
+        allowed_paths=allowed_dirs
     )
