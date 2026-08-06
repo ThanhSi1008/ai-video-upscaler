@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import json
+import gc
 import subprocess
 import urllib.request
 import torch
@@ -499,6 +500,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 except Exception:
                     pass
 
+            # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM / Fatal status code 44
+            if idx % 10 == 0:
+                gc.collect()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                elif device.type == 'mps':
+                    torch.mps.empty_cache()
+
             elapsed_time = time.time() - start_time
             speed_fps = (idx - start_frame_idx) / elapsed_time if elapsed_time > 0 else 0
             current_video_time = idx / fps if fps > 0 else 0
@@ -521,11 +530,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 print(status_msg + "    ", end='\r', flush=True)
                 if progress_callback:
                     progress_callback(None, desc=status_msg)
-
-            if device.type == 'mps' and idx % 30 == 0:
-                torch.mps.empty_cache()
-            elif device.type == 'cuda' and idx % 30 == 0:
-                torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
         print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
