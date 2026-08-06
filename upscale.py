@@ -118,13 +118,13 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ]
 
         if "hevc" in encoder_codec:
-            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '18', '-pix_fmt', 'yuv420p'])
         elif "nvenc" in encoder_codec or encoder_codec == "auto":
-            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '18', '-pix_fmt', 'yuv420p'])
         elif "videotoolbox" in encoder_codec:
             ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
         else:
-            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-pix_fmt', 'yuv420p'])
 
         ffmpeg_write_cmd.append(chunk_output_path)
 
@@ -539,9 +539,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-preset', 'p1', '-tune', 'll', '-rc', 'constqp', '-qp', '20']
+        quality_opts = ['-preset', 'p4', '-rc', 'constqp', '-qp', '18']
     else:
-        quality_opts = ['-crf', '18', '-preset', 'ultrafast']
+        quality_opts = ['-crf', '18', '-preset', 'medium']
 
     ffmpeg_write_cmd.extend(quality_opts)
     ffmpeg_write_cmd.extend(['-pix_fmt', 'yuv420p', temp_video_only])
@@ -690,7 +690,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
-                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...")
+                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...", flush=True)
                 shutil.copy(temp_video_only, video_output)
 
             if os.path.exists(temp_video_only):
