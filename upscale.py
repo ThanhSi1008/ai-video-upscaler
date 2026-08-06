@@ -107,6 +107,10 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ])
         process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
+        if os.path.exists(chunk_output_path):
+            try: os.remove(chunk_output_path)
+            except Exception: pass
+
         ffmpeg_write_cmd = [
             'ffmpeg', '-y',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
@@ -299,6 +303,11 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         video_base = os.path.basename(os.path.splitext(video_input)[0])
         video_output = os.path.join(output_dir, f"{video_base}_upscaled.mp4")
 
+    # XÓA FILE KẾT QUẢ CŨ NẾU TỒN TẠI ĐỂ LUÔN GHI ĐÈ (OVERRIDE) BẰNG FILE MỚI
+    if os.path.exists(video_output):
+        try: os.remove(video_output)
+        except Exception: pass
+
     # Trích xuất siêu dữ liệu qua ffprobe
     try:
         fps_cmd = f"ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
@@ -369,6 +378,12 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             (half_frames, expected_frames - half_frames, 1, os.path.join(output_dir, "_part_gpu1.mp4"))
         ]
 
+        # Xóa tệp tạm cũ nếu có
+        for _, _, _, chunk_p in segments:
+            if os.path.exists(chunk_p):
+                try: os.remove(chunk_p)
+                except Exception: pass
+
         manager = mp.Manager()
         return_dict = manager.dict()
         progress_queue = manager.Queue()
@@ -436,6 +451,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     f.write(f"file '{os.path.abspath(c_path)}'\n")
 
             temp_concat = os.path.join(output_dir, f"_temp_concat_{int(time.time())}.mp4")
+            if os.path.exists(temp_concat):
+                try: os.remove(temp_concat)
+                except Exception: pass
+
             concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt, '-c', 'copy', temp_concat]
             subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -497,6 +516,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     temp_video_only = os.path.join(output_dir, f"_temp_v_{os.path.basename(video_output)}")
+    if os.path.exists(temp_video_only):
+        try: os.remove(temp_video_only)
+        except Exception: pass
 
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
