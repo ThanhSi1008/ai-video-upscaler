@@ -50,7 +50,7 @@ Run the following cell in a free **Kaggle Notebook (GPU T4 x2)**:
 !pip install -q gradio yt-dlp torch torchvision pillow numpy
 
 # 2. Tải/Cập nhật mã nguồn mới nhất từ GitHub
-import os, importlib
+import os, sys, importlib
 
 repo_dir = "/kaggle/working/ai-video-upscaler"
 if os.path.exists(repo_dir):
@@ -60,10 +60,15 @@ else:
     !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git {repo_dir}
     %cd {repo_dir}
 
-# 3. Khởi chạy Web UI
-import app
+if repo_dir not in sys.path:
+    sys.path.insert(0, repo_dir)
+
+# 3. Khởi chạy Web UI với prevent_thread_lock=True
+import upscale, app
+importlib.reload(upscale)
 importlib.reload(app)
-app.app.queue().launch(share=True)
+
+app.app.queue().launch(share=True, prevent_thread_lock=True)
 ```
 
 ---
