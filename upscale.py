@@ -273,32 +273,20 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
 
-    # Đọc ffmpeg pipes hỗ trợ Resume từ start_frame_idx
+    # Đọc ffmpeg pipes giải mã chuẩn 100% tương thích mọi định dạng video
     seek_time = start_frame_idx / fps if (start_frame_idx > 0 and fps > 0) else 0.0
     print(f"🎞️ Khởi tạo luồng giải mã video FFmpeg (Bắt đầu từ frame {start_frame_idx} / {seek_time:.2f}s)...")
     
     ffmpeg_read_cmd = ['ffmpeg', '-y']
     if seek_time > 0:
         ffmpeg_read_cmd.extend(['-ss', str(seek_time)])
-        
-    if device.type == 'mps':
-        ffmpeg_read_cmd.extend(['-hwaccel', 'videotoolbox'])
-    elif device.type == 'cuda':
-        ffmpeg_read_cmd.extend(['-hwaccel', 'cuda', '-c:v', 'h264_cuvid'])
     
     ffmpeg_read_cmd.extend([
         '-i', video_input,
         '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
     ])
     
-    try:
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except Exception:
-        ffmpeg_read_cmd = ['ffmpeg', '-y']
-        if seek_time > 0:
-            ffmpeg_read_cmd.extend(['-ss', str(seek_time)])
-        ffmpeg_read_cmd.extend(['-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'])
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
@@ -323,7 +311,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     # Tệp video đoạn mới nếu đang Resume
     current_chunk_file = os.path.join(output_dir, f"_part_{start_frame_idx}_{os.path.basename(video_output)}")
     active_chunks = list(existing_chunks)
-    active_chunks.append(current_chunk_file)
+    if current_chunk_file not in active_chunks:
+        active_chunks.append(current_chunk_file)
 
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
@@ -522,10 +511,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         except Exception:
             pass
 
-        if expected_frames and idx >= (expected_frames - 5):
+        # Ghép tệp video cuối cùng
+        valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
+        if valid_chunks:
             print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...")
-            
-            valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
             if len(valid_chunks) == 1:
                 if valid_chunks[0] != video_output:
                     if os.path.exists(video_output): os.remove(video_output)
@@ -545,25 +534,25 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 if os.path.exists(concat_list_file):
                     os.remove(concat_list_file)
 
-            print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...")
-            for chunk_p in active_chunks:
-                if os.path.exists(chunk_p) and chunk_p != video_output:
-                    try: os.remove(chunk_p)
-                    except Exception: pass
-
-            if os.path.exists(checkpoint_file):
-                try: os.remove(checkpoint_file)
+        print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...")
+        for chunk_p in active_chunks:
+            if os.path.exists(chunk_p) and chunk_p != video_output:
+                try: os.remove(chunk_p)
                 except Exception: pass
 
-            if is_youtube and temp_input_file and os.path.exists(temp_input_file):
-                try: os.remove(temp_input_file)
-                except Exception: pass
-                
-            if os.path.exists(failed_log_path) and os.path.getsize(failed_log_path) == 0:
-                try: os.remove(failed_log_path)
-                except Exception: pass
+        if os.path.exists(checkpoint_file):
+            try: os.remove(checkpoint_file)
+            except Exception: pass
 
-            print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}")
+        if is_youtube and temp_input_file and os.path.exists(temp_input_file):
+            try: os.remove(temp_input_file)
+            except Exception: pass
+            
+        if os.path.exists(failed_log_path) and os.path.getsize(failed_log_path) == 0:
+            try: os.remove(failed_log_path)
+            except Exception: pass
+
+        print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}")
 
     return video_output
 
