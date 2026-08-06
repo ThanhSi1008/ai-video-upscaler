@@ -2,8 +2,13 @@ import os
 import time
 import threading
 from queue import Queue
+import importlib
 import torch
 import gradio as gr
+
+# Reload upscale module để luôn áp dụng mã nguồn mới nhất trong RAM
+import upscale
+importlib.reload(upscale)
 from upscale import upscale_video, get_device_and_codec
 
 # Xác định phần cứng hiện tại
@@ -80,7 +85,7 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
 
     def worker():
         try:
-            res = upscale_video(
+            res = upscale.upscale_video(
                 video_input=video_input,
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
