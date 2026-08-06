@@ -8,6 +8,7 @@ import urllib.request
 import warnings
 import time
 import threading
+import shutil
 from queue import Queue
 import numpy as np
 import torch
@@ -472,7 +473,15 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 '-map', '1:a?',
                 video_output
             ]
-            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res_mux = subprocess.run(mux_cmd, capture_output=True, text=True)
+
+            # NẾU MUX ÂM THÀNH BỊ LỖI HOẶC CHƯA TẠO FILE, COPY NGHỆT FILE TEMP CONCAT TRỰC TIẾP
+            if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
+                print("⚠️ Đang sử dụng phương án sao chép trực tiếp video ghép...")
+                if os.path.exists(temp_concat) and os.path.getsize(temp_concat) > 1000:
+                    shutil.copy(temp_concat, video_output)
+                elif chunk_files:
+                    shutil.copy(chunk_files[0], video_output)
 
             for f_clean in [concat_txt, temp_concat] + chunk_files:
                 if os.path.exists(f_clean):
@@ -678,7 +687,12 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 '-map', '1:a?',
                 video_output
             ]
-            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res_mux = subprocess.run(mux_cmd, capture_output=True, text=True)
+
+            if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
+                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...")
+                shutil.copy(temp_video_only, video_output)
+
             if os.path.exists(temp_video_only):
                 try: os.remove(temp_video_only)
                 except Exception: pass
