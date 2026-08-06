@@ -66,7 +66,6 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
     keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest)")
     encoder_codec = CODEC_MAP.get(codec_choice, "auto")
 
-    # Queue trao đổi tiến độ thời gian thực giữa thread và Gradio Generator
     progress_queue = Queue()
 
     def progress_cb(pct, desc=""):
@@ -74,8 +73,7 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
         if pct is not None:
             progress(pct, desc=desc)
 
-    # Yield bước 1: Thông báo khởi chạy
-    yield gr.update(value=None), gr.update(value=None), gr.update(visible=False), "⏳ Đang kết nối luồng và tải video..."
+    yield None, None, gr.update(visible=False), "⏳ Đang kết nối luồng và tải video..."
 
     output_result = [None]
     error_result = [None]
@@ -97,7 +95,6 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
-    # Vòng lặp stream cập nhật tiến độ thời gian thực ra giao diện Web UI
     while True:
         try:
             item = progress_queue.get(timeout=0.2)
@@ -156,8 +153,7 @@ with gr.Blocks(title="Video Upscaler & Encoder") as app:
                 with gr.Tabs():
                     with gr.TabItem("📁 Tải tệp Video"):
                         file_input = gr.Video(
-                            label="📁 Tệp Video Đầu Vào ❓",
-                            info="Tải lên tệp video sẵn có từ máy tính của bạn (hỗ trợ MP4, MKV, MOV...)",
+                            label="📁 Tệp Video Đầu Vào ❓ (Hỗ trợ tệp MP4, MKV, MOV...)",
                             sources=["upload"]
                         )
                     with gr.TabItem("🔗 Link YouTube"):
