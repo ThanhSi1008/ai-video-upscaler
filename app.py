@@ -1,4 +1,7 @@
 import os
+import time
+import threading
+from queue import Queue
 import torch
 import gradio as gr
 from upscale import upscale_video, get_device_and_codec
@@ -51,7 +54,7 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Progress()):
+def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Progress(track_tqdm=True)):
     video_input = None
     if youtube_url and youtube_url.strip():
         video_input = youtube_url.strip()
@@ -63,22 +66,57 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
     keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest)")
     encoder_codec = CODEC_MAP.get(codec_choice, "auto")
 
+    # Queue trao đổi tiến độ thời gian thực giữa thread và Gradio Generator
+    progress_queue = Queue()
+
     def progress_cb(pct, desc=""):
+        progress_queue.put((pct, desc))
         if pct is not None:
             progress(pct, desc=desc)
-        else:
-            progress(0, desc=desc)
 
-    try:
-        output_path = upscale_video(
-            video_input=video_input,
-            encoder_codec=encoder_codec,
-            keep_highest=keep_highest,
-            progress_callback=progress_cb
-        )
-        return video_input, output_path, gr.update(value=output_path, visible=True), "✨ Hoàn tất nâng cấp video 4K thành công!"
-    except Exception as e:
-        raise gr.Error(f"❌ Lỗi xử lý: {str(e)}")
+    # Yield bước 1: Thông báo khởi chạy
+    yield gr.update(value=None), gr.update(value=None), gr.update(visible=False), "⏳ Đang kết nối luồng và tải video..."
+
+    output_result = [None]
+    error_result = [None]
+
+    def worker():
+        try:
+            res = upscale_video(
+                video_input=video_input,
+                encoder_codec=encoder_codec,
+                keep_highest=keep_highest,
+                progress_callback=progress_cb
+            )
+            output_result[0] = res
+        except Exception as e:
+            error_result[0] = e
+        finally:
+            progress_queue.put(None)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    # Vòng lặp stream cập nhật tiến độ thời gian thực ra giao diện Web UI
+    while True:
+        try:
+            item = progress_queue.get(timeout=0.2)
+            if item is None:
+                break
+            pct, desc = item
+            if desc:
+                yield gr.update(), gr.update(), gr.update(), desc
+        except Exception:
+            if not thread.is_alive() and progress_queue.empty():
+                break
+
+    thread.join()
+
+    if error_result[0]:
+        raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
+
+    output_path = output_result[0]
+    yield video_input, output_path, gr.update(value=output_path, visible=True), f"✨ Hoàn tất nâng cấp video 4K thành công!"
 
 with gr.Blocks(title="Video Upscaler & Encoder") as app:
     with gr.Column(elem_classes=["container"]):
@@ -148,8 +186,8 @@ with gr.Blocks(title="Video Upscaler & Encoder") as app:
 
             with gr.Column(scale=6):
                 status_box = gr.Textbox(
-                    label="📊 Trạng Thái Xử Lý (Status)",
-                    value="Sẵn sàng xử lý...",
+                    label="📊 Tiến Độ & Trạng Thái Xử Lý (Live Progress Status)",
+                    value="Chờ bắt đầu...",
                     interactive=False
                 )
                 
