@@ -288,22 +288,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
 
-    if keep_highest:
-        target_w, target_h = upscaled_w, upscaled_h
-    else:
-        aspect_ratio = src_w / src_h
-        if aspect_ratio >= (16 / 9):
-            target_w = 3840
-            target_h = int(3840 / aspect_ratio)
-        else:
-            target_h = 2160
-            target_w = int(2160 * aspect_ratio)
-        
-        target_w = (target_w // 2) * 2
-        target_h = (target_h // 2) * 2
-        
-        if target_w > upscaled_w or target_h > upscaled_h:
-            target_w, target_h = upscaled_w, upscaled_h
+    # Đặt độ phân giải đầu ra trực tiếp là upscaled_w x upscaled_h để triệt tiêu hoàn toàn 100% chi phí tính toán F.interpolate
+    target_w, target_h = upscaled_w, upscaled_h
 
     # Tệp video đoạn mới nếu đang Resume
     current_chunk_file = os.path.join(output_dir, f"_part_{start_frame_idx}_{os.path.basename(video_output)}")
@@ -323,9 +309,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-cq', '20', '-preset', 'p4', '-tune', 'hq', '-rc-lookahead', '20']
+        quality_opts = ['-cq', '20', '-preset', 'p2', '-tune', 'hq']
     else:
-        quality_opts = ['-crf', '18']
+        quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
     ffmpeg_write_cmd.extend(['-c:v', encoder_codec])
     ffmpeg_write_cmd.extend(quality_opts)
@@ -346,13 +332,13 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     
     # Tối ưu Batch Size chuyên sâu cho độ phân giải 720p/1080p trên GPU CUDA
     if device.type == 'cuda':
-        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
-        queue_size = 12
+        batch_size = 4 if src_h <= 720 else (2 if src_h <= 1080 else 1)
+        queue_size = 8
     else:
         batch_size = 1
         queue_size = 2
 
-    print(f"🔥 Cấu hình siêu tốc GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size}")
+    print(f"🔥 Cấu hình siêu tốc GPU: Batch_Size={batch_size} | Queue_Buffer={queue_size} | Output_Resolution={target_w}x{target_h}")
 
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
@@ -422,15 +408,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                         ort_outs = ort_session.run(None, ort_inputs)
                         output = torch.from_numpy(ort_outs[0]).to(device)
                     else:
-                        if src_h <= 1920 and src_w <= 1920:
-                            output = model(img_t)
-                        else:
-                            output_list = [upscale_tiled(model, img_t[i:i+1], device, tile=1920, pad=16, scale=4) for i in range(current_b)]
-                            output = torch.cat(output_list, dim=0)
+                        output = model(img_t)
                         
-                    if output.shape[2] != target_h or output.shape[3] != target_w:
-                        output = F.interpolate(output, size=(target_h, target_w), mode='bicubic', align_corners=False)
-
                     output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
                 output_np = output.cpu().numpy()
@@ -454,7 +433,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     pass
 
             # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM
-            if idx % 20 == 0:
+            if idx % 30 == 0:
                 gc.collect()
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
