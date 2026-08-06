@@ -8,7 +8,7 @@ import importlib
 import torch
 import gradio as gr
 
-# Giải phóng và đóng toàn bộ máy chủ Gradio cũ để tránh xung đột asyncio Event Loop trên Python 3.12
+# Clear any active Gradio servers/event loops to prevent Python 3.12 asyncio conflicts
 try:
     gr.close_all()
 except Exception:
@@ -209,10 +209,11 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         )
 
 if __name__ == '__main__':
+    share_mode = True if ("--share" in sys.argv or "--public" in sys.argv) else False
     allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd()]
-    app.launch(
+    app.queue().launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False,
+        share=share_mode,
         allowed_paths=allowed_dirs
     )
