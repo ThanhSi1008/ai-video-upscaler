@@ -53,7 +53,7 @@ keep_highest = False # @param {type:"boolean"}
 # ------------------------------------------------------------
 import os, sys, importlib
 !apt-get update -qq && apt-get install -y ffmpeg -qq
-!pip install -q -U --no-cache-dir https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz gradio torch torchvision pillow numpy
+!pip install -q --no-cache-dir https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz gradio
 
 repo_dir = "/kaggle/working/ai-video-upscaler"
 if os.path.exists(repo_dir):
