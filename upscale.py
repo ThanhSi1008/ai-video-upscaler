@@ -117,7 +117,9 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             '-i', '-'
         ]
 
-        if "nvenc" in encoder_codec or encoder_codec == "auto":
+        if "hevc" in encoder_codec:
+            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+        elif "nvenc" in encoder_codec or encoder_codec == "auto":
             ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
         elif "videotoolbox" in encoder_codec:
             ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
@@ -348,21 +350,19 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
 
-    upscaled_w = src_w * 4
-    upscaled_h = src_h * 4
-
-    if keep_highest:
-        target_w, target_h = upscaled_w, upscaled_h
+    # ĐỘ PHÂN GIẢI MỤC TIÊU: CHUẨN HÓA VỀ 4K ULTRA-HD (3840x2160) ĐỂ TRÁNH VƯỢT GIỚI HẠN PHẦN CỨNG NVENC H.264 (4096x4096)
+    aspect_ratio = src_w / src_h
+    if keep_highest and (src_w * 4 <= 4096) and (src_h * 4 <= 4096):
+        target_w, target_h = src_w * 4, src_h * 4
     else:
-        aspect_ratio = src_w / src_h
         if aspect_ratio >= (16 / 9):
             target_w = 3840
             target_h = int(3840 / aspect_ratio)
         else:
             target_h = 2160
             target_w = int(2160 * aspect_ratio)
-        target_w = (target_w // 2) * 2
-        target_h = (target_h // 2) * 2
+    target_w = (target_w // 2) * 2
+    target_h = (target_h // 2) * 2
 
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
@@ -372,7 +372,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         except Exception: pass
 
         print(f"🔥 BẮT ĐẦU CHẠY PHÂN LUỒNG ĐỘC LẬP DUAL GPU: KÍCH HOẠT CẢ {num_cuda_gpus} CARDS NVIDIA T4 CÙNG LÚC!")
-        print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu: {target_w}x{target_h}")
+        print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu 4K Ultra-HD: {target_w}x{target_h}")
 
         half_frames = expected_frames // 2
         segments = [
