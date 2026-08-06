@@ -80,8 +80,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         from torch.nn import functional as F
         from queue import Queue
 
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
 
         model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
         state_dict = torch.load(weights_path, map_location='cpu')
@@ -119,7 +118,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ]
 
         if "nvenc" in encoder_codec or encoder_codec == "auto":
-            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-gpu', str(gpu_id), '-preset', 'p1', '-pix_fmt', 'yuv420p'])
         elif "videotoolbox" in encoder_codec:
             ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
         else:
@@ -450,7 +449,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
         chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 1000]
 
-        if chunk_files:
+        if len(chunk_files) == 2:
             print("📦 Đang nối các đoạn video và ghép âm thanh gốc...", flush=True)
             concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
             with open(concat_txt, "w") as f:
