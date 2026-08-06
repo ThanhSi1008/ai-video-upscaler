@@ -299,11 +299,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         if torch.cuda.device_count() > 1:
             print(f"🔥 Kích hoạt Multi-GPU DataParallel trên {torch.cuda.device_count()} GPUs (Kaggle NVIDIA T4 x2)!")
             model = nn.DataParallel(model)
-        elif hasattr(torch, 'compile'):
-            try:
-                model = torch.compile(model, mode="reduce-overhead")
-            except Exception:
-                pass
 
     model = model.to(device)
 
@@ -401,8 +396,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
     
-    batch_size = 2 if (device.type == 'cuda' and src_h <= 1080 and src_w <= 1920) else 1
-    queue_size = 8 if device.type == 'cuda' else 4
+    # Tối ưu kích thước queue siêu an toàn cho Kaggle RAM (< 500MB VRAM/RAM overhead)
+    batch_size = 1
+    queue_size = 2
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
 
@@ -502,7 +498,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     pass
 
             # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM
-            if idx % 15 == 0:
+            if idx % 5 == 0:
                 gc.collect()
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
