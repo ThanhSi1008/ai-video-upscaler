@@ -139,11 +139,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     pass
                     
             ydl_opts = {
-                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
                 'outtmpl': 'yt_temp_input.%(ext)s',
                 'merge_output_format': 'mp4',
                 'quiet': True,
                 'no_warnings': True,
+                'geo_bypass': True,
+                'geo_bypass_country': 'VN',
+                'nocheckcertificate': True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_input, download=True)
@@ -152,14 +155,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 
             downloaded = glob.glob('yt_temp_input.*')
             if not downloaded:
-                raise Exception("Không thể tải video từ YouTube!")
+                raise Exception("Không thể tải video từ YouTube! Video có thể bị giới hạn quốc gia hoặc cần đăng nhập.")
             temp_input_file = downloaded[0]
             video_input = temp_input_file
             video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
             print(f"✅ Tải thành công video: '{video_title}'. Bắt đầu chạy upscale...")
         except Exception as e:
             print(f"❌ Lỗi trong quá trình tải YouTube: {e}")
-            raise e
+            raise Exception(f"Lỗi tải YouTube: {str(e)}")
     else:
         if not os.path.exists(video_input):
             raise FileNotFoundError(f"Không tìm thấy file video nguồn '{video_input}'!")
@@ -462,7 +465,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     except KeyboardInterrupt:
         print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
-        # Lưu checkpoint khi ngắt ngang
         try:
             with open(checkpoint_file, "w") as f:
                 json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
@@ -490,18 +492,15 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         except Exception:
             pass
 
-        # Ghép các tệp đoạn (nếu có Resume) và TỰ ĐỘNG DỌN DẸP FILE RÁC KHI THÀNH CÔNG
-        if expected_frames and idx >= (expected_frames - 5): # Coi như hoàn thành
+        if expected_frames and idx >= (expected_frames - 5):
             print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...")
             
             valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
             if len(valid_chunks) == 1:
-                # Chỉ có 1 file duy nhất, đổi tên thành video_output
                 if valid_chunks[0] != video_output:
                     if os.path.exists(video_output): os.remove(video_output)
                     os.rename(valid_chunks[0], video_output)
             elif len(valid_chunks) > 1:
-                # Nối nhiều tệp video đoạn bằng FFmpeg concat
                 concat_list_file = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
                 with open(concat_list_file, "w") as f:
                     for chunk_p in valid_chunks:
@@ -513,11 +512,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 ]
                 subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                # Dọn dẹp tệp danh sách concat
                 if os.path.exists(concat_list_file):
                     os.remove(concat_list_file)
 
-            # --- TỰ ĐỘNG DỌN DẸP FILE RÁC SAU KHI THÀNH CÔNG ---
             print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...")
             for chunk_p in active_chunks:
                 if os.path.exists(chunk_p) and chunk_p != video_output:
