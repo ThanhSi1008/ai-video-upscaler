@@ -270,7 +270,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
 
-    # Đọc ffmpeg pipes giải mã chuẩn 100% tương thích mọi định dạng video
     seek_time = start_frame_idx / fps if (start_frame_idx > 0 and fps > 0) else 0.0
     print(f"🎞️ Khởi tạo luồng giải mã video FFmpeg (Bắt đầu từ frame {start_frame_idx} / {seek_time:.2f}s)...")
     
@@ -283,13 +282,24 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
     ])
     
-    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
 
-    # Đặt độ phân giải đầu ra trực tiếp là upscaled_w x upscaled_h để triệt tiêu hoàn toàn 100% chi phí tính toán F.interpolate
-    target_w, target_h = upscaled_w, upscaled_h
+    # Đặt chuẩn 4K Ultra-HD (3840x2160) để tránh nghẽn bộ đệm pipe FFmpeg
+    if keep_highest:
+        target_w, target_h = upscaled_w, upscaled_h
+    else:
+        aspect_ratio = src_w / src_h
+        if aspect_ratio >= (16 / 9):
+            target_w = 3840
+            target_h = int(3840 / aspect_ratio)
+        else:
+            target_h = 2160
+            target_w = int(2160 * aspect_ratio)
+        target_w = (target_w // 2) * 2
+        target_h = (target_h // 2) * 2
 
     # Tệp video đoạn mới nếu đang Resume
     current_chunk_file = os.path.join(output_dir, f"_part_{start_frame_idx}_{os.path.basename(video_output)}")
@@ -297,15 +307,15 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if current_chunk_file not in active_chunks:
         active_chunks.append(current_chunk_file)
 
+    # Đặt -ss TRƯỚC -i video_input để đồng bộ audio mà KHÔNG BAO GIỜ làm nghẽn stdin pipe!
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
-        '-i', '-',
-        '-i', video_input,
+        '-i', '-'
     ]
     if seek_time > 0:
         ffmpeg_write_cmd.extend(['-ss', str(seek_time)])
-        
+
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
@@ -313,7 +323,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     else:
         quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
-    ffmpeg_write_cmd.extend(['-c:v', encoder_codec])
+    ffmpeg_write_cmd.extend([
+        '-i', video_input,
+        '-c:v', encoder_codec
+    ])
     ffmpeg_write_cmd.extend(quality_opts)
     ffmpeg_write_cmd.extend([
         '-pix_fmt', 'yuv420p',
@@ -321,19 +334,18 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     ])
     
     try:
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
     except Exception:
         encoder_codec = "libx264"
         ffmpeg_write_cmd[ffmpeg_write_cmd.index('-c:v') + 1] = encoder_codec
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     frame_size = src_w * src_h * 3
     idx = start_frame_idx
     
-    # Tối ưu Batch Size chuyên sâu cho độ phân giải 720p/1080p trên GPU CUDA
     if device.type == 'cuda':
-        batch_size = 4 if src_h <= 720 else (2 if src_h <= 1080 else 1)
-        queue_size = 8
+        batch_size = 2 if src_h <= 1080 else 1
+        queue_size = 4
     else:
         batch_size = 1
         queue_size = 2
@@ -360,7 +372,11 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 item = output_queue.get()
                 if item is None:
                     break
-                process_write.stdin.write(item)
+                try:
+                    process_write.stdin.write(item)
+                    process_write.stdin.flush()
+                except Exception:
+                    pass
                 output_queue.task_done()
         except Exception:
             pass
@@ -410,6 +426,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     else:
                         output = model(img_t)
                         
+                    if output.shape[2] != target_h or output.shape[3] != target_w:
+                        output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+
                     output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
                 output_np = output.cpu().numpy()
