@@ -20,7 +20,7 @@ An AI-powered video resolution upscaler and enhancement web application using **
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/ai-video-upscaler.git
+git clone https://github.com/ThanhSi1008/ai-video-upscaler.git
 cd ai-video-upscaler
 
 # Install dependencies
@@ -45,14 +45,18 @@ python3 upscale.py <video_input_or_youtube_url> [auto/libx264/hevc_nvenc] [keep/
 Run the following cell in a free **Kaggle Notebook (GPU T4 x2)**:
 
 ```python
-!apt-get update -qq && !apt-get install -y ffmpeg -qq
+# 1. Cài đặt FFmpeg và thư viện Python
+!apt-get update -qq && apt-get install -y ffmpeg -qq
 !pip install -q gradio yt-dlp torch torchvision pillow numpy
 
+# 2. Tải mã nguồn dự án từ GitHub
 import os
-if not os.path.exists('ai-video-upscaler'):
-    !git clone https://github.com/YOUR_USERNAME/ai-video-upscaler.git
-%cd ai-video-upscaler
+if not os.path.exists('/kaggle/working/ai-video-upscaler'):
+    !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git /kaggle/working/ai-video-upscaler
 
+%cd /kaggle/working/ai-video-upscaler
+
+# 3. Khởi chạy Web UI
 import app
 app.app.queue().launch(share=True)
 ```

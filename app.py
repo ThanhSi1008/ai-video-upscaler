@@ -51,7 +51,7 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Progress(track_tqdm=True)):
+def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Progress()):
     video_input = None
     if youtube_url and youtube_url.strip():
         video_input = youtube_url.strip()
@@ -69,8 +69,6 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
         else:
             progress(0, desc=desc)
 
-    yield None, None, gr.update(visible=False), "⏳ Đang kết nối luồng và phân tích video..."
-
     try:
         output_path = upscale_video(
             video_input=video_input,
@@ -78,7 +76,7 @@ def process_ui(video_file, youtube_url, codec_choice, res_choice, progress=gr.Pr
             keep_highest=keep_highest,
             progress_callback=progress_cb
         )
-        yield video_input, output_path, gr.update(value=output_path, visible=True), "✨ Hoàn tất nâng cấp video 4K thành công!"
+        return video_input, output_path, gr.update(value=output_path, visible=True), "✨ Hoàn tất nâng cấp video 4K thành công!"
     except Exception as e:
         raise gr.Error(f"❌ Lỗi xử lý: {str(e)}")
 
@@ -150,8 +148,8 @@ with gr.Blocks(title="Video Upscaler & Encoder") as app:
 
             with gr.Column(scale=6):
                 status_box = gr.Textbox(
-                    label="📊 Tiến Độ & Trạng Thái Xử Lý (Live Status)",
-                    value="Chờ bắt đầu...",
+                    label="📊 Trạng Thái Xử Lý (Status)",
+                    value="Sẵn sàng xử lý...",
                     interactive=False
                 )
                 
