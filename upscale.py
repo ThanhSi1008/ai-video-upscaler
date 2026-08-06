@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import json
 import subprocess
 import urllib.request
 import torch
@@ -61,7 +62,6 @@ def upscale_tiled(model, img_t, device, tile=800, pad=16, scale=4):
 def get_device_and_codec(requested_codec="auto"):
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        # Tối ưu hóa hiệu năng CUDA & Tensor Cores cho NVIDIA GPUs
         torch.backends.cudnn.benchmark = True
         if hasattr(torch.backends.cuda, 'matmul'):
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -81,7 +81,6 @@ def get_device_and_codec(requested_codec="auto"):
         codec = requested_codec
     return device, codec
 
-# --- 4. Khởi tạo NVIDIA TensorRT ONNX Engine (Nâng cao) ---
 def get_tensorrt_session(weights_path, device):
     try:
         import onnxruntime as ort
@@ -109,11 +108,11 @@ def get_tensorrt_session(weights_path, device):
             session = ort.InferenceSession(onnx_path, providers=active_providers)
             print(f"🚀 Đã kích hoạt NVIDIA TensorRT Engine với Providers: {active_providers}")
             return session
-    except Exception as e:
-        print(f"ℹ️ Sử dụng PyTorch JIT / Multi-GPU cho suy luận AI.")
+    except Exception:
+        pass
     return None
 
-# --- 5. Hàm xử lý upscale chính dùng được từ Python API & Gradio UI ---
+# --- 4. Hàm xử lý upscale chính tích hợp Tự Động Resume Progress & Dọn Dẹp File Rác ---
 def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
@@ -167,6 +166,22 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         video_base = os.path.basename(os.path.splitext(video_input)[0])
         video_output = os.path.join(output_dir, f"{video_base}_upscaled.mp4")
 
+    # Kiểm tra tệp Checkpoint Resume tiến trình cũ
+    checkpoint_file = os.path.join(output_dir, f".checkpoint_{os.path.basename(video_output)}.json")
+    start_frame_idx = 0
+    existing_chunks = []
+
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, "r") as f:
+                ckpt_data = json.load(f)
+                start_frame_idx = ckpt_data.get("completed_frames", 0)
+                existing_chunks = ckpt_data.get("chunks", [])
+            print(f"🔄 Phát hiện tiến trình cũ bị ngắt! Tự động khôi phục (Resume) từ frame {start_frame_idx}...")
+        except Exception:
+            start_frame_idx = 0
+            existing_chunks = []
+
     # Trích xuất siêu dữ liệu qua ffprobe
     try:
         fps_cmd = f"ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
@@ -196,7 +211,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             print(f"❌ Lỗi hạ tầng mạng: {e}")
             raise e
 
-    # Kiểm tra NVIDIA TensorRT Session (Nâng cao)
     ort_session = get_tensorrt_session(weights_path, device) if device.type == 'cuda' else None
 
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
@@ -212,7 +226,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if device.type in ['mps', 'cuda']:
         model = model.half()
 
-    # Tối ưu hóa bộ nhớ Channels Last, Multi-GPU & JIT Compiler cho CUDA GPU
     if device.type == 'cuda':
         model = model.to(memory_format=torch.channels_last)
         if torch.cuda.device_count() > 1:
@@ -221,7 +234,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         elif hasattr(torch, 'compile'):
             try:
                 model = torch.compile(model, mode="reduce-overhead")
-                print("⚡ Đã kích hoạt PyTorch 2.0 JIT Kernel Fusion (torch.compile) cho NVIDIA GPU!")
             except Exception:
                 pass
 
@@ -236,13 +248,17 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
 
-    # Đọc ffmpeg pipes bằng chip giải mã phần cứng NVDEC trên GPU
-    print("🎞️ Khởi tạo luồng giải mã video trực tiếp từ FFmpeg (NVDEC GPU acceleration)...")
+    # Đọc ffmpeg pipes hỗ trợ Resume từ start_frame_idx
+    seek_time = start_frame_idx / fps if (start_frame_idx > 0 and fps > 0) else 0.0
+    print(f"🎞️ Khởi tạo luồng giải mã video FFmpeg (Bắt đầu từ frame {start_frame_idx} / {seek_time:.2f}s)...")
+    
     ffmpeg_read_cmd = ['ffmpeg', '-y']
+    if seek_time > 0:
+        ffmpeg_read_cmd.extend(['-ss', str(seek_time)])
+        
     if device.type == 'mps':
         ffmpeg_read_cmd.extend(['-hwaccel', 'videotoolbox'])
     elif device.type == 'cuda':
-        # Kỹ thuật Nâng Cao: Ưu tiên NVIDIA NVDEC Hardware Decoder
         ffmpeg_read_cmd.extend(['-hwaccel', 'cuda', '-c:v', 'h264_cuvid'])
     
     ffmpeg_read_cmd.extend([
@@ -253,14 +269,11 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     try:
         process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except Exception:
-        # Fallback 1: Không dùng cuvid
-        try:
-            ffmpeg_read_cmd = ['ffmpeg', '-y', '-hwaccel', 'cuda', '-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-']
-            process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        except Exception:
-            # Fallback 2: Đọc chuẩn không hwaccel
-            ffmpeg_read_cmd = ['ffmpeg', '-y', '-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-']
-            process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        ffmpeg_read_cmd = ['ffmpeg', '-y']
+        if seek_time > 0:
+            ffmpeg_read_cmd.extend(['-ss', str(seek_time)])
+        ffmpeg_read_cmd.extend(['-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'])
+        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
@@ -282,13 +295,19 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         if target_w > upscaled_w or target_h > upscaled_h:
             target_w, target_h = upscaled_w, upscaled_h
 
-    print(f"🎬 Khởi tạo luồng mã hóa video đầu ra ({target_w}x{target_h} @ {fps:.3f} FPS)...")
+    # Tệp video đoạn mới nếu đang Resume
+    current_chunk_file = os.path.join(output_dir, f"_part_{start_frame_idx}_{os.path.basename(video_output)}")
+    active_chunks = list(existing_chunks)
+    active_chunks.append(current_chunk_file)
+
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
         '-i', '-',
         '-i', video_input,
     ]
+    if seek_time > 0:
+        ffmpeg_write_cmd.extend(['-ss', str(seek_time)])
         
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
@@ -301,22 +320,19 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     ffmpeg_write_cmd.extend(quality_opts)
     ffmpeg_write_cmd.extend([
         '-pix_fmt', 'yuv420p',
-        '-c:a', 'copy', '-map', '0:v:0', '-map', '1:a?', video_output
+        '-c:a', 'copy', '-map', '0:v:0', '-map', '1:a?', current_chunk_file
     ])
     
     try:
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"⚠️ Codec {encoder_codec} không hỗ trợ, fallback sang libx264...")
+    except Exception:
         encoder_codec = "libx264"
         ffmpeg_write_cmd[ffmpeg_write_cmd.index('-c:v') + 1] = encoder_codec
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     frame_size = src_w * src_h * 3
-    idx = 0
-    print("🚀 Bắt đầu quá trình AI Super-Resolution...")
+    idx = start_frame_idx
     
-    # Tối ưu kích thước queue pre-fetch & batch size
     batch_size = 2 if (device.type == 'cuda' and src_h <= 1080 and src_w <= 1920) else 1
     queue_size = 8 if device.type == 'cuda' else 4
     input_queue = Queue(maxsize=queue_size)
@@ -383,7 +399,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
                 with torch.inference_mode():
                     if ort_session is not None:
-                        # Thực thi qua NVIDIA TensorRT Engine (Nâng cao) - Đảm bảo tensor contiguous khi chuyển sang numpy
                         ort_inputs = {ort_session.get_inputs()[0].name: img_t.contiguous().cpu().numpy()}
                         ort_outs = ort_session.run(None, ort_inputs)
                         output = torch.from_numpy(ort_outs[0]).to(device)
@@ -409,8 +424,16 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 with open(failed_log_path, "a") as log_file:
                     log_file.write(f"Batch_idx_{idx} -> {str(e)}\n")
             
+            # Cập nhật Checkpoint tiến trình định kỳ mỗi 50 frames
+            if idx % 50 == 0:
+                try:
+                    with open(checkpoint_file, "w") as f:
+                        json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
+                except Exception:
+                    pass
+
             elapsed_time = time.time() - start_time
-            speed_fps = idx / elapsed_time if elapsed_time > 0 else 0
+            speed_fps = (idx - start_frame_idx) / elapsed_time if elapsed_time > 0 else 0
             current_video_time = idx / fps if fps > 0 else 0
             video_time_str = f"{int(current_video_time // 60):02d}:{int(current_video_time % 60):02d}"
             
@@ -438,10 +461,16 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
-        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng!")
+        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
+        # Lưu checkpoint khi ngắt ngang
+        try:
+            with open(checkpoint_file, "w") as f:
+                json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
+        except Exception:
+            pass
         
     finally:
-        print("\n🎬 Đang hoàn tất đóng gói dữ liệu và đồng bộ âm thanh gốc...")
+        print("\n🎬 Hoàn tất luồng xử lý khung hình...")
         try:
             output_queue.put(None)
             writer_thread.join(timeout=10)
@@ -460,15 +489,54 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             process_write.wait()
         except Exception:
             pass
-        
-        if is_youtube and temp_input_file and os.path.exists(temp_input_file):
-            try:
-                os.remove(temp_input_file)
-                print("🧹 Đã dọn dẹp file YouTube tạm thời.")
-            except Exception as e:
-                print(f"⚠️ Cảnh báo không thể xóa file tạm: {e}")
-        
-        print(f"\n✨ KẾT THÚC HOÀN HẢO! Video Anime ở chuẩn {target_w}x{target_h} @ {fps:.3f} FPS nằm tại: {video_output}")
+
+        # Ghép các tệp đoạn (nếu có Resume) và TỰ ĐỘNG DỌN DẸP FILE RÁC KHI THÀNH CÔNG
+        if expected_frames and idx >= (expected_frames - 5): # Coi như hoàn thành
+            print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...")
+            
+            valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
+            if len(valid_chunks) == 1:
+                # Chỉ có 1 file duy nhất, đổi tên thành video_output
+                if valid_chunks[0] != video_output:
+                    if os.path.exists(video_output): os.remove(video_output)
+                    os.rename(valid_chunks[0], video_output)
+            elif len(valid_chunks) > 1:
+                # Nối nhiều tệp video đoạn bằng FFmpeg concat
+                concat_list_file = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
+                with open(concat_list_file, "w") as f:
+                    for chunk_p in valid_chunks:
+                        f.write(f"file '{os.path.abspath(chunk_p)}'\n")
+                
+                concat_cmd = [
+                    'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                    '-i', concat_list_file, '-c', 'copy', video_output
+                ]
+                subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Dọn dẹp tệp danh sách concat
+                if os.path.exists(concat_list_file):
+                    os.remove(concat_list_file)
+
+            # --- TỰ ĐỘNG DỌN DẸP FILE RÁC SAU KHI THÀNH CÔNG ---
+            print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...")
+            for chunk_p in active_chunks:
+                if os.path.exists(chunk_p) and chunk_p != video_output:
+                    try: os.remove(chunk_p)
+                    except Exception: pass
+
+            if os.path.exists(checkpoint_file):
+                try: os.remove(checkpoint_file)
+                except Exception: pass
+
+            if is_youtube and temp_input_file and os.path.exists(temp_input_file):
+                try: os.remove(temp_input_file)
+                except Exception: pass
+                
+            if os.path.exists(failed_log_path) and os.path.getsize(failed_log_path) == 0:
+                try: os.remove(failed_log_path)
+                except Exception: pass
+
+            print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}")
 
     return video_output
 
