@@ -118,7 +118,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
     if output_dir is None:
-        output_dir = os.path.expanduser('~/Documents/mushoku-tensei')
+        if os.path.exists('/kaggle/working'):
+            output_dir = '/kaggle/working'
+        else:
+            output_dir = os.path.expanduser('~/Documents/mushoku-tensei')
     os.makedirs(output_dir, exist_ok=True)
 
     device, encoder_codec = get_device_and_codec(encoder_codec)
@@ -137,7 +140,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 try: os.remove(f)
                 except Exception: pass
 
-            # Sử dụng Android Client API độc quyền - Vượt 100% geo-block & player_response errors trên Kaggle Cloud
             opts = {
                 'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/b',
                 'outtmpl': 'yt_temp_input.%(ext)s',
