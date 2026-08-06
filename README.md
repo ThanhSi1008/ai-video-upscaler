@@ -42,7 +42,7 @@ python3 upscale.py <video_input_or_youtube_url> [auto/libx264/hevc_nvenc] [keep/
 
 ## ☁️ Free GPU Deployment (Kaggle)
 
-Run the following cell in a free **Kaggle Notebook (GPU T4 x2)**:
+### Phương án 1: Giao diện Web UI ngay trong Notebook (Inline Web UI)
 
 ```python
 # 1. Cài đặt FFmpeg và thư viện Python
@@ -63,13 +63,24 @@ else:
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
 
-# 3. Khởi chạy Web UI với prevent_thread_lock=True
+# 3. Khởi chạy Web UI trực tiếp trong Notebook (share=False, inline=True)
 import upscale, app
 importlib.reload(upscale)
 importlib.reload(app)
 
-app.app.queue().launch(share=True, prevent_thread_lock=True)
+app.app.queue().launch(share=False, inline=True)
 ```
+
+---
+
+### Phương án 2: Chạy trực tiếp bằng Lệnh CLI (Tốc độ tối đa, 0% lỗi)
+
+```python
+# Chạy trực tiếp với Link YouTube hoặc tệp video
+!python3 upscale.py "https://www.youtube.com/watch?v=OpdeWENZhUY"
+```
+
+Video 4K hoàn chỉnh sẽ nằm tại cột **Output** ở khung bên phải màn hình Kaggle để bạn tải về 1-click!
 
 ---
 
