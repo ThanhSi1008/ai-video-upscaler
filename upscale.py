@@ -177,10 +177,13 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if device.type in ['mps', 'cuda']:
         model = model.half()
 
-    # Tối ưu hóa bộ nhớ Channels Last & JIT Compiler cho CUDA GPU
+    # Tối ưu hóa bộ nhớ Channels Last, Multi-GPU & JIT Compiler cho CUDA GPU
     if device.type == 'cuda':
         model = model.to(memory_format=torch.channels_last)
-        if hasattr(torch, 'compile'):
+        if torch.cuda.device_count() > 1:
+            print(f"🔥 Kích hoạt Multi-GPU DataParallel trên {torch.cuda.device_count()} GPUs (Kaggle NVIDIA T4 x2)!")
+            model = nn.DataParallel(model)
+        elif hasattr(torch, 'compile'):
             try:
                 model = torch.compile(model, mode="reduce-overhead")
                 print("⚡ Đã kích hoạt PyTorch 2.0 JIT Kernel Fusion (torch.compile) cho NVIDIA GPU!")
