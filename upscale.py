@@ -5,6 +5,7 @@ import json
 import gc
 import subprocess
 import urllib.request
+import warnings
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -14,7 +15,9 @@ import time
 import threading
 from queue import Queue
 
-# Ẩn các dòng Warning hiển thị của PyTorch Compiler Inductor
+# Ẩn toàn bộ các dòng Warning hiển thị của Python & PyTorch Inductor
+warnings.filterwarnings("ignore")
+os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TORCH_LOGS"] = "-inductor"
 
@@ -416,7 +419,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     dtype = torch.float16 if device.type == 'mps' else torch.float32
                     img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
 
-                with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == 'cuda'), dtype=torch.float16):
+                with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda'), dtype=torch.float16):
                     if ort_session is not None:
                         ort_inputs = {ort_session.get_inputs()[0].name: img_t.contiguous().cpu().numpy()}
                         ort_outs = ort_session.run(None, ort_inputs)
