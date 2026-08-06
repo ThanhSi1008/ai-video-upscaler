@@ -8,6 +8,12 @@ import importlib
 import torch
 import gradio as gr
 
+# Giải phóng và đóng toàn bộ máy chủ Gradio cũ để tránh xung đột asyncio Event Loop trên Python 3.12
+try:
+    gr.close_all()
+except Exception:
+    pass
+
 # Reload upscale module để luôn áp dụng mã nguồn mới nhất trong RAM
 import upscale
 importlib.reload(upscale)
@@ -204,7 +210,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
 if __name__ == '__main__':
     allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd()]
-    app.queue().launch(
+    app.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
