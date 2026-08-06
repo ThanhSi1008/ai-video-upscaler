@@ -63,14 +63,18 @@ else:
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
 
-# 3. Khởi chạy Web UI Server dưới nền
+# 3. Đóng các server cũ và giải phóng cổng 7860
+import gradio as gr
+gr.close_all()
+!pkill -f "ssh.*localhost.run" 2>/dev/null
+
 import upscale, app
 importlib.reload(upscale)
 importlib.reload(app)
 
 app.app.queue().launch(server_name="0.0.0.0", server_port=7860, share=False, prevent_thread_lock=True)
 
-# 4. Tạo đường dẫn Web UI Public an toàn 100% qua SSH Tunnel (Chống sập Kaggle session)
+# 4. Tạo đường dẫn Web UI Public an toàn 100% qua SSH Tunnel
 print("🌐 Đang tạo đường dẫn Web UI Public cho bạn...")
 proc = subprocess.Popen(
     ['ssh', '-o', 'StrictHostKeyChecking=no', '-R', '80:localhost:7860', 'nokey@localhost.run'],
