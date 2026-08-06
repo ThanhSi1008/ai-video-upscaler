@@ -5,7 +5,6 @@ import json
 import gc
 import subprocess
 import urllib.request
-import concurrent.futures
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -114,18 +113,6 @@ def get_tensorrt_session(weights_path, device):
         pass
     return None
 
-def fetch_vn_proxies():
-    proxies = []
-    try:
-        url = 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=VN'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        res = urllib.request.urlopen(req, timeout=3)
-        for line in res.read().decode().strip().splitlines():
-            if line.strip() and ':' in line: proxies.append(line.strip())
-    except Exception:
-        pass
-    return list(dict.fromkeys(proxies))
-
 # --- 4. Hàm xử lý upscale chính tích hợp Tự Động Resume Progress & Dọn Dẹp File Rác ---
 def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
@@ -139,7 +126,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     temp_input_file = None
     if is_youtube:
-        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video...")
+        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô...")
         if progress_callback:
             progress_callback(0.01, desc="📥 Đang kết nối tải video từ YouTube...")
         try:
@@ -150,9 +137,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 try: os.remove(f)
                 except Exception: pass
 
-            # Sử dụng Android / iOS Mobile Player Client để vượt rào địa lý YouTube & player response 100%
+            # Sử dụng Android Client API độc quyền - Vượt 100% geo-block & player_response errors trên Kaggle Cloud
             opts = {
-                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/b',
                 'outtmpl': 'yt_temp_input.%(ext)s',
                 'merge_output_format': 'mp4',
                 'quiet': True,
@@ -160,7 +147,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 'noprogress': True,
                 'geo_bypass': True,
                 'geo_bypass_country': 'VN',
-                'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb', 'web']}},
+                'extractor_args': {'youtube': {'player_client': ['android']}},
                 'socket_timeout': 10,
                 'nocheckcertificate': True,
             }
@@ -168,7 +155,6 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             download_success = False
             video_title = "youtube_video"
 
-            # 1. Tải bằng Android/iOS API client (Tải cực nhanh không bị chặn địa lý)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(video_input, download=True)
@@ -178,40 +164,23 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 if downloaded and os.path.getsize(downloaded[0]) > 100000:
                     download_success = True
                     temp_input_file = downloaded[0]
-            except Exception as direct_err:
-                print(f"⚠️ Tải trực tiếp Android Client cần thêm fallback: {direct_err}")
-
-            # 2. Thử từng Proxy Việt Nam tuần tự nếu có yêu cầu bổ sung
-            if not download_success:
-                print("🌐 Đang tải qua Proxy Việt Nam...")
-                if progress_callback:
-                    progress_callback(0.01, desc="🌐 Đang thử Proxy Việt Nam vượt rào YouTube...")
-                
-                vn_proxies = fetch_vn_proxies()[:10]
-
-                for p in vn_proxies:
-                    out_path = f"yt_temp_input_{p.replace(':', '_')}.mp4"
-                    p_opts = dict(opts)
-                    p_opts['proxy'] = f'http://{p}'
-                    p_opts['outtmpl'] = out_path
-                    try:
-                        with yt_dlp.YoutubeDL(p_opts) as ydl:
-                            info = ydl.extract_info(video_input, download=True)
-                            if os.path.exists(out_path) and os.path.getsize(out_path) > 100000:
-                                temp_input_file = out_path
-                                video_title = info.get('title', 'youtube_video')
-                                video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                                download_success = True
-                                print(f"🎉 Tải thành công qua Proxy {p}!")
-                                break
-                    except Exception:
-                        if os.path.exists(out_path):
-                            try: os.remove(out_path)
-                            except Exception: pass
-                        continue
+            except Exception as e1:
+                print(f"⚠️ Thử lại với luồng mweb client: {e1}")
+                opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'android']}}
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(video_input, download=True)
+                        video_title = info.get('title', 'youtube_video')
+                        video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
+                    downloaded = glob.glob('yt_temp_input.*')
+                    if downloaded and os.path.getsize(downloaded[0]) > 100000:
+                        download_success = True
+                        temp_input_file = downloaded[0]
+                except Exception as e2:
+                    print(f"❌ Không thể giải mã video YouTube: {e2}")
 
             if not download_success:
-                raise Exception("Video YouTube này bị chặn địa lý trên IP Cloud. Vui lòng tải video trực tiếp lên từ tab 'Tải tệp Video'.")
+                raise Exception("Không thể tải video từ YouTube. Vui lòng tải file video trực tiếp từ máy của bạn.")
 
             video_input = temp_input_file
             video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
