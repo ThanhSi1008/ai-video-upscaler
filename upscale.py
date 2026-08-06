@@ -176,6 +176,17 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     model.eval()
     if device.type in ['mps', 'cuda']:
         model = model.half()
+
+    # Tối ưu hóa bộ nhớ Channels Last & JIT Compiler cho CUDA GPU
+    if device.type == 'cuda':
+        model = model.to(memory_format=torch.channels_last)
+        if hasattr(torch, 'compile'):
+            try:
+                model = torch.compile(model, mode="reduce-overhead")
+                print("⚡ Đã kích hoạt PyTorch 2.0 JIT Kernel Fusion (torch.compile) cho NVIDIA GPU!")
+            except Exception:
+                pass
+
     model = model.to(device)
 
     expected_frames = None
@@ -310,9 +321,16 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             
             try:
                 img_np = np.frombuffer(in_bytes, dtype=np.uint8).reshape((src_h, src_w, 3)).copy()
-                img_t = torch.from_numpy(img_np).to(device)
-                dtype = torch.float16 if (device.type in ['mps', 'cuda']) else torch.float32
-                img_t = img_t.permute(2, 0, 1).unsqueeze(0).to(dtype).div(255.0)
+                
+                if device.type == 'cuda':
+                    # Pinned Memory & Non-blocking DMA Transfer & Channels Last Memory Layout cho NVIDIA GPU
+                    img_t = torch.from_numpy(img_np).pin_memory().to(device, non_blocking=True)
+                    img_t = img_t.permute(2, 0, 1).unsqueeze(0).to(torch.float16, non_blocking=True).div(255.0)
+                    img_t = img_t.to(memory_format=torch.channels_last)
+                else:
+                    img_t = torch.from_numpy(img_np).to(device)
+                    dtype = torch.float16 if device.type == 'mps' else torch.float32
+                    img_t = img_t.permute(2, 0, 1).unsqueeze(0).to(dtype).div(255.0)
 
                 with torch.inference_mode():
                     if src_h <= 1920 and src_w <= 1920:
