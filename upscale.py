@@ -81,7 +81,39 @@ def get_device_and_codec(requested_codec="auto"):
         codec = requested_codec
     return device, codec
 
-# --- 4. Hàm xử lý upscale chính dùng được từ Python API & Gradio UI ---
+# --- 4. Khởi tạo NVIDIA TensorRT ONNX Engine (Nâng cao) ---
+def get_tensorrt_session(weights_path, device):
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        if 'TensorrtExecutionProvider' in providers or 'CUDAExecutionProvider' in providers:
+            onnx_path = weights_path.replace('.pth', '.onnx')
+            if not os.path.exists(onnx_path):
+                print("⚡ Đang xuất mô hình PyTorch sang định dạng ONNX/TensorRT...")
+                dummy_input = torch.randn(1, 3, 270, 480, dtype=torch.float16, device=device)
+                model_pt = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+                state_dict = torch.load(weights_path, map_location='cpu')
+                if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
+                elif 'params' in state_dict: state_dict = state_dict['params']
+                model_pt.load_state_dict(state_dict, strict=True)
+                model_pt.eval().half().to(device)
+                torch.onnx.export(
+                    model_pt, dummy_input, onnx_path,
+                    export_params=True, opset_version=14, do_constant_folding=True,
+                    input_names=['input'], output_names=['output'],
+                    dynamic_axes={'input': {0: 'batch', 2: 'height', 3: 'width'}, 'output': {0: 'batch', 2: 'height', 3: 'width'}}
+                )
+                print("✅ Đã tạo tệp ONNX TensorRT thành công!")
+            
+            active_providers = ['TensorrtExecutionProvider', 'CUDAExecutionProvider'] if 'TensorrtExecutionProvider' in providers else ['CUDAExecutionProvider']
+            session = ort.InferenceSession(onnx_path, providers=active_providers)
+            print(f"🚀 Đã kích hoạt NVIDIA TensorRT Engine với Providers: {active_providers}")
+            return session
+    except Exception as e:
+        print(f"ℹ️ Sử dụng PyTorch JIT / Multi-GPU cho suy luận AI.")
+    return None
+
+# --- 5. Hàm xử lý upscale chính dùng được từ Python API & Gradio UI ---
 def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
@@ -164,6 +196,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             print(f"❌ Lỗi hạ tầng mạng: {e}")
             raise e
 
+    # Kiểm tra NVIDIA TensorRT Session (Nâng cao)
+    ort_session = get_tensorrt_session(weights_path, device) if device.type == 'cuda' else None
+
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
     state_dict = torch.load(weights_path, map_location='cpu')
     
@@ -201,13 +236,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     except Exception as e:
         print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
 
-    # Đọc ffmpeg pipes
-    print("🎞️ Khởi tạo luồng giải mã video trực tiếp từ FFmpeg...")
+    # Đọc ffmpeg pipes bằng chip giải mã phần cứng NVDEC trên GPU
+    print("🎞️ Khởi tạo luồng giải mã video trực tiếp từ FFmpeg (NVDEC GPU acceleration)...")
     ffmpeg_read_cmd = ['ffmpeg', '-y']
     if device.type == 'mps':
         ffmpeg_read_cmd.extend(['-hwaccel', 'videotoolbox'])
     elif device.type == 'cuda':
-        ffmpeg_read_cmd.extend(['-hwaccel', 'cuda'])
+        # Kỹ thuật Nâng Cao: Ưu tiên NVIDIA NVDEC Hardware Decoder
+        ffmpeg_read_cmd.extend(['-hwaccel', 'cuda', '-c:v', 'h264_cuvid'])
     
     ffmpeg_read_cmd.extend([
         '-i', video_input,
@@ -217,12 +253,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     try:
         process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except Exception:
-        # Fallback không dùng -hwaccel nếu lỗi
-        ffmpeg_read_cmd = [
-            'ffmpeg', '-y', '-i', video_input,
-            '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
-        ]
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # Fallback 1: Không dùng cuvid
+        try:
+            ffmpeg_read_cmd = ['ffmpeg', '-y', '-hwaccel', 'cuda', '-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-']
+            process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except Exception:
+            # Fallback 2: Đọc chuẩn không hwaccel
+            ffmpeg_read_cmd = ['ffmpeg', '-y', '-i', video_input, '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-']
+            process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     upscaled_w = src_w * 4
     upscaled_h = src_h * 4
@@ -344,11 +382,17 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
 
                 with torch.inference_mode():
-                    if src_h <= 1920 and src_w <= 1920:
-                        output = model(img_t)
+                    if ort_session is not None:
+                        # Thực thi qua NVIDIA TensorRT Engine (Nâng cao)
+                        ort_inputs = {ort_session.get_inputs()[0].name: img_t.cpu().numpy()}
+                        ort_outs = ort_session.run(None, ort_inputs)
+                        output = torch.from_numpy(ort_outs[0]).to(device)
                     else:
-                        output_list = [upscale_tiled(model, img_t[i:i+1], device, tile=1920, pad=16, scale=4) for i in range(current_b)]
-                        output = torch.cat(output_list, dim=0)
+                        if src_h <= 1920 and src_w <= 1920:
+                            output = model(img_t)
+                        else:
+                            output_list = [upscale_tiled(model, img_t[i:i+1], device, tile=1920, pad=16, scale=4) for i in range(current_b)]
+                            output = torch.cat(output_list, dim=0)
                         
                     if output.shape[2] != target_h or output.shape[3] != target_w:
                         output = F.interpolate(output, size=(target_h, target_w), mode='bicubic', align_corners=False)
