@@ -315,19 +315,15 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         target_w = (target_w // 2) * 2
         target_h = (target_h // 2) * 2
 
-    # Tệp video đoạn mới nếu đang Resume
-    current_chunk_file = os.path.join(output_dir, f"_part_{start_frame_idx}_{os.path.basename(video_output)}")
-    active_chunks = list(existing_chunks)
-    if current_chunk_file not in active_chunks:
-        active_chunks.append(current_chunk_file)
+    # Tệp tạm video hình ảnh 4K tách biệt để đảm bảo 100% đủ thời lượng 2285 frames
+    temp_video_only = os.path.join(output_dir, f"_temp_v_{os.path.basename(video_output)}")
 
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
-        '-i', '-'
+        '-i', '-',
+        '-c:v', encoder_codec
     ]
-    if seek_time > 0:
-        ffmpeg_write_cmd.extend(['-ss', str(seek_time)])
 
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
@@ -336,14 +332,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     else:
         quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
-    ffmpeg_write_cmd.extend([
-        '-i', video_input,
-        '-c:v', encoder_codec
-    ])
     ffmpeg_write_cmd.extend(quality_opts)
     ffmpeg_write_cmd.extend([
         '-pix_fmt', 'yuv420p',
-        '-c:a', 'copy', '-map', '0:v:0', '-map', '1:a?', current_chunk_file
+        temp_video_only
     ])
     
     try:
@@ -453,7 +445,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             if idx % 50 == 0:
                 try:
                     with open(checkpoint_file, "w") as f:
-                        json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
+                        json.dump({"completed_frames": idx}, f)
                 except Exception:
                     pass
 
@@ -496,7 +488,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.", flush=True)
         try:
             with open(checkpoint_file, "w") as f:
-                json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
+                json.dump({"completed_frames": idx}, f)
         except Exception:
             pass
         
@@ -522,33 +514,27 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         except Exception:
             pass
 
-        # Ghép tệp video cuối cùng
-        valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
-        if valid_chunks:
-            print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...", flush=True)
-            if len(valid_chunks) == 1:
-                if valid_chunks[0] != video_output:
-                    if os.path.exists(video_output): os.remove(video_output)
-                    os.rename(valid_chunks[0], video_output)
-            elif len(valid_chunks) > 1:
-                concat_list_file = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
-                with open(concat_list_file, "w") as f:
-                    for chunk_p in valid_chunks:
-                        f.write(f"file '{os.path.abspath(chunk_p)}'\n")
+        # Ghép âm thanh gốc từ video_input vào tệp video 4K hoàn chỉnh
+        if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
+            print("🔊 Đang ghép âm thanh gốc và xuất video 4K hoàn chỉnh 100%...", flush=True)
+            if os.path.exists(video_output):
+                try: os.remove(video_output)
+                except Exception: pass
                 
-                concat_cmd = [
-                    'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-                    '-i', concat_list_file, '-c', 'copy', video_output
-                ]
-                subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                if os.path.exists(concat_list_file):
-                    os.remove(concat_list_file)
-
-        print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...", flush=True)
-        for chunk_p in active_chunks:
-            if os.path.exists(chunk_p) and chunk_p != video_output:
-                try: os.remove(chunk_p)
+            mux_cmd = [
+                'ffmpeg', '-y',
+                '-i', temp_video_only,
+                '-i', video_input,
+                '-c:v', 'copy',
+                '-c:a', 'copy',
+                '-map', '0:v:0',
+                '-map', '1:a?',
+                video_output
+            ]
+            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            if os.path.exists(temp_video_only):
+                try: os.remove(temp_video_only)
                 except Exception: pass
 
         if os.path.exists(checkpoint_file):
