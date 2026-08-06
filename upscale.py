@@ -125,7 +125,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     temp_input_file = None
     if is_youtube:
-        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô...")
+        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô (với Geo-Bypass VN)...")
         if progress_callback:
             progress_callback(0.01, desc="📥 Đang tải video từ YouTube...")
         try:
@@ -137,26 +137,56 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     os.remove(f)
                 except Exception:
                     pass
-                    
-            ydl_opts = {
-                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-                'outtmpl': 'yt_temp_input.%(ext)s',
-                'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'geo_bypass': True,
-                'geo_bypass_country': 'VN',
-                'nocheckcertificate': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_input, download=True)
-                video_title = info.get('title', 'youtube_video')
-                video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                
-            downloaded = glob.glob('yt_temp_input.*')
-            if not downloaded:
-                raise Exception("Không thể tải video từ YouTube! Video có thể bị giới hạn quốc gia hoặc cần đăng nhập.")
-            temp_input_file = downloaded[0]
+
+            fallback_opts = [
+                {
+                    'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+                    'outtmpl': 'yt_temp_input.%(ext)s',
+                    'merge_output_format': 'mp4',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'VN',
+                    'geo_bypass_ip_block': '113.161.0.0/16',
+                    'headers': {'X-Forwarded-For': '113.161.64.1'},
+                    'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
+                    'nocheckcertificate': True,
+                },
+                {
+                    'format': 'best',
+                    'outtmpl': 'yt_temp_input.%(ext)s',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'VN',
+                    'geo_bypass_ip_block': '27.72.0.0/16',
+                    'headers': {'X-Forwarded-For': '27.72.1.1'},
+                    'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'android', 'web']}},
+                    'nocheckcertificate': True,
+                }
+            ]
+
+            download_success = False
+            video_title = "youtube_video"
+            last_err = None
+
+            for opts in fallback_opts:
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(video_input, download=True)
+                        video_title = info.get('title', 'youtube_video')
+                        video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
+                    downloaded = glob.glob('yt_temp_input.*')
+                    if downloaded:
+                        download_success = True
+                        temp_input_file = downloaded[0]
+                        break
+                except Exception as ex:
+                    last_err = ex
+
+            if not download_success:
+                raise Exception(f"Không thể tải video YouTube! Chi tiết: {str(last_err)}")
+
             video_input = temp_input_file
             video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
             print(f"✅ Tải thành công video: '{video_title}'. Bắt đầu chạy upscale...")
