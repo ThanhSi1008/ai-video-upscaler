@@ -49,15 +49,20 @@ Run the following cell in a free **Kaggle Notebook (GPU T4 x2)**:
 !apt-get update -qq && apt-get install -y ffmpeg -qq
 !pip install -q gradio yt-dlp torch torchvision pillow numpy
 
-# 2. Tải mã nguồn dự án từ GitHub
-import os
-if not os.path.exists('/kaggle/working/ai-video-upscaler'):
-    !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git /kaggle/working/ai-video-upscaler
+# 2. Tải/Cập nhật mã nguồn mới nhất từ GitHub
+import os, importlib
 
-%cd /kaggle/working/ai-video-upscaler
+repo_dir = "/kaggle/working/ai-video-upscaler"
+if os.path.exists(repo_dir):
+    %cd {repo_dir}
+    !git pull
+else:
+    !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git {repo_dir}
+    %cd {repo_dir}
 
 # 3. Khởi chạy Web UI
 import app
+importlib.reload(app)
 app.app.queue().launch(share=True)
 ```
 
