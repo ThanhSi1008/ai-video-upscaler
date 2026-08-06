@@ -278,7 +278,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     idx = 0
     print("🚀 Bắt đầu quá trình AI Super-Resolution...")
     
-    # Tối ưu kích thước queue pre-fetch cho CUDA GPU để tránh nghẽn I/O
+    # Tối ưu kích thước queue pre-fetch & batch size
+    batch_size = 2 if (device.type == 'cuda' and src_h <= 1080 and src_w <= 1920) else 1
     queue_size = 8 if device.type == 'cuda' else 4
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
@@ -316,43 +317,53 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     try:
         while True:
-            in_bytes = input_queue.get()
-            if in_bytes is None:
+            batch_bytes = []
+            for _ in range(batch_size):
+                item = input_queue.get()
+                if item is None:
+                    break
+                batch_bytes.append(item)
+                
+            if not batch_bytes:
                 break
                 
-            idx += 1
+            current_b = len(batch_bytes)
+            idx += current_b
             
             try:
-                img_np = np.frombuffer(in_bytes, dtype=np.uint8).reshape((src_h, src_w, 3)).copy()
+                img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
+                img_np_batch = np.stack(img_nps, axis=0)
                 
                 if device.type == 'cuda':
-                    # Pinned Memory & Non-blocking DMA Transfer & Channels Last Memory Layout cho NVIDIA GPU
-                    img_t = torch.from_numpy(img_np).pin_memory().to(device, non_blocking=True)
-                    img_t = img_t.permute(2, 0, 1).unsqueeze(0).to(torch.float16, non_blocking=True).div(255.0)
+                    img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
+                    img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
                     img_t = img_t.to(memory_format=torch.channels_last)
                 else:
-                    img_t = torch.from_numpy(img_np).to(device)
+                    img_t = torch.from_numpy(img_np_batch).to(device)
                     dtype = torch.float16 if device.type == 'mps' else torch.float32
-                    img_t = img_t.permute(2, 0, 1).unsqueeze(0).to(dtype).div(255.0)
+                    img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
 
                 with torch.inference_mode():
                     if src_h <= 1920 and src_w <= 1920:
                         output = model(img_t)
                     else:
-                        output = upscale_tiled(model, img_t, device, tile=1920, pad=16, scale=4)
+                        output_list = [upscale_tiled(model, img_t[i:i+1], device, tile=1920, pad=16, scale=4) for i in range(current_b)]
+                        output = torch.cat(output_list, dim=0)
                         
                     if output.shape[2] != target_h or output.shape[3] != target_w:
                         output = F.interpolate(output, size=(target_h, target_w), mode='bicubic', align_corners=False)
 
-                    output = output.squeeze(0).clamp(0, 1).mul(255.0).round().to(torch.uint8)
+                    output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
                 output_np = output.cpu().numpy()
-                output_np = np.transpose(output_np, (1, 2, 0))
-                output_queue.put(output_np.tobytes())
+                output_np = np.transpose(output_np, (0, 2, 3, 1))
+                
+                for i in range(current_b):
+                    output_queue.put(output_np[i].tobytes())
                 
             except Exception as e:
                 with open(failed_log_path, "a") as log_file:
-                    log_file.write(f"Frame_{idx} -> {str(e)}\n")
+                    log_file.write(f"Batch_idx_{idx} -> {str(e)}\n")
             
             elapsed_time = time.time() - start_time
             speed_fps = idx / elapsed_time if elapsed_time > 0 else 0
