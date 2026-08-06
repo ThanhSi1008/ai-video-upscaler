@@ -16,7 +16,7 @@ An AI-powered video resolution upscaler and enhancement web application using **
 
 ## 🚀 Quick Start
 
-### 1. Local Setup
+### 1. Web UI (Máy cá nhân Mac / Windows / Google Colab)
 
 ```bash
 # Clone the repository
@@ -32,20 +32,16 @@ python3 app.py
 
 Open your browser at `http://localhost:7860`.
 
-### 2. Command Line Interface (CLI)
-
-```bash
-python3 upscale.py <video_input_or_youtube_url> [auto/libx264/hevc_nvenc] [keep/scale]
-```
-
 ---
 
-## ☁️ Free GPU Deployment (Kaggle)
+### 2. Form Native UI (Dành riêng cho Kaggle Cloud - Chống sập Session 100%)
 
-Run the following cell in a free **Kaggle Notebook (GPU T4 x2)** to upscale videos directly:
+Run the following cell in a free **Kaggle Notebook (GPU T4 x2)**:
 
 ```python
 # @title 🎬 AI Video Upscaler 4K - Nhập Thông Tin Video
+# @markdown Dán link YouTube hoặc đường dẫn tệp video của bạn bên dưới:
+
 video_input = "https://www.youtube.com/watch?v=OpdeWENZhUY" # @param {type:"string"}
 codec_choice = "auto" # @param ["auto", "hevc_nvenc", "h264_nvenc", "libx264"]
 keep_highest = False # @param {type:"boolean"}
