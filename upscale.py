@@ -493,7 +493,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                         progress_callback(None, desc=status_msg)
 
     except KeyboardInterrupt:
-        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
+        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.", flush=True)
         try:
             with open(checkpoint_file, "w") as f:
                 json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
@@ -501,7 +501,8 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             pass
         
     finally:
-        print("\n🎬 Hoàn tất luồng xử lý khung hình...")
+        print("\n", flush=True)
+        print("🎬 Hoàn tất luồng xử lý khung hình...", flush=True)
         try:
             output_queue.put(None)
             writer_thread.join(timeout=10)
@@ -524,7 +525,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         # Ghép tệp video cuối cùng
         valid_chunks = [c for c in active_chunks if os.path.exists(c) and os.path.getsize(c) > 0]
         if valid_chunks:
-            print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...")
+            print("📦 Đang nối các đoạn video và đồng bộ kết quả cuối cùng...", flush=True)
             if len(valid_chunks) == 1:
                 if valid_chunks[0] != video_output:
                     if os.path.exists(video_output): os.remove(video_output)
@@ -544,7 +545,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 if os.path.exists(concat_list_file):
                     os.remove(concat_list_file)
 
-        print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...")
+        print("🧹 Đang dọn dẹp các tệp tạm và file checkpoint rác...", flush=True)
         for chunk_p in active_chunks:
             if os.path.exists(chunk_p) and chunk_p != video_output:
                 try: os.remove(chunk_p)
@@ -562,7 +563,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
             try: os.remove(failed_log_path)
             except Exception: pass
 
-        print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}")
+        print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
 
     return video_output
 
