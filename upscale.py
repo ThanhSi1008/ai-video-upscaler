@@ -432,6 +432,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     writer_thread = threading.Thread(target=writer_worker, daemon=True)
     
     start_time = time.time()
+    last_print_time = 0.0
     reader_thread.start()
     writer_thread.start()
 
@@ -500,36 +501,40 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 except Exception:
                     pass
 
-            # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM / Fatal status code 44
-            if idx % 10 == 0:
+            # Giải phóng bộ nhớ định kỳ để bảo vệ RAM Kaggle không bị OOM
+            if idx % 15 == 0:
                 gc.collect()
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
                 elif device.type == 'mps':
                     torch.mps.empty_cache()
 
-            elapsed_time = time.time() - start_time
-            speed_fps = (idx - start_frame_idx) / elapsed_time if elapsed_time > 0 else 0
-            current_video_time = idx / fps if fps > 0 else 0
-            video_time_str = f"{int(current_video_time // 60):02d}:{int(current_video_time % 60):02d}"
-            
-            if expected_frames:
-                total_video_time = expected_frames / fps if fps > 0 else 0
-                total_video_time_str = f"{int(total_video_time // 60):02d}:{int(total_video_time % 60):02d}"
-                remaining_frames = expected_frames - idx
-                eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
-                eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
-                pct = (idx / expected_frames) * 100
+            # Giới hạn tần suất in tiến trình (Throttling 1s/lần) để chống tràn WebSocket IOPub Kaggle
+            now = time.time()
+            if (now - last_print_time) >= 1.0 or (expected_frames and idx >= expected_frames):
+                last_print_time = now
+                elapsed_time = now - start_time
+                speed_fps = (idx - start_frame_idx) / elapsed_time if elapsed_time > 0 else 0
+                current_video_time = idx / fps if fps > 0 else 0
+                video_time_str = f"{int(current_video_time // 60):02d}:{int(current_video_time % 60):02d}"
                 
-                status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
-                print(status_msg + "    ", end='\r', flush=True)
-                if progress_callback:
-                    progress_callback(pct / 100.0, desc=status_msg)
-            else:
-                status_msg = f"⏳ {idx} frames | {speed_fps:.2f} fps | {video_time_str}"
-                print(status_msg + "    ", end='\r', flush=True)
-                if progress_callback:
-                    progress_callback(None, desc=status_msg)
+                if expected_frames:
+                    total_video_time = expected_frames / fps if fps > 0 else 0
+                    total_video_time_str = f"{int(total_video_time // 60):02d}:{int(total_video_time % 60):02d}"
+                    remaining_frames = expected_frames - idx
+                    eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
+                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
+                    pct = (idx / expected_frames) * 100
+                    
+                    status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
+                    print(status_msg + "    ", end='\r', flush=True)
+                    if progress_callback:
+                        progress_callback(pct / 100.0, desc=status_msg)
+                else:
+                    status_msg = f"⏳ {idx} frames | {speed_fps:.2f} fps | {video_time_str}"
+                    print(status_msg + "    ", end='\r', flush=True)
+                    if progress_callback:
+                        progress_callback(None, desc=status_msg)
 
     except KeyboardInterrupt:
         print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
