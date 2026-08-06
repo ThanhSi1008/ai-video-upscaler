@@ -42,15 +42,15 @@ python3 upscale.py <video_input_or_youtube_url> [auto/libx264/hevc_nvenc] [keep/
 
 ## ☁️ Free GPU Deployment (Kaggle)
 
-### Phương án 1: Giao diện Web UI ngay trong Notebook (Inline Web UI)
+Run the following cell in a free **Kaggle Notebook (GPU T4 x2)** to launch the Web UI:
 
 ```python
-# 1. Cài đặt FFmpeg và thư viện Python
+# 1. Cài đặt FFmpeg và các thư viện Python
 !apt-get update -qq && apt-get install -y ffmpeg -qq
 !pip install -q gradio yt-dlp torch torchvision pillow numpy
 
 # 2. Tải/Cập nhật mã nguồn mới nhất từ GitHub
-import os, sys, importlib
+import os, sys, subprocess, time, importlib
 
 repo_dir = "/kaggle/working/ai-video-upscaler"
 if os.path.exists(repo_dir):
@@ -63,24 +63,32 @@ else:
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
 
-# 3. Khởi chạy Web UI trực tiếp trong Notebook (share=False, inline=True)
+# 3. Khởi chạy Web UI Server dưới nền
 import upscale, app
 importlib.reload(upscale)
 importlib.reload(app)
 
-app.app.queue().launch(share=False, inline=True)
+app.app.queue().launch(server_name="0.0.0.0", server_port=7860, share=False, prevent_thread_lock=True)
+
+# 4. Tạo đường dẫn Web UI Public an toàn 100% qua SSH Tunnel (Chống sập Kaggle session)
+print("🌐 Đang tạo đường dẫn Web UI Public cho bạn...")
+proc = subprocess.Popen(
+    ['ssh', '-o', 'StrictHostKeyChecking=no', '-R', '80:localhost:7860', 'nokey@localhost.run'],
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+)
+
+start = time.time()
+while time.time() - start < 15:
+    line = proc.stdout.readline()
+    if not line:
+        break
+    if 'lhr.life' in line or 'lhrtunnel' in line or 'tunneled' in line:
+        urls = [w for w in line.split() if 'https://' in w]
+        if urls:
+            print("\n🎉 MỞ WEB UI CỦA BẠN TẠI ĐƯỜNG DẪN BÊN DƯỚI:")
+            print(f"👉 {urls[0]}\n")
+            break
 ```
-
----
-
-### Phương án 2: Chạy trực tiếp bằng Lệnh CLI (Tốc độ tối đa, 0% lỗi)
-
-```python
-# Chạy trực tiếp với Link YouTube hoặc tệp video
-!python3 upscale.py "https://www.youtube.com/watch?v=OpdeWENZhUY"
-```
-
-Video 4K hoàn chỉnh sẽ nằm tại cột **Output** ở khung bên phải màn hình Kaggle để bạn tải về 1-click!
 
 ---
 
