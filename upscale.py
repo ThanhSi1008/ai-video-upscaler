@@ -389,14 +389,14 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
         while completed_total < expected_frames:
             try:
-                added = progress_queue.get(timeout=0.5)
+                added = progress_queue.get(timeout=0.3)
                 completed_total += added
             except Exception:
                 if not any(p.is_alive() for p in processes):
                     break
 
             now = time.time()
-            if (now - last_print_t) >= 0.8 or completed_total >= expected_frames:
+            if (now - last_print_t) >= 0.5 or completed_total >= expected_frames:
                 last_print_t = now
                 elapsed = now - start_time
                 speed_fps = completed_total / elapsed if elapsed > 0 else 0.0
@@ -411,12 +411,20 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}"
                 print(status_msg + "    ", end='\r', flush=True)
 
+                if progress_callback:
+                    try: progress_callback(pct / 100.0, desc=status_msg)
+                    except Exception: pass
+
         for p in processes:
             p.join()
 
         elapsed = time.time() - start_time
         effective_fps = expected_frames / elapsed if elapsed > 0 else 0
         print(f"\n⚡ HOÀN THÀNH XỬ LÝ SONG SONG DUAL GPU! Thời gian: {elapsed:.2f}s | Tốc độ hiệu dụng: {effective_fps:.2f} FPS!", flush=True)
+
+        if progress_callback:
+            try: progress_callback(0.98, desc="📦 Đang nối 2 đoạn video và ghép âm thanh gốc...")
+            except Exception: pass
 
         chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 0]
 
@@ -453,6 +461,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     except Exception: pass
 
             print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
+            if progress_callback:
+                try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
+                except Exception: pass
             return video_output
 
     # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC CHẠY MPS/CPU)
@@ -595,6 +606,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     pct = (idx / expected_frames) * 100
                     status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
                     print(status_msg + "    ", end='\r', flush=True)
+
+                    if progress_callback:
+                        try: progress_callback(pct / 100.0, desc=status_msg)
+                        except Exception: pass
                 else:
                     status_msg = f"⏳ {idx} frames | {speed_fps:.2f} fps | {video_time_str}"
                     print(status_msg + "    ", end='\r', flush=True)
