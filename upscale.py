@@ -105,7 +105,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             '-vframes', str(total_frames_to_process),
             '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
         ])
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         if os.path.exists(chunk_output_path):
             try: os.remove(chunk_output_path)
@@ -118,7 +118,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ]
 
         if "nvenc" in encoder_codec or encoder_codec == "auto":
-            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-gpu', str(gpu_id), '-preset', 'p1', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p1', '-pix_fmt', 'yuv420p'])
         elif "videotoolbox" in encoder_codec:
             ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
         else:
@@ -126,7 +126,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
         ffmpeg_write_cmd.append(chunk_output_path)
 
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
         batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
@@ -449,7 +449,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
         chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 1000]
 
-        if len(chunk_files) == 2:
+        if len(chunk_files) >= 1:
             print("📦 Đang nối các đoạn video và ghép âm thanh gốc...", flush=True)
             concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
             with open(concat_txt, "w") as f:
