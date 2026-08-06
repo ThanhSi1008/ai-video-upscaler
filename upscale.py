@@ -64,6 +64,7 @@ def get_device_and_codec(requested_codec="auto"):
     if torch.cuda.is_available():
         device = torch.device('cuda')
         torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
         if hasattr(torch.backends.cuda, 'matmul'):
             torch.backends.cuda.matmul.allow_tf32 = True
         if hasattr(torch.backends.cudnn, 'allow_tf32'):
@@ -256,10 +257,10 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
-        batch_size = 4
-        queue_size = 8
+        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        queue_size = 12
         try:
-            model = torch.compile(model, mode="reduce-overhead")
+            model = torch.compile(model, mode="default")
             print("⚡ Đã kích hoạt PyTorch Kernel Fusion Compiler!")
         except Exception:
             pass
@@ -327,7 +328,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-cq', '20', '-preset', 'p1', '-tune', 'll']
+        quality_opts = ['-preset', 'p1', '-tune', 'll', '-rc', 'constqp', '-qp', '20']
     else:
         quality_opts = ['-crf', '18', '-preset', 'ultrafast']
 
@@ -419,7 +420,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                     dtype = torch.float16 if device.type == 'mps' else torch.float32
                     img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
 
-                with torch.inference_mode():
+                with torch.inference_mode(), torch.cuda.amp.autocast(enabled=(device.type == 'cuda'), dtype=torch.float16):
                     if ort_session is not None:
                         ort_inputs = {ort_session.get_inputs()[0].name: img_t.contiguous().cpu().numpy()}
                         ort_outs = ort_session.run(None, ort_inputs)
@@ -488,7 +489,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                         progress_callback(None, desc=status_msg)
 
     except KeyboardInterrupt:
-        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã me được lưu lại.")
+        print("\n⚠️ Quá trình chạy bị ngắt bởi người dùng! Tiến trình đã được lưu lại.")
         try:
             with open(checkpoint_file, "w") as f:
                 json.dump({"completed_frames": idx, "chunks": active_chunks}, f)
