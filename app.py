@@ -90,6 +90,29 @@ with gr.Blocks(title="Video Upscaler & Encoder") as app:
             <div class="sys-info">SYSTEM: Device={device_name} | Recommended_Codec={default_codec}</div>
             """)
 
+        with gr.Accordion("📖 Hướng dẫn sử dụng & Giải thích chi tiết chức năng", open=False):
+            gr.Markdown("""
+            ### 📖 Hướng Dẫn Sử Dụng Chi Tiết
+
+            #### 1. Nguồn Video Đầu Vào (Input Source)
+            - **Tải tệp Video**: Sử dụng khi bạn muốn nâng cấp tệp video sẵn có trên máy tính (hỗ trợ đầy đủ các định dạng như MP4, MKV, MOV, AVI...).
+            - **Link YouTube**: Nhập trực tiếp đường dẫn video từ YouTube (ví dụ: `https://www.youtube.com/watch?v=...`). Hệ thống sẽ tự động tải video gốc về xử lý.
+
+            #### 2. Bộ Mã Hóa Video (Video Encoder)
+            - **Tự động (Auto-detect)** *(Khuyên dùng)*: Hệ thống tự phát hiện và chọn bộ mã hóa tối ưu nhất cho thiết bị của bạn.
+            - **Nvidia GPU (`hevc_nvenc` / `h264_nvenc`)**: Mã hóa bằng nhân phần cứng chuyên dụng trên card đồ họa NVIDIA (dành cho Kaggle GPU / Linux Server).
+            - **Apple Silicon (`hevc_videotoolbox`)**: Tăng tốc mã hóa phần cứng chuyên dụng cho các dòng máy Mac chip Apple Silicon (M1/M2/M3/M4).
+            - **CPU (`libx264` / `libx265`)**: Mã hóa bằng vi xử lý CPU (dành cho máy không trang bị card đồ họa GPU).
+
+            #### 3. Tùy Chọn Độ Phân Giải (Output Resolution)
+            - **Đưa về 4K Ultra-HD (3840x2160)** *(Khuyên dùng)*: Nâng cấp AI và đưa video về độ phân giải chuẩn 4K sắc nét mà vẫn bảo toàn đúng tỷ lệ khung hình gốc (không bị méo hay biến dạng hình ảnh).
+            - **Giữ tỷ lệ gốc tối đa (Keep Highest)**: Tự động nâng cấp AI lên gấp 4 lần kích thước gốc mà không áp dụng giới hạn chuẩn 4K.
+
+            #### 4. Khôi Phục Tiến Trình & Dọn Dẹp Tự Động
+            - **Tự động khôi phục (Auto Resume)**: Nếu quá trình xử lý bị tạm dừng hoặc ngắt kết nối giữa chừng, khi bạn bật lại ứng dụng sẽ tự động chạy tiếp từ phần trăm bị dở mà không tốn công chạy lại từ đầu.
+            - **Tự động dọn dẹp (Auto Cleanup)**: Sau khi hoàn thành, ứng dụng tự động xóa toàn bộ file rác và chỉ giữ lại duy nhất 1 tệp video 4K sắc nét để bạn tải về.
+            """)
+
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Tabs():
