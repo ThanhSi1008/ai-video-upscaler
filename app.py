@@ -35,8 +35,8 @@ else:
 
 CODEC_MAP = {
     "Tự động chọn phần cứng tốt nhất (Auto-detect)": "auto",
-    "Nvidia GPU (h264_nvenc - Siêu tốc)": "h264_nvenc",
-    "Nvidia GPU (hevc_nvenc - Chuẩn HEVC)": "hevc_nvenc",
+    "Nvidia GPU (h264_nvenc - Master Quality -qp 14)": "h264_nvenc",
+    "Nvidia GPU (hevc_nvenc - Master Quality HEVC)": "hevc_nvenc",
     "Apple Silicon (hevc_videotoolbox)": "hevc_videotoolbox",
     "CPU (libx264 - H.264 chuẩn)": "libx264"
 }
@@ -89,7 +89,7 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, codec_choice, res_choice, enhance_detail, progress=gr.Progress(track_tqdm=True)):
+def process_ui(video_file, codec_choice, res_choice, detail_strength, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
         raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
 
@@ -103,7 +103,7 @@ def process_ui(video_file, codec_choice, res_choice, enhance_detail, progress=gr
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), "⏳ Đang khởi tạo luồng giải mã video AI 4K..."
+    yield None, gr.update(visible=False), "⏳ Đang khởi tạo luồng giải mã video AI 4K Master Quality..."
 
     output_result = [None]
     error_result = [None]
@@ -114,7 +114,7 @@ def process_ui(video_file, codec_choice, res_choice, enhance_detail, progress=gr
                 video_input=video_file,
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
-                enhance_detail=enhance_detail,
+                detail_strength=float(detail_strength),
                 progress_callback=progress_cb
             )
             output_result[0] = res
@@ -144,7 +144,7 @@ def process_ui(video_file, codec_choice, res_choice, enhance_detail, progress=gr
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả sẵn sàng tải về."
+    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả Master Quality sẵn sàng tải về."
 
 with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
@@ -160,14 +160,17 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tải Tệp Video Gốc**: Kéo thả hoặc chọn tệp video (`.mp4`, `.mov`, `.mkv`...) vào ô **"Video Gốc (Original Input)"** ở bên trái.
-            2. **Cấu Hình**: Tùy chỉnh Bộ mã hóa phần cứng (NVENC GPU), Tùy chọn độ phân giải và Tùy chọn Tăng Cường Chi Tiết GPU.
+            2. **Cấu Hình Tối Ưu**: 
+               - Tùy chọn Thanh trượt **Cường độ Chi tiết Vi mô (Detail Sharpness)** từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.50` cho Anime & Action).
+               - Tự động bật mã hóa phần cứng NVENC Spatial/Temporal AQ `-qp 14` Master Quality.
             3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan ngay bên dưới 2 khung video.
             4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
-            ### ⚡ Công Nghệ Nổi Bật
+            ### ⚡ Công Nghệ Tăng Cường Chi Tiết Đột Phá
             - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS**.
-            - **Bộ Lọc GPU Unsharp Detail Restoration**: Áp dụng bộ lọc Unsharp Masking trực tiếp trên PyTorch Tensor giúp tái tạo sắc nét từng đường nét nhân vật, mái tóc, đôi mắt và chi tiết vi mô.
+            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Thuật toán phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor giúp tăng cường độ sắc nét cho mái tóc, đôi mắt, hoa văn trang phục và chi tiết hạt/khói trong cảnh combat.
+            - **NVENC Spatial & Temporal AQ (-qp 14 Master Quality)**: Tự động phân bổ bitrate thông minh cho từng vùng chi tiết cao và chuyển động nhanh, chống nhòe khung hình.
             """)
 
         # 1. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
@@ -206,10 +209,13 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                         label="📐 Tùy Chọn Độ Phân Giải Đầu Ra",
                         info="4K Ultra-HD: Chuẩn hóa 4K sắc nét bảo toàn tỷ lệ gốc."
                     )
-                    enhance_checkbox = gr.Checkbox(
-                        label="✨ Tăng Cường Chi Tiết Vi Mô (Ultra Sharp & Detail Restoration)",
-                        value=True,
-                        info="Sử dụng bộ lọc GPU Unsharp Masking giúp tái tạo sắc nét từng đường nét nhân vật, mái tóc, đôi mắt và phụ đề."
+                    detail_slider = gr.Slider(
+                        minimum=0.0,
+                        maximum=1.0,
+                        value=0.35,
+                        step=0.05,
+                        label="✨ Cường Độ Tăng Cường Chi Tiết Vi Mô (5x5 GPU Laplacian Filter)",
+                        info="0.0: Mặc định gốc | 0.35: Sắc Nét Cao (Khuyên Dùng) | 0.60+: Siêu Sắc Nét Cực Hạn (Master Quality)"
                     )
             with gr.Column(scale=6):
                 submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Start Upscaling)", variant="primary", size="lg")
@@ -220,7 +226,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, codec_dropdown, res_radio, enhance_checkbox],
+            inputs=[file_input, codec_dropdown, res_radio, detail_slider],
             outputs=[output_preview, download_file, status_box]
         )
 

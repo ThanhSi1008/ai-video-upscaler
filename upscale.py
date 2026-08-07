@@ -26,12 +26,20 @@ os.environ["TORCH_LOGS"] = "-inductor"
 def natural_key(s):
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
 
-# --- 2. Bộ Lọc Tăng Cường Chi Tiết & Độ Sắc Nét Vi Mô Trên GPU ---
-def apply_gpu_detail_enhancement(tensor, strength=0.25):
-    # PyTorch GPU Unsharp Masking filter for line art and micro-detail restoration
-    kernel = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=tensor.dtype, device=tensor.device) / 16.0
-    kernel = kernel.repeat(3, 1, 1, 1)
-    blurred = F.conv2d(tensor, kernel, padding=1, groups=3)
+# --- 2. Bộ Lọc Tăng Cường Chi Tiết Vi Mô 5x5 Laplacian Pyramid Trên GPU ---
+def apply_gpu_detail_enhancement(tensor, strength=0.35):
+    if strength <= 0.0:
+        return tensor
+    # Lọc Kim Tự Tháp 5x5 Laplacian High-Pass Filter khôi phục chi tiết cực sâu
+    kernel5x5 = torch.tensor([
+        [1,  4,  6,  4, 1],
+        [4, 16, 24, 16, 4],
+        [6, 24, 36, 24, 6],
+        [4, 16, 24, 16, 4],
+        [1,  4,  6,  4, 1]
+    ], dtype=tensor.dtype, device=tensor.device) / 256.0
+    kernel5x5 = kernel5x5.repeat(3, 1, 1, 1)
+    blurred = F.conv2d(tensor, kernel5x5, padding=2, groups=3)
     high_pass = tensor - blurred
     return torch.clamp(tensor + strength * high_pass, 0.0, 1.0)
 
@@ -81,7 +89,7 @@ def get_device_and_codec(requested_codec="auto"):
     return device, codec
 
 # Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, enhance_detail, return_dict, progress_queue):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, detail_strength, return_dict, progress_queue):
     try:
         import numpy as np
         import torch
@@ -127,13 +135,13 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         ]
 
         if "hevc" in encoder_codec:
-            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '18', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p'])
         elif "nvenc" in encoder_codec or encoder_codec == "auto":
-            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '18', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p'])
         elif "videotoolbox" in encoder_codec:
             ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
         else:
-            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-pix_fmt', 'yuv420p'])
+            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '14', '-preset', 'medium', '-pix_fmt', 'yuv420p'])
 
         ffmpeg_write_cmd.append(chunk_output_path)
 
@@ -197,9 +205,9 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
                 
-                # TẮM NÉT VI MÔ TRÊN GPU
-                if enhance_detail:
-                    output = apply_gpu_detail_enhancement(output, strength=0.25)
+                # TẮM NÉT CHI TIẾT CỰC SÂU TRÊN GPU VỚI LAPLACIAN 5x5 PYRAMID
+                if detail_strength > 0.0:
+                    output = apply_gpu_detail_enhancement(output, strength=detail_strength)
 
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
@@ -239,7 +247,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         return_dict[gpu_id] = False
 
 # --- 5. Hàm xử lý upscale chính tích hợp Tự Động Dual GPU Multi-processing ---
-def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, enhance_detail=True, progress_callback=None):
+def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, detail_strength=0.35, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
     if output_dir is None:
@@ -250,7 +258,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     os.makedirs(output_dir, exist_ok=True)
 
     device, encoder_codec = get_device_and_codec(encoder_codec)
-    print(f"🚀 Thiết bị tính toán được chọn: {device} | Codec: {encoder_codec} | Tăng Cường Chi Tiết GPU: {enhance_detail}")
+    print(f"🚀 Thiết bị tính toán được chọn: {device} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength}")
 
     temp_input_file = None
     if is_youtube:
@@ -410,7 +418,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, enhance_detail, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, detail_strength, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -553,9 +561,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     if "videotoolbox" in encoder_codec:
         quality_opts = ['-q:v', '65']
     elif "nvenc" in encoder_codec:
-        quality_opts = ['-preset', 'p4', '-rc', 'constqp', '-qp', '18']
+        quality_opts = ['-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1']
     else:
-        quality_opts = ['-crf', '18', '-preset', 'medium']
+        quality_opts = ['-crf', '14', '-preset', 'medium']
 
     ffmpeg_write_cmd.extend(quality_opts)
     ffmpeg_write_cmd.extend(['-pix_fmt', 'yuv420p', temp_video_only])
@@ -624,9 +632,9 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
                 
-                # TẮM NÉT VI MÔ TRÊN GPU
-                if enhance_detail:
-                    output = apply_gpu_detail_enhancement(output, strength=0.25)
+                # TẮM NÉT CHI TIẾT CỰC SÂU TRÊN GPU VỚI LAPLACIAN 5x5 PYRAMID
+                if detail_strength > 0.0:
+                    output = apply_gpu_detail_enhancement(output, strength=detail_strength)
 
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
