@@ -216,7 +216,8 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
-        batch_size = 4 if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
+        # Tối ưu kích thước batch_size cho RRDBNet 6B để tránh tràn VRAM CUDA OOM trên NVIDIA T4 (15GB)
+        batch_size = (2 if src_h <= 720 else 1) if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
         queue_size = 12
 
         input_queue = Queue(maxsize=queue_size)
@@ -610,7 +611,7 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
 
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
-        batch_size = 4 if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
+        batch_size = (2 if src_h <= 720 else 1) if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
         queue_size = 12
         try: model = torch.compile(model, mode="default")
         except Exception: pass
