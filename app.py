@@ -89,7 +89,7 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_tqdm=True)):
+def process_ui(video_file, codec_choice, res_choice, enhance_detail, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
         raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
 
@@ -114,6 +114,7 @@ def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_
                 video_input=video_file,
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
+                enhance_detail=enhance_detail,
                 progress_callback=progress_cb
             )
             output_result[0] = res
@@ -159,14 +160,14 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tải Tệp Video Gốc**: Kéo thả hoặc chọn tệp video (`.mp4`, `.mov`, `.mkv`...) vào ô **"Video Gốc (Original Input)"** ở bên trái.
-            2. **Cấu Hình**: Tùy chỉnh Bộ mã hóa phần cứng (NVENC GPU) và Tùy chọn độ phân giải ở bên dưới.
+            2. **Cấu Hình**: Tùy chỉnh Bộ mã hóa phần cứng (NVENC GPU), Tùy chọn độ phân giải và Tùy chọn Tăng Cường Chi Tiết GPU.
             3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan ngay bên dưới 2 khung video.
-            4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"** có cùng kích thước 1:1 với video gốc. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
+            4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
             ### ⚡ Công Nghệ Nổi Bật
-            - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS** (rút ngắn thời gian xử lý từ vài phút xuống chỉ còn vài chục giây).
-            - **Chuẩn Mã Hóa NVENC P4 HQ**: Giữ trọn vẹn chi tiết sắc nét cho cả cảnh cận cảnh nhân vật lẫn các cảnh hiệu ứng chiến đấu phức tạp.
+            - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS**.
+            - **Bộ Lọc GPU Unsharp Detail Restoration**: Áp dụng bộ lọc Unsharp Masking trực tiếp trên PyTorch Tensor giúp tái tạo sắc nét từng đường nét nhân vật, mái tóc, đôi mắt và chi tiết vi mô.
             """)
 
         # 1. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
@@ -205,6 +206,11 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                         label="📐 Tùy Chọn Độ Phân Giải Đầu Ra",
                         info="4K Ultra-HD: Chuẩn hóa 4K sắc nét bảo toàn tỷ lệ gốc."
                     )
+                    enhance_checkbox = gr.Checkbox(
+                        label="✨ Tăng Cường Chi Tiết Vi Mô (Ultra Sharp & Detail Restoration)",
+                        value=True,
+                        info="Sử dụng bộ lọc GPU Unsharp Masking giúp tái tạo sắc nét từng đường nét nhân vật, mái tóc, đôi mắt và phụ đề."
+                    )
             with gr.Column(scale=6):
                 submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Start Upscaling)", variant="primary", size="lg")
                 download_file = gr.File(
@@ -214,7 +220,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, codec_dropdown, res_radio],
+            inputs=[file_input, codec_dropdown, res_radio, enhance_checkbox],
             outputs=[output_preview, download_file, status_box]
         )
 
