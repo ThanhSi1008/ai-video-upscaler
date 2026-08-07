@@ -43,7 +43,7 @@ def apply_gpu_detail_enhancement(tensor, strength=0.35):
     high_pass = tensor - blurred
     return torch.clamp(tensor + strength * high_pass, 0.0, 1.0)
 
-# --- 3. Kiến trúc SRVGGNetCompact chuyên dụng cho AnimeVideoV3 ---
+# --- 3. MẠNG AI 1: SRVGGNetCompact (Mô hình AnimeVideoV3 Siêu Tốc) ---
 class SRVGGNetCompact(nn.Module):
     def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4):
         super().__init__()
@@ -64,6 +64,64 @@ class SRVGGNetCompact(nn.Module):
         out = self.upsampler(out)
         base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
         return out + base
+
+# --- 4. MẠNG AI 2: RRDBNet 6B (Mô hình Real-ESRGAN x4Plus Anime Master Class) ---
+class ResidualDenseBlock_5C(nn.Module):
+    def __init__(self, nf=64, gc=32, bias=True):
+        super().__init__()
+        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=bias)
+        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=bias)
+        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=bias)
+        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=bias)
+        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=bias)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x
+
+class RRDB(nn.Module):
+    def __init__(self, nf, gc=32):
+        super().__init__()
+        self.rdb1 = ResidualDenseBlock_5C(nf, gc)
+        self.rdb2 = ResidualDenseBlock_5C(nf, gc)
+        self.rdb3 = ResidualDenseBlock_5C(nf, gc)
+
+    def forward(self, x):
+        out = self.rdb1(x)
+        out = self.rdb2(out)
+        out = self.rdb3(out)
+        return out * 0.2 + x
+
+class RRDBNet(nn.Module):
+    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4):
+        super().__init__()
+        self.scale = scale
+        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
+        self.body = nn.ModuleList([RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
+        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        feat = self.conv_first(x)
+        body_feat = feat
+        for block in self.body:
+            body_feat = block(body_feat)
+        body_feat = self.conv_body(body_feat)
+        feat = feat + body_feat
+
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        out = self.conv_last(self.lrelu(self.conv_hr(feat)))
+        return out
 
 def get_device_and_codec(requested_codec="auto"):
     if torch.cuda.is_available():
@@ -89,7 +147,7 @@ def get_device_and_codec(requested_codec="auto"):
     return device, codec
 
 # Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, gpu_id, chunk_output_path, detail_strength, return_dict, progress_queue):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, gpu_id, chunk_output_path, detail_strength, return_dict, progress_queue):
     try:
         import numpy as np
         import torch
@@ -99,7 +157,11 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
         device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
 
-        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+        if "x4plus" in model_name:
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+        else:
+            model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+
         state_dict = torch.load(weights_path, map_location='cpu')
         if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
         elif 'params' in state_dict: state_dict = state_dict['params']
@@ -148,7 +210,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
-        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        batch_size = 4 if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
         queue_size = 12
 
         input_queue = Queue(maxsize=queue_size)
@@ -247,7 +309,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         return_dict[gpu_id] = False
 
 # --- 5. Hàm xử lý upscale chính tích hợp Tự Động Dual GPU Multi-processing ---
-def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highest=False, detail_strength=0.35, progress_callback=None):
+def upscale_video(video_input, output_dir=None, model_name="animevideov3", encoder_codec="auto", keep_highest=False, detail_strength=0.35, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
     if output_dir is None:
@@ -258,7 +320,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
     os.makedirs(output_dir, exist_ok=True)
 
     device, encoder_codec = get_device_and_codec(encoder_codec)
-    print(f"🚀 Thiết bị tính toán được chọn: {device} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength}")
+    print(f"🚀 Thiết bị tính toán được chọn: {device} | Mô hình AI: {model_name} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength}")
 
     temp_input_file = None
     if is_youtube:
@@ -349,16 +411,21 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         
     print(f"ℹ️ Cấu hình gốc phát hiện: {src_w}x{src_h} @ {fps:.3f} FPS")
 
-    # Trọng số AI
-    weights_path = "realesr-animevideov3.pth"
-    if not os.path.exists(weights_path):
-        print("📥 Tự động tải mô hình phục hồi chuyên dụng từ kho lưu trữ GitHub...")
-        if progress_callback:
-            progress_callback(0.02, desc="📥 Đang tải weights Real-ESRGAN...")
+    # TẢI WEIGHTS THEO MÔ HÌNH AI ĐƯỢC CHỌN
+    if "x4plus" in model_name:
+        weights_path = "RealESRGAN_x4plus_anime_6B.pth"
+        url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
+    else:
+        weights_path = "realesr-animevideov3.pth"
         url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
+
+    if not os.path.exists(weights_path):
+        print(f"📥 Tự động tải mô hình AI ({weights_path}) từ GitHub...")
+        if progress_callback:
+            progress_callback(0.02, desc=f"📥 Đang tải weights mô hình AI {model_name}...")
         try:
             urllib.request.urlretrieve(url, weights_path)
-            print("✅ Đã đồng bộ trọng số mạng Anime thành công!")
+            print("✅ Đã đồng bộ trọng số mô hình AI thành công!")
         except Exception as e:
             print(f"❌ Lỗi hạ tầng mạng: {e}")
             raise e
@@ -418,7 +485,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, encoder_codec, g_id, chunk_path, detail_strength, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, g_id, chunk_path, detail_strength, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -520,7 +587,11 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
         print("⚠️ Cảnh báo: Luồng Dual GPU chưa tạo được file kết quả. Tự động chuyển sang luồng GPU đơn an toàn...")
 
     # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC DUAL GPU CẦN DỰ PHÒNG AN TOÀN)
-    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+    if "x4plus" in model_name:
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+    else:
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+
     state_dict = torch.load(weights_path, map_location='cpu')
     if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
     elif 'params' in state_dict: state_dict = state_dict['params']
@@ -529,7 +600,7 @@ def upscale_video(video_input, output_dir=None, encoder_codec="auto", keep_highe
 
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
-        batch_size = 6 if src_h <= 720 else (4 if src_h <= 1080 else 2)
+        batch_size = 4 if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
         queue_size = 12
         try: model = torch.compile(model, mode="default")
         except Exception: pass

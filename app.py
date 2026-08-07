@@ -33,6 +33,11 @@ elif device.type == "mps":
 else:
     device_name = "💻 CPU (x86_64)"
 
+MODEL_MAP = {
+    "AnimeVideoV3 (Mô hình Siêu Tốc 16+ FPS - Khuyên Dùng)": "animevideov3",
+    "Real-ESRGAN x4Plus Anime 6B (Mô hình Siêu Nét Master Class - Chi tiết cực cao)": "x4plus_anime"
+}
+
 CODEC_MAP = {
     "Tự động chọn phần cứng tốt nhất (Auto-detect)": "auto",
     "Nvidia GPU (h264_nvenc - Master Quality -qp 14)": "h264_nvenc",
@@ -89,12 +94,13 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, codec_choice, res_choice, detail_strength, progress=gr.Progress(track_tqdm=True)):
+def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
         raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
 
     keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest 4x)")
     encoder_codec = CODEC_MAP.get(codec_choice, "auto")
+    model_name = MODEL_MAP.get(model_choice, "animevideov3")
 
     progress_queue = Queue()
 
@@ -103,7 +109,7 @@ def process_ui(video_file, codec_choice, res_choice, detail_strength, progress=g
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), "⏳ Đang khởi tạo luồng giải mã video AI 4K Master Quality..."
+    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã video AI 4K ({model_name})..."
 
     output_result = [None]
     error_result = [None]
@@ -112,6 +118,7 @@ def process_ui(video_file, codec_choice, res_choice, detail_strength, progress=g
         try:
             res = upscale.upscale_video(
                 video_input=video_file,
+                model_name=model_name,
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
                 detail_strength=float(detail_strength),
@@ -161,16 +168,17 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tải Tệp Video Gốc**: Kéo thả hoặc chọn tệp video (`.mp4`, `.mov`, `.mkv`...) vào ô **"Video Gốc (Original Input)"** ở bên trái.
             2. **Cấu Hình Tối Ưu**: 
-               - Tùy chọn Thanh trượt **Cường độ Chi tiết Vi mô (Detail Sharpness)** từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.50` cho Anime & Action).
-               - Tự động bật mã hóa phần cứng NVENC Spatial/Temporal AQ `-qp 14` Master Quality.
+               - **Mô Hình AI**: Chọn `Real-ESRGAN x4Plus Anime 6B` nếu bạn muốn khôi phục chi tiết cực sâu cho từng nét vẽ nhân vật và hạt kỹ xảo.
+               - **Cường Độ Chi Tiết**: Tùy chỉnh thanh trượt từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.60`).
             3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan ngay bên dưới 2 khung video.
             4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
             ### ⚡ Công Nghệ Tăng Cường Chi Tiết Đột Phá
+            - **Mạng Neural RRDBNet 6B**: Kiến trúc Residual-in-Residual Dense Block giúp tái tạo nét vẽ Anime sắc sảo như bản vẽ Vector gốc.
             - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS**.
-            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Thuật toán phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor giúp tăng cường độ sắc nét cho mái tóc, đôi mắt, hoa văn trang phục và chi tiết hạt/khói trong cảnh combat.
-            - **NVENC Spatial & Temporal AQ (-qp 14 Master Quality)**: Tự động phân bổ bitrate thông minh cho từng vùng chi tiết cao và chuyển động nhanh, chống nhòe khung hình.
+            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Thuật toán phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor.
+            - **NVENC Spatial & Temporal AQ (-qp 14 Master Quality)**: Phân bổ bitrate thông minh cho từng vùng chi tiết cao và chuyển động nhanh.
             """)
 
         # 1. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
@@ -197,6 +205,12 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         with gr.Row():
             with gr.Column(scale=6):
                 with gr.Group(elem_classes=["panel-box"]):
+                    model_dropdown = gr.Dropdown(
+                        choices=list(MODEL_MAP.keys()),
+                        value="AnimeVideoV3 (Mô hình Siêu Tốc 16+ FPS - Khuyên Dùng)",
+                        label="🤖 Mô Hình AI Nâng Cấp (AI Upscale Model)",
+                        info="Real-ESRGAN x4Plus Anime 6B là mô hình sâu chuyên tái tạo chi tiết vi mô cực nét."
+                    )
                     codec_dropdown = gr.Dropdown(
                         choices=list(CODEC_MAP.keys()),
                         value="Tự động chọn phần cứng tốt nhất (Auto-detect)",
@@ -226,7 +240,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, codec_dropdown, res_radio, detail_slider],
+            inputs=[file_input, model_dropdown, codec_dropdown, res_radio, detail_slider],
             outputs=[output_preview, download_file, status_box]
         )
 
