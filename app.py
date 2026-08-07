@@ -94,7 +94,7 @@ CUSTOM_CSS = """
 }
 """
 
-def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, progress=gr.Progress(track_tqdm=True)):
+def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
         raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
 
@@ -109,7 +109,7 @@ def process_ui(video_file, model_choice, codec_choice, res_choice, detail_streng
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã video AI 4K ({model_name})..."
+    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã video AI 4K Master Class..."
 
     output_result = [None]
     error_result = [None]
@@ -122,6 +122,7 @@ def process_ui(video_file, model_choice, codec_choice, res_choice, detail_streng
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
                 detail_strength=float(detail_strength),
+                color_boost=color_boost,
                 progress_callback=progress_cb
             )
             output_result[0] = res
@@ -170,12 +171,14 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
             2. **Cấu Hình Tối Ưu**: 
                - **Mô Hình AI**: Chọn `Real-ESRGAN x4Plus Anime 6B` nếu bạn muốn khôi phục chi tiết cực sâu cho từng nét vẽ nhân vật và hạt kỹ xảo.
                - **Cường Độ Chi Tiết**: Tùy chỉnh thanh trượt từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.60`).
+               - **Anime 4K HDR Color Boost**: Bật tăng cường độ rực rỡ và độ tương phản màu tương tự chuẩn 4K HDR.
             3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan ngay bên dưới 2 khung video.
             4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
             ### ⚡ Công Nghệ Tăng Cường Chi Tiết Đột Phá
             - **Mạng Neural RRDBNet 6B**: Kiến trúc Residual-in-Residual Dense Block giúp tái tạo nét vẽ Anime sắc sảo như bản vẽ Vector gốc.
+            - **Bộ Lọc GPU Dynamic Contrast & Color Vibrance**: Tối ưu hóa màu sắc rực rỡ và độ tương phản sâu tự nhiên chuẩn 4K HDR.
             - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS**.
             - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Thuật toán phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor.
             - **NVENC Spatial & Temporal AQ (-qp 14 Master Quality)**: Phân bổ bitrate thông minh cho từng vùng chi tiết cao và chuyển động nhanh.
@@ -231,6 +234,11 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                         label="✨ Cường Độ Tăng Cường Chi Tiết Vi Mô (5x5 GPU Laplacian Filter)",
                         info="0.0: Mặc định gốc | 0.35: Sắc Nét Cao (Khuyên Dùng) | 0.60+: Siêu Sắc Nét Cực Hạn (Master Quality)"
                     )
+                    vivid_checkbox = gr.Checkbox(
+                        label="🎨 Tăng Cường Độ Tương Phản & Độ Rực Rỡ Màu Sắc (Anime 4K HDR Color Boost)",
+                        value=True,
+                        info="Giúp màu sắc phim đậm đà, đường nét viền đen sâu hơn và các hiệu ứng ánh sáng/kỹ xảo rực rỡ hơn."
+                    )
             with gr.Column(scale=6):
                 submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Start Upscaling)", variant="primary", size="lg")
                 download_file = gr.File(
@@ -240,7 +248,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, model_dropdown, codec_dropdown, res_radio, detail_slider],
+            inputs=[file_input, model_dropdown, codec_dropdown, res_radio, detail_slider, vivid_checkbox],
             outputs=[output_preview, download_file, status_box]
         )
 

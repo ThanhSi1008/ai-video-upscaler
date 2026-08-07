@@ -43,7 +43,13 @@ def apply_gpu_detail_enhancement(tensor, strength=0.35):
     high_pass = tensor - blurred
     return torch.clamp(tensor + strength * high_pass, 0.0, 1.0)
 
-# --- 3. MẠNG AI 1: SRVGGNetCompact (Mô hình AnimeVideoV3 Siêu Tốc) ---
+# --- 3. Bộ Lọc Tăng Cường Độ Tương Phản & Rực Rỡ Màu Sắc Anime 4K HDR ---
+def apply_gpu_color_and_contrast(tensor, contrast_boost=1.04):
+    mean = tensor.mean(dim=(2, 3), keepdim=True)
+    enhanced = (tensor - mean) * contrast_boost + mean
+    return torch.clamp(enhanced, 0.0, 1.0)
+
+# --- 4. MẠNG AI 1: SRVGGNetCompact (Mô hình AnimeVideoV3 Siêu Tốc) ---
 class SRVGGNetCompact(nn.Module):
     def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4):
         super().__init__()
@@ -65,7 +71,7 @@ class SRVGGNetCompact(nn.Module):
         base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
         return out + base
 
-# --- 4. MẠNG AI 2: RRDBNet 6B (Mô hình Real-ESRGAN x4Plus Anime Master Class) ---
+# --- 5. MẠNG AI 2: RRDBNet 6B (Mô hình Real-ESRGAN x4Plus Anime Master Class) ---
 class ResidualDenseBlock_5C(nn.Module):
     def __init__(self, nf=64, gc=32, bias=True):
         super().__init__()
@@ -147,7 +153,7 @@ def get_device_and_codec(requested_codec="auto"):
     return device, codec
 
 # Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, gpu_id, chunk_output_path, detail_strength, return_dict, progress_queue):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, gpu_id, chunk_output_path, detail_strength, color_boost, return_dict, progress_queue):
     try:
         import numpy as np
         import torch
@@ -271,6 +277,10 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 if detail_strength > 0.0:
                     output = apply_gpu_detail_enhancement(output, strength=detail_strength)
 
+                # TĂNG CƯỜNG TƯƠNG PHẢN & ĐỘ RỰC RỠ MÀU ANIME 4K HDR
+                if color_boost:
+                    output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
+
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
             output_np = output.cpu().numpy()
@@ -309,7 +319,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         return_dict[gpu_id] = False
 
 # --- 5. Hàm xử lý upscale chính tích hợp Tự Động Dual GPU Multi-processing ---
-def upscale_video(video_input, output_dir=None, model_name="animevideov3", encoder_codec="auto", keep_highest=False, detail_strength=0.35, progress_callback=None):
+def upscale_video(video_input, output_dir=None, model_name="animevideov3", encoder_codec="auto", keep_highest=False, detail_strength=0.35, color_boost=True, progress_callback=None):
     is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
     
     if output_dir is None:
@@ -320,7 +330,7 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
     os.makedirs(output_dir, exist_ok=True)
 
     device, encoder_codec = get_device_and_codec(encoder_codec)
-    print(f"🚀 Thiết bị tính toán được chọn: {device} | Mô hình AI: {model_name} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength}")
+    print(f"🚀 Thiết bị tính toán được chọn: {device} | Mô hình AI: {model_name} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength} | Tăng màu sắc HDR: {color_boost}")
 
     temp_input_file = None
     if is_youtube:
@@ -485,7 +495,7 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, g_id, chunk_path, detail_strength, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, g_id, chunk_path, detail_strength, color_boost, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -706,6 +716,10 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
                 # TẮM NÉT CHI TIẾT CỰC SÂU TRÊN GPU VỚI LAPLACIAN 5x5 PYRAMID
                 if detail_strength > 0.0:
                     output = apply_gpu_detail_enhancement(output, strength=detail_strength)
+
+                # TĂNG CƯỜNG TƯƠNG PHẢN & ĐỘ RỰC RỠ MÀU ANIME 4K HDR
+                if color_boost:
+                    output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
 
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
