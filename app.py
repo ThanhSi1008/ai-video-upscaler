@@ -43,51 +43,56 @@ CODEC_MAP = {
 
 CUSTOM_CSS = """
 .container {
-    max-width: 1200px;
+    max-width: 1280px;
     margin: 0 auto;
-    padding: 16px;
+    padding: 20px;
 }
 .header-box {
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    border-radius: 12px;
-    padding: 24px;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 28px;
     margin-bottom: 24px;
-    box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.25);
+    box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.4);
     color: #ffffff;
 }
 .header-box h1 {
-    font-size: 2rem;
-    font-weight: 700;
-    margin: 0 0 8px 0;
-    color: #38bdf8;
+    font-size: 2.2rem;
+    font-weight: 800;
+    margin: 0 0 10px 0;
+    background: linear-gradient(90deg, #38bdf8 0%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
 .header-box p {
-    font-size: 1rem;
+    font-size: 1.05rem;
     color: #94a3b8;
     margin: 0;
 }
 .badge {
     display: inline-block;
-    background: #0284c7;
-    color: #ffffff;
+    background: rgba(14, 165, 233, 0.15);
+    border: 1px solid #0284c7;
+    color: #38bdf8;
     font-family: monospace;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     font-weight: 600;
-    padding: 4px 12px;
+    padding: 6px 16px;
     border-radius: 9999px;
-    margin-top: 14px;
+    margin-top: 16px;
 }
 .panel-box {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 16px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 18px;
+    margin-top: 16px;
 }
 """
 
 def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
-        raise gr.Error("❌ Vui lòng kéo hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
+        raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
 
     keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest 4x)")
     encoder_codec = CODEC_MAP.get(codec_choice, "auto")
@@ -99,7 +104,7 @@ def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, None, gr.update(visible=False), "⏳ Đang khởi tạo luồng giải mã video AI 4K..."
+    yield None, gr.update(visible=False), "⏳ Đang khởi tạo luồng giải mã video AI 4K..."
 
     output_result = [None]
     error_result = [None]
@@ -128,7 +133,7 @@ def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_
                 break
             pct, desc = item
             if desc:
-                yield gr.update(), gr.update(), gr.update(), desc
+                yield gr.update(), gr.update(), desc
         except Exception:
             if not thread.is_alive() and progress_queue.empty():
                 break
@@ -139,7 +144,7 @@ def process_ui(video_file, codec_choice, res_choice, progress=gr.Progress(track_
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield video_file, output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả sẵn sàng tải về."
+    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả sẵn sàng tải về."
 
 with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
@@ -154,21 +159,22 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         with gr.Accordion("📖 Hướng dẫn sử dụng & Thông số kỹ thuật", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Tải Tệp Video**: Kéo thả hoặc bấm chọn tệp video (`.mp4`, `.mov`, `.mkv`...) từ máy tính của bạn.
-            2. **Cấu Hình**: Chọn bộ mã hóa phần cứng (NVENC GPU) và độ phân giải mong muốn.
-            3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi tiến độ thời gian thực.
-            4. **Tải Về**: Xem trước kết quả sắc nét 4K và bấm nút **"📥 Tải Tệp 4K Về Máy"**.
+            1. **Tải Tệp Video**: Kéo thả hoặc chọn tệp video (`.mp4`, `.mov`, `.mkv`...) ở cột bên trái. Bạn có thể xem trước video gốc ngay tại đây.
+            2. **Cấu Hình**: Chọn bộ mã hóa phần cứng (NVENC GPU) và tùy chọn độ phân giải mong muốn.
+            3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi tiến độ thời gian thực ở cột bên phải.
+            4. **Tải Về**: Trình phát 4K lớn ở cột bên phải sẽ hiển thị video nét căng. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
             ### ⚡ Công Nghệ Nổi Bật
-            - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS** (rút ngắn thời gian xử lý 1 phút 35 giây xuống chỉ còn vài chục giây).
-            - **Mã Hóa Tách Luồng (Decoupled Stream)**: Đảm bảo 100% video hoàn tất đủ thời lượng và đồng bộ âm thanh gốc cực kỳ sắc nét.
+            - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS** (rút ngắn thời gian xử lý từ vài phút xuống chỉ còn vài chục giây).
+            - **Chuẩn Mã Hóa NVENC P4 HQ**: Giữ trọn vẹn chi tiết sắc nét cho cả cảnh cận cảnh nhân vật lẫn các cảnh hiệu ứng chiến đấu phức tạp.
             """)
 
         with gr.Row():
+            # CỘT BÊN TRÁI: UPLOAD VIDEO GỐC (VỪA LÀ DROPZONE VỪA LÀ TRÌNH PHÁT VIDEO GỐC) & CẤU HÌNH
             with gr.Column(scale=5):
                 file_input = gr.Video(
-                    label="📁 Tệp Video Nguồn (Kéo thả hoặc chọn tệp MP4, MOV, MKV...)",
+                    label="📁 Tệp Video Gốc (Kéo thả hoặc chọn tệp MP4, MOV, MKV...)",
                     sources=["upload"]
                 )
                 
@@ -188,6 +194,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
                 submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Start Upscaling)", variant="primary", size="lg")
 
+            # CỘT BÊN PHẢI: TIẾN ĐỘ & TRÌNH PHÁT KẾT QUẢ 4K TO TOÀN MÀN HÌNH + NÚT TẢI VỀ
             with gr.Column(scale=6):
                 status_box = gr.Textbox(
                     label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
@@ -195,17 +202,20 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                     interactive=False
                 )
                 
-                gr.Markdown("### 🎬 Trình Phát Xem Trước & Kết Quả")
-                with gr.Row():
-                    input_preview = gr.Video(label="Video Gốc (Original Input)", interactive=False)
-                    output_preview = gr.Video(label="Video 4K Sắc Nét (Upscaled Output)", interactive=False)
+                output_preview = gr.Video(
+                    label="✨ Video 4K Kết Quả Sắc Nét (Upscaled 4K Video)",
+                    interactive=False
+                )
                 
-                download_file = gr.File(label="📥 Tải tệp 4K kết quả về máy", visible=False)
+                download_file = gr.File(
+                    label="📥 Tải tệp 4K kết quả về máy",
+                    visible=False
+                )
 
         submit_btn.click(
             fn=process_ui,
             inputs=[file_input, codec_dropdown, res_radio],
-            outputs=[input_preview, output_preview, download_file, status_box]
+            outputs=[output_preview, download_file, status_box]
         )
 
 if __name__ == '__main__':
