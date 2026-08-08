@@ -22,6 +22,11 @@ import upscale
 importlib.reload(upscale)
 from upscale import upscale_video, get_device_and_codec
 
+# Đọc các tham số command-line như --alias=my-custom-name
+for arg in sys.argv:
+    if arg.startswith("--alias="):
+        os.environ["TINYURL_ALIAS"] = arg.split("=", 1)[1]
+
 # Xác định phần cứng hiện tại
 device, default_codec = get_device_and_codec("auto")
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
