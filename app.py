@@ -3,6 +3,9 @@ import sys
 import time
 import threading
 import tempfile
+import json
+import urllib.parse
+import urllib.request
 from queue import Queue
 import importlib
 import torch
@@ -93,6 +96,39 @@ CUSTOM_CSS = """
     padding: 18px;
 }
 """
+
+def create_tinyurl(target_url, custom_alias=None, api_token=None):
+    try:
+        custom_alias = custom_alias or os.environ.get("TINYURL_ALIAS")
+        api_token = api_token or os.environ.get("TINYURL_API_TOKEN")
+
+        if api_token and custom_alias:
+            req_data = json.dumps({
+                "url": target_url,
+                "domain": "tinyurl.com",
+                "alias": custom_alias
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                "https://api.tinyurl.com/create",
+                data=req_data,
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res = json.loads(resp.read().decode())
+                return res.get("data", {}).get("tiny_url")
+        else:
+            api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}"
+            if custom_alias:
+                api_url += f"&alias={urllib.parse.quote(custom_alias)}"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.read().decode('utf-8').strip()
+    except Exception as e:
+        print(f"⚠️ TinyURL Notice: {e}")
+        return None
 
 def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
     if video_file is None:
@@ -253,11 +289,28 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         )
 
 if __name__ == '__main__':
-    share_mode = True if ("--share" in sys.argv or "--public" in sys.argv) else False
+    share_mode = True if ("--share" in sys.argv or "--public" in sys.argv or os.environ.get("GRADIO_SHARE") == "True") else False
     allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd()]
-    app.queue().launch(
+    
+    app_obj, local_url, share_url = app.queue().launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=share_mode,
-        allowed_paths=allowed_dirs
+        allowed_paths=allowed_dirs,
+        prevent_thread_lock=True
     )
+
+    if share_url:
+        print("\n" + "="*68, flush=True)
+        print(f"🌐 GRADIO ORIGINAL URL: {share_url}", flush=True)
+        tiny_url = create_tinyurl(share_url)
+        if tiny_url:
+            print(f"🔗 TINYURL SHORTLINK:   {tiny_url}", flush=True)
+            print(f"💡 Bạn có thể lưu hoặc dùng ngay link TinyURL trên để mở WebUI!", flush=True)
+        print("="*68 + "\n", flush=True)
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("🛑 Ứng dụng đã dừng.")
