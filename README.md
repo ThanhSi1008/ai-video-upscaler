@@ -65,8 +65,8 @@ else:
     !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git {repo_dir}
     %cd {repo_dir}
 
-# Khởi chạy WebUI song song Dual GPU
-!python3 app.py --share
+# Khởi chạy WebUI song song Dual GPU với TinyURL alias cố định
+!python3 app.py --share --alias=4k-upscaler
 ```
 
 ---
