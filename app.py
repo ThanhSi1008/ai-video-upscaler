@@ -103,36 +103,29 @@ CUSTOM_CSS = """
 """
 
 def create_tinyurl(target_url, custom_alias=None, api_token=None):
-    try:
-        custom_alias = custom_alias or os.environ.get("TINYURL_ALIAS")
-        api_token = api_token or os.environ.get("TINYURL_API_TOKEN")
+    custom_alias = custom_alias or os.environ.get("TINYURL_ALIAS")
+    api_token = api_token or os.environ.get("TINYURL_API_TOKEN")
 
-        if api_token and custom_alias:
-            req_data = json.dumps({
-                "url": target_url,
-                "domain": "tinyurl.com",
-                "alias": custom_alias
-            }).encode('utf-8')
-            req = urllib.request.Request(
-                "https://api.tinyurl.com/create",
-                data=req_data,
-                headers={
-                    "Authorization": f"Bearer {api_token}",
-                    "Content-Type": "application/json"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                res = json.loads(resp.read().decode())
-                return res.get("data", {}).get("tiny_url")
-        else:
-            api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}"
-            if custom_alias:
-                api_url += f"&alias={urllib.parse.quote(custom_alias)}"
+    # 1. Thử tạo với Custom Alias nếu được cung cấp
+    if custom_alias:
+        try:
+            api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}&alias={urllib.parse.quote(custom_alias)}"
             req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.read().decode('utf-8').strip()
-    except Exception as e:
-        print(f"⚠️ TinyURL Notice: {e}")
+                res_url = resp.read().decode('utf-8').strip()
+                if "tinyurl.com" in res_url:
+                    return res_url
+        except Exception:
+            # Nếu Alias bị trùng tên (HTTP 422), tự động chuyển sang luồng ngẫu nhiên bên dưới
+            pass
+
+    # 2. Thử tạo link ngẫu nhiên nếu Custom Alias đã có người đăng ký trên TinyURL
+    try:
+        api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}"
+        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode('utf-8').strip()
+    except Exception:
         return None
 
 def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
