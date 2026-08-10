@@ -106,7 +106,6 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
     custom_alias = custom_alias or os.environ.get("TINYURL_ALIAS")
     api_token = api_token or os.environ.get("TINYURL_API_TOKEN")
 
-    # 1. Thử tạo với Custom Alias nếu được cung cấp
     if custom_alias:
         try:
             api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}&alias={urllib.parse.quote(custom_alias)}"
@@ -116,10 +115,8 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
                 if "tinyurl.com" in res_url:
                     return res_url
         except Exception:
-            # Nếu Alias bị trùng tên (HTTP 422), tự động chuyển sang luồng ngẫu nhiên bên dưới
             pass
 
-    # 2. Thử tạo link ngẫu nhiên nếu Custom Alias đã có người đăng ký trên TinyURL
     try:
         api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(target_url)}"
         req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -128,9 +125,14 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
     except Exception:
         return None
 
-def process_ui(video_file, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
-    if video_file is None:
-        raise gr.Error("❌ Vui lòng kéo thả hoặc chọn 1 tệp video MP4/MOV từ máy tính của bạn!")
+def process_ui(video_file, video_url_or_path, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
+    target_input = None
+    if video_url_or_path and video_url_or_path.strip():
+        target_input = video_url_or_path.strip()
+    elif video_file is not None:
+        target_input = video_file
+    else:
+        raise gr.Error("❌ Vui lòng dán liên kết YouTube / Đường dẫn file HOẶC kéo thả tệp video từ máy tính của bạn!")
 
     keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest 4x)")
     encoder_codec = CODEC_MAP.get(codec_choice, "auto")
@@ -151,7 +153,7 @@ def process_ui(video_file, model_choice, codec_choice, res_choice, detail_streng
     def worker():
         try:
             res = upscale.upscale_video(
-                video_input=video_file,
+                video_input=target_input,
                 model_name=model_name,
                 encoder_codec=encoder_codec,
                 keep_highest=keep_highest,
@@ -201,27 +203,33 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
         with gr.Accordion("📖 Hướng dẫn sử dụng & Thông số kỹ thuật", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Tải Tệp Video Gốc**: Kéo thả hoặc chọn tệp video (`.mp4`, `.mov`, `.mkv`...) vào ô **"Video Gốc (Original Input)"** ở bên trái.
+            1. **Nhập Video**: Dán trực tiếp **Link YouTube** (ví dụ: `https://youtu.be/9fv5A6N0MVA`) vào ô **"Dán Link YouTube hoặc Đường Dẫn File"** HOẶC kéo thả tệp video từ máy tính.
             2. **Cấu Hình Tối Ưu**: 
-               - **Mô Hình AI**: Chọn `Real-ESRGAN x4Plus Anime 6B` nếu bạn muốn khôi phục chi tiết cực sâu cho từng nét vẽ nhân vật và hạt kỹ xảo.
+               - **Mô Hình AI**: Chọn `Real-ESRGAN x4Plus Anime 6B` cho độ chi tiết vi mô cao nhất.
                - **Cường Độ Chi Tiết**: Tùy chỉnh thanh trượt từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.60`).
-               - **Anime 4K HDR Color Boost**: Bật tăng cường độ rực rỡ và độ tương phản màu tương tự chuẩn 4K HDR.
-            3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan ngay bên dưới 2 khung video.
-            4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm nút **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
+               - **Anime 4K HDR Color Boost**: Bật tăng cường độ rực rỡ và độ tương phản màu chuẩn 4K HDR.
+            3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan.
+            4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
             
             ---
             ### ⚡ Công Nghệ Tăng Cường Chi Tiết Đột Phá
-            - **Mạng Neural RRDBNet 6B**: Kiến trúc Residual-in-Residual Dense Block giúp tái tạo nét vẽ Anime sắc sảo như bản vẽ Vector gốc.
-            - **Bộ Lọc GPU Dynamic Contrast & Color Vibrance**: Tối ưu hóa màu sắc rực rỡ và độ tương phản sâu tự nhiên chuẩn 4K HDR.
-            - **Multi-Processing Dual GPU Split**: Tự động phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) giúp tốc độ lên tới **16+ FPS**.
-            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Thuật toán phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor.
-            - **NVENC Spatial & Temporal AQ (-qp 14 Master Quality)**: Phân bổ bitrate thông minh cho từng vùng chi tiết cao và chuyển động nhanh.
+            - **Mạng Neural RRDBNet 6B**: Tái tạo nét vẽ Anime sắc sảo như bản vẽ Vector gốc.
+            - **Bộ Lọc GPU Dynamic Contrast & Color Vibrance**: Tối ưu hóa màu sắc rực rỡ và độ tương phản chuẩn 4K HDR.
+            - **Multi-Processing Dual GPU Split**: Phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) tốc độ tới **16+ FPS**.
+            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor.
             """)
 
-        # 1. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
+        # 1. Ô NHẬP LINK YOUTUBE / DƯỜNG DẪN CÙNG NHAU
+        url_input = gr.Textbox(
+            label="🔗 Dán Link YouTube Hoặc Đường Dẫn File Trực Tiếp (Khuyên Dùng - Siêu Tốc Không Cần Chờ Upload)",
+            placeholder="Ví dụ: https://youtu.be/9fv5A6N0MVA hoặc /kaggle/working/Thất nghiệp chuyển sinh S3 - Tập 07 [Việt sub].mp4",
+            lines=1
+        )
+
+        # 2. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
         with gr.Row(equal_height=True):
             file_input = gr.Video(
-                label="📁 Video Gốc (Original Input - Drag & Drop)",
+                label="📁 Hoặc Tải Tệp Video Từ Máy Tính (Original Input)",
                 sources=["upload"],
                 scale=1
             )
@@ -231,14 +239,14 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                 scale=1
             )
 
-        # 2. THANH TIẾN ĐỘ THỜI GIAN THỰC ĐƯỢC CHUYỂN XUỐNG DƯỚI 2 KHUNG VIDEO
+        # 3. THANH TIẾN ĐỘ THỜI GIAN THỰC ĐƯỢC CHUYỂN XUỐNG DƯỚI 2 KHUNG VIDEO
         status_box = gr.Textbox(
             label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-            value="Chờ tải tệp video...",
+            value="Chờ dán link hoặc chọn tệp video...",
             interactive=False
         )
 
-        # 3. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
+        # 4. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
         with gr.Row():
             with gr.Column(scale=6):
                 with gr.Group(elem_classes=["panel-box"]):
@@ -251,7 +259,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
                     codec_dropdown = gr.Dropdown(
                         choices=list(CODEC_MAP.keys()),
                         value="Tự động chọn phần cứng tốt nhất (Auto-detect)",
-                        label="🎬 Bộ Mã Hóa Phần Cứng (Video Encoder)",
+                        label="🎬 Bộ Mã Hóa Phần CỨng (Video Encoder)",
                         info="Tự động chọn mã hóa phần cứng siêu tốc NVENC (Nvidia GPU)."
                     )
                     res_radio = gr.Radio(
@@ -282,7 +290,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), 
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, model_dropdown, codec_dropdown, res_radio, detail_slider, vivid_checkbox],
+            inputs=[file_input, url_input, model_dropdown, codec_dropdown, res_radio, detail_slider, vivid_checkbox],
             outputs=[output_preview, download_file, status_box]
         )
 
