@@ -242,7 +242,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
 
 if __name__ == '__main__':
     share_mode = True if ("--share" in sys.argv or "--public" in sys.argv or os.environ.get("GRADIO_SHARE") == "True") else False
-    allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd()]
+    allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd(), os.path.expanduser('~/Movies/Upscaled'), "/content"]
     
     app_obj, local_url, share_url = app.queue().launch(
         server_name="0.0.0.0",
