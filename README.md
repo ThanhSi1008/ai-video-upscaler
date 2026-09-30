@@ -30,7 +30,6 @@ An AI-powered video super-resolution platform optimized for **Real-CUGAN Pro (Na
 - **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 17 -profile:v main10` eliminating color banding on large 4K screens.
 - **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of Japanese/English audio tracks, styled ASS/SSA subtitles, and embedded font attachments into `.mkv`.
 - **🧲 Direct Magnet / Torrent Ingestion**: Powered by `aria2c` multi-connection downloading (downloading a 1.4 GB episode in ~30 seconds on Kaggle).
-- **⚡ PyTorch 5x5 Laplacian Pyramid GPU Filter**: High-pass micro-edge detail sharpening directly on PyTorch CUDA Tensors.
 - **🚀 Dual-GPU Multi-Processing Acceleration**: Splits and processes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle at ~16 FPS, ~35 mins for a 24-minute episode).
 - **🔍 Native Resolution Quality Checker**: Built-in independent tool to verify whether a video is true native 1080p or upscaled from 720p / ~810p / ~878p (see [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md)).
 

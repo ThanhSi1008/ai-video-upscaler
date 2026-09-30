@@ -108,7 +108,7 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
     except Exception:
         return None
 
-def process_ui(magnet_or_path, video_file, model_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
+def process_ui(magnet_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
     target_input = None
     if magnet_or_path and magnet_or_path.strip():
         target_input = magnet_or_path.strip()
@@ -135,8 +135,6 @@ def process_ui(magnet_or_path, video_file, model_choice, detail_strength, color_
             res = upscale.upscale_video(
                 video_input=target_input,
                 model_name=model_name,
-                detail_strength=float(detail_strength),
-                color_boost=color_boost,
                 progress_callback=progress_cb
             )
             output_result[0] = res
@@ -221,22 +219,8 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
                         choices=list(MODEL_MAP.keys()),
                         value="Real-CUGAN 2x Conservative (Mặc định cho SubsPlease Web-DL - Cực Nét Vector)",
                         label="🤖 Mô Hình AI (Real-CUGAN Pro Native 2x)",
-                        info="Native 2x phóng đại trực tiếp 1080p lên 4K, không bị mờ do downscale."
+                        info="Native 2x phóng đại trực tiếp 1080p lên 4K thuần khiết, bảo toàn 100% màu sắc và nét vẽ gốc."
                     )
-                    with gr.Row():
-                        detail_slider = gr.Slider(
-                            minimum=0.0,
-                            maximum=1.0,
-                            value=0.35,
-                            step=0.05,
-                            label="✨ Cường Độ Nét Vi Mô (5x5 Laplacian Filter)",
-                            info="Khuyên dùng 0.35 cho line-art sắc sảo."
-                        )
-                        vivid_checkbox = gr.Checkbox(
-                            label="🎨 Anime 4K HDR Color Boost",
-                            value=True,
-                            info="Tăng tương phản và độ rực rỡ màu sắc chuẩn HDR."
-                        )
             with gr.Column(scale=5):
                 submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Real-CUGAN Pro Native 2x)", variant="primary", size="lg")
                 download_file = gr.File(
@@ -246,7 +230,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[magnet_input, file_input, model_dropdown, detail_slider, vivid_checkbox],
+            inputs=[magnet_input, file_input, model_dropdown],
             outputs=[output_preview, download_file, status_box]
         )
 

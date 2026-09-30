@@ -21,30 +21,8 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TORCH_LOGS"] = "-inductor"
 
-# --- 1. Bộ Lọc Tăng Cường Chi Tiết Vi Mô 5x5 Laplacian Pyramid Trên GPU ---
-def apply_gpu_detail_enhancement(tensor, strength=0.35):
-    if strength <= 0.0:
-        return tensor
-    kernel5x5 = torch.tensor([
-        [1,  4,  6,  4, 1],
-        [4, 16, 24, 16, 4],
-        [6, 24, 36, 24, 6],
-        [4, 16, 24, 16, 4],
-        [1,  4,  6,  4, 1]
-    ], dtype=tensor.dtype, device=tensor.device) / 256.0
-    kernel5x5 = kernel5x5.repeat(3, 1, 1, 1)
-    blurred = F.conv2d(tensor, kernel5x5, padding=2, groups=3)
-    high_pass = tensor - blurred
-    return torch.clamp(tensor + strength * high_pass, 0.0, 1.0)
-
-# --- 2. Bộ Lọc Tăng Cường Độ Tương Phản & Rực Rỡ Màu Sắc Anime 4K HDR ---
-def apply_gpu_color_and_contrast(tensor, contrast_boost=1.04):
-    mean = tensor.mean(dim=(2, 3), keepdim=True)
-    enhanced = (tensor - mean) * contrast_boost + mean
-    return torch.clamp(enhanced, 0.0, 1.0)
-
 # ==============================================================================
-# --- 3. KIẾN TRÚC MÔ HÌNH CỐT LÕI: Real-CUGAN Native 2x (Cascaded U-Net 2x) ---
+# --- 1. KIẾN TRÚC MÔ HÌNH CỐT LÕI: Real-CUGAN Native 2x (Cascaded U-Net 2x) ---
 # ==============================================================================
 
 class SEBlock(nn.Module):
@@ -340,7 +318,7 @@ def download_magnet(magnet_uri, output_dir="/kaggle/working/input", progress_cb=
 # --- 6. WORKER PHÂN ĐOẠN DUAL GPU (NVIDIA T4 x2 TRÊN KAGGLE) ---
 # ==============================================================================
 
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, detail_strength, color_boost, return_dict, progress_queue):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue):
     try:
         device = torch.device(f'cuda:{gpu_id}')
         model, is_pro = load_realcugan_model(model_key, weights_path, device)
@@ -433,14 +411,6 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 # NATIVE 2x ĐÃ RA CHÍNH XÁC (3840x2160) NÊN HOÀN TOÀN BỎ QUA INTERPOLATE
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='area')
-                
-                # TẮM NÉT VI MÔ LAPLACIAN 5x5 TRÊN GPU
-                if detail_strength > 0.0:
-                    output = apply_gpu_detail_enhancement(output, strength=detail_strength)
-
-                # TĂNG CƯỜNG TƯƠNG PHẢN & RỰC RỠ ANIME 4K HDR
-                if color_boost:
-                    output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
 
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
@@ -483,7 +453,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 # --- 7. HÀM UPSCALE CHÍNH CHO KAGGLE DUAL NVIDIA T4 ---
 # ==============================================================================
 
-def upscale_video(video_input, output_dir=None, model_name="cugan_conservative", detail_strength=0.35, color_boost=True, progress_callback=None):
+def upscale_video(video_input, output_dir=None, model_name="cugan_conservative", progress_callback=None):
     is_magnet = isinstance(video_input, str) and video_input.strip().startswith("magnet:?")
     
     if output_dir is None:
@@ -575,7 +545,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, detail_strength, color_boost, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -737,12 +707,6 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='area')
-                
-                if detail_strength > 0.0:
-                    output = apply_gpu_detail_enhancement(output, strength=detail_strength)
-
-                if color_boost:
-                    output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
 
                 output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
 
