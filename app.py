@@ -116,12 +116,23 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
 
 def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
     target_input = None
-    if drive_or_path and drive_or_path.strip():
-        target_input = drive_or_path.strip()
+    cleaned_input = drive_or_path.strip() if drive_or_path else ""
+
+    # Nếu người dùng chỉ để nguyên tiền tố mặc định mà không điền tên file
+    if cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
+        if video_file is None:
+            raise gr.Error("❌ Bạn chưa điền tên file anime sau đường dẫn! Ví dụ: /content/drive/MyDrive/Resources/Mushoku_Tensei_S02E14.mkv")
+        target_input = video_file
+    elif cleaned_input:
+        # Nếu người dùng chỉ gõ tên file mà quên tiền tố (ví dụ: Mushoku_Tensei_14.mkv)
+        if not cleaned_input.startswith("/") and not cleaned_input.startswith("http") and not cleaned_input.startswith("magnet:"):
+            target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
+        else:
+            target_input = cleaned_input
     elif video_file is not None:
         target_input = video_file
     else:
-        raise gr.Error("❌ Vui lòng dán Link Google Drive HOẶC đường dẫn file HOẶC tải tệp video từ máy tính!")
+        raise gr.Error("❌ Vui lòng điền tên file trong thư mục /content/drive/MyDrive/Resources/ HOẶC dán link Google Drive!")
 
     model_name = MODEL_MAP.get(model_choice, "cugan_conservative")
     progress_queue = Queue()
@@ -185,15 +196,16 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
         with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Google Colab & Mac)", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Dán Link Google Drive**: Dán Link chia sẻ Google Drive (ví dụ: `https://drive.google.com/file/d/...`) HOẶC đường dẫn file trong Drive (ví dụ: `/content/drive/MyDrive/Mushoku_Tensei_14.mkv`).
+            1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
             2. **Mô Hình AI**: Giữ nguyên mặc định `Real-CUGAN 2x Conservative` (Tối ưu tuyệt đối cho nguồn Web-DL Crunchyroll / SubsPlease).
-            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về Google Drive của bạn!
+            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
 
         # 1. Ô NHẬP LINK GOOGLE DRIVE / ĐƯỜNG DẪN TẬP PHIM
         drive_link_input = gr.Textbox(
-            label="☁️ Dán Link Chia Sẻ Google Drive HOẶC Đường Dẫn File Trong Drive (/content/drive/MyDrive/...)",
-            placeholder="Ví dụ: https://drive.google.com/file/d/1A2B3C.../view?usp=sharing HOẶC /content/drive/MyDrive/Mushoku_Tensei_S02E14.mkv",
+            value="/content/drive/MyDrive/Resources/",
+            label="☁️ Đường Dẫn File Trong Drive (/content/drive/MyDrive/Resources/...) HOẶC Link Google Drive",
+            placeholder="Chỉ cần điền thêm tên file vào sau (ví dụ: Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Drive https://drive.google.com/...",
             lines=2
         )
 
