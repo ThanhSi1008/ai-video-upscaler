@@ -60,9 +60,19 @@ Click the badge below to duplicate this app directly into your Hugging Face Spac
 
 > 💡 **Note**: Free Spaces run on CPU. For maximum GPU acceleration, upgrade the Space hardware to T4 / A10G GPU in Space Settings.
 
+### Option B: Free Google Colab Deployment (1-Click T4 GPU - No Phone Verification)
+
+Run directly on Google Colab with free NVIDIA T4 GPU acceleration:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ThanhSi1008/ai-video-upscaler/blob/main/notebooks/Google_Colab_RealCUGAN_4K.ipynb)
+
+1. Click the badge above to open the official notebook in Google Colab.
+2. Select **Runtime -> Change runtime type -> T4 GPU**.
+3. Mount Google Drive and run the cells. Upscaled 4K videos save directly to your Google Drive!
+
 ---
 
-### Option B: Free Kaggle Notebook Deployment (Dual NVIDIA T4 GPUs ~16+ FPS)
+### Option C: Free Kaggle Notebook Deployment (Dual NVIDIA T4 GPUs ~16+ FPS)
 
 Run the following cell inside a free **Kaggle GPU Notebook** (with Accelerator set to **GPU T4 x2**):
 
@@ -87,7 +97,7 @@ else:
 
 ---
 
-### Option C: Apple Silicon Mac (M1/M2/M3 Pro/Max) & Local Offline
+### Option D: Apple Silicon Mac (M1/M2/M3 Pro/Max) & Local Offline
 
 Optimized natively for Apple Silicon hardware using **MPS (Metal Performance Shaders)** and **VideoToolbox Hardware 10-bit HEVC (`hevc_videotoolbox`)**:
 
@@ -115,7 +125,7 @@ brew install ffmpeg
 
 ---
 
-### Option D: Docker Container Deployment
+### Option E: Docker Container Deployment
 
 ```bash
 # Build Docker image
