@@ -33,6 +33,15 @@ venv.bak/
 *.avi
 yt_temp_input.*
 failed_frames.txt
+*.tmp_media
+*.tmp
+
+# Video resolution checker outputs & temporary plots
+result_analysis.png
+result_web_*.png
+*_analysis.png
+sharpest_frame_preview.jpg
+sample_preview.*
 
 # Model weights downloaded automatically
 realesr-animevideov3.pth
