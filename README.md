@@ -31,6 +31,22 @@ An AI-powered video super-resolution and restoration platform supporting **Real-
 - **🚀 Dual-GPU Multi-Processing Acceleration**: Splits and processes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle).
 - **🎬 NVIDIA NVENC Master Quality Quality**: Encoder settings tuned with Spatial & Temporal Adaptive Quantization (`-qp 14`, `-spatial-aq 1`, `-temporal-aq 1`).
 - **⚡ Zero-Disk Streaming Memory Pipes**: High-performance FFmpeg stdin/stdout streaming without creating millions of temporary image files on disk.
+- **🔍 Native Resolution Quality Checker**: Built-in independent tool to verify whether a video is true native 1080p or upscaled from 720p / ~810p / ~878p (see [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md)).
+
+---
+
+## 🔍 Native Resolution Quality Checker (Tools)
+
+Check whether your video is genuine Native 1080p or just an upscaled 720p file before running AI super-resolution:
+
+```bash
+# Analyze video directly (auto-detects sharpest keyframe)
+python3 check_native.py samples/my_video.mkv
+
+# Or launch standalone Web UI on port 7865
+python3 check_native.py --web
+```
+👉 Full documentation and mathematical details: [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md).
 
 ---
 
