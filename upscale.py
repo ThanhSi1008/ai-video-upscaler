@@ -317,10 +317,57 @@ def load_realcugan_model(model_key, weights_path, device):
     return model, is_pro
 
 # ==============================================================================
-# --- 5. TẢI MAGNET LINK TRỰC TIẾP QUA ARIA2C TRÊN KAGGLE ---
+# ==============================================================================
+# --- 5. TẢI TẬP PHIM TỪ GOOGLE DRIVE HOẶC MAGNET ---
 # ==============================================================================
 
-def download_magnet(magnet_uri, output_dir="/kaggle/working/input", progress_cb=None):
+def download_gdrive(url, output_dir="/content/input", progress_cb=None):
+    os.makedirs(output_dir, exist_ok=True)
+    if progress_cb:
+        progress_cb(0.01, desc="☁️ Đang phân tích link Google Drive...")
+
+    file_id = None
+    m = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if m:
+        file_id = m.group(1)
+    else:
+        m2 = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+        if m2:
+            file_id = m2.group(1)
+
+    if not file_id:
+        raise ValueError(f"Không thể trích xuất File ID từ link Google Drive: {url}")
+
+    print(f"☁️ Đang kết nối tải file từ Google Drive ID: {file_id}...")
+    if progress_cb:
+        progress_cb(0.02, desc=f"☁️ Đang kéo file video từ Google Drive ({file_id[:8]}...)...")
+
+    target_file = None
+    # 1. Thử dùng thư viện gdown
+    try:
+        import gdown
+        downloaded = gdown.download(id=file_id, output=output_dir + "/", quiet=False, fuzzy=True)
+        if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) > 100000:
+            target_file = downloaded
+    except Exception as e_gd:
+        print(f"⚠️ gdown không thành công: {e_gd}, chuyển sang curl...")
+
+    # 2. Fallback dùng curl trực tiếp
+    if not target_file or not os.path.exists(target_file):
+        out_path = os.path.join(output_dir, f"gdrive_video_{file_id}.mkv")
+        download_url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+        curl_cmd = ['curl', '-L', '-o', out_path, download_url]
+        subprocess.run(curl_cmd, check=True)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 100000:
+            target_file = out_path
+
+    if not target_file or not os.path.exists(target_file) or os.path.getsize(target_file) < 100000:
+        raise RuntimeError("Không thể tải file từ Google Drive! Vui lòng đảm bảo link đã được bật quyền chia sẻ: 'Bất kỳ ai có đường liên kết đều có thể xem' (Anyone with the link).")
+
+    print(f"✅ Tải thành công video từ Google Drive: '{target_file}' ({os.path.getsize(target_file)/(1024*1024):.1f} MB)")
+    return target_file
+
+def download_magnet(magnet_uri, output_dir="/content/input", progress_cb=None):
     os.makedirs(output_dir, exist_ok=True)
     if shutil.which("aria2c") is None:
         raise RuntimeError(
@@ -522,9 +569,12 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
 def upscale_video(video_input, output_dir=None, model_name="cugan_conservative", progress_callback=None):
     is_magnet = isinstance(video_input, str) and video_input.strip().startswith("magnet:?")
+    is_gdrive = isinstance(video_input, str) and ("drive.google.com" in video_input or "drive.usercontent.google.com" in video_input)
     
     if output_dir is None:
-        if os.path.exists('/kaggle/working'):
+        if os.path.exists('/content/drive/MyDrive'):
+            output_dir = '/content/drive/MyDrive/Upscaled'
+        elif os.path.exists('/kaggle/working'):
             output_dir = '/kaggle/working'
         else:
             output_dir = os.path.expanduser('~/Movies/Upscaled')
@@ -538,7 +588,13 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: {encoder_desc}")
 
     temp_downloaded_file = None
-    if is_magnet:
+    if is_gdrive:
+        print("☁️ Nhận diện Link Google Drive. Đang tải video...")
+        if progress_callback:
+            progress_callback(0.01, desc="☁️ Đang kết nối tải video từ Google Drive...")
+        temp_downloaded_file = download_gdrive(video_input.strip(), output_dir=os.path.join(output_dir, "input"), progress_cb=progress_callback)
+        video_input = temp_downloaded_file
+    elif is_magnet:
         print("🧲 Nhận diện Magnet link. Bắt đầu tải tập anime bằng aria2c...")
         if progress_callback:
             progress_callback(0.01, desc="🧲 Đang tải anime qua Magnet link (aria2c)...")

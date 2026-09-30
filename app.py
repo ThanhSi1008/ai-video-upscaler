@@ -114,14 +114,14 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
     except Exception:
         return None
 
-def process_ui(magnet_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
+def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
     target_input = None
-    if magnet_or_path and magnet_or_path.strip():
-        target_input = magnet_or_path.strip()
+    if drive_or_path and drive_or_path.strip():
+        target_input = drive_or_path.strip()
     elif video_file is not None:
         target_input = video_file
     else:
-        raise gr.Error("❌ Vui lòng dán Link Magnet (SubsPlease) HOẶC đường dẫn file HOẶC tải tệp video từ máy tính!")
+        raise gr.Error("❌ Vui lòng dán Link Google Drive HOẶC đường dẫn file HOẶC tải tệp video từ máy tính!")
 
     model_name = MODEL_MAP.get(model_choice, "cugan_conservative")
     progress_queue = Queue()
@@ -182,18 +182,18 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
             <div class="badge">THIẾT BỊ: {device_badge}</div>
             """)
 
-        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (MacBook Pro Apple Silicon)", open=False):
+        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Google Colab & Mac)", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Nạp Tệp Anime**: Kéo thả tệp anime `.mkv` / `.mp4` vào ô tải lên HOẶC dán đường dẫn tệp trên máy (ví dụ: `/Users/xis108/Downloads/Mushoku_Tensei_14.mkv`).
+            1. **Dán Link Google Drive**: Dán Link chia sẻ Google Drive (ví dụ: `https://drive.google.com/file/d/...`) HOẶC đường dẫn file trong Drive (ví dụ: `/content/drive/MyDrive/Mushoku_Tensei_14.mkv`).
             2. **Mô Hình AI**: Giữ nguyên mặc định `Real-CUGAN 2x Conservative` (Tối ưu tuyệt đối cho nguồn Web-DL Crunchyroll / SubsPlease).
-            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Sau khi xử lý xong, tệp 4K Ultra-HD hoàn chỉnh sẽ nằm sẵn trong `~/Movies/Upscaled` và sẵn sàng xem ngay trên IINA!
+            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về Google Drive của bạn!
             """)
 
-        # 1. Ô NHẬP LINK MAGNET / ĐƯỜNG DẪN TẬP PHIM
-        magnet_input = gr.Textbox(
-            label="📁 Đường Dẫn File trên Mac / Kaggle HOẶC Link Magnet",
-            placeholder="Ví dụ: /Users/xis108/Downloads/Mushoku_Tensei_S02E14.mkv hoặc magnet:?xt=urn:btih:...",
+        # 1. Ô NHẬP LINK GOOGLE DRIVE / ĐƯỜNG DẪN TẬP PHIM
+        drive_link_input = gr.Textbox(
+            label="☁️ Dán Link Chia Sẻ Google Drive HOẶC Đường Dẫn File Trong Drive (/content/drive/MyDrive/...)",
+            placeholder="Ví dụ: https://drive.google.com/file/d/1A2B3C.../view?usp=sharing HOẶC /content/drive/MyDrive/Mushoku_Tensei_S02E14.mkv",
             lines=2
         )
 
@@ -213,7 +213,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
         # 3. THANH TIẾN ĐỘ THỜI GIAN THỰC
         status_box = gr.Textbox(
             label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-            value="Chờ dán link Magnet hoặc chọn tệp anime...",
+            value="Chờ dán link Google Drive hoặc chọn tệp anime...",
             interactive=False
         )
 
@@ -236,7 +236,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[magnet_input, file_input, model_dropdown],
+            inputs=[drive_link_input, file_input, model_dropdown],
             outputs=[output_preview, download_file, status_box]
         )
 
