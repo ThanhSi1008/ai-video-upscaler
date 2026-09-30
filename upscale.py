@@ -270,6 +270,7 @@ def download_magnet(magnet_uri, output_dir="/kaggle/working/input", progress_cb=
     cmd = [
         "aria2c",
         "--seed-time=0",
+        "--disable-ipv6=true",
         "--max-connection-per-server=16",
         "--split=16",
         "--bt-stop-timeout=120",
