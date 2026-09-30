@@ -32,7 +32,7 @@ class SEBlock(nn.Module):
         self.conv2 = nn.Conv2d(in_channels // reduction, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
-        if "Half" in x.type():
+        if x.dtype == torch.float16:
             x0 = torch.mean(x.float(), dim=(2, 3), keepdim=True).half()
         else:
             x0 = torch.mean(x, dim=(2, 3), keepdim=True)
@@ -40,7 +40,7 @@ class SEBlock(nn.Module):
         x0 = F.relu(x0, inplace=True)
         x0 = self.conv2(x0)
         x0 = torch.sigmoid(x0)
-        return torch.mul(x, x0)
+        return x * x0
 
 class UNetConv(nn.Module):
     def __init__(self, in_channels, mid_channels, out_channels, se):
@@ -84,7 +84,7 @@ class UNet1(nn.Module):
     def forward(self, x):
         x1 = self.conv1(x)
         x2 = self.conv1_down(x1)
-        x1 = F.pad(x1, (-4, -4, -4, -4))
+        x1 = x1[:, :, 4:-4, 4:-4]
         x2 = F.leaky_relu(x2, 0.1, inplace=True)
         x2 = self.conv2(x2)
         x2 = self.conv2_up(x2)
@@ -123,11 +123,11 @@ class UNet2(nn.Module):
     def forward(self, x, alpha=1.0):
         x1 = self.conv1(x)
         x2 = self.conv1_down(x1)
-        x1 = F.pad(x1, (-16, -16, -16, -16))
+        x1 = x1[:, :, 16:-16, 16:-16]
         x2 = F.leaky_relu(x2, 0.1, inplace=True)
         x2 = self.conv2(x2)
         x3 = self.conv2_down(x2)
-        x2 = F.pad(x2, (-4, -4, -4, -4))
+        x2 = x2[:, :, 4:-4, 4:-4]
         x3 = F.leaky_relu(x3, 0.1, inplace=True)
         x3 = self.conv3(x3)
         x3 = self.conv3_up(x3)
@@ -160,13 +160,13 @@ class UpCunet2x(nn.Module):
         x = F.pad(x, (18, 18 + pw - w0, 18, 18 + ph - h0), 'reflect')
         x = self.unet1(x)
         if self.mode == "se":
-            x = F.pad(x, (-20, -20, -20, -20))
+            x = x[:, :, 20:-20, 20:-20]
             if w0 != pw or h0 != ph:
                 x = x[:, :, :h0 * 2, :w0 * 2]
             return x
 
         x0 = self.unet2(x, alpha)
-        x = F.pad(x, (-20, -20, -20, -20))
+        x = x[:, :, 20:-20, 20:-20]
         x = torch.add(x0, x)
         if w0 != pw or h0 != ph:
             x = x[:, :, :h0 * 2, :w0 * 2]
@@ -453,11 +453,15 @@ def download_magnet(magnet_uri, output_dir="/content/input", progress_cb=None):
 def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue, model_mode="se"):
     try:
         device = torch.device(f'cuda:{gpu_id}')
+        torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
 
         seek_time = start_frame / fps if (start_frame > 0 and fps > 0) else 0.0
         
-        ffmpeg_read_cmd = ['ffmpeg', '-y']
+        ffmpeg_read_cmd = ['ffmpeg', '-y', '-threads', '0']
         if seek_time > 0:
             ffmpeg_read_cmd.extend(['-ss', f"{seek_time:.4f}"])
         ffmpeg_read_cmd.extend([
@@ -465,38 +469,48 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             '-vframes', str(total_frames_to_process),
             '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
         ])
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
+        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=32*1024*1024)
 
         if os.path.exists(chunk_output_path):
             try: os.remove(chunk_output_path)
             except Exception: pass
 
-        # MÃ HÓA PHẦN CỨNG HEVC 10-BIT (NVENC TURING CHUẨN 4K MASTER)
+        # MÃ HÓA PHẦN CỨNG HEVC 10-BIT (NVENC TURING CHUẨN 4K MASTER - FAST PRESET P4)
         ffmpeg_write_cmd = [
             'ffmpeg', '-y',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
             '-i', '-',
-            '-c:v', 'hevc_nvenc', '-preset', 'p7', '-tune', 'hq', '-cq', '17',
-            '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
+            '-c:v', 'hevc_nvenc', '-preset', 'p4', '-tune', 'hq', '-cq', '18',
+            '-spatial-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
             chunk_output_path
         ]
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=32*1024*1024)
 
         frame_size = src_w * src_h * 3
         batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
-        queue_size = 12
+        queue_size = 8
 
         input_queue = Queue(maxsize=queue_size)
         output_queue = Queue(maxsize=queue_size)
 
         def reader_worker():
             try:
-                for _ in range(total_frames_to_process):
-                    in_bytes = process_read.stdout.read(frame_size)
-                    if not in_bytes or len(in_bytes) != frame_size:
-                        input_queue.put(None)
+                remaining = total_frames_to_process
+                while remaining > 0:
+                    cur_frames = min(batch_size, remaining)
+                    req_bytes = cur_frames * frame_size
+                    chunk = process_read.stdout.read(req_bytes)
+                    if not chunk:
                         break
-                    input_queue.put(in_bytes)
+                    while len(chunk) < req_bytes:
+                        more = process_read.stdout.read(req_bytes - len(chunk))
+                        if not more:
+                            break
+                        chunk += more
+                    if not chunk:
+                        break
+                    input_queue.put(chunk)
+                    remaining -= (len(chunk) // frame_size)
                 input_queue.put(None)
             except Exception:
                 input_queue.put(None)
@@ -508,7 +522,6 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                     if item is None: break
                     try:
                         process_write.stdin.write(item)
-                        process_write.stdin.flush()
                     except Exception: pass
                     output_queue.task_done()
             except Exception: pass
@@ -520,36 +533,34 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
         processed_cnt = 0
         while processed_cnt < total_frames_to_process:
-            batch_bytes = []
-            for _ in range(batch_size):
-                item = input_queue.get()
-                if item is None: break
-                batch_bytes.append(item)
-            if not batch_bytes: break
+            chunk = input_queue.get()
+            if chunk is None: break
+            current_b = len(chunk) // frame_size
+            if current_b == 0: break
 
-            current_b = len(batch_bytes)
-            img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
-            img_np_batch = np.stack(img_nps, axis=0)
-
-            img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
-            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+            img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
+            img_t = torch.from_numpy(img_np_batch).to(device, non_blocking=True)
+            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True)
+            if is_pro:
+                img_t.mul_(0.7 / 255.0).add_(0.15)
+            else:
+                img_t.mul_(1.0 / 255.0)
             img_t = img_t.to(memory_format=torch.channels_last)
 
-            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True, dtype=torch.float16):
-                x_in = (img_t * 0.7 + 0.15) if is_pro else img_t
-                raw_out = model(x_in)
-                output = (((raw_out - 0.15) / 0.7).clamp(0.0, 1.0)) if is_pro else raw_out.clamp(0.0, 1.0)
+            with torch.inference_mode():
+                raw_out = model(img_t)
+                if is_pro:
+                    raw_out.sub_(0.15).mul_(1.0 / 0.7).clamp_(0.0, 1.0)
+                else:
+                    raw_out.clamp_(0.0, 1.0)
 
                 # NATIVE 2x ĐÃ RA CHÍNH XÁC (3840x2160) NÊN HOÀN TOÀN BỎ QUA INTERPOLATE
-                if output.shape[2] != target_h or output.shape[3] != target_w:
-                    output = F.interpolate(output, size=(target_h, target_w), mode='area')
+                if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
+                    raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
 
-                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
-            output_np = output.cpu().numpy()
-
-            for i in range(current_b):
-                output_queue.put(output_np[i].tobytes())
+            output_queue.put(output.cpu().numpy().tobytes())
 
             processed_cnt += current_b
             try: progress_queue.put(current_b)
@@ -609,6 +620,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     mode_desc = "⚡ Bản SE Siêu Tốc (~7–9 FPS)" if model_mode == "se" else "👑 Bản Pro (~1.6 FPS)"
     print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} [{mode_desc}] | Mã hóa: {encoder_desc}")
@@ -793,13 +806,13 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     # LUỒNG GPU ĐƠN (KHI CHỈ CÓ 1 GPU HOẶC CHẠY KIỂM THỬ)
     model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
     batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
-    queue_size = 12
+    queue_size = 8
 
     ffmpeg_read_cmd = [
-        'ffmpeg', '-y', '-i', video_input,
+        'ffmpeg', '-y', '-threads', '0', '-i', video_input,
         '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
     ]
-    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+    process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32*1024*1024)
 
     temp_video_only = os.path.join(scratch_dir, f"_temp_v_{os.path.basename(video_output)}")
     ffmpeg_write_cmd = [
@@ -809,22 +822,32 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         *encoder_flags,
         temp_video_only
     ]
-    process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
+    process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32*1024*1024)
 
     frame_size = src_w * src_h * 3
     idx = 0
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
+    batch_bytes_target = batch_size * frame_size
 
     def reader_worker():
         try:
             while True:
-                in_bytes = process_read.stdout.read(frame_size)
-                if not in_bytes or len(in_bytes) != frame_size:
+                chunk = process_read.stdout.read(batch_bytes_target)
+                if not chunk:
                     input_queue.put(None)
                     break
-                input_queue.put(in_bytes)
-        except Exception: input_queue.put(None)
+                while len(chunk) % frame_size != 0:
+                    more = process_read.stdout.read(frame_size - (len(chunk) % frame_size))
+                    if not more:
+                        break
+                    chunk += more
+                if not chunk:
+                    input_queue.put(None)
+                    break
+                input_queue.put(chunk)
+        except Exception:
+            input_queue.put(None)
 
     def writer_worker():
         try:
@@ -833,7 +856,6 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 if item is None: break
                 try:
                     process_write.stdin.write(item)
-                    process_write.stdin.flush()
                 except Exception: pass
                 output_queue.task_done()
         except Exception: pass
@@ -847,55 +869,49 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
     try:
         while True:
-            batch_bytes = []
-            for _ in range(batch_size):
-                item = input_queue.get()
-                if item is None: break
-                batch_bytes.append(item)
-            if not batch_bytes: break
-                
-            current_b = len(batch_bytes)
-            img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
-            img_np_batch = np.stack(img_nps, axis=0)
-            
+            chunk = input_queue.get()
+            if chunk is None: break
+            current_b = len(chunk) // frame_size
+            if current_b == 0: break
+
+            img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
             img_t = torch.from_numpy(img_np_batch)
             if device.type == 'cuda':
-                img_t = img_t.pin_memory().to(device, non_blocking=True)
-                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+                img_t = img_t.to(device, non_blocking=True)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True)
+                if is_pro:
+                    img_t.mul_(0.7 / 255.0).add_(0.15)
+                else:
+                    img_t.mul_(1.0 / 255.0)
                 img_t = img_t.to(memory_format=torch.channels_last)
             elif device.type == 'mps':
                 img_t = img_t.to(device)
-                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16).div(255.0)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16)
+                if is_pro:
+                    img_t.mul_(0.7 / 255.0).add_(0.15)
+                else:
+                    img_t.mul_(1.0 / 255.0)
             else:
                 img_t = img_t.to(device)
-                img_t = img_t.permute(0, 3, 1, 2).float().div(255.0)
+                img_t = img_t.permute(0, 3, 1, 2).float()
+                if is_pro:
+                    img_t.mul_(0.7 / 255.0).add_(0.15)
+                else:
+                    img_t.mul_(1.0 / 255.0)
 
-            if device.type == 'cuda':
-                autocast_ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
-            elif device.type == 'mps':
-                try:
-                    autocast_ctx = torch.amp.autocast(device_type='mps', dtype=torch.float16)
-                except Exception:
-                    from contextlib import nullcontext
-                    autocast_ctx = nullcontext()
-            else:
-                from contextlib import nullcontext
-                autocast_ctx = nullcontext()
+            with torch.inference_mode():
+                raw_out = model(img_t)
+                if is_pro:
+                    raw_out.sub_(0.15).mul_(1.0 / 0.7).clamp_(0.0, 1.0)
+                else:
+                    raw_out.clamp_(0.0, 1.0)
 
-            with torch.inference_mode(), autocast_ctx:
-                x_in = (img_t * 0.7 + 0.15) if is_pro else img_t
-                raw_out = model(x_in)
-                output = (((raw_out - 0.15) / 0.7).clamp(0.0, 1.0)) if is_pro else raw_out.clamp(0.0, 1.0)
+                if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
+                    raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
 
-                if output.shape[2] != target_h or output.shape[3] != target_w:
-                    output = F.interpolate(output, size=(target_h, target_w), mode='area')
+                output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
-                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
-
-            output_np = output.cpu().numpy()
-            
-            for i in range(current_b):
-                output_queue.put(output_np[i].tobytes())
+            output_queue.put(output.cpu().numpy().tobytes())
             
             idx += current_b
 
