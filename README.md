@@ -17,20 +17,21 @@ license: mit
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Gradio](https://img.shields.io/badge/Gradio-4.0+-orange.svg)](https://gradio.app/)
 
-An AI-powered video super-resolution and restoration platform supporting **Real-ESRGAN (`realesr-animevideov3` & `RealESRGAN_x4plus_anime_6B`)**, **5x5 GPU Laplacian Detail Enhancement**, **Anime 4K HDR Color Boost**, and **NVIDIA Dual-GPU Parallel Processing**.
+An AI-powered video super-resolution platform optimized for **Real-CUGAN Pro (Native 2x Cascaded U-Net)**, **HEVC 10-bit Master Quality NVENC**, **High-speed Magnet Ingestion (`aria2c`)**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Dual-GPU Parallel Processing**.
 
 ---
 
 ## 🌟 Key Features
 
-- **🤖 Dual AI Model Architecture**:
-  - **`AnimeVideoV3`**: Lightweight & ultra-fast (~16+ FPS on Dual T4 GPUs).
-  - **`Real-ESRGAN x4Plus Anime 6B`**: Deep 6-block RRDBNet model for vector-sharp line art and micro-detail reconstruction.
+- **👑 Real-CUGAN Pro Native 2x (Dedicated for Anime 1080p -> 4K)**:
+  - **`cugan_conservative`**: Specifically tuned for clean Web-DL (SubsPlease / Crunchyroll) to eliminate mosquito noise while preserving vector line-art and cel-shading.
+  - **`cugan_no_denoise`**: Maximum detail retention for pristine Blu-ray Remux sources.
+  - **`cugan_denoise3x`**: Aggressive artifact removal for older or heavily compressed releases.
+- **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 17 -profile:v main10` eliminating color banding on large 4K screens.
+- **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of Japanese/English audio tracks, styled ASS/SSA subtitles, and embedded font attachments into `.mkv`.
+- **🧲 Direct Magnet / Torrent Ingestion**: Powered by `aria2c` multi-connection downloading (downloading a 1.4 GB episode in ~30 seconds on Kaggle).
 - **⚡ PyTorch 5x5 Laplacian Pyramid GPU Filter**: High-pass micro-edge detail sharpening directly on PyTorch CUDA Tensors.
-- **🎨 Anime 4K HDR Color & Dynamic Contrast Boost**: Automatic vibrancy and dynamic range enhancement for crisp, vibrant visuals.
-- **🚀 Dual-GPU Multi-Processing Acceleration**: Splits and processes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle).
-- **🎬 NVIDIA NVENC Master Quality Quality**: Encoder settings tuned with Spatial & Temporal Adaptive Quantization (`-qp 14`, `-spatial-aq 1`, `-temporal-aq 1`).
-- **⚡ Zero-Disk Streaming Memory Pipes**: High-performance FFmpeg stdin/stdout streaming without creating millions of temporary image files on disk.
+- **🚀 Dual-GPU Multi-Processing Acceleration**: Splits and processes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle at ~16 FPS, ~35 mins for a 24-minute episode).
 - **🔍 Native Resolution Quality Checker**: Built-in independent tool to verify whether a video is true native 1080p or upscaled from 720p / ~810p / ~878p (see [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md)).
 
 ---
@@ -64,14 +65,14 @@ Click the badge below to duplicate this app directly into your Hugging Face Spac
 
 ### Option B: Free Kaggle Notebook Deployment (Dual NVIDIA T4 GPUs ~16+ FPS)
 
-Run the following cell inside a free **Kaggle GPU Notebook**:
+Run the following cell inside a free **Kaggle GPU Notebook** (with Accelerator set to **GPU T4 x2**):
 
 ```python
-# @title 🎬 AI Video Upscaler 4K - Ultra High Speed WebUI
+# @title 🎬 AI Video Upscaler 4K - Ultra High Speed WebUI (Real-CUGAN Pro)
 import os, sys
 
-!apt-get update -qq && apt-get install -y ffmpeg -qq
-!pip install -q --no-cache-dir gradio torch torchvision yt-dlp
+!apt-get update -qq && apt-get install -y ffmpeg aria2 -qq
+!pip install -q --no-cache-dir gradio torch torchvision
 
 repo_dir = "/kaggle/working/ai-video-upscaler"
 if os.path.exists(repo_dir):

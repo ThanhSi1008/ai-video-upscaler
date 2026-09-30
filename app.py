@@ -3,7 +3,6 @@ import sys
 import time
 import threading
 import tempfile
-import json
 import urllib.parse
 import urllib.request
 from queue import Queue
@@ -11,47 +10,31 @@ import importlib
 import torch
 import gradio as gr
 
-# Clear any active Gradio servers/event loops to prevent Python 3.12 asyncio conflicts
 try:
     gr.close_all()
 except Exception:
     pass
 
-# Reload upscale module để luôn áp dụng mã nguồn mới nhất trong RAM
 import upscale
 importlib.reload(upscale)
-from upscale import upscale_video, get_device_and_codec
+from upscale import upscale_video
 
-# Đọc các tham số command-line như --alias=my-custom-name
 for arg in sys.argv:
     if arg.startswith("--alias="):
         os.environ["TINYURL_ALIAS"] = arg.split("=", 1)[1]
 
-# Xác định phần cứng hiện tại
-device, default_codec = get_device_and_codec("auto")
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-if device.type == "cuda":
-    if num_gpus >= 2:
-        device_name = f"🔥 Dual NVIDIA T4 GPUs (Multi-Processing ~16+ FPS)"
-    else:
-        device_name = f"🚀 Single NVIDIA GPU (CUDA)"
-elif device.type == "mps":
-    device_name = "🍏 Apple Silicon GPU (Metal/MPS)"
+if num_gpus >= 2:
+    device_badge = f"🔥 Kaggle Dual NVIDIA T4 GPUs (~16+ FPS Multi-Processing)"
+elif num_gpus == 1:
+    device_badge = f"🚀 Single NVIDIA GPU (CUDA)"
 else:
-    device_name = "💻 CPU (x86_64)"
+    device_badge = f"💻 GPU chưa kích hoạt hoặc CPU (Vui lòng chọn Accelerator GPU T4 x2 trên Kaggle)"
 
 MODEL_MAP = {
-    "AnimeVideoV3 (Mô hình Siêu Tốc 16+ FPS - Khuyên Dùng)": "animevideov3",
-    "Real-ESRGAN x4Plus Anime 6B (Mô hình Siêu Nét Master Class - Chi tiết cực cao)": "x4plus_anime"
-}
-
-CODEC_MAP = {
-    "Tự động chọn phần cứng tốt nhất (Auto-detect)": "auto",
-    "Nvidia GPU (h264_nvenc - Master Quality -qp 14)": "h264_nvenc",
-    "Nvidia GPU (hevc_nvenc - Master Quality HEVC)": "hevc_nvenc",
-    "Apple Silicon (hevc_videotoolbox)": "hevc_videotoolbox",
-    "CPU (libx264 - H.264 chuẩn)": "libx264"
+    "Real-CUGAN 2x Conservative (Mặc định cho SubsPlease Web-DL - Cực Nét Vector)": "cugan_conservative",
+    "Real-CUGAN 2x No-Denoise (Giữ nguyên hạt - Tối ưu cho Blu-ray Remux)": "cugan_no_denoise",
+    "Real-CUGAN 2x Denoise3x (Khử nhiễu nặng - Cho Anime cũ/nhiễu)": "cugan_denoise3x"
 }
 
 CUSTOM_CSS = """
@@ -125,19 +108,16 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
     except Exception:
         return None
 
-def process_ui(video_file, video_url_or_path, model_choice, codec_choice, res_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
+def process_ui(magnet_or_path, video_file, model_choice, detail_strength, color_boost, progress=gr.Progress(track_tqdm=True)):
     target_input = None
-    if video_url_or_path and video_url_or_path.strip():
-        target_input = video_url_or_path.strip()
+    if magnet_or_path and magnet_or_path.strip():
+        target_input = magnet_or_path.strip()
     elif video_file is not None:
         target_input = video_file
     else:
-        raise gr.Error("❌ Vui lòng dán liên kết YouTube / Đường dẫn file HOẶC kéo thả tệp video từ máy tính của bạn!")
+        raise gr.Error("❌ Vui lòng dán Link Magnet (SubsPlease) HOẶC đường dẫn file HOẶC tải tệp video từ máy tính!")
 
-    keep_highest = (res_choice == "Giữ tỷ lệ gốc tối đa (Keep Highest 4x)")
-    encoder_codec = CODEC_MAP.get(codec_choice, "auto")
-    model_name = MODEL_MAP.get(model_choice, "animevideov3")
-
+    model_name = MODEL_MAP.get(model_choice, "cugan_conservative")
     progress_queue = Queue()
 
     def progress_cb(pct, desc=""):
@@ -145,7 +125,7 @@ def process_ui(video_file, video_url_or_path, model_choice, codec_choice, res_ch
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã video AI 4K Master Class..."
+    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Real-CUGAN Pro Native 2x (4K HEVC 10-bit)..."
 
     output_result = [None]
     error_result = [None]
@@ -155,8 +135,6 @@ def process_ui(video_file, video_url_or_path, model_choice, codec_choice, res_ch
             res = upscale.upscale_video(
                 video_input=target_input,
                 model_name=model_name,
-                encoder_codec=encoder_codec,
-                keep_highest=keep_highest,
                 detail_strength=float(detail_strength),
                 color_boost=color_boost,
                 progress_callback=progress_cb
@@ -188,109 +166,87 @@ def process_ui(video_file, video_url_or_path, model_choice, codec_choice, res_ch
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tệp 4K kết quả Master Quality sẵn sàng tải về."
+    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về."
 
-with gr.Blocks(title="AI Video Upscaler 4K - WebUI", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
+with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
         with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
-            # 🎬 AI Video Upscaler 4K - Ultra High Speed
-            Nâng cấp và tăng tốc video lên độ phân giải **4K Ultra-HD (3840x2160)** bằng mô hình AI Real-ESRGAN chuyên dụng.
+            # 🎬 AI Video Upscaler 4K - Real-CUGAN Pro (Dual NVIDIA T4)
+            Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)**. Khôi phục nét vẽ vector nguyên bản, mã hóa HEVC 10-bit chống banding và bảo tồn 100% Phụ đề mềm (.ass) & Âm thanh gốc.
             
-            <div class="badge">THIẾT BỊ: {device_name} | KHUYÊN DÙNG: {default_codec}</div>
+            <div class="badge">THIẾT BỊ: {device_badge} | MÃ HÓA: hevc_nvenc 10-bit (yuv420p10le -cq 17)</div>
             """)
 
-        with gr.Accordion("📖 Hướng dẫn sử dụng & Thông số kỹ thuật", open=False):
+        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Kaggle T4 x2)", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Nhập Video**: Dán trực tiếp **Link YouTube** (ví dụ: `https://youtu.be/9fv5A6N0MVA`) vào ô **"Dán Link YouTube hoặc Đường Dẫn File"** HOẶC kéo thả tệp video từ máy tính.
-            2. **Cấu Hình Tối Ưu**: 
-               - **Mô Hình AI**: Chọn `Real-ESRGAN x4Plus Anime 6B` cho độ chi tiết vi mô cao nhất.
-               - **Cường Độ Chi Tiết**: Tùy chỉnh thanh trượt từ `0.0` đến `1.0` (Khuyên dùng `0.35` - `0.60`).
-               - **Anime 4K HDR Color Boost**: Bật tăng cường độ rực rỡ và độ tương phản màu chuẩn 4K HDR.
-            3. **Bắt Đầu Nâng Cấp**: Bấm nút **"🚀 Nâng Cấp Video 4K"** và theo dõi thanh tiến độ thời gian thực trực quan.
-            4. **Xem Trước & Tải Về**: Video 4K sắc nét xuất hiện ở khung bên phải **"Video 4K Kết Quả"**. Bấm **"📥 Tải Tệp 4K Về Máy"** để hoàn tất.
-            
-            ---
-            ### ⚡ Công Nghệ Tăng Cường Chi Tiết Đột Phá
-            - **Mạng Neural RRDBNet 6B**: Tái tạo nét vẽ Anime sắc sảo như bản vẽ Vector gốc.
-            - **Bộ Lọc GPU Dynamic Contrast & Color Vibrance**: Tối ưu hóa màu sắc rực rỡ và độ tương phản chuẩn 4K HDR.
-            - **Multi-Processing Dual GPU Split**: Phân chia và xử lý song song trên cả 2 Card NVIDIA T4 (Kaggle) tốc độ tới **16+ FPS**.
-            - **Lọc 5x5 Laplacian Pyramid GPU Filter**: Phục hồi chi tiết kim tự tháp 5x5 trực tiếp trên PyTorch Tensor.
+            1. **Dán Link Magnet**: Copy link Magnet tập anime từ **SubsPlease / Nyaa** (ví dụ: `magnet:?xt=urn:btih:...`) vào ô bên dưới. Hệ thống sẽ tự động dùng `aria2c` kéo về trong ~30 giây.
+            2. **Mô Hình AI**: Giữ nguyên mặc định `Real-CUGAN 2x Conservative` (Tối ưu tuyệt đối cho nguồn Web-DL Crunchyroll).
+            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Sau khoảng ~35 phút (1 tập 24 phút), file 4K hoàn chỉnh sẽ xuất hiện để tải về!
             """)
 
-        # 1. Ô NHẬP LINK YOUTUBE / DƯỜNG DẪN CÙNG NHAU
-        url_input = gr.Textbox(
-            label="🔗 Dán Link YouTube Hoặc Đường Dẫn File Trực Tiếp (Khuyên Dùng - Siêu Tốc Không Cần Chờ Upload)",
-            placeholder="Ví dụ: https://youtu.be/9fv5A6N0MVA hoặc /kaggle/working/Thất nghiệp chuyển sinh S3 - Tập 07 [Việt sub].mp4",
-            lines=1
+        # 1. Ô NHẬP LINK MAGNET / ĐƯỜNG DẪN TẬP PHIM
+        magnet_input = gr.Textbox(
+            label="🧲 Dán Link Magnet (SubsPlease / Nyaa) HOẶC Đường Dẫn File trên Kaggle",
+            placeholder="Ví dụ: magnet:?xt=urn:btih:3fa8c19... hoặc /kaggle/working/input/Mushoku_Tensei_S02E01.mkv",
+            lines=2
         )
 
-        # 2. 2 KHUNG VIDEO NẰM NGANG HÀNG NHAU (SIDE-BY-SIDE EQUAL HEIGHT & EQUAL WIDTH)
+        # 2. KHUNG VIDEO XEM TRƯỚC VÀ KẾT QUẢ
         with gr.Row(equal_height=True):
             file_input = gr.Video(
-                label="📁 Hoặc Tải Tệp Video Từ Máy Tính (Original Input)",
+                label="📁 Hoặc Tải Tệp Video Từ Máy Tính (.mkv / .mp4)",
                 sources=["upload"],
                 scale=1
             )
             output_preview = gr.Video(
-                label="✨ Video 4K Kết Quả (Upscaled 4K Video)",
+                label="✨ Video 4K Kết Quả (Real-CUGAN Pro 2x UHD)",
                 interactive=False,
                 scale=1
             )
 
-        # 3. THANH TIẾN ĐỘ THỜI GIAN THỰC ĐƯỢC CHUYỂN XUỐNG DƯỚI 2 KHUNG VIDEO
+        # 3. THANH TIẾN ĐỘ THỜI GIAN THỰC
         status_box = gr.Textbox(
             label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-            value="Chờ dán link hoặc chọn tệp video...",
+            value="Chờ dán link Magnet hoặc chọn tệp anime...",
             interactive=False
         )
 
         # 4. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
         with gr.Row():
-            with gr.Column(scale=6):
+            with gr.Column(scale=7):
                 with gr.Group(elem_classes=["panel-box"]):
                     model_dropdown = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
-                        value="AnimeVideoV3 (Mô hình Siêu Tốc 16+ FPS - Khuyên Dùng)",
-                        label="🤖 Mô Hình AI Nâng Cấp (AI Upscale Model)",
-                        info="Real-ESRGAN x4Plus Anime 6B là mô hình sâu chuyên tái tạo chi tiết vi mô cực nét."
+                        value="Real-CUGAN 2x Conservative (Mặc định cho SubsPlease Web-DL - Cực Nét Vector)",
+                        label="🤖 Mô Hình AI (Real-CUGAN Pro Native 2x)",
+                        info="Native 2x phóng đại trực tiếp 1080p lên 4K, không bị mờ do downscale."
                     )
-                    codec_dropdown = gr.Dropdown(
-                        choices=list(CODEC_MAP.keys()),
-                        value="Tự động chọn phần cứng tốt nhất (Auto-detect)",
-                        label="🎬 Bộ Mã Hóa Phần CỨng (Video Encoder)",
-                        info="Tự động chọn mã hóa phần cứng siêu tốc NVENC (Nvidia GPU)."
-                    )
-                    res_radio = gr.Radio(
-                        choices=["Đưa về 4K Ultra-HD (3840x2160)", "Giữ tỷ lệ gốc tối đa (Keep Highest 4x)"],
-                        value="Đưa về 4K Ultra-HD (3840x2160)",
-                        label="📐 Tùy Chọn Độ Phân Giải Đầu Ra",
-                        info="4K Ultra-HD: Chuẩn hóa 4K sắc nét bảo toàn tỷ lệ gốc."
-                    )
-                    detail_slider = gr.Slider(
-                        minimum=0.0,
-                        maximum=1.0,
-                        value=0.35,
-                        step=0.05,
-                        label="✨ Cường Độ Tăng Cường Chi Tiết Vi Mô (5x5 GPU Laplacian Filter)",
-                        info="0.0: Mặc định gốc | 0.35: Sắc Nét Cao (Khuyên Dùng) | 0.60+: Siêu Sắc Nét Cực Hạn (Master Quality)"
-                    )
-                    vivid_checkbox = gr.Checkbox(
-                        label="🎨 Tăng Cường Độ Tương Phản & Độ Rực Rỡ Màu Sắc (Anime 4K HDR Color Boost)",
-                        value=True,
-                        info="Giúp màu sắc phim đậm đà, đường nét viền đen sâu hơn và các hiệu ứng ánh sáng/kỹ xảo rực rỡ hơn."
-                    )
-            with gr.Column(scale=6):
-                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Start Upscaling)", variant="primary", size="lg")
+                    with gr.Row():
+                        detail_slider = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.35,
+                            step=0.05,
+                            label="✨ Cường Độ Nét Vi Mô (5x5 Laplacian Filter)",
+                            info="Khuyên dùng 0.35 cho line-art sắc sảo."
+                        )
+                        vivid_checkbox = gr.Checkbox(
+                            label="🎨 Anime 4K HDR Color Boost",
+                            value=True,
+                            info="Tăng tương phản và độ rực rỡ màu sắc chuẩn HDR."
+                        )
+            with gr.Column(scale=5):
+                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Real-CUGAN Pro Native 2x)", variant="primary", size="lg")
                 download_file = gr.File(
-                    label="📥 Tải tệp 4K kết quả về máy",
+                    label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
                     visible=False
                 )
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[file_input, url_input, model_dropdown, codec_dropdown, res_radio, detail_slider, vivid_checkbox],
+            inputs=[magnet_input, file_input, model_dropdown, detail_slider, vivid_checkbox],
             outputs=[output_preview, download_file, status_box]
         )
 
@@ -312,7 +268,7 @@ if __name__ == '__main__':
         tiny_url = create_tinyurl(share_url)
         if tiny_url:
             print(f"🔗 TINYURL SHORTLINK:   {tiny_url}", flush=True)
-            print(f"💡 Bạn có thể lưu hoặc dùng ngay link TinyURL trên để mở WebUI!", flush=True)
+            print(f"💡 Dùng ngay link TinyURL trên để mở WebUI!", flush=True)
         print("="*68 + "\n", flush=True)
 
     try:

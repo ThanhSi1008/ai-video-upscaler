@@ -4,9 +4,10 @@ FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
 # Đặt thư mục làm việc
 WORKDIR /app
 
-# Cài đặt FFmpeg và các thư viện hệ thống
+# Cài đặt FFmpeg, aria2 và các thư viện hệ thống
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    aria2 \
     git \
     wget \
     curl \

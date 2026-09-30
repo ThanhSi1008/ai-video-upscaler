@@ -2,7 +2,6 @@ torch
 torchvision
 numpy
 Pillow
-yt-dlp
 gradio
 opencv-python
 matplotlib

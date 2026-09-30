@@ -16,21 +16,15 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torch.multiprocessing as mp
 
-# Ẩn toàn bộ các dòng Warning hiển thị của Python & PyTorch Inductor
 warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TORCH_LOGS"] = "-inductor"
 
-# --- 1. Thuật toán Sắp xếp Tự nhiên (Natural Sort) ---
-def natural_key(s):
-    return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
-
-# --- 2. Bộ Lọc Tăng Cường Chi Tiết Vi Mô 5x5 Laplacian Pyramid Trên GPU ---
+# --- 1. Bộ Lọc Tăng Cường Chi Tiết Vi Mô 5x5 Laplacian Pyramid Trên GPU ---
 def apply_gpu_detail_enhancement(tensor, strength=0.35):
     if strength <= 0.0:
         return tensor
-    # Lọc Kim Tự Tháp 5x5 Laplacian High-Pass Filter khôi phục chi tiết cực sâu
     kernel5x5 = torch.tensor([
         [1,  4,  6,  4, 1],
         [4, 16, 24, 16, 4],
@@ -43,142 +37,313 @@ def apply_gpu_detail_enhancement(tensor, strength=0.35):
     high_pass = tensor - blurred
     return torch.clamp(tensor + strength * high_pass, 0.0, 1.0)
 
-# --- 3. Bộ Lọc Tăng Cường Độ Tương Phản & Rực Rỡ Màu Sắc Anime 4K HDR ---
+# --- 2. Bộ Lọc Tăng Cường Độ Tương Phản & Rực Rỡ Màu Sắc Anime 4K HDR ---
 def apply_gpu_color_and_contrast(tensor, contrast_boost=1.04):
     mean = tensor.mean(dim=(2, 3), keepdim=True)
     enhanced = (tensor - mean) * contrast_boost + mean
     return torch.clamp(enhanced, 0.0, 1.0)
 
-# --- 4. MẠNG AI 1: SRVGGNetCompact (Mô hình AnimeVideoV3 Siêu Tốc) ---
-class SRVGGNetCompact(nn.Module):
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4):
-        super().__init__()
-        self.upscale = upscale
-        self.body = nn.ModuleList()
-        self.body.append(nn.Conv2d(num_in_ch, num_feat, 3, 1, 1))
-        self.body.append(nn.PReLU(num_parameters=num_feat))
-        for _ in range(num_conv):
-            self.body.append(nn.Conv2d(num_feat, num_feat, 3, 1, 1))
-            self.body.append(nn.PReLU(num_parameters=num_feat))
-        self.body.append(nn.Conv2d(num_feat, num_out_ch * upscale * upscale, 3, 1, 1))
-        self.upsampler = nn.PixelShuffle(upscale)
+# ==============================================================================
+# --- 3. KIẾN TRÚC MÔ HÌNH CỐT LÕI: Real-CUGAN Native 2x (Cascaded U-Net 2x) ---
+# ==============================================================================
+
+class SEBlock(nn.Module):
+    def __init__(self, in_channels, reduction=8, bias=False):
+        super(SEBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels // reduction, 1, 1, 0, bias=bias)
+        self.conv2 = nn.Conv2d(in_channels // reduction, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
-        out = x
-        for layer in self.body:
-            out = layer(out)
-        out = self.upsampler(out)
-        base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
-        return out + base
-
-# --- 5. MẠNG AI 2: RRDBNet 6B (Mô hình Real-ESRGAN x4Plus Anime Master Class) ---
-class ResidualDenseBlock_5C(nn.Module):
-    def __init__(self, nf=64, gc=32, bias=True):
-        super().__init__()
-        self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1, bias=bias)
-        self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1, bias=bias)
-        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, 1, 1, bias=bias)
-        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1, bias=bias)
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-    def forward(self, x):
-        x1 = self.lrelu(self.conv1(x))
-        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
-        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
-        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
-        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
-        return x5 * 0.2 + x
-
-class RRDB(nn.Module):
-    def __init__(self, nf, gc=32):
-        super().__init__()
-        self.rdb1 = ResidualDenseBlock_5C(nf, gc)
-        self.rdb2 = ResidualDenseBlock_5C(nf, gc)
-        self.rdb3 = ResidualDenseBlock_5C(nf, gc)
-
-    def forward(self, x):
-        out = self.rdb1(x)
-        out = self.rdb2(out)
-        out = self.rdb3(out)
-        return out * 0.2 + x
-
-class RRDBNet(nn.Module):
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4):
-        super().__init__()
-        self.scale = scale
-        self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
-        self.body = nn.ModuleList([RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
-        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-
-    def forward(self, x):
-        feat = self.conv_first(x)
-        body_feat = feat
-        for block in self.body:
-            body_feat = block(body_feat)
-        body_feat = self.conv_body(body_feat)
-        feat = feat + body_feat
-
-        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        out = self.conv_last(self.lrelu(self.conv_hr(feat)))
-        return out
-
-def get_device_and_codec(requested_codec="auto"):
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        if hasattr(torch.backends.cuda, 'matmul'):
-            torch.backends.cuda.matmul.allow_tf32 = True
-        if hasattr(torch.backends.cudnn, 'allow_tf32'):
-            torch.backends.cudnn.allow_tf32 = True
-        default_codec = 'h264_nvenc'
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-        default_codec = 'hevc_videotoolbox'
-    else:
-        device = torch.device('cpu')
-        default_codec = 'libx264'
-
-    if requested_codec == "auto" or not requested_codec:
-        codec = default_codec
-    else:
-        codec = requested_codec
-    return device, codec
-
-# Worker tiến trình chạy phân luồng độc lập trên 1 GPU riêng biệt
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, gpu_id, chunk_output_path, detail_strength, color_boost, return_dict, progress_queue):
-    try:
-        import numpy as np
-        import torch
-        import torch.nn as nn
-        from torch.nn import functional as F
-        from queue import Queue
-
-        device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
-
-        if "x4plus" in model_name:
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+        if "Half" in x.type():
+            x0 = torch.mean(x.float(), dim=(2, 3), keepdim=True).half()
         else:
-            model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
+            x0 = torch.mean(x, dim=(2, 3), keepdim=True)
+        x0 = self.conv1(x0)
+        x0 = F.relu(x0, inplace=True)
+        x0 = self.conv2(x0)
+        x0 = torch.sigmoid(x0)
+        return torch.mul(x, x0)
 
-        state_dict = torch.load(weights_path, map_location='cpu')
-        if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
-        elif 'params' in state_dict: state_dict = state_dict['params']
-        model.load_state_dict(state_dict, strict=True)
-        model.eval()
+class UNetConv(nn.Module):
+    def __init__(self, in_channels, mid_channels, out_channels, se):
+        super(UNetConv, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, 3, 1, 0),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv2d(mid_channels, out_channels, 3, 1, 0),
+            nn.LeakyReLU(0.1, inplace=True),
+        )
+        self.seblock = SEBlock(out_channels, reduction=8, bias=True) if se else None
 
-        if device.type == 'cuda':
-            model = model.half().to(memory_format=torch.channels_last)
-            try: model = torch.compile(model, mode="default")
-            except Exception: pass
-        model = model.to(device)
+    def forward(self, x):
+        z = self.conv(x)
+        if self.seblock is not None:
+            z = self.seblock(z)
+        return z
+
+class UNet1(nn.Module):
+    def __init__(self, in_channels, out_channels, deconv):
+        super(UNet1, self).__init__()
+        self.conv1 = UNetConv(in_channels, 32, 64, se=False)
+        self.conv1_down = nn.Conv2d(64, 64, 2, 2, 0)
+        self.conv2 = UNetConv(64, 128, 64, se=True)
+        self.conv2_up = nn.ConvTranspose2d(64, 64, 2, 2, 0)
+        self.conv3 = nn.Conv2d(64, 64, 3, 1, 0)
+
+        if deconv:
+            self.conv_bottom = nn.ConvTranspose2d(64, out_channels, 4, 2, 3)
+        else:
+            self.conv_bottom = nn.Conv2d(64, out_channels, 3, 1, 0)
+
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x1 = self.conv1(x)
+        x2 = self.conv1_down(x1)
+        x1 = F.pad(x1, (-4, -4, -4, -4))
+        x2 = F.leaky_relu(x2, 0.1, inplace=True)
+        x2 = self.conv2(x2)
+        x2 = self.conv2_up(x2)
+        x2 = F.leaky_relu(x2, 0.1, inplace=True)
+        x3 = self.conv3(x1 + x2)
+        x3 = F.leaky_relu(x3, 0.1, inplace=True)
+        z = self.conv_bottom(x3)
+        return z
+
+class UNet2(nn.Module):
+    def __init__(self, in_channels, out_channels, deconv):
+        super(UNet2, self).__init__()
+        self.conv1 = UNetConv(in_channels, 32, 64, se=False)
+        self.conv1_down = nn.Conv2d(64, 64, 2, 2, 0)
+        self.conv2 = UNetConv(64, 64, 128, se=True)
+        self.conv2_down = nn.Conv2d(128, 128, 2, 2, 0)
+        self.conv3 = UNetConv(128, 256, 128, se=True)
+        self.conv3_up = nn.ConvTranspose2d(128, 128, 2, 2, 0)
+        self.conv4 = UNetConv(128, 64, 64, se=True)
+        self.conv4_up = nn.ConvTranspose2d(64, 64, 2, 2, 0)
+        self.conv5 = nn.Conv2d(64, 64, 3, 1, 0)
+
+        if deconv:
+            self.conv_bottom = nn.ConvTranspose2d(64, out_channels, 4, 2, 3)
+        else:
+            self.conv_bottom = nn.Conv2d(64, out_channels, 3, 1, 0)
+
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x, alpha=1.0):
+        x1 = self.conv1(x)
+        x2 = self.conv1_down(x1)
+        x1 = F.pad(x1, (-16, -16, -16, -16))
+        x2 = F.leaky_relu(x2, 0.1, inplace=True)
+        x2 = self.conv2(x2)
+        x3 = self.conv2_down(x2)
+        x2 = F.pad(x2, (-4, -4, -4, -4))
+        x3 = F.leaky_relu(x3, 0.1, inplace=True)
+        x3 = self.conv3(x3)
+        x3 = self.conv3_up(x3)
+        x3 = F.leaky_relu(x3, 0.1, inplace=True)
+        x4 = self.conv4(x2 + x3)
+        if alpha != 1.0:
+            x4 = x4 * alpha
+        x4 = self.conv4_up(x4)
+        x4 = F.leaky_relu(x4, 0.1, inplace=True)
+        x5 = self.conv5(x1 + x4)
+        x5 = F.leaky_relu(x5, 0.1, inplace=True)
+        z = self.conv_bottom(x5)
+        return z
+
+class UpCunet2x(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3):
+        super(UpCunet2x, self).__init__()
+        self.unet1 = UNet1(in_channels, out_channels, deconv=True)
+        self.unet2 = UNet2(in_channels, out_channels, deconv=False)
+
+    def forward(self, x, alpha=1.0):
+        # Chế độ Full-Frame (tile_mode=0) cho độ nét vector tối đa và không lỗi ghép mảnh
+        n, c, h0, w0 = x.shape
+        ph = ((h0 - 1) // 2 + 1) * 2
+        pw = ((w0 - 1) // 2 + 1) * 2
+        x = F.pad(x, (18, 18 + pw - w0, 18, 18 + ph - h0), 'reflect')
+        x = self.unet1(x)
+        x0 = self.unet2(x, alpha)
+        x = F.pad(x, (-20, -20, -20, -20))
+        x = torch.add(x0, x)
+        if w0 != pw or h0 != ph:
+            x = x[:, :, :h0 * 2, :w0 * 2]
+        return x
+
+# ==============================================================================
+# --- 4. DANH MỤC WEIGHTS REAL-CUGAN PRO NATIVE 2x ---
+# ==============================================================================
+
+WEIGHTS_INFO = {
+    "cugan_conservative": {
+        "file": "up2x-latest-conservative.pth",
+        "desc": "Real-CUGAN 2x Conservative (Khuyên dùng cho SubsPlease Web-DL)",
+        "urls": [
+            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-conservative.pth",
+            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-conservative.pth"
+        ]
+    },
+    "cugan_no_denoise": {
+        "file": "up2x-latest-no-denoise.pth",
+        "desc": "Real-CUGAN 2x No-Denoise (Tối ưu cho Blu-ray Remux)",
+        "urls": [
+            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-no-denoise.pth",
+            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-no-denoise.pth"
+        ]
+    },
+    "cugan_denoise3x": {
+        "file": "up2x-latest-denoise3x.pth",
+        "desc": "Real-CUGAN 2x Denoise3x (Khử nhiễu nặng cho anime cũ)",
+        "urls": [
+            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-denoise3x.pth",
+            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-denoise3x.pth"
+        ]
+    }
+}
+
+def resolve_model_key(name):
+    name_l = (name or "").lower()
+    if "no_denoise" in name_l or "no-denoise" in name_l:
+        return "cugan_no_denoise"
+    if "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
+        return "cugan_denoise3x"
+    return "cugan_conservative"
+
+def ensure_model_weights(model_key, progress_callback=None):
+    info = WEIGHTS_INFO[model_key]
+    weights_path = info["file"]
+    if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
+        return weights_path
+
+    print(f"📥 Tự động tải weights mô hình '{info['desc']}'...")
+    if progress_callback:
+        progress_callback(0.01, desc=f"📥 Đang tải weights: {info['file']}...")
+
+    download_success = False
+    for url in info["urls"]:
+        try:
+            print(f"🔗 Đang tải từ: {url}")
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(weights_path, 'wb') as f:
+                shutil.copyfileobj(resp, f)
+            if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
+                print(f"✅ Đã tải thành công: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
+                download_success = True
+                break
+        except Exception as e:
+            print(f"⚠️ Thất bại tải từ {url}: {e}")
+
+    if not download_success:
+        raise RuntimeError(f"Không thể tải weights mô hình {model_key}. Vui lòng kiểm tra kết nối mạng!")
+    return weights_path
+
+def load_realcugan_model(model_key, weights_path, device):
+    model = UpCunet2x(in_channels=3, out_channels=3)
+    state_dict = torch.load(weights_path, map_location='cpu')
+    is_pro = ("pro" in state_dict)
+    if is_pro:
+        del state_dict["pro"]
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+
+    if device.type == 'cuda':
+        model = model.half().to(memory_format=torch.channels_last)
+        try:
+            model = torch.compile(model, mode="default")
+        except Exception:
+            pass
+    elif device.type == 'mps':
+        model = model.half()
+
+    model = model.to(device)
+    return model, is_pro
+
+# ==============================================================================
+# --- 5. TẢI MAGNET LINK TRỰC TIẾP QUA ARIA2C TRÊN KAGGLE ---
+# ==============================================================================
+
+def download_magnet(magnet_uri, output_dir="/kaggle/working/input", progress_cb=None):
+    os.makedirs(output_dir, exist_ok=True)
+    if shutil.which("aria2c") is None:
+        raise RuntimeError(
+            "❌ Lệnh 'aria2c' chưa được cài đặt!\n"
+            "Chạy lệnh sau trên ô code Kaggle Notebook:\n"
+            "  !apt-get update -qq && apt-get install -y aria2 -qq"
+        )
+
+    if progress_cb:
+        progress_cb(0.01, desc="🧲 Đang kết nối aria2c tải tập anime qua Magnet...")
+
+    print(f"📥 Bắt đầu kéo Magnet link bằng aria2c vào: {output_dir}")
+    cmd = [
+        "aria2c",
+        "--seed-time=0",
+        "--max-connection-per-server=16",
+        "--split=16",
+        "--bt-stop-timeout=120",
+        "--summary-interval=5",
+        f"--dir={output_dir}",
+        magnet_uri
+    ]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in proc.stdout:
+        line_clean = line.strip()
+        if line_clean:
+            print(f"[aria2] {line_clean}")
+            if "%" in line_clean and progress_cb:
+                try:
+                    match = re.search(r'\((\d+)%\)', line_clean)
+                    if match:
+                        pct = int(match.group(1))
+                        progress_cb(0.01 + 0.08 * (pct / 100.0), desc=f"🧲 Đang kéo torrent: {pct}%...")
+                except Exception:
+                    pass
+
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Lỗi khi tải torrent bằng aria2c (Mã lỗi: {proc.returncode})")
+
+    video_exts = {".mkv", ".mp4", ".ts", ".m2ts"}
+    downloaded_videos = []
+    for root, _, files in os.walk(output_dir):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in video_exts:
+                p = os.path.join(root, f)
+                if os.path.getsize(p) > 50 * 1024 * 1024:
+                    downloaded_videos.append(p)
+
+    if not downloaded_videos:
+        raise FileNotFoundError(f"Không tìm thấy file video anime trong thư mục '{output_dir}'!")
+
+    downloaded_videos.sort(key=lambda x: os.path.getsize(x), reverse=True)
+    selected_video = downloaded_videos[0]
+    print(f"✅ Tải thành công tập phim: '{selected_video}' ({os.path.getsize(selected_video)/(1024*1024):.1f} MB)")
+    return selected_video
+
+# ==============================================================================
+# --- 6. WORKER PHÂN ĐOẠN DUAL GPU (NVIDIA T4 x2 TRÊN KAGGLE) ---
+# ==============================================================================
+
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, detail_strength, color_boost, return_dict, progress_queue):
+    try:
+        device = torch.device(f'cuda:{gpu_id}')
+        model, is_pro = load_realcugan_model(model_key, weights_path, device)
 
         seek_time = start_frame / fps if (start_frame > 0 and fps > 0) else 0.0
         
@@ -196,28 +361,19 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             try: os.remove(chunk_output_path)
             except Exception: pass
 
+        # MÃ HÓA PHẦN CỨNG HEVC 10-BIT (NVENC TURING CHUẨN 4K MASTER)
         ffmpeg_write_cmd = [
             'ffmpeg', '-y',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
-            '-i', '-'
+            '-i', '-',
+            '-c:v', 'hevc_nvenc', '-preset', 'p7', '-tune', 'hq', '-cq', '17',
+            '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
+            chunk_output_path
         ]
-
-        if "hevc" in encoder_codec:
-            ffmpeg_write_cmd.extend(['-c:v', 'hevc_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p'])
-        elif "nvenc" in encoder_codec or encoder_codec == "auto":
-            ffmpeg_write_cmd.extend(['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p'])
-        elif "videotoolbox" in encoder_codec:
-            ffmpeg_write_cmd.extend(['-c:v', encoder_codec, '-q:v', '65', '-pix_fmt', 'yuv420p'])
-        else:
-            ffmpeg_write_cmd.extend(['-c:v', 'libx264', '-crf', '14', '-preset', 'medium', '-pix_fmt', 'yuv420p'])
-
-        ffmpeg_write_cmd.append(chunk_output_path)
-
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
-        # Tối ưu kích thước batch_size cho RRDBNet 6B để tránh tràn VRAM CUDA OOM trên NVIDIA T4 (15GB)
-        batch_size = (2 if src_h <= 720 else 1) if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
+        batch_size = 2 if src_h <= 720 else 1
         queue_size = 12
 
         input_queue = Queue(maxsize=queue_size)
@@ -270,15 +426,19 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             img_t = img_t.to(memory_format=torch.channels_last)
 
             with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=True, dtype=torch.float16):
-                output = model(img_t)
+                x_in = (img_t * 0.7 + 0.15) if is_pro else img_t
+                raw_out = model(x_in)
+                output = (((raw_out - 0.15) / 0.7).clamp(0.0, 1.0)) if is_pro else raw_out.clamp(0.0, 1.0)
+
+                # NATIVE 2x ĐÃ RA CHÍNH XÁC (3840x2160) NÊN HOÀN TOÀN BỎ QUA INTERPOLATE
                 if output.shape[2] != target_h or output.shape[3] != target_w:
-                    output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                    output = F.interpolate(output, size=(target_h, target_w), mode='area')
                 
-                # TẮM NÉT CHI TIẾT CỰC SÂU TRÊN GPU VỚI LAPLACIAN 5x5 PYRAMID
+                # TẮM NÉT VI MÔ LAPLACIAN 5x5 TRÊN GPU
                 if detail_strength > 0.0:
                     output = apply_gpu_detail_enhancement(output, strength=detail_strength)
 
-                # TĂNG CƯỜNG TƯƠNG PHẢN & ĐỘ RỰC RỠ MÀU ANIME 4K HDR
+                # TĂNG CƯỜNG TƯƠNG PHẢN & RỰC RỠ ANIME 4K HDR
                 if color_boost:
                     output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
 
@@ -312,102 +472,50 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 process_write.stdin.close()
             process_write.wait(timeout=30)
         except Exception as e_w:
-            print(f"⚠️ Cảnh báo đóng luồng ghi FFmpeg worker {gpu_id}: {e_w}")
+            print(f"⚠️ Đóng luồng ghi FFmpeg worker {gpu_id}: {e_w}")
 
         return_dict[gpu_id] = True
     except Exception as e:
         print(f"⚠️ Lỗi GPU worker {gpu_id}: {e}")
         return_dict[gpu_id] = False
 
-# --- 5. Hàm xử lý upscale chính tích hợp Tự Động Dual GPU Multi-processing ---
-def upscale_video(video_input, output_dir=None, model_name="animevideov3", encoder_codec="auto", keep_highest=False, detail_strength=0.35, color_boost=True, progress_callback=None):
-    is_youtube = "youtube.com" in video_input or "youtu.be" in video_input
+# ==============================================================================
+# --- 7. HÀM UPSCALE CHÍNH CHO KAGGLE DUAL NVIDIA T4 ---
+# ==============================================================================
+
+def upscale_video(video_input, output_dir=None, model_name="cugan_conservative", detail_strength=0.35, color_boost=True, progress_callback=None):
+    is_magnet = isinstance(video_input, str) and video_input.strip().startswith("magnet:?")
     
     if output_dir is None:
-        if os.path.exists('/kaggle/working'):
-            output_dir = '/kaggle/working'
-        else:
-            output_dir = os.path.expanduser('~/Documents/mushoku-tensei')
+        output_dir = '/kaggle/working' if os.path.exists('/kaggle/working') else os.path.expanduser('~/Documents/mushoku-tensei')
     os.makedirs(output_dir, exist_ok=True)
 
-    device, encoder_codec = get_device_and_codec(encoder_codec)
-    print(f"🚀 Thiết bị tính toán được chọn: {device} | Mô hình AI: {model_name} | Codec: {encoder_codec} | Cường độ chi tiết 5x5 GPU: {detail_strength} | Tăng màu sắc HDR: {color_boost}")
+    model_key = resolve_model_key(model_name)
+    num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    device = torch.device('cuda:0' if num_cuda_gpus > 0 else 'cpu')
 
-    temp_input_file = None
-    if is_youtube:
-        print("📥 Phát hiện liên kết YouTube. Bắt đầu tải video thô...")
+    print(f"🚀 Thiết bị: {num_cuda_gpus}x NVIDIA GPU | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: hevc_nvenc 10-bit")
+
+    temp_downloaded_file = None
+    if is_magnet:
+        print("🧲 Nhận diện Magnet link. Bắt đầu tải tập anime bằng aria2c...")
         if progress_callback:
-            progress_callback(0.01, desc="📥 Đang kết nối tải video từ YouTube...")
-        try:
-            import yt_dlp
-            import glob
-            
-            for f in glob.glob('yt_temp_input*'):
-                try: os.remove(f)
-                except Exception: pass
-
-            opts = {
-                'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/b',
-                'outtmpl': 'yt_temp_input.%(ext)s',
-                'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'noprogress': True,
-                'geo_bypass': True,
-                'geo_bypass_country': 'VN',
-                'extractor_args': {'youtube': {'player_client': ['android']}},
-                'socket_timeout': 10,
-                'nocheckcertificate': True,
-            }
-
-            download_success = False
-            video_title = "youtube_video"
-
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(video_input, download=True)
-                    video_title = info.get('title', 'youtube_video')
-                    video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                downloaded = glob.glob('yt_temp_input.*')
-                if downloaded and os.path.getsize(downloaded[0]) > 100000:
-                    download_success = True
-                    temp_input_file = downloaded[0]
-            except Exception as e1:
-                print(f"⚠️ Thử lại với luồng mweb client: {e1}")
-                opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'android']}}
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(video_input, download=True)
-                        video_title = info.get('title', 'youtube_video')
-                        video_title = re.sub(r'[\\/*?:"<>|]', "", video_title)
-                    downloaded = glob.glob('yt_temp_input.*')
-                    if downloaded and os.path.getsize(downloaded[0]) > 100000:
-                        download_success = True
-                        temp_input_file = downloaded[0]
-                except Exception as e2:
-                    print(f"❌ Không thể giải mã video YouTube: {e2}")
-
-            if not download_success:
-                raise Exception("Không thể tải video từ YouTube. Vui lòng tải file video trực tiếp từ máy của bạn.")
-
-            video_input = temp_input_file
-            video_output = os.path.join(output_dir, f"{video_title}_upscaled.mp4")
-            print(f"✅ Tải thành công video: '{video_title}'. Bắt đầu chạy upscale...")
-        except Exception as e:
-            print(f"❌ Lỗi trong quá trình tải YouTube: {e}")
-            raise Exception(f"Lỗi tải YouTube: {str(e)}")
+            progress_callback(0.01, desc="🧲 Đang tải anime qua Magnet link (aria2c)...")
+        temp_downloaded_file = download_magnet(video_input.strip(), output_dir=os.path.join(output_dir, "input"), progress_cb=progress_callback)
+        video_input = temp_downloaded_file
     else:
         if not os.path.exists(video_input):
             raise FileNotFoundError(f"Không tìm thấy file video nguồn '{video_input}'!")
-        video_base = os.path.basename(os.path.splitext(video_input)[0])
-        video_output = os.path.join(output_dir, f"{video_base}_upscaled.mp4")
 
-    # XÓA FILE KẾT QUẢ CŨ NẾU TỒN TẠI ĐỂ LUÔN GHI ĐÈ (OVERRIDE) BẰNG FILE MỚI
+    # LUÔN XUẤT RA ĐỊNH DẠNG .MKV ĐỂ BẢO TỒN NGUYÊN VẸN TOÀN BỘ PHỤ ĐỀ MỀM (.ASS) VÀ FONT ĐÍNH KÈM!
+    video_base = os.path.basename(os.path.splitext(video_input)[0])
+    video_output = os.path.join(output_dir, f"{video_base}_4K_RealCUGAN.mkv")
+
     if os.path.exists(video_output):
         try: os.remove(video_output)
         except Exception: pass
 
-    # Trích xuất siêu dữ liệu qua ffprobe
+    # Đọc thông số metadata gốc
     try:
         fps_cmd = f"ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
         fps_res = subprocess.check_output(fps_cmd, shell=True).decode().strip()
@@ -417,29 +525,13 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
         src_res = subprocess.check_output(res_cmd, shell=True).decode().strip()
         src_w, src_h = map(int, src_res.split('x'))
     except Exception as e:
-        print(f"⚠️ Thất bại khi phân tích siêu dữ liệu video: {e}")
-        fps, src_w, src_h = 30.0, 1920, 1080
+        print(f"⚠️ Lỗi phân tích metadata video: {e}")
+        fps, src_w, src_h = 23.976, 1920, 1080
         
-    print(f"ℹ️ Cấu hình gốc phát hiện: {src_w}x{src_h} @ {fps:.3f} FPS")
+    print(f"ℹ️ Thông số gốc: {src_w}x{src_h} @ {fps:.3f} FPS")
 
-    # TẢI WEIGHTS THEO MÔ HÌNH AI ĐƯỢC CHỌN
-    if "x4plus" in model_name:
-        weights_path = "RealESRGAN_x4plus_anime_6B.pth"
-        url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
-    else:
-        weights_path = "realesr-animevideov3.pth"
-        url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
-
-    if not os.path.exists(weights_path):
-        print(f"📥 Tự động tải mô hình AI ({weights_path}) từ GitHub...")
-        if progress_callback:
-            progress_callback(0.02, desc=f"📥 Đang tải weights mô hình AI {model_name}...")
-        try:
-            urllib.request.urlretrieve(url, weights_path)
-            print("✅ Đã đồng bộ trọng số mô hình AI thành công!")
-        except Exception as e:
-            print(f"❌ Lỗi hạ tầng mạng: {e}")
-            raise e
+    # Tải weights Real-CUGAN
+    weights_path = ensure_model_weights(model_key, progress_callback=progress_callback)
 
     expected_frames = None
     try:
@@ -448,39 +540,26 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
         if frames_res.isdigit():
             expected_frames = int(frames_res)
     except Exception as e:
-        print(f"⚠️ Không thể đọc số lượng frame dự kiến: {e}")
+        pass
 
-    # ĐỘ PHÂN GIẢI MỤC TIÊU: CHUẨN HÓA VỀ 4K ULTRA-HD (3840x2160) ĐỂ TRÁNH VƯỢT GIỚI HẠN PHẦN CỨNG NVENC H.264 (4096x4096)
-    aspect_ratio = src_w / src_h
-    if keep_highest and (src_w * 4 <= 4096) and (src_h * 4 <= 4096):
-        target_w, target_h = src_w * 4, src_h * 4
-    else:
-        if aspect_ratio >= (16 / 9):
-            target_w = 3840
-            target_h = int(3840 / aspect_ratio)
-        else:
-            target_h = 2160
-            target_w = int(2160 * aspect_ratio)
-    target_w = (target_w // 2) * 2
-    target_h = (target_h // 2) * 2
+    # Native 2x: 1080p -> 4K Ultra-HD (3840x2160)
+    target_w = src_w * 2
+    target_h = src_h * 2
 
-    num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-
-    # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT PHÂN LUỒNG ĐỘC LẬP TỐC ĐỘ 14 - 18 FPS + THANH TIẾN ĐỘ THỜI GIAN THỰC
+    # NẾU CÓ DUAL GPU T4 x2 TRÊN KAGGLE: KÍCH HOẠT MULTI-PROCESSING ĐỘC LẬP
     if num_cuda_gpus >= 2 and expected_frames and expected_frames > 100:
         try: mp.set_start_method('spawn', force=True)
         except Exception: pass
 
-        print(f"🔥 BẮT ĐẦU CHẠY PHÂN LUỒNG ĐỘC LẬP DUAL GPU: KÍCH HOẠT CẢ {num_cuda_gpus} CARDS NVIDIA T4 CÙNG LÚC!")
-        print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu 4K Ultra-HD: {target_w}x{target_h}")
+        print(f"🔥 KÍCH HOẠT DUAL GPU: Chạy song song cả {num_cuda_gpus} card NVIDIA T4 cùng lúc!")
+        print(f"⚡ Tổng số frames: {expected_frames} | Độ phân giải mục tiêu 4K: {target_w}x{target_h} (Real-CUGAN Native 2x)")
 
         half_frames = expected_frames // 2
         segments = [
-            (0, half_frames, 0, os.path.join(output_dir, "_part_gpu0.mp4")),
-            (half_frames, expected_frames - half_frames, 1, os.path.join(output_dir, "_part_gpu1.mp4"))
+            (0, half_frames, 0, os.path.join(output_dir, "_part_gpu0.mkv")),
+            (half_frames, expected_frames - half_frames, 1, os.path.join(output_dir, "_part_gpu1.mkv"))
         ]
 
-        # Xóa tệp tạm cũ nếu có
         for _, _, _, chunk_p in segments:
             if os.path.exists(chunk_p):
                 try: os.remove(chunk_p)
@@ -496,7 +575,7 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_name, encoder_codec, g_id, chunk_path, detail_strength, color_boost, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, detail_strength, color_boost, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -537,51 +616,34 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
 
         elapsed = time.time() - start_time
         effective_fps = expected_frames / elapsed if elapsed > 0 else 0
-        print(f"\n⚡ HOÀN THÀNH XỬ LÝ SONG SONG DUAL GPU! Thời gian: {elapsed:.2f}s | Tốc độ hiệu dụng: {effective_fps:.2f} FPS!", flush=True)
-
-        if progress_callback:
-            try: progress_callback(0.98, desc="📦 Đang nối 2 đoạn video và ghép âm thanh gốc...")
-            except Exception: pass
+        print(f"\n⚡ HOÀN THÀNH XỬ LÝ DUAL T4! Thời gian: {elapsed:.2f}s | Tốc độ hiệu dụng: {effective_fps:.2f} FPS!", flush=True)
 
         chunk_files = [seg[3] for seg in segments if os.path.exists(seg[3]) and os.path.getsize(seg[3]) > 1000]
 
         if len(chunk_files) >= 1:
-            print("📦 Đang nối các đoạn video và ghép âm thanh gốc...", flush=True)
+            print("📦 Đang nối 2 nửa video và sao chép 100% Audio, Subtitle (.ass), Fonts...", flush=True)
             concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
             with open(concat_txt, "w") as f:
                 for c_path in chunk_files:
                     f.write(f"file '{os.path.abspath(c_path)}'\n")
 
-            temp_concat = os.path.join(output_dir, f"_temp_concat_{int(time.time())}.mp4")
-            if os.path.exists(temp_concat):
-                try: os.remove(temp_concat)
-                except Exception: pass
-
+            temp_concat = os.path.join(output_dir, f"_temp_concat_{int(time.time())}.mkv")
             concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt, '-c', 'copy', temp_concat]
             subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            if os.path.exists(video_output):
-                try: os.remove(video_output)
-                except Exception: pass
-
+            # BẢO TỒN 100% METADATA (VIDEO 4K + AUDIO GỐC + PHỤ ĐỀ MỀM + ATTACHMENT FONTS)
             mux_cmd = [
                 'ffmpeg', '-y',
                 '-i', temp_concat,
                 '-i', video_input,
-                '-c:v', 'copy',
-                '-c:a', 'copy',
+                '-c', 'copy',
                 '-map', '0:v:0',
                 '-map', '1:a?',
+                '-map', '1:s?',
+                '-map', '1:t?',
                 video_output
             ]
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
-                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...")
-                if os.path.exists(temp_concat) and os.path.getsize(temp_concat) > 1000:
-                    shutil.copy(temp_concat, video_output)
-                elif chunk_files:
-                    shutil.copy(chunk_files[0], video_output)
 
             for f_clean in [concat_txt, temp_concat] + chunk_files:
                 if os.path.exists(f_clean):
@@ -589,38 +651,16 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
                     except Exception: pass
 
             if os.path.exists(video_output) and os.path.getsize(video_output) > 1000:
-                print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
+                print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
                 if progress_callback:
                     try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
                     except Exception: pass
                 return video_output
 
-        print("⚠️ Cảnh báo: Luồng Dual GPU chưa tạo được file kết quả. Tự động chuyển sang luồng GPU đơn an toàn...")
-
-    # LUỒNG CHẠY GPU ĐƠN THƯỜNG (KHI CHỈ CÓ 1 GPU HOẶC DUAL GPU CẦN DỰ PHÒNG AN TOÀN)
-    if "x4plus" in model_name:
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-    else:
-        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4)
-
-    state_dict = torch.load(weights_path, map_location='cpu')
-    if 'params_ema' in state_dict: state_dict = state_dict['params_ema']
-    elif 'params' in state_dict: state_dict = state_dict['params']
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-
-    if device.type == 'cuda':
-        model = model.half().to(memory_format=torch.channels_last)
-        batch_size = (2 if src_h <= 720 else 1) if "x4plus" in model_name else (6 if src_h <= 720 else (4 if src_h <= 1080 else 2))
-        queue_size = 12
-        try: model = torch.compile(model, mode="default")
-        except Exception: pass
-    else:
-        if device.type == 'mps': model = model.half()
-        batch_size = 1
-        queue_size = 2
-
-    model = model.to(device)
+    # LUỒNG GPU ĐƠN (KHI CHỈ CÓ 1 GPU HOẶC CHẠY KIỂM THỬ)
+    model, is_pro = load_realcugan_model(model_key, weights_path, device)
+    batch_size = 2 if src_h <= 720 else 1
+    queue_size = 12
 
     ffmpeg_read_cmd = [
         'ffmpeg', '-y', '-i', video_input,
@@ -629,32 +669,18 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
     process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     temp_video_only = os.path.join(output_dir, f"_temp_v_{os.path.basename(video_output)}")
-    if os.path.exists(temp_video_only):
-        try: os.remove(temp_video_only)
-        except Exception: pass
-
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
         '-i', '-',
-        '-c:v', encoder_codec
+        '-c:v', 'hevc_nvenc', '-preset', 'p7', '-tune', 'hq', '-cq', '17',
+        '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
+        temp_video_only
     ]
-
-    if "videotoolbox" in encoder_codec:
-        quality_opts = ['-q:v', '65']
-    elif "nvenc" in encoder_codec:
-        quality_opts = ['-preset', 'p4', '-rc', 'constqp', '-qp', '14', '-spatial-aq', '1', '-temporal-aq', '1']
-    else:
-        quality_opts = ['-crf', '14', '-preset', 'medium']
-
-    ffmpeg_write_cmd.extend(quality_opts)
-    ffmpeg_write_cmd.extend(['-pix_fmt', 'yuv420p', temp_video_only])
-    
     process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
     frame_size = src_w * src_h * 3
     idx = 0
-
     input_queue = Queue(maxsize=queue_size)
     output_queue = Queue(maxsize=queue_size)
 
@@ -700,25 +726,21 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
             img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
             img_np_batch = np.stack(img_nps, axis=0)
             
-            if device.type == 'cuda':
-                img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
-                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
-                img_t = img_t.to(memory_format=torch.channels_last)
-            else:
-                img_t = torch.from_numpy(img_np_batch).to(device)
-                dtype = torch.float16 if device.type == 'mps' else torch.float32
-                img_t = img_t.permute(0, 3, 1, 2).to(dtype).div(255.0)
+            img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
+            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+            img_t = img_t.to(memory_format=torch.channels_last)
 
             with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda'), dtype=torch.float16):
-                output = model(img_t)
+                x_in = (img_t * 0.7 + 0.15) if is_pro else img_t
+                raw_out = model(x_in)
+                output = (((raw_out - 0.15) / 0.7).clamp(0.0, 1.0)) if is_pro else raw_out.clamp(0.0, 1.0)
+
                 if output.shape[2] != target_h or output.shape[3] != target_w:
-                    output = F.interpolate(output, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                    output = F.interpolate(output, size=(target_h, target_w), mode='area')
                 
-                # TẮM NÉT CHI TIẾT CỰC SÂU TRÊN GPU VỚI LAPLACIAN 5x5 PYRAMID
                 if detail_strength > 0.0:
                     output = apply_gpu_detail_enhancement(output, strength=detail_strength)
 
-                # TĂNG CƯỜNG TƯƠNG PHẢN & ĐỘ RỰC RỠ MÀU ANIME 4K HDR
                 if color_boost:
                     output = apply_gpu_color_and_contrast(output, contrast_boost=1.04)
 
@@ -734,101 +756,61 @@ def upscale_video(video_input, output_dir=None, model_name="animevideov3", encod
             if idx % 30 == 0:
                 gc.collect()
                 if device.type == 'cuda': torch.cuda.empty_cache()
-                elif device.type == 'mps': torch.mps.empty_cache()
 
             now = time.time()
             if (now - last_print_time) >= 1.0 or (expected_frames and idx >= expected_frames):
                 last_print_time = now
                 elapsed_time = now - start_time
                 speed_fps = idx / elapsed_time if elapsed_time > 0 else 0
-                current_video_time = idx / fps if fps > 0 else 0
-                video_time_str = f"{int(current_video_time // 60):02d}:{int(current_video_time % 60):02d}"
-                
-                if expected_frames:
-                    total_video_time = expected_frames / fps if fps > 0 else 0
-                    total_video_time_str = f"{int(total_video_time // 60):02d}:{int(total_video_time % 60):02d}"
-                    remaining_frames = expected_frames - idx
-                    eta_time = remaining_frames / speed_fps if speed_fps > 0 else 0
-                    eta_str = f"{int(eta_time // 60):02d}:{int(eta_time % 60):02d}"
-                    pct = (idx / expected_frames) * 100
-                    status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {video_time_str}/{total_video_time_str} | ETA: {eta_str}"
-                    print(status_msg + "    ", end='\r', flush=True)
+                pct = (idx / expected_frames) * 100 if expected_frames else 0
+                status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps"
+                print(status_msg + "    ", end='\r', flush=True)
 
-                    if progress_callback:
-                        try: progress_callback(pct / 100.0, desc=status_msg)
-                        except Exception: pass
-                else:
-                    status_msg = f"⏳ {idx} frames | {speed_fps:.2f} fps | {video_time_str}"
-                    print(status_msg + "    ", end='\r', flush=True)
+                if progress_callback and expected_frames:
+                    try: progress_callback(pct / 100.0, desc=status_msg)
+                    except Exception: pass
 
     finally:
-        print("\n", flush=True)
-        print("🎬 Hoàn tất luồng xử lý khung hình...", flush=True)
         try: output_queue.put(None); writer_thread.join(timeout=5)
         except Exception: pass
-
-        try:
-            if process_read.poll() is None:
-                process_read.terminate()
-                process_read.wait(timeout=2)
-        except Exception:
-            try: process_read.kill()
-            except Exception: pass
-
+        try: process_read.terminate()
+        except Exception: pass
         try:
             if process_write.stdin and not process_write.stdin.closed:
                 process_write.stdin.close()
-            if process_write.poll() is None:
-                process_write.wait(timeout=3)
-        except Exception:
-            try: process_write.kill()
-            except Exception: pass
+            process_write.wait(timeout=5)
+        except Exception: pass
 
         if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
-            print("🔊 Đang ghép âm thanh gốc và xuất video 4K hoàn chỉnh 100%...", flush=True)
-            if os.path.exists(video_output):
-                try: os.remove(video_output)
-                except Exception: pass
-                
+            print("🔊 Ghép 100% Audio gốc, Subtitle (.ass) và Fonts vào MKV...", flush=True)
             mux_cmd = [
                 'ffmpeg', '-y',
                 '-i', temp_video_only,
                 '-i', video_input,
-                '-c:v', 'copy',
-                '-c:a', 'copy',
+                '-c', 'copy',
                 '-map', '0:v:0',
                 '-map', '1:a?',
+                '-map', '1:s?',
+                '-map', '1:t?',
                 video_output
             ]
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            if not os.path.exists(video_output) or os.path.getsize(video_output) < 1000:
-                print("⚠️ Đang sử dụng phương án sao chép trực tiếp...", flush=True)
-                shutil.copy(temp_video_only, video_output)
-
-            if os.path.exists(temp_video_only):
-                try: os.remove(temp_video_only)
-                except Exception: pass
-
-        if is_youtube and temp_input_file and os.path.exists(temp_input_file):
-            try: os.remove(temp_input_file)
+            try: os.remove(temp_video_only)
             except Exception: pass
 
-        print(f"\n✨ KẾT THÚC HOÀN HẢO! Video 4K nằm tại: {video_output}", flush=True)
+        print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
 
     return video_output
 
 def main():
     if len(sys.argv) < 2:
-        print("❌ Lỗi: Vui lòng cung cấp đường dẫn video input!")
-        print("💡 Sử dụng: python3 upscale.py <video_input.mp4/youtube_url> [auto/libx264/hevc_nvenc/hevc_videotoolbox] [keep/scale]")
+        print("❌ Lỗi: Vui lòng cung cấp link Magnet hoặc đường dẫn file video!")
+        print("💡 Sử dụng: python3 upscale.py <magnet:... hoặc video.mkv> [cugan_conservative/cugan_no_denoise/cugan_denoise3x]")
         return
     
     video_input = sys.argv[1]
-    encoder_codec = sys.argv[2] if len(sys.argv) > 2 else "auto"
-    keep_highest = (sys.argv[3] == "keep") if len(sys.argv) > 3 else False
-    
-    upscale_video(video_input=video_input, encoder_codec=encoder_codec, keep_highest=keep_highest)
+    model_name = sys.argv[2] if len(sys.argv) > 2 else "cugan_conservative"
+    upscale_video(video_input=video_input, model_name=model_name)
 
 if __name__ == '__main__':
     main()
