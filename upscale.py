@@ -32,15 +32,12 @@ class SEBlock(nn.Module):
         self.conv2 = nn.Conv2d(in_channels // reduction, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
-        if x.dtype == torch.float16:
-            x0 = torch.mean(x.float(), dim=(2, 3), keepdim=True).half()
-        else:
-            x0 = torch.mean(x, dim=(2, 3), keepdim=True)
+        x0 = torch.mean(x, dim=(2, 3), keepdim=True, dtype=torch.float32).to(x.dtype)
         x0 = self.conv1(x0)
         x0 = F.relu(x0, inplace=True)
         x0 = self.conv2(x0)
         x0 = torch.sigmoid(x0)
-        return x * x0
+        return x.mul_(x0)
 
 class UNetConv(nn.Module):
     def __init__(self, in_channels, mid_channels, out_channels, se):
@@ -478,6 +475,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         # MÃ HÓA PHẦN CỨNG HEVC 10-BIT (NVENC TURING CHUẨN 4K MASTER - FAST PRESET P4)
         ffmpeg_write_cmd = [
             'ffmpeg', '-y',
+            '-threads', '0',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
             '-i', '-',
             '-c:v', 'hevc_nvenc', '-preset', 'p4', '-tune', 'hq', '-cq', '18',
@@ -530,6 +528,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         writer_thread = threading.Thread(target=writer_worker, daemon=True)
         reader_thread.start()
         writer_thread.start()
+        gc.disable()
 
         processed_cnt = 0
         while processed_cnt < total_frames_to_process:
@@ -560,7 +559,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
                 output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
-            output_queue.put(output.cpu().numpy().tobytes())
+            output_queue.put(memoryview(output.cpu().numpy()).cast('B'))
 
             processed_cnt += current_b
             try: progress_queue.put(current_b)
@@ -568,6 +567,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
 
         output_queue.put(None)
         writer_thread.join(timeout=10)
+        gc.enable()
 
         try:
             if process_read.poll() is None:
@@ -622,6 +622,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, 'set_float32_matmul_precision'):
+            torch.set_float32_matmul_precision('high')
 
     mode_desc = "⚡ Bản SE Siêu Tốc (~7–9 FPS)" if model_mode == "se" else "👑 Bản Pro (~1.6 FPS)"
     print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} [{mode_desc}] | Mã hóa: {encoder_desc}")
@@ -642,6 +644,16 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     else:
         if not os.path.exists(video_input):
             raise FileNotFoundError(f"Không tìm thấy file video nguồn '{video_input}'!")
+        # Tự động nạp file từ Google Drive FUSE về SSD cục bộ để tránh nghẽn I/O mạng Drive
+        if video_input.startswith('/content/drive/'):
+            print(f"⚡ Đang nạp nhanh video nguồn từ Google Drive vào Local NVMe SSD ({scratch_dir})...")
+            if progress_callback:
+                progress_callback(0.01, desc="⚡ Đang nạp video nguồn vào Local NVMe SSD...")
+            local_src = os.path.join(scratch_dir, f"source_{os.path.basename(video_input)}")
+            if not os.path.exists(local_src) or os.path.getsize(local_src) != os.path.getsize(video_input):
+                shutil.copy2(video_input, local_src)
+            video_input = local_src
+            print(f"✅ Đã nạp thành công video vào Local SSD: {local_src}")
 
     # LUÔN XUẤT RA ĐỊNH DẠNG .MKV ĐỂ BẢO TỒN NGUYÊN VẸN TOÀN BỘ PHỤ ĐỀ MỀM (.ASS) VÀ FONT ĐÍNH KÈM!
     video_base = os.path.basename(os.path.splitext(video_input)[0])
@@ -817,6 +829,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     temp_video_only = os.path.join(scratch_dir, f"_temp_v_{os.path.basename(video_output)}")
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
+        '-threads', '0',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
         '-i', '-',
         *encoder_flags,
@@ -866,6 +879,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     last_print_time = 0.0
     reader_thread.start()
     writer_thread.start()
+    gc.disable()
 
     try:
         while True:
@@ -911,7 +925,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
                 output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
-            output_queue.put(output.cpu().numpy().tobytes())
+            output_queue.put(memoryview(output.cpu().numpy()).cast('B'))
             
             idx += current_b
 
@@ -936,6 +950,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                     except Exception: pass
 
     finally:
+        gc.enable()
         try: output_queue.put(None); writer_thread.join(timeout=5)
         except Exception: pass
         try: process_read.terminate()
