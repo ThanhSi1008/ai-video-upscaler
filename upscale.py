@@ -147,6 +147,10 @@ class UpCunet2x(nn.Module):
         super(UpCunet2x, self).__init__()
         self.unet1 = UNet1(in_channels, out_channels, deconv=True)
         self.unet2 = UNet2(in_channels, out_channels, deconv=False)
+        self.mode = "se"
+
+    def set_mode(self, mode):
+        self.mode = mode
 
     def forward(self, x, alpha=1.0):
         # Chế độ Full-Frame (tile_mode=0) cho độ nét vector tối đa và không lỗi ghép mảnh
@@ -155,6 +159,12 @@ class UpCunet2x(nn.Module):
         pw = ((w0 - 1) // 2 + 1) * 2
         x = F.pad(x, (18, 18 + pw - w0, 18, 18 + ph - h0), 'reflect')
         x = self.unet1(x)
+        if self.mode == "se":
+            x = F.pad(x, (-20, -20, -20, -20))
+            if w0 != pw or h0 != ph:
+                x = x[:, :, :h0 * 2, :w0 * 2]
+            return x
+
         x0 = self.unet2(x, alpha)
         x = F.pad(x, (-20, -20, -20, -20))
         x = torch.add(x0, x)
@@ -193,13 +203,21 @@ WEIGHTS_INFO = {
     }
 }
 
-def resolve_model_key(name):
+def resolve_model_info(name):
     name_l = (name or "").lower()
+    # Mặc định là SE (siêu tốc ~7-9 FPS). Nếu người dùng chỉ định rõ "pro" thì mới chạy Pro (~1.6 FPS)
+    mode = "pro" if ("_pro" in name_l or " pro" in name_l or name_l.endswith("pro")) else "se"
     if "no_denoise" in name_l or "no-denoise" in name_l:
-        return "cugan_no_denoise"
-    if "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
-        return "cugan_denoise3x"
-    return "cugan_conservative"
+        key = "cugan_no_denoise"
+    elif "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
+        key = "cugan_denoise3x"
+    else:
+        key = "cugan_conservative"
+    return key, mode
+
+def resolve_model_key(name):
+    key, _ = resolve_model_info(name)
+    return key
 
 def ensure_model_weights(model_key, progress_callback=None):
     info = WEIGHTS_INFO[model_key]
@@ -298,8 +316,9 @@ def get_hevc_encoder_flags(device_type):
         '-pix_fmt', 'yuv420p10le'
     ], "libx265 10-bit (CPU Software - Fast)"
 
-def load_realcugan_model(model_key, weights_path, device):
+def load_realcugan_model(model_key, weights_path, device, mode="se"):
     model = UpCunet2x(in_channels=3, out_channels=3)
+    model.set_mode(mode)
     state_dict = torch.load(weights_path, map_location='cpu')
     is_pro = ("pro" in state_dict)
     if is_pro:
@@ -431,10 +450,10 @@ def download_magnet(magnet_uri, output_dir="/content/input", progress_cb=None):
 # --- 6. WORKER PHÂN ĐOẠN DUAL GPU (NVIDIA T4 x2 TRÊN KAGGLE) ---
 # ==============================================================================
 
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue, model_mode="se"):
     try:
         device = torch.device(f'cuda:{gpu_id}')
-        model, is_pro = load_realcugan_model(model_key, weights_path, device)
+        model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
 
         seek_time = start_frame / fps if (start_frame > 0 and fps > 0) else 0.0
         
@@ -464,7 +483,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10*1024*1024)
 
         frame_size = src_w * src_h * 3
-        batch_size = 2 if src_h <= 720 else 1
+        batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
         queue_size = 12
 
         input_queue = Queue(maxsize=queue_size)
@@ -583,7 +602,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         scratch_dir = os.path.join(tempfile.gettempdir(), 'ai_upscale_work')
     os.makedirs(scratch_dir, exist_ok=True)
 
-    model_key = resolve_model_key(model_name)
+    model_key, model_mode = resolve_model_info(model_name)
     device, device_type, device_desc = get_best_device()
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     encoder_flags, encoder_desc = get_hevc_encoder_flags(device_type)
@@ -591,7 +610,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
 
-    print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: {encoder_desc}")
+    mode_desc = "⚡ Bản SE Siêu Tốc (~7–9 FPS)" if model_mode == "se" else "👑 Bản Pro (~1.6 FPS)"
+    print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} [{mode_desc}] | Mã hóa: {encoder_desc}")
 
     temp_downloaded_file = None
     if is_gdrive:
@@ -688,7 +708,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, return_dict, progress_queue)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, return_dict, progress_queue, model_mode)
             )
             p.start()
             processes.append(p)
@@ -771,8 +791,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 return video_output
 
     # LUỒNG GPU ĐƠN (KHI CHỈ CÓ 1 GPU HOẶC CHẠY KIỂM THỬ)
-    model, is_pro = load_realcugan_model(model_key, weights_path, device)
-    batch_size = 2 if src_h <= 720 else 1
+    model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
+    batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
     queue_size = 12
 
     ffmpeg_read_cmd = [
