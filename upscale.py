@@ -574,6 +574,15 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             output_dir = os.path.expanduser('~/Movies/Upscaled')
     os.makedirs(output_dir, exist_ok=True)
 
+    # Dùng ổ SSD cục bộ cho file tạm để ghi với tốc độ 500+ MB/s, tránh độ trễ I/O mạng của Google Drive
+    if os.path.exists('/content'):
+        scratch_dir = '/content/temp_work'
+    elif os.path.exists('/kaggle/working'):
+        scratch_dir = '/kaggle/working/temp_work'
+    else:
+        scratch_dir = os.path.join(tempfile.gettempdir(), 'ai_upscale_work')
+    os.makedirs(scratch_dir, exist_ok=True)
+
     model_key = resolve_model_key(model_name)
     device, device_type, device_desc = get_best_device()
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -772,7 +781,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     ]
     process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
 
-    temp_video_only = os.path.join(output_dir, f"_temp_v_{os.path.basename(video_output)}")
+    temp_video_only = os.path.join(scratch_dir, f"_temp_v_{os.path.basename(video_output)}")
     ffmpeg_write_cmd = [
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
@@ -901,6 +910,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             process_write.wait(timeout=5)
         except Exception: pass
 
+        temp_final_mkv = os.path.join(scratch_dir, f"_final_{os.path.basename(video_output)}")
         if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
             print("🔊 Ghép 100% Audio gốc, Subtitle (.ass) và Fonts vào MKV...", flush=True)
             mux_cmd = [
@@ -912,11 +922,14 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 '-map', '1:a?',
                 '-map', '1:s?',
                 '-map', '1:t?',
-                video_output
+                temp_final_mkv
             ]
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try: os.remove(temp_video_only)
             except Exception: pass
+
+            print(f"☁️ Đang lưu tập phim 4K hoàn chỉnh vào Google Drive: '{video_output}'...", flush=True)
+            shutil.move(temp_final_mkv, video_output)
 
         print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
 
