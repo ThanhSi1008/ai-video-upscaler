@@ -951,40 +951,51 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
     finally:
         gc.enable()
-        try: output_queue.put(None); writer_thread.join(timeout=5)
+        try:
+            output_queue.put(None)
+            writer_thread.join(timeout=30)
         except Exception: pass
-        try: process_read.terminate()
+        try:
+            if process_read.poll() is None:
+                process_read.terminate()
+                process_read.wait(timeout=5)
         except Exception: pass
         try:
             if process_write.stdin and not process_write.stdin.closed:
                 process_write.stdin.close()
-            process_write.wait(timeout=5)
+            process_write.wait(timeout=30)
         except Exception: pass
 
-        temp_final_mkv = os.path.join(scratch_dir, f"_final_{os.path.basename(video_output)}")
-        if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 0:
-            print("🔊 Ghép 100% Audio gốc, Subtitle (.ass) và Fonts vào MKV...", flush=True)
-            mux_cmd = [
-                'ffmpeg', '-y',
-                '-i', temp_video_only,
-                '-i', video_input,
-                '-c', 'copy',
-                '-map', '0:v:0',
-                '-map', '1:a?',
-                '-map', '1:s?',
-                '-map', '1:t?',
-                temp_final_mkv
-            ]
-            subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try: os.remove(temp_video_only)
-            except Exception: pass
+    temp_final_mkv = os.path.join(scratch_dir, f"_final_{os.path.basename(video_output)}")
+    if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 1000:
+        print("🔊 Ghép 100% Audio gốc, Subtitle (.ass) và Fonts vào MKV...", flush=True)
+        mux_cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_video_only,
+            '-i', video_input,
+            '-c', 'copy',
+            '-map', '0:v:0',
+            '-map', '1:a?',
+            '-map', '1:s?',
+            '-map', '1:t?',
+            temp_final_mkv
+        ]
+        subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try: os.remove(temp_video_only)
+        except Exception: pass
 
+        if os.path.exists(temp_final_mkv) and os.path.getsize(temp_final_mkv) > 1000:
             print(f"☁️ Đang lưu tập phim 4K hoàn chỉnh vào Google Drive: '{video_output}'...", flush=True)
             shutil.move(temp_final_mkv, video_output)
 
+    if os.path.exists(video_output) and os.path.getsize(video_output) > 1000:
         print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
-
-    return video_output
+        if progress_callback:
+            try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
+            except Exception: pass
+        return video_output
+    else:
+        raise RuntimeError(f"Quá trình xuất video 4K không thành công hoặc file kết quả bị trống: '{video_output}'")
 
 def main():
     if len(sys.argv) < 2:
