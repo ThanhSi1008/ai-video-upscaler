@@ -87,25 +87,31 @@ else:
 
 ---
 
-### Option C: Local Machine Installation (Mac / Windows / Linux)
+### Option C: Apple Silicon Mac (M1/M2/M3 Pro/Max) & Local Offline
+
+Optimized natively for Apple Silicon hardware using **MPS (Metal Performance Shaders)** and **VideoToolbox Hardware 10-bit HEVC (`hevc_videotoolbox`)**:
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/ThanhSi1008/ai-video-upscaler.git
 cd ai-video-upscaler
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Create Python 3.12 virtual environment & install requirements
+python3.12 -m venv venv
+./venv/bin/pip install -r requirements.txt
 
-# 3. Ensure FFmpeg is installed
-# macOS: brew install ffmpeg
-# Ubuntu: sudo apt install ffmpeg
+# 3. Ensure FFmpeg is installed (with VideoToolbox support)
+brew install ffmpeg
 
 # 4. Launch the Web UI
-python3 app.py
+./venv/bin/python app.py
+
+# Or run CLI directly on any video file
+./venv/bin/python upscale.py /path/to/anime_episode.mkv
 ```
 
-Open `http://localhost:7860` in your browser.
+- Output videos are saved to `~/Movies/Upscaled` with bit-exact softsub `.ass` and font preservation.
+- Open and enjoy directly in **IINA** (`/Applications/IINA.app`) with full HDR/Retina color fidelity.
 
 ---
 

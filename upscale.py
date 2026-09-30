@@ -223,11 +223,76 @@ def ensure_model_weights(model_key, progress_callback=None):
                 download_success = True
                 break
         except Exception as e:
-            print(f"⚠️ Thất bại tải từ {url}: {e}")
+            print(f"⚠️ Thất bại tải từ {url} qua urllib: {e}")
+            try:
+                print("🔄 Thử lại bằng curl --http1.1...")
+                curl_cmd = ['curl', '--http1.1', '-L', '-o', weights_path, url]
+                subprocess.run(curl_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
+                    print(f"✅ Đã tải thành công bằng curl: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
+                    download_success = True
+                    break
+            except Exception as e2:
+                print(f"⚠️ Curl cũng thất bại: {e2}")
 
     if not download_success:
         raise RuntimeError(f"Không thể tải weights mô hình {model_key}. Vui lòng kiểm tra kết nối mạng!")
     return weights_path
+
+def get_best_device():
+    """
+    Tự động nhận diện thiết bị tăng tốc phần cứng tốt nhất:
+    1. NVIDIA GPU (CUDA)
+    2. Apple Silicon M-Series (MPS Metal Acceleration)
+    3. CPU Software Fallback
+    """
+    if torch.cuda.is_available():
+        num = torch.cuda.device_count()
+        name = torch.cuda.get_device_name(0) if num > 0 else "CUDA"
+        return torch.device('cuda:0'), 'cuda', f"{num}x NVIDIA GPU ({name})"
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps'), 'mps', "Apple Silicon M3 Pro (Metal Performance Shaders - MPS)"
+    return torch.device('cpu'), 'cpu', "CPU (Software Mode)"
+
+def get_hevc_encoder_flags(device_type):
+    """
+    Tự động chọn encoder HEVC 10-bit tối ưu nhất theo phần cứng:
+    - Apple Silicon M-Series: hevc_videotoolbox (Hardware 10-bit Main10)
+    - NVIDIA GPU: hevc_nvenc (Hardware NVENC 10-bit Main10)
+    - Fallback: libx265 (CPU 10-bit)
+    """
+    if device_type == 'mps' or sys.platform == 'darwin':
+        try:
+            res = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if 'hevc_videotoolbox' in res.stdout:
+                return [
+                    '-c:v', 'hevc_videotoolbox',
+                    '-profile:v', 'main10',
+                    '-pix_fmt', 'p010le',
+                    '-q:v', '65',
+                    '-spatial_aq', '1'
+                ], "hevc_videotoolbox 10-bit (Apple Silicon Hardware)"
+        except Exception:
+            pass
+
+    if device_type == 'cuda':
+        return [
+            '-c:v', 'hevc_nvenc',
+            '-preset', 'p7',
+            '-tune', 'hq',
+            '-cq', '17',
+            '-spatial-aq', '1',
+            '-temporal-aq', '1',
+            '-pix_fmt', 'yuv420p10le',
+            '-profile:v', 'main10'
+        ], "hevc_nvenc 10-bit (NVIDIA Hardware)"
+
+    return [
+        '-c:v', 'libx265',
+        '-crf', '18',
+        '-preset', 'medium',
+        '-pix_fmt', 'yuv420p10le'
+    ], "libx265 10-bit (CPU Software)"
 
 def load_realcugan_model(model_key, weights_path, device):
     model = UpCunet2x(in_channels=3, out_channels=3)
@@ -458,14 +523,18 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     is_magnet = isinstance(video_input, str) and video_input.strip().startswith("magnet:?")
     
     if output_dir is None:
-        output_dir = '/kaggle/working' if os.path.exists('/kaggle/working') else os.path.expanduser('~/Documents/mushoku-tensei')
+        if os.path.exists('/kaggle/working'):
+            output_dir = '/kaggle/working'
+        else:
+            output_dir = os.path.expanduser('~/Movies/Upscaled')
     os.makedirs(output_dir, exist_ok=True)
 
     model_key = resolve_model_key(model_name)
+    device, device_type, device_desc = get_best_device()
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    device = torch.device('cuda:0' if num_cuda_gpus > 0 else 'cpu')
+    encoder_flags, encoder_desc = get_hevc_encoder_flags(device_type)
 
-    print(f"🚀 Thiết bị: {num_cuda_gpus}x NVIDIA GPU | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: hevc_nvenc 10-bit")
+    print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: {encoder_desc}")
 
     temp_downloaded_file = None
     if is_magnet:
@@ -512,6 +581,16 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             expected_frames = int(frames_res)
     except Exception as e:
         pass
+
+    if not expected_frames:
+        try:
+            dur_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{video_input}\""
+            dur_res = subprocess.check_output(dur_cmd, shell=True).decode().strip()
+            dur = float(dur_res)
+            if dur > 0 and fps > 0:
+                expected_frames = int(dur * fps)
+        except Exception:
+            pass
 
     # Native 2x: 1080p -> 4K Ultra-HD (3840x2160)
     target_w = src_w * 2
@@ -644,8 +723,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         'ffmpeg', '-y',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
         '-i', '-',
-        '-c:v', 'hevc_nvenc', '-preset', 'p7', '-tune', 'hq', '-cq', '17',
-        '-spatial-aq', '1', '-temporal-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
+        *encoder_flags,
         temp_video_only
     ]
     process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10*1024*1024)
@@ -697,11 +775,31 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             img_nps = [np.frombuffer(b, dtype=np.uint8).reshape((src_h, src_w, 3)) for b in batch_bytes]
             img_np_batch = np.stack(img_nps, axis=0)
             
-            img_t = torch.from_numpy(img_np_batch).pin_memory().to(device, non_blocking=True)
-            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
-            img_t = img_t.to(memory_format=torch.channels_last)
+            img_t = torch.from_numpy(img_np_batch)
+            if device.type == 'cuda':
+                img_t = img_t.pin_memory().to(device, non_blocking=True)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True).div(255.0)
+                img_t = img_t.to(memory_format=torch.channels_last)
+            elif device.type == 'mps':
+                img_t = img_t.to(device)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16).div(255.0)
+            else:
+                img_t = img_t.to(device)
+                img_t = img_t.permute(0, 3, 1, 2).float().div(255.0)
 
-            with torch.inference_mode(), torch.amp.autocast(device_type='cuda', enabled=(device.type == 'cuda'), dtype=torch.float16):
+            if device.type == 'cuda':
+                autocast_ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
+            elif device.type == 'mps':
+                try:
+                    autocast_ctx = torch.amp.autocast(device_type='mps', dtype=torch.float16)
+                except Exception:
+                    from contextlib import nullcontext
+                    autocast_ctx = nullcontext()
+            else:
+                from contextlib import nullcontext
+                autocast_ctx = nullcontext()
+
+            with torch.inference_mode(), autocast_ctx:
                 x_in = (img_t * 0.7 + 0.15) if is_pro else img_t
                 raw_out = model(x_in)
                 output = (((raw_out - 0.15) / 0.7).clamp(0.0, 1.0)) if is_pro else raw_out.clamp(0.0, 1.0)
@@ -720,15 +818,25 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             idx += current_b
             if idx % 30 == 0:
                 gc.collect()
-                if device.type == 'cuda': torch.cuda.empty_cache()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                elif device.type == 'mps':
+                    torch.mps.empty_cache()
 
             now = time.time()
-            if (now - last_print_time) >= 1.0 or (expected_frames and idx >= expected_frames):
+            if (now - last_print_time) >= 0.5 or (expected_frames and idx >= expected_frames):
                 last_print_time = now
                 elapsed_time = now - start_time
                 speed_fps = idx / elapsed_time if elapsed_time > 0 else 0
                 pct = (idx / expected_frames) * 100 if expected_frames else 0
-                status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps"
+                cur_sec = idx / fps if fps > 0 else 0
+                cur_str = f"{int(cur_sec // 60):02d}:{int(cur_sec % 60):02d}"
+                tot_sec = expected_frames / fps if (expected_frames and fps > 0) else 0
+                tot_str = f"{int(tot_sec // 60):02d}:{int(tot_sec % 60):02d}"
+                eta_sec = (expected_frames - idx) / speed_fps if (expected_frames and speed_fps > 0) else 0
+                eta_str = f"{int(eta_sec // 60):02d}:{int(eta_sec % 60):02d}"
+
+                status_msg = f"⏳ {idx}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}"
                 print(status_msg + "    ", end='\r', flush=True)
 
                 if progress_callback and expected_frames:

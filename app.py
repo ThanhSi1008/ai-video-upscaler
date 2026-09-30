@@ -23,13 +23,19 @@ for arg in sys.argv:
     if arg.startswith("--alias="):
         os.environ["TINYURL_ALIAS"] = arg.split("=", 1)[1]
 
-num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-if num_gpus >= 2:
-    device_badge = f"🔥 Kaggle Dual NVIDIA T4 GPUs (~16+ FPS Multi-Processing)"
-elif num_gpus == 1:
-    device_badge = f"🚀 Single NVIDIA GPU (CUDA)"
+device_obj, device_type, device_desc = upscale.get_best_device()
+encoder_flags, encoder_desc = upscale.get_hevc_encoder_flags(device_type)
+
+if device_type == 'mps':
+    device_badge = f"🍎 Apple Silicon M3 Pro (MPS Metal Acceleration) | MÃ HÓA: {encoder_desc}"
+elif device_type == 'cuda':
+    num_gpus = torch.cuda.device_count()
+    if num_gpus >= 2:
+        device_badge = f"🔥 {num_gpus}x NVIDIA CUDA (Multi-Processing) | MÃ HÓA: {encoder_desc}"
+    else:
+        device_badge = f"🚀 Single NVIDIA GPU (CUDA) | MÃ HÓA: {encoder_desc}"
 else:
-    device_badge = f"💻 GPU chưa kích hoạt hoặc CPU (Vui lòng chọn Accelerator GPU T4 x2 trên Kaggle)"
+    device_badge = f"💻 CPU Software Mode | MÃ HÓA: {encoder_desc}"
 
 MODEL_MAP = {
     "Real-CUGAN 2x Conservative (Mặc định cho SubsPlease Web-DL - Cực Nét Vector)": "cugan_conservative",
@@ -170,24 +176,24 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
     with gr.Column(elem_classes=["container"]):
         with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
-            # 🎬 AI Video Upscaler 4K - Real-CUGAN Pro (Dual NVIDIA T4)
+            # 🎬 AI Video Upscaler 4K - Real-CUGAN Pro
             Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)**. Khôi phục nét vẽ vector nguyên bản, mã hóa HEVC 10-bit chống banding và bảo tồn 100% Phụ đề mềm (.ass) & Âm thanh gốc.
             
-            <div class="badge">THIẾT BỊ: {device_badge} | MÃ HÓA: hevc_nvenc 10-bit (yuv420p10le -cq 17)</div>
+            <div class="badge">THIẾT BỊ: {device_badge}</div>
             """)
 
-        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Kaggle T4 x2)", open=False):
+        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (MacBook Pro Apple Silicon)", open=False):
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
-            1. **Dán Link Magnet**: Copy link Magnet tập anime từ **SubsPlease / Nyaa** (ví dụ: `magnet:?xt=urn:btih:...`) vào ô bên dưới. Hệ thống sẽ tự động dùng `aria2c` kéo về trong ~30 giây.
-            2. **Mô Hình AI**: Giữ nguyên mặc định `Real-CUGAN 2x Conservative` (Tối ưu tuyệt đối cho nguồn Web-DL Crunchyroll).
-            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Sau khoảng ~35 phút (1 tập 24 phút), file 4K hoàn chỉnh sẽ xuất hiện để tải về!
+            1. **Nạp Tệp Anime**: Kéo thả tệp anime `.mkv` / `.mp4` vào ô tải lên HOẶC dán đường dẫn tệp trên máy (ví dụ: `/Users/xis108/Downloads/Mushoku_Tensei_14.mkv`).
+            2. **Mô Hình AI**: Giữ nguyên mặc định `Real-CUGAN 2x Conservative` (Tối ưu tuyệt đối cho nguồn Web-DL Crunchyroll / SubsPlease).
+            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Sau khi xử lý xong, tệp 4K Ultra-HD hoàn chỉnh sẽ nằm sẵn trong `~/Movies/Upscaled` và sẵn sàng xem ngay trên IINA!
             """)
 
         # 1. Ô NHẬP LINK MAGNET / ĐƯỜNG DẪN TẬP PHIM
         magnet_input = gr.Textbox(
-            label="🧲 Dán Link Magnet (SubsPlease / Nyaa) HOẶC Đường Dẫn File trên Kaggle",
-            placeholder="Ví dụ: magnet:?xt=urn:btih:3fa8c19... hoặc /kaggle/working/input/Mushoku_Tensei_S02E01.mkv",
+            label="📁 Đường Dẫn File trên Mac / Kaggle HOẶC Link Magnet",
+            placeholder="Ví dụ: /Users/xis108/Downloads/Mushoku_Tensei_S02E14.mkv hoặc magnet:?xt=urn:btih:...",
             lines=2
         )
 

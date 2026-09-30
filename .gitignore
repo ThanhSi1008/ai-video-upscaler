@@ -44,7 +44,7 @@ sharpest_frame_preview.jpg
 sample_preview.*
 
 # Model weights downloaded automatically
-realesr-animevideov3.pth
+*.pth
 
 # OS & IDE files
 .DS_Store
