@@ -9,6 +9,7 @@ import warnings
 import time
 import threading
 import shutil
+import tempfile
 from queue import Queue
 import numpy as np
 import torch
@@ -144,10 +145,6 @@ class UpCunet2x(nn.Module):
         super(UpCunet2x, self).__init__()
         self.unet1 = UNet1(in_channels, out_channels, deconv=True)
         self.unet2 = UNet2(in_channels, out_channels, deconv=False)
-        self.mode = "se"
-
-    def set_mode(self, mode):
-        self.mode = mode
 
     def forward(self, x, alpha=1.0):
         # Chế độ Full-Frame (tile_mode=0) cho độ nét vector tối đa và không lỗi ghép mảnh
@@ -156,27 +153,21 @@ class UpCunet2x(nn.Module):
         pw = ((w0 - 1) // 2 + 1) * 2
         x = F.pad(x, (18, 18 + pw - w0, 18, 18 + ph - h0), 'reflect')
         x = self.unet1(x)
-        if self.mode == "se":
-            x = x[:, :, 20:-20, 20:-20]
-            if w0 != pw or h0 != ph:
-                x = x[:, :, :h0 * 2, :w0 * 2]
-            return x
-
         x0 = self.unet2(x, alpha)
         x = x[:, :, 20:-20, 20:-20]
-        x = torch.add(x0, x)
+        x0.add_(x)
         if w0 != pw or h0 != ph:
-            x = x[:, :, :h0 * 2, :w0 * 2]
-        return x
+            x0 = x0[:, :, :h0 * 2, :w0 * 2]
+        return x0
 
 # ==============================================================================
-# --- 4. DANH MỤC WEIGHTS REAL-CUGAN PRO NATIVE 2x ---
+# --- 4. DANH MỤC WEIGHTS REAL-CUGAN NATIVE 2x ---
 # ==============================================================================
 
 WEIGHTS_INFO = {
     "cugan_conservative": {
         "file": "up2x-latest-conservative.pth",
-        "desc": "Real-CUGAN 2x Conservative (Khuyên dùng cho SubsPlease Web-DL)",
+        "desc": "Real-CUGAN 2x Conservative (Cân bằng sắc nét & sạch nhiễu - Khuyên dùng)",
         "urls": [
             "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-conservative.pth",
             "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-conservative.pth"
@@ -184,7 +175,7 @@ WEIGHTS_INFO = {
     },
     "cugan_no_denoise": {
         "file": "up2x-latest-no-denoise.pth",
-        "desc": "Real-CUGAN 2x No-Denoise (Tối ưu cho Blu-ray Remux)",
+        "desc": "Real-CUGAN 2x No-Denoise (Giữ nguyên hạt phim - Tối ưu cho Blu-ray Remux)",
         "urls": [
             "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-no-denoise.pth",
             "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-no-denoise.pth"
@@ -192,7 +183,7 @@ WEIGHTS_INFO = {
     },
     "cugan_denoise3x": {
         "file": "up2x-latest-denoise3x.pth",
-        "desc": "Real-CUGAN 2x Denoise3x (Khử nhiễu nặng cho anime cũ)",
+        "desc": "Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng)",
         "urls": [
             "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-denoise3x.pth",
             "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-denoise3x.pth"
@@ -200,21 +191,14 @@ WEIGHTS_INFO = {
     }
 }
 
-def resolve_model_info(name):
-    name_l = (name or "").lower()
-    # Mặc định là SE (siêu tốc ~7-9 FPS). Nếu người dùng chỉ định rõ "pro" thì mới chạy Pro (~1.6 FPS)
-    mode = "pro" if ("_pro" in name_l or " pro" in name_l or name_l.endswith("pro")) else "se"
-    if "no_denoise" in name_l or "no-denoise" in name_l:
-        key = "cugan_no_denoise"
-    elif "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
-        key = "cugan_denoise3x"
-    else:
-        key = "cugan_conservative"
-    return key, mode
-
 def resolve_model_key(name):
-    key, _ = resolve_model_info(name)
-    return key
+    name_l = (name or "").lower()
+    if "no_denoise" in name_l or "no-denoise" in name_l:
+        return "cugan_no_denoise"
+    elif "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
+        return "cugan_denoise3x"
+    else:
+        return "cugan_conservative"
 
 def ensure_model_weights(model_key, progress_callback=None):
     info = WEIGHTS_INFO[model_key]
@@ -313,9 +297,8 @@ def get_hevc_encoder_flags(device_type):
         '-pix_fmt', 'yuv420p10le'
     ], "libx265 10-bit (CPU Software - Fast)"
 
-def load_realcugan_model(model_key, weights_path, device, mode="se"):
+def load_realcugan_model(model_key, weights_path, device):
     model = UpCunet2x(in_channels=3, out_channels=3)
-    model.set_mode(mode)
     state_dict = torch.load(weights_path, map_location='cpu')
     is_pro = ("pro" in state_dict)
     if is_pro:
@@ -447,14 +430,14 @@ def download_magnet(magnet_uri, output_dir="/content/input", progress_cb=None):
 # --- 6. WORKER PHÂN ĐOẠN DUAL GPU (NVIDIA T4 x2 TRÊN KAGGLE) ---
 # ==============================================================================
 
-def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue, model_mode="se"):
+def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, chunk_output_path, return_dict, progress_queue):
     try:
         device = torch.device(f'cuda:{gpu_id}')
         torch.cuda.set_device(device)
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
+        model, is_pro = load_realcugan_model(model_key, weights_path, device)
 
         seek_time = start_frame / fps if (start_frame > 0 and fps > 0) else 0.0
         
@@ -466,7 +449,7 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             '-vframes', str(total_frames_to_process),
             '-f', 'image2pipe', '-pix_fmt', 'rgb24', '-vcodec', 'rawvideo', '-'
         ])
-        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=32*1024*1024)
+        process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32*1024*1024)
 
         if os.path.exists(chunk_output_path):
             try: os.remove(chunk_output_path)
@@ -482,10 +465,11 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             '-spatial-aq', '1', '-pix_fmt', 'yuv420p10le', '-profile:v', 'main10',
             chunk_output_path
         ]
-        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=32*1024*1024)
+        process_write = subprocess.Popen(ffmpeg_write_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32*1024*1024)
 
         frame_size = src_w * src_h * 3
-        batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
+        has_large_vram = (torch.cuda.is_available() and torch.cuda.get_device_properties(device).total_memory > 10 * 1024**3)
+        batch_size = 2 if (has_large_vram and src_h <= 1080) else 1
         queue_size = 8
 
         input_queue = Queue(maxsize=queue_size)
@@ -529,45 +513,46 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
         reader_thread.start()
         writer_thread.start()
         gc.disable()
+        try:
+            processed_cnt = 0
+            while processed_cnt < total_frames_to_process:
+                chunk = input_queue.get()
+                if chunk is None: break
+                current_b = len(chunk) // frame_size
+                if current_b == 0: break
 
-        processed_cnt = 0
-        while processed_cnt < total_frames_to_process:
-            chunk = input_queue.get()
-            if chunk is None: break
-            current_b = len(chunk) // frame_size
-            if current_b == 0: break
-
-            img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
-            img_t = torch.from_numpy(img_np_batch).to(device, non_blocking=True)
-            img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True)
-            if is_pro:
-                img_t.mul_(0.7 / 255.0).add_(0.15)
-            else:
-                img_t.mul_(1.0 / 255.0)
-            img_t = img_t.to(memory_format=torch.channels_last)
-
-            with torch.inference_mode():
-                raw_out = model(img_t)
+                img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
+                img_t = torch.from_numpy(img_np_batch).to(device, non_blocking=True)
+                img_t = img_t.permute(0, 3, 1, 2).to(torch.float16, non_blocking=True)
                 if is_pro:
-                    raw_out.sub_(0.15).mul_(1.0 / 0.7).clamp_(0.0, 1.0)
+                    img_t.mul_(0.7 / 255.0).add_(0.15)
                 else:
-                    raw_out.clamp_(0.0, 1.0)
+                    img_t.mul_(1.0 / 255.0)
+                img_t = img_t.to(memory_format=torch.channels_last)
 
-                # NATIVE 2x ĐÃ RA CHÍNH XÁC (3840x2160) NÊN HOÀN TOÀN BỎ QUA INTERPOLATE
-                if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
-                    raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
+                with torch.inference_mode():
+                    raw_out = model(img_t)
+                    if is_pro:
+                        raw_out.sub_(0.15).mul_(1.0 / 0.7).clamp_(0.0, 1.0)
+                    else:
+                        raw_out.clamp_(0.0, 1.0)
 
-                output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                    # NATIVE 2x ĐÃ RA CHÍNH XÁC (3840x2160) NÊN HOÀN TOÀN BỎ QUA INTERPOLATE
+                    if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
+                        raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
 
-            output_queue.put(memoryview(output.cpu().numpy()).cast('B'))
+                    output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
-            processed_cnt += current_b
-            try: progress_queue.put(current_b)
+                output_queue.put(memoryview(output.cpu().numpy()).cast('B'))
+
+                processed_cnt += current_b
+                try: progress_queue.put(current_b)
+                except Exception: pass
+        finally:
+            output_queue.put(None)
+            try: writer_thread.join(timeout=30)
             except Exception: pass
-
-        output_queue.put(None)
-        writer_thread.join(timeout=10)
-        gc.enable()
+            gc.enable()
 
         try:
             if process_read.poll() is None:
@@ -613,7 +598,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         scratch_dir = os.path.join(tempfile.gettempdir(), 'ai_upscale_work')
     os.makedirs(scratch_dir, exist_ok=True)
 
-    model_key, model_mode = resolve_model_info(model_name)
+    model_key = resolve_model_key(model_name)
     device, device_type, device_desc = get_best_device()
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     encoder_flags, encoder_desc = get_hevc_encoder_flags(device_type)
@@ -625,9 +610,9 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         if hasattr(torch, 'set_float32_matmul_precision'):
             torch.set_float32_matmul_precision('high')
 
-    mode_desc = "⚡ Bản SE Siêu Tốc (~7–9 FPS)" if model_mode == "se" else "👑 Bản Pro (~1.6 FPS)"
-    print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} [{mode_desc}] | Mã hóa: {encoder_desc}")
+    print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: {encoder_desc}")
 
+    copied_to_scratch = False
     temp_downloaded_file = None
     if is_gdrive:
         print("☁️ Nhận diện Link Google Drive. Đang tải video...")
@@ -649,10 +634,11 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             print(f"⚡ Đang nạp nhanh video nguồn từ Google Drive vào Local NVMe SSD ({scratch_dir})...")
             if progress_callback:
                 progress_callback(0.01, desc="⚡ Đang nạp video nguồn vào Local NVMe SSD...")
-            local_src = os.path.join(scratch_dir, f"source_{os.path.basename(video_input)}")
+            local_src = os.path.join(scratch_dir, os.path.basename(video_input))
             if not os.path.exists(local_src) or os.path.getsize(local_src) != os.path.getsize(video_input):
                 shutil.copy2(video_input, local_src)
             video_input = local_src
+            copied_to_scratch = True
             print(f"✅ Đã nạp thành công video vào Local SSD: {local_src}")
 
     # LUÔN XUẤT RA ĐỊNH DẠNG .MKV ĐỂ BẢO TỒN NGUYÊN VẸN TOÀN BỘ PHỤ ĐỀ MỀM (.ASS) VÀ FONT ĐÍNH KÈM!
@@ -714,8 +700,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
         half_frames = expected_frames // 2
         segments = [
-            (0, half_frames, 0, os.path.join(output_dir, "_part_gpu0.mkv")),
-            (half_frames, expected_frames - half_frames, 1, os.path.join(output_dir, "_part_gpu1.mkv"))
+            (0, half_frames, 0, os.path.join(scratch_dir, "_part_gpu0.mkv")),
+            (half_frames, expected_frames - half_frames, 1, os.path.join(scratch_dir, "_part_gpu1.mkv"))
         ]
 
         for _, _, _, chunk_p in segments:
@@ -733,7 +719,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
         for s_frame, n_frames, g_id, chunk_path in segments:
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, return_dict, progress_queue, model_mode)
+                args=(video_input, s_frame, n_frames, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, chunk_path, return_dict, progress_queue)
             )
             p.start()
             processes.append(p)
@@ -780,16 +766,17 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
         if len(chunk_files) >= 1:
             print("📦 Đang nối 2 nửa video và sao chép 100% Audio, Subtitle (.ass), Fonts...", flush=True)
-            concat_txt = os.path.join(output_dir, f"_concat_{int(time.time())}.txt")
+            concat_txt = os.path.join(scratch_dir, f"_concat_{int(time.time())}.txt")
             with open(concat_txt, "w") as f:
                 for c_path in chunk_files:
                     f.write(f"file '{os.path.abspath(c_path)}'\n")
 
-            temp_concat = os.path.join(output_dir, f"_temp_concat_{int(time.time())}.mkv")
+            temp_concat = os.path.join(scratch_dir, f"_temp_concat_{int(time.time())}.mkv")
             concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_txt, '-c', 'copy', temp_concat]
             subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # BẢO TỒN 100% METADATA (VIDEO 4K + AUDIO GỐC + PHỤ ĐỀ MỀM + ATTACHMENT FONTS)
+            # BẢO TỒN 100% METADATA (VIDEO 4K + AUDIO GỐC + PHỤ ĐỀ MỀM + ATTACHMENT FONTS + CHAPTERS)
+            temp_final_dual = os.path.join(scratch_dir, f"_final_dual_{os.path.basename(video_output)}")
             mux_cmd = [
                 'ffmpeg', '-y',
                 '-i', temp_concat,
@@ -799,7 +786,9 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 '-map', '1:a?',
                 '-map', '1:s?',
                 '-map', '1:t?',
-                video_output
+                '-map_metadata', '1',
+                '-map_chapters', '1',
+                temp_final_dual
             ]
             subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -808,7 +797,11 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                     try: os.remove(f_clean)
                     except Exception: pass
 
-            if os.path.exists(video_output) and os.path.getsize(video_output) > 1000:
+            if os.path.exists(temp_final_dual) and os.path.getsize(temp_final_dual) > 1000:
+                shutil.move(temp_final_dual, video_output)
+                if copied_to_scratch and os.path.exists(video_input):
+                    try: os.remove(video_input)
+                    except Exception: pass
                 print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
                 if progress_callback:
                     try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")
@@ -816,8 +809,9 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 return video_output
 
     # LUỒNG GPU ĐƠN (KHI CHỈ CÓ 1 GPU HOẶC CHẠY KIỂM THỬ)
-    model, is_pro = load_realcugan_model(model_key, weights_path, device, mode=model_mode)
-    batch_size = 2 if (model_mode == "se" or src_h <= 720) else 1
+    model, is_pro = load_realcugan_model(model_key, weights_path, device)
+    has_large_vram = (device.type == 'cuda' and torch.cuda.get_device_properties(device).total_memory > 10 * 1024**3)
+    batch_size = 2 if (has_large_vram and src_h <= 1080) else 1
     queue_size = 8
 
     ffmpeg_read_cmd = [
@@ -968,7 +962,7 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
 
     temp_final_mkv = os.path.join(scratch_dir, f"_final_{os.path.basename(video_output)}")
     if os.path.exists(temp_video_only) and os.path.getsize(temp_video_only) > 1000:
-        print("🔊 Ghép 100% Audio gốc, Subtitle (.ass) và Fonts vào MKV...", flush=True)
+        print("🔊 Ghép 100% Audio gốc, Subtitle (.ass), Fonts và Chapters vào MKV...", flush=True)
         mux_cmd = [
             'ffmpeg', '-y',
             '-i', temp_video_only,
@@ -978,6 +972,8 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             '-map', '1:a?',
             '-map', '1:s?',
             '-map', '1:t?',
+            '-map_metadata', '1',
+            '-map_chapters', '1',
             temp_final_mkv
         ]
         subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -989,6 +985,9 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
             shutil.move(temp_final_mkv, video_output)
 
     if os.path.exists(video_output) and os.path.getsize(video_output) > 1000:
+        if copied_to_scratch and os.path.exists(video_input):
+            try: os.remove(video_input)
+            except Exception: pass
         print(f"\n✨ KẾT THÚC HOÀN HẢO! Tập phim 4K nằm tại: {video_output}", flush=True)
         if progress_callback:
             try: progress_callback(1.0, desc="✨ Hoàn tất nâng cấp video 4K!")

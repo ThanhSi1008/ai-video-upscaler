@@ -38,10 +38,9 @@ else:
     device_badge = f"💻 CPU Software Mode | MÃ HÓA: {encoder_desc}"
 
 MODEL_MAP = {
-    "⚡ Real-CUGAN 2x SE (Khuyên dùng Colab - Siêu tốc ~7–9 FPS, ~60 phút/tập)": "cugan_conservative_se",
-    "👑 Real-CUGAN 2x Pro (Chất lượng tối đa - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_conservative_pro",
-    "Real-CUGAN 2x No-Denoise SE (Siêu tốc - Tối ưu cho Blu-ray Remux)": "cugan_no_denoise_se",
-    "Real-CUGAN 2x Denoise3x SE (Siêu tốc - Khử nhiễu cho Anime cũ/nhiễu)": "cugan_denoise3x_se"
+    "⚡ Real-CUGAN 2x Conservative (Cân bằng sắc nét & sạch nhiễu - Khuyên dùng)": "cugan_conservative",
+    "🎬 Real-CUGAN 2x No-Denoise (Giữ nguyên hạt phim - Tối ưu cho Blu-ray Remux)": "cugan_no_denoise",
+    "✨ Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng)": "cugan_denoise3x"
 }
 
 CUSTOM_CSS = """
@@ -135,7 +134,7 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
     else:
         raise gr.Error("❌ Vui lòng điền tên file trong thư mục /content/drive/MyDrive/Resources/ HOẶC dán link Google Drive!")
 
-    model_name = MODEL_MAP.get(model_choice, "cugan_conservative_se")
+    model_name = MODEL_MAP.get(model_choice, "cugan_conservative")
     progress_queue = Queue()
 
     def progress_cb(pct, desc=""):
@@ -198,7 +197,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
-            2. **Mô Hình AI**: Giữ nguyên mặc định **Bản SE Siêu Tốc (~7–9 FPS)** để hoàn tất tập phim 24 phút chỉ trong ~60 phút, không sợ bị ngắt session Colab Free.
+            2. **Mô Hình AI**: Chọn **Conservative** (mặc định cho Web-DL/SubsPlease) hoặc **No-Denoise** cho Blu-ray Remux.
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
 
@@ -236,12 +235,12 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
                 with gr.Group(elem_classes=["panel-box"]):
                     model_dropdown = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
-                        value="⚡ Real-CUGAN 2x SE (Khuyên dùng Colab - Siêu tốc ~7–9 FPS, ~60 phút/tập)",
-                        label="🤖 Mô Hình AI (Real-CUGAN 2x UHD)",
-                        info="⚡ Bản SE: Tăng tốc gấp 5 lần (~7-9 FPS), hoàn tất cả tập 24 phút trong ~60 phút (không bao giờ sợ tràn giới hạn Colab Free)!"
+                        value="⚡ Real-CUGAN 2x Conservative (Cân bằng sắc nét & sạch nhiễu - Khuyên dùng)",
+                        label="🤖 Mô Hình AI (Real-CUGAN Native 2x UHD)",
+                        info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ tối ưu và giữ nguyên 100% chi tiết gốc."
                     )
             with gr.Column(scale=5):
-                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Real-CUGAN Pro Native 2x)", variant="primary", size="lg")
+                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Real-CUGAN Native 2x UHD)", variant="primary", size="lg")
                 download_file = gr.File(
                     label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
                     visible=False
