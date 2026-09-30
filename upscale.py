@@ -276,16 +276,21 @@ def get_hevc_encoder_flags(device_type):
             pass
 
     if device_type == 'cuda':
-        return [
-            '-c:v', 'hevc_nvenc',
-            '-preset', 'p7',
-            '-tune', 'hq',
-            '-cq', '17',
-            '-spatial-aq', '1',
-            '-temporal-aq', '1',
-            '-pix_fmt', 'yuv420p10le',
-            '-profile:v', 'main10'
-        ], "hevc_nvenc 10-bit (NVIDIA Hardware)"
+        try:
+            res = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if 'hevc_nvenc' in res.stdout:
+                return [
+                    '-c:v', 'hevc_nvenc',
+                    '-preset', 'p7',
+                    '-tune', 'hq',
+                    '-cq', '17',
+                    '-spatial-aq', '1',
+                    '-temporal-aq', '1',
+                    '-pix_fmt', 'yuv420p10le',
+                    '-profile:v', 'main10'
+                ], "hevc_nvenc 10-bit (NVIDIA Hardware)"
+        except Exception:
+            pass
 
     return [
         '-c:v', 'libx265',
