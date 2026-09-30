@@ -281,23 +281,22 @@ def get_hevc_encoder_flags(device_type):
             if 'hevc_nvenc' in res.stdout:
                 return [
                     '-c:v', 'hevc_nvenc',
-                    '-preset', 'p7',
+                    '-preset', 'p4',
                     '-tune', 'hq',
-                    '-cq', '17',
+                    '-cq', '18',
                     '-spatial-aq', '1',
-                    '-temporal-aq', '1',
                     '-pix_fmt', 'yuv420p10le',
                     '-profile:v', 'main10'
-                ], "hevc_nvenc 10-bit (NVIDIA Hardware)"
+                ], "hevc_nvenc 10-bit (NVIDIA Hardware Fast)"
         except Exception:
             pass
 
     return [
         '-c:v', 'libx265',
         '-crf', '18',
-        '-preset', 'medium',
+        '-preset', 'veryfast',
         '-pix_fmt', 'yuv420p10le'
-    ], "libx265 10-bit (CPU Software)"
+    ], "libx265 10-bit (CPU Software - Fast)"
 
 def load_realcugan_model(model_key, weights_path, device):
     model = UpCunet2x(in_channels=3, out_channels=3)
@@ -526,10 +525,9 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='area')
 
-                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
+                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
             output_np = output.cpu().numpy()
-            output_np = np.transpose(output_np, (0, 2, 3, 1))
 
             for i in range(current_b):
                 output_queue.put(output_np[i].tobytes())
@@ -537,10 +535,6 @@ def _gpu_segment_worker(video_input, start_frame, total_frames_to_process, targe
             processed_cnt += current_b
             try: progress_queue.put(current_b)
             except Exception: pass
-
-            if processed_cnt % 30 == 0:
-                gc.collect()
-                torch.cuda.empty_cache()
 
         output_queue.put(None)
         writer_thread.join(timeout=10)
@@ -584,6 +578,9 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
     device, device_type, device_desc = get_best_device()
     num_cuda_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     encoder_flags, encoder_desc = get_hevc_encoder_flags(device_type)
+
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
 
     print(f"🚀 Thiết bị: {device_desc} | Mô hình: {WEIGHTS_INFO[model_key]['desc']} | Mã hóa: {encoder_desc}")
 
@@ -864,21 +861,14 @@ def upscale_video(video_input, output_dir=None, model_name="cugan_conservative",
                 if output.shape[2] != target_h or output.shape[3] != target_w:
                     output = F.interpolate(output, size=(target_h, target_w), mode='area')
 
-                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8)
+                output = output.clamp(0, 1).mul(255.0).round().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
 
             output_np = output.cpu().numpy()
-            output_np = np.transpose(output_np, (0, 2, 3, 1))
             
             for i in range(current_b):
                 output_queue.put(output_np[i].tobytes())
             
             idx += current_b
-            if idx % 30 == 0:
-                gc.collect()
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                elif device.type == 'mps':
-                    torch.mps.empty_cache()
 
             now = time.time()
             if (now - last_print_time) >= 0.5 or (expected_frames and idx >= expected_frames):
