@@ -310,10 +310,6 @@ def load_realcugan_model(model_key, weights_path, device):
 
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
-        try:
-            model = torch.compile(model, mode="default")
-        except Exception:
-            pass
     elif device.type == 'mps':
         model = model.half()
 
