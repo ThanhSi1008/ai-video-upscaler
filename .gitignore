@@ -45,6 +45,8 @@ sample_preview.*
 
 # Model weights downloaded automatically
 *.pth
+!2x_AnimeJaNai_HD_V3_Compact.pth
+!2x_AnimeJaNai_HD_V3Sharp1_Compact.pth
 
 # OS & IDE files
 .DS_Store

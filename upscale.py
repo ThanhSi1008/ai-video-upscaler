@@ -88,7 +88,7 @@ WEIGHTS_INFO = {
         "arch": "srvggnet_compact",
         "scale": 2,
         "desc": "AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)",
-        "zip_url": "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3_Compact.pth"
     },
     # NGUỒN A: BDRip 10-bit (Hi10P / Main 10) (Đã xử lý deband/dither 16-bit, viền nét đanh, không color banding)
@@ -97,7 +97,7 @@ WEIGHTS_INFO = {
         "arch": "srvggnet_compact",
         "scale": 2,
         "desc": "AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)",
-        "zip_url": "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth"
     }
 }
@@ -119,7 +119,16 @@ def ensure_model_weights(model_key, progress_callback=None):
     if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
         return weights_path
 
-    # Kiểm tra xem file có ở thư mục hiện tại không
+    # Kiểm tra xem file có ở thư mục con 2x_AnimeJaNai_HD_V3_ModelsOnly không
+    sub_path = os.path.join(script_dir, "2x_AnimeJaNai_HD_V3_ModelsOnly", info["file"])
+    if os.path.exists(sub_path) and os.path.getsize(sub_path) > 100000:
+        try:
+            shutil.copy2(sub_path, weights_path)
+            return weights_path
+        except Exception:
+            return sub_path
+
+    # Kiểm tra xem file có ở thư mục làm việc hiện tại không
     if os.path.exists(info["file"]) and os.path.getsize(info["file"]) > 100000:
         return info["file"]
 
@@ -133,19 +142,38 @@ def ensure_model_weights(model_key, progress_callback=None):
         zip_path = os.path.join(script_dir, "2x_AnimeJaNai_HD_V3_ModelsOnly.zip")
         if not os.path.exists(zip_path) or os.path.getsize(zip_path) < 100000:
             print(f"🔗 Đang tải kho mô hình ZIP từ: {zip_url}")
+            download_ok = False
+            # Thử bằng curl trước vì hỗ trợ redirect và SSL tốt nhất trên Colab/Linux
             try:
-                req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, 'wb') as f:
-                    shutil.copyfileobj(resp, f)
-            except Exception as e:
-                print(f"⚠️ Tải qua urllib thất bại ({e}), chuyển sang curl...")
-                curl_cmd = ['curl', '-L', '-o', zip_path, zip_url]
+                curl_cmd = ['curl', '-L', '-k', '--retry', '3', '-o', zip_path, zip_url]
                 subprocess.run(curl_cmd, check=True)
+                if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100000:
+                    download_ok = True
+            except Exception as e_curl:
+                print(f"⚠️ Tải qua curl thất bại ({e_curl}), thử lại bằng urllib...")
+
+            if not download_ok:
+                try:
+                    req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, 'wb') as f:
+                        shutil.copyfileobj(resp, f)
+                    if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100000:
+                        download_ok = True
+                except Exception as e_url:
+                    print(f"⚠️ Urllib cũng thất bại: {e_url}")
 
         if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100000:
             print(f"📦 Đang giải nén bộ trọng số AnimeJaNai V3...")
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(script_dir)
+                for member in zf.namelist():
+                    filename = os.path.basename(member)
+                    if not filename:
+                        continue
+                    # Trích xuất trực tiếp từng file ra thẳng script_dir (tránh bị lồng thư mục)
+                    dest_file = os.path.join(script_dir, filename)
+                    with zf.open(member) as source, open(dest_file, "wb") as target:
+                        shutil.copyfileobj(source, target)
+
             if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
                 print(f"✅ Đã tải thành công: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
                 return weights_path
