@@ -196,6 +196,18 @@ def load_model(model_key, weights_path, device):
     elif device.type == 'mps':
         model = model.half()
     model = model.to(device)
+
+    # Tối ưu hóa PyTorch JIT Graph cho GPU để triệt tiêu overhead CPU kernel launch
+    if device.type == 'cuda':
+        try:
+            dummy_in = torch.zeros(2, 3, 1080, 1920, dtype=torch.float16, device=device).to(memory_format=torch.channels_last)
+            traced = torch.jit.trace(model, dummy_in)
+            traced = torch.jit.optimize_for_inference(traced)
+            model = traced
+            print("⚡ Đã kích hoạt PyTorch JIT Graph & Tensor Fusion siêu tốc!")
+        except Exception as e_jit:
+            print(f"ℹ️ Sử dụng mô hình PyTorch chuẩn ({e_jit})")
+
     return model, arch, is_pro
 
 # Alias tương thích ngược
@@ -436,7 +448,8 @@ def render_segment(
     process_read = subprocess.Popen(ffmpeg_read_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32*1024*1024)
 
     ffmpeg_write_cmd = [
-        'ffmpeg', '-y', '-threads', '0',
+        'ffmpeg', '-y',
+        '-sws_flags', 'fast_bilinear',
         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{target_w}x{target_h}', '-r', str(fps),
         '-i', '-',
         '-f', 'matroska',
@@ -500,11 +513,19 @@ def render_segment(
 
     try:
         processed_cnt = 0
+        profile_cnt = 0
+        t_wait_read = 0.0
+        t_gpu_infer = 0.0
+        t_post_pcie = 0.0
+        t_wait_write = 0.0
+
         while processed_cnt < n_frames:
+            t0 = time.perf_counter()
             chunk = input_queue.get()
             if chunk is None: break
             current_b = len(chunk) // frame_size
             if current_b == 0: break
+            t1 = time.perf_counter()
 
             img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
             img_t = torch.from_numpy(img_np_batch)
@@ -535,8 +556,14 @@ def render_segment(
                 else:
                     img_t.mul_(1.0 / 255.0)
 
+            t2 = time.perf_counter()
             with torch.inference_mode():
                 raw_out = model(img_t)
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+            t3 = time.perf_counter()
+
+            with torch.inference_mode():
                 if arch == "srvggnet_compact":
                     raw_out.clamp_(0.0, 1.0)
                 elif is_pro:
@@ -547,9 +574,28 @@ def render_segment(
                 if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
                     raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
 
-                output = raw_out.mul_(255.0).round_().to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                output = raw_out.mul_(255.0).clamp_(0.0, 255.0).to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                out_bytes = memoryview(output.cpu().numpy()).cast('B')
+            t4 = time.perf_counter()
 
-            output_queue.put(memoryview(output.cpu().numpy()).cast('B'))
+            output_queue.put(out_bytes)
+            t5 = time.perf_counter()
+
+            t_wait_read += (t1 - t0)
+            t_gpu_infer += (t3 - t2)
+            t_post_pcie += (t4 - t3)
+            t_wait_write += (t5 - t4)
+            profile_cnt += current_b
+
+            if profile_cnt >= 20:
+                print(f"\n📊 [Profiler] GPU Infer: {t_gpu_infer/profile_cnt*1000:.1f}ms/f | "
+                      f"Post+PCIe: {t_post_pcie/profile_cnt*1000:.1f}ms | "
+                      f"Đọc: {t_wait_read/profile_cnt*1000:.1f}ms | "
+                      f"Ghi: {t_wait_write/profile_cnt*1000:.1f}ms | "
+                      f"Buffers: in={input_queue.qsize()}/{queue_size}, out={output_queue.qsize()}/4", flush=True)
+                profile_cnt = 0
+                t_wait_read = t_gpu_infer = t_post_pcie = t_wait_write = 0.0
+
             processed_cnt += current_b
             if progress_queue:
                 try: progress_queue.put(current_b)
