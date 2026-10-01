@@ -154,11 +154,22 @@ CUSTOM_CSS = """
     border-color: #38bdf8;
     transform: translateY(-1px);
 }
-.comp-btn.active-mode {
-    background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+.comp-btn.fs-hero-btn {
+    background: linear-gradient(135deg, #0284c7 0%, #3b82f6 50%, #6366f1 100%) !important;
     color: #ffffff !important;
-    border-color: #38bdf8 !important;
-    box-shadow: 0 0 14px rgba(56, 189, 248, 0.5) !important;
+    border: 1px solid #38bdf8 !important;
+    font-weight: 700 !important;
+    font-size: 0.92rem !important;
+    padding: 8px 18px !important;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.35) !important;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.comp-btn.fs-hero-btn:hover {
+    background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 50%, #4f46e5 100%) !important;
+    box-shadow: 0 0 22px rgba(56, 189, 248, 0.6) !important;
+    transform: translateY(-1px);
 }
 .comp-btn.accent-btn {
     background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
@@ -203,10 +214,187 @@ CUSTOM_CSS = """
     padding-top: 4px;
 }
 #comparison_row {
+    position: relative;
     transition: all 0.3s ease;
 }
 #video_orig, #video_upscaled {
     transition: all 0.25s ease-in-out;
+}
+
+/* CHẾ ĐỘ TOÀN MÀN HÌNH (FULLSCREEN COMPARISON THEATER) */
+#comparison_row:fullscreen,
+#comparison_row.is-fullscreen {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    background: #000000 !important;
+    z-index: 999999 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+}
+
+#comparison_row:fullscreen #video_orig,
+#comparison_row:fullscreen #video_upscaled,
+#comparison_row.is-fullscreen #video_orig,
+#comparison_row.is-fullscreen #video_upscaled {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    background: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+#comparison_row:fullscreen .wrap,
+#comparison_row:fullscreen .video-container,
+#comparison_row.is-fullscreen .wrap,
+#comparison_row.is-fullscreen .video-container {
+    width: 100% !important;
+    height: 100% !important;
+    max-height: 100vh !important;
+    background: #000000 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border: none !important;
+}
+
+#comparison_row:fullscreen video,
+#comparison_row.is-fullscreen video {
+    width: 100vw !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    max-width: 100vw !important;
+    object-fit: contain !important;
+    background: #000000 !important;
+}
+
+/* HEADS-UP DISPLAY (HUD) KHI CHUYỂN TẬP TRONG FULL SCREEN */
+.fs-hud {
+    display: none;
+    position: absolute;
+    top: 36px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-25px);
+    background: rgba(15, 23, 42, 0.92);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(56, 189, 248, 0.6);
+    border-radius: 9999px;
+    padding: 10px 24px;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 12px 35px rgba(0, 0, 0, 0.8), 0 0 24px rgba(56, 189, 248, 0.35);
+    z-index: 1000000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.fs-hud.visible {
+    opacity: 1 !important;
+    transform: translateX(-50%) translateY(0) !important;
+}
+.fs-hud-icon {
+    font-size: 1.6rem;
+    line-height: 1;
+}
+.fs-hud-text {
+    display: flex;
+    flex-direction: column;
+}
+.fs-hud-title {
+    color: #f8fafc;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+}
+.fs-hud-sub {
+    color: #94a3b8;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+
+/* THANH ĐIỀU KHIỂN NỔI KHI RÊ CHUỘT TRONG FULL SCREEN */
+.fs-controls {
+    display: none;
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: rgba(15, 23, 42, 0.9);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(51, 65, 85, 0.8);
+    border-radius: 14px;
+    padding: 8px 14px;
+    gap: 10px;
+    align-items: center;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8);
+    z-index: 1000000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.fs-controls.visible {
+    opacity: 1 !important;
+    transform: translateX(-50%) translateY(0) !important;
+    pointer-events: auto !important;
+}
+.fs-ctrl-btn {
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #e2e8f0;
+    font-size: 0.88rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+.fs-ctrl-btn:hover {
+    background: #334155;
+    color: #ffffff;
+    border-color: #38bdf8;
+    transform: translateY(-1px);
+}
+.fs-ctrl-play {
+    background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
+    border-color: #38bdf8;
+    color: #ffffff;
+}
+.fs-ctrl-exit {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: #ef4444;
+    color: #fca5a5;
+}
+.fs-ctrl-exit:hover {
+    background: #ef4444;
+    color: #ffffff;
+}
+
+#comparison_row:fullscreen .fs-hud,
+#comparison_row:fullscreen .fs-controls,
+#comparison_row.is-fullscreen .fs-hud,
+#comparison_row.is-fullscreen .fs-controls {
+    display: flex !important;
 }
 """
 
@@ -214,7 +402,7 @@ COMPARISON_TOOLBAR_HTML = """
 <div class="comp-toolbar-container">
   <div class="comp-header">
     <div class="comp-title">
-      <span>🔍</span> <b>BỘ ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN HAI VIDEO</b>
+      <span>🔍</span> <b>BỘ SO SÁNH & ĐỒNG BỘ THỜI GIAN HAI TẬP PHIM</b>
     </div>
     <div class="sync-badge">
       <span class="sync-dot"></span> <span id="sync-status-text">Đồng Bộ Khóa Lockstep: SẴN SÀNG</span>
@@ -222,18 +410,10 @@ COMPARISON_TOOLBAR_HTML = """
   </div>
 
   <div class="comp-btn-row">
-    <!-- Nhóm chọn chế độ hiển thị -->
-    <div class="btn-group">
-      <button type="button" id="btn-show-orig" class="comp-btn" onclick="window.switchCompView('orig')">
-        ⬅️ Video Gốc (Phím ←)
-      </button>
-      <button type="button" id="btn-show-both" class="comp-btn active-mode" onclick="window.switchCompView('both')">
-        👥 Xem Song Song (Phím B)
-      </button>
-      <button type="button" id="btn-show-upscaled" class="comp-btn" onclick="window.switchCompView('upscaled')">
-        ➡️ Video 4K (Phím →)
-      </button>
-    </div>
+    <!-- NÚT BẬT TOÀN MÀN HÌNH SO SÁNH (TẬP TRUNG CHÍNH) -->
+    <button type="button" id="btn-enter-fs" class="comp-btn fs-hero-btn" onclick="window.enterComparisonFullscreen()">
+      ⛶ BẬT TOÀN MÀN HÌNH SO SÁNH (Nhấn ← / → để chuyển tập)
+    </button>
 
     <!-- Nhóm điều khiển đồng bộ -->
     <div class="btn-group">
@@ -241,10 +421,10 @@ COMPARISON_TOOLBAR_HTML = """
         ⏯️ Phát / Tạm Dừng Cả Hai (Space)
       </button>
       <button type="button" class="comp-btn" onclick="window.seekSyncBoth(-5)">
-        ⏪ Lùi 5s
+        ⏪ Tua Lùi 5s
       </button>
       <button type="button" class="comp-btn" onclick="window.seekSyncBoth(5)">
-        ⏩ Tới 5s
+        ⏩ Tua Tới 5s
       </button>
       <button type="button" id="btn-toggle-audio" class="comp-btn" onclick="window.toggleAudioSource()">
         🔊 Âm thanh: Video 4K (Bấm để đổi)
@@ -253,7 +433,7 @@ COMPARISON_TOOLBAR_HTML = """
   </div>
   
   <div class="comp-tip">
-    💡 <b>Mẹo So Sánh Cực Chuẩn:</b> Ấn phím <b>← (Mũi tên trái)</b> để xem tức thì Video Gốc, phím <b>→ (Mũi tên phải)</b> để xem Video 4K Upscale tại đúng khung hình đó. Hai video luôn chiếu cùng lúc ở mili-giây chuẩn xác!
+    💡 <b>Trải Nghiệm Toàn Màn Hình:</b> Bấm <b>"⛶ BẬT TOÀN MÀN HÌNH SO SÁNH"</b>. Khi đang xem full screen, chỉ cần ấn phím <b>← (Mũi tên trái)</b> hoặc <b>→ (Mũi tên phải)</b> để chuyển đổi tức thì giữa Video Gốc (1080p) và Video 4K UHD như chuyển tập phim mới, giữ nguyên 100% thời gian đang chiếu!
   </div>
 </div>
 """
@@ -261,7 +441,7 @@ COMPARISON_TOOLBAR_HTML = """
 HEAD_SCRIPTS = """
 <script>
 (function() {
-  window.currentCompMode = 'both';
+  window.fsActiveEpisode = 'upscaled';
   window.activeAudio = 'upscaled';
 
   function getVideos() {
@@ -270,57 +450,195 @@ HEAD_SCRIPTS = """
     return { v1, v2 };
   }
 
-  window.switchCompView = function(mode) {
-    window.currentCompMode = mode;
+  function isFullscreenActive() {
+    return !!(
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement
+    );
+  }
+
+  let hudTimer = null;
+  window.showFsHud = function(icon, title, sub) {
+    window.ensureFsElements();
+    const hud = document.getElementById('fs-hud');
+    const hudIcon = document.getElementById('fs-hud-icon');
+    const hudTitle = document.getElementById('fs-hud-title');
+    const hudSub = document.getElementById('fs-hud-sub');
+    if (!hud) return;
+
+    if (hudIcon) hudIcon.innerText = icon;
+    if (hudTitle) hudTitle.innerText = title;
+    if (hudSub) hudSub.innerText = sub;
+
+    hud.classList.add('visible');
+    clearTimeout(hudTimer);
+    hudTimer = setTimeout(() => {
+      hud.classList.remove('visible');
+    }, 2400);
+  };
+
+  let fsHideTimer = null;
+  function onMouseMoveFS() {
+    if (!isFullscreenActive()) return;
+    window.ensureFsElements();
+    const ctrl = document.getElementById('fs-controls');
+    if (ctrl) {
+      ctrl.classList.add('visible');
+      clearTimeout(fsHideTimer);
+      fsHideTimer = setTimeout(() => {
+        ctrl.classList.remove('visible');
+      }, 3000);
+    }
+  }
+
+  window.ensureFsElements = function() {
+    const compRow = document.getElementById('comparison_row');
+    if (!compRow) return;
+
+    if (!document.getElementById('fs-hud')) {
+      const hud = document.createElement('div');
+      hud.id = 'fs-hud';
+      hud.className = 'fs-hud';
+      hud.innerHTML = `
+        <span id="fs-hud-icon" class="fs-hud-icon">✨</span>
+        <div class="fs-hud-text">
+          <div id="fs-hud-title" class="fs-hud-title">TẬP 2: VIDEO 4K UHD</div>
+          <div id="fs-hud-sub" class="fs-hud-sub">Dùng phím ← / → để chuyển tập phim</div>
+        </div>
+      `;
+      compRow.appendChild(hud);
+    }
+
+    if (!document.getElementById('fs-controls')) {
+      const ctrl = document.createElement('div');
+      ctrl.id = 'fs-controls';
+      ctrl.className = 'fs-controls';
+      ctrl.innerHTML = `
+        <button type="button" class="fs-ctrl-btn" onclick="window.switchEpisode('orig')">
+          ⏮ Tập Video Gốc (Phím ←)
+        </button>
+        <button type="button" class="fs-ctrl-btn fs-ctrl-play" onclick="window.toggleSyncPlay()">
+          ⏯️ Phát / Tạm Dừng (Space)
+        </button>
+        <button type="button" class="fs-ctrl-btn" onclick="window.switchEpisode('upscaled')">
+          Tập Video 4K (Phím →) ⏭
+        </button>
+        <button type="button" class="fs-ctrl-btn" onclick="window.toggleAudioSource()">
+          🔊 Đổi Âm Thanh
+        </button>
+        <button type="button" class="fs-ctrl-btn fs-ctrl-exit" onclick="window.exitComparisonFullscreen()">
+          ✕ Thoát Toàn Màn Hình (Esc)
+        </button>
+      `;
+      compRow.appendChild(ctrl);
+      compRow.addEventListener('mousemove', onMouseMoveFS);
+    }
+  };
+
+  window.enterComparisonFullscreen = function() {
+    const compRow = document.getElementById('comparison_row');
+    if (!compRow) return;
+
+    window.ensureFsElements();
+
+    if (compRow.requestFullscreen) {
+      compRow.requestFullscreen().catch(()=>{});
+    } else if (compRow.webkitRequestFullscreen) {
+      compRow.webkitRequestFullscreen();
+    } else if (compRow.mozRequestFullScreen) {
+      compRow.mozRequestFullScreen();
+    }
+  };
+
+  window.exitComparisonFullscreen = function() {
+    if (document.exitFullscreen) {
+      document.exitFullscreen().catch(()=>{});
+    } else if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    } else if (document.mozCancelFullScreen) {
+      document.mozCancelFullScreen();
+    }
+  };
+
+  window.switchEpisode = function(target) {
+    const { v1, v2 } = getVideos();
+    if (!v1 && !v2) return;
+
+    const curTime = (window.fsActiveEpisode === 'orig' ? (v1 ? v1.currentTime : 0) : (v2 ? v2.currentTime : 0));
+    const isPlaying = (window.fsActiveEpisode === 'orig' ? (v1 && !v1.paused) : (v2 && !v2.paused));
+
+    window.fsActiveEpisode = target;
+
+    const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsElem === v1 && target === 'upscaled' && v2) {
+      v2.currentTime = curTime;
+      if (isPlaying) v2.play().catch(()=>{});
+      v2.requestFullscreen().catch(()=>{});
+      return;
+    } else if (fsElem === v2 && target === 'orig' && v1) {
+      v1.currentTime = curTime;
+      if (isPlaying) v1.play().catch(()=>{});
+      v1.requestFullscreen().catch(()=>{});
+      return;
+    }
+
     const cOrig = document.getElementById('video_orig');
     const cUp = document.getElementById('video_upscaled');
-    if (!cOrig || !cUp) return;
 
-    const btnOrig = document.getElementById('btn-show-orig');
-    const btnBoth = document.getElementById('btn-show-both');
-    const btnUp = document.getElementById('btn-show-upscaled');
-
-    [btnOrig, btnBoth, btnUp].forEach(b => {
-      if (b) b.classList.remove('active-mode');
-    });
-
-    const { v1, v2 } = getVideos();
-
-    if (mode === 'orig') {
-      cOrig.style.display = 'block';
-      cOrig.style.width = '100%';
-      cOrig.style.flex = '1 1 100%';
-      cOrig.style.maxWidth = '100%';
-      cUp.style.display = 'none';
-      if (btnOrig) btnOrig.classList.add('active-mode');
-      if (v1 && v2) {
-        if (!v2.paused && v1.paused) v1.play().catch(()=>{});
-        v1.currentTime = v2.currentTime;
+    if (target === 'orig') {
+      if (v1) {
+        v1.currentTime = curTime;
+        if (isPlaying && v1.paused) v1.play().catch(()=>{});
+        if (!isPlaying && !v1.paused) v1.pause();
+        v1.muted = false;
       }
-    } else if (mode === 'upscaled') {
-      cOrig.style.display = 'none';
-      cUp.style.display = 'block';
-      cUp.style.width = '100%';
-      cUp.style.flex = '1 1 100%';
-      cUp.style.maxWidth = '100%';
-      if (btnUp) btnUp.classList.add('active-mode');
-      if (v1 && v2) {
-        if (!v1.paused && v2.paused) v2.play().catch(()=>{});
-        v2.currentTime = v1.currentTime;
+      if (v2) {
+        v2.currentTime = curTime;
+        v2.muted = true;
       }
-    } else { // both
-      cOrig.style.display = 'block';
-      cOrig.style.width = '50%';
-      cOrig.style.flex = '1 1 50%';
-      cOrig.style.maxWidth = '50%';
-      cUp.style.display = 'block';
-      cUp.style.width = '50%';
-      cUp.style.flex = '1 1 50%';
-      cUp.style.maxWidth = '50%';
-      if (btnBoth) btnBoth.classList.add('active-mode');
-      if (v1 && v2) {
-        v1.currentTime = v2.currentTime;
+
+      if (cOrig) {
+        cOrig.style.setProperty('display', 'flex', 'important');
+        cOrig.style.setProperty('opacity', '1', 'important');
+        cOrig.style.setProperty('z-index', '20', 'important');
+        cOrig.style.setProperty('pointer-events', 'auto', 'important');
       }
+      if (cUp) {
+        cUp.style.setProperty('display', 'none', 'important');
+        cUp.style.setProperty('opacity', '0', 'important');
+        cUp.style.setProperty('z-index', '10', 'important');
+        cUp.style.setProperty('pointer-events', 'none', 'important');
+      }
+
+      window.showFsHud('📺', 'TẬP 1: VIDEO GỐC (1080p)', 'Dùng phím → để chuyển sang Tập Video 4K UHD');
+    } else {
+      if (v2) {
+        v2.currentTime = curTime;
+        if (isPlaying && v2.paused) v2.play().catch(()=>{});
+        if (!isPlaying && !v2.paused) v2.pause();
+        v2.muted = false;
+      }
+      if (v1) {
+        v1.currentTime = curTime;
+        v1.muted = true;
+      }
+
+      if (cUp) {
+        cUp.style.setProperty('display', 'flex', 'important');
+        cUp.style.setProperty('opacity', '1', 'important');
+        cUp.style.setProperty('z-index', '20', 'important');
+        cUp.style.setProperty('pointer-events', 'auto', 'important');
+      }
+      if (cOrig) {
+        cOrig.style.setProperty('display', 'none', 'important');
+        cOrig.style.setProperty('opacity', '0', 'important');
+        cOrig.style.setProperty('z-index', '10', 'important');
+        cOrig.style.setProperty('pointer-events', 'none', 'important');
+      }
+
+      window.showFsHud('✨', 'TẬP 2: VIDEO 4K UHD (Native 2x)', 'Dùng phím ← để chuyển về Tập Video Gốc (1080p)');
     }
   };
 
@@ -354,33 +672,104 @@ HEAD_SCRIPTS = """
       if (v1) v1.muted = false;
       if (v2) v2.muted = true;
       if (btn) btn.innerText = '🔊 Âm thanh: Video Gốc';
+      if (isFullscreenActive()) window.showFsHud('🔊', 'ÂM THANH: VIDEO GỐC', '');
     } else {
       window.activeAudio = 'upscaled';
       if (v1) v1.muted = true;
       if (v2) v2.muted = false;
       if (btn) btn.innerText = '🔊 Âm thanh: Video 4K';
+      if (isFullscreenActive()) window.showFsHud('🔊', 'ÂM THANH: VIDEO 4K UHD', '');
     }
   };
 
+  /* XỬ LÝ PHÍM BẤM: PHÍM ← VÀ → CHUYỂN TẬP KHI Ở FULL SCREEN */
   window.addEventListener('keydown', function(e) {
     const tag = document.activeElement ? document.activeElement.tagName : '';
     if (['INPUT', 'TEXTAREA'].includes(tag)) return;
 
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      window.switchCompView('orig');
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      window.switchCompView('upscaled');
-    } else if (e.key === 'b' || e.key === 'B' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      window.switchCompView('both');
-    } else if (e.code === 'Space') {
-      e.preventDefault();
-      window.toggleSyncPlay();
+    const isFS = isFullscreenActive();
+
+    if (isFS) {
+      // 1. KHI Ở CHẾ ĐỘ FULL SCREEN: Phím ← và → chuyển đổi giữa 2 tập phim
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        e.stopPropagation();
+        window.switchEpisode('orig');
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        e.stopPropagation();
+        window.switchEpisode('upscaled');
+      } else if (e.code === 'Space') {
+        e.preventDefault();
+        e.stopPropagation();
+        window.toggleSyncPlay();
+      }
+    } else {
+      // 2. KHI KHÔNG Ở FULL SCREEN: Phím mũi tên dùng để tua 5s giữ 2 video đồng bộ
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        window.seekSyncBoth(-5);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        window.seekSyncBoth(5);
+      } else if (e.code === 'Space') {
+        const compRow = document.getElementById('comparison_row');
+        if (compRow && (compRow.contains(document.activeElement) || document.activeElement === document.body)) {
+          e.preventDefault();
+          window.toggleSyncPlay();
+        }
+      }
     }
   });
 
+  function handleFsChange() {
+    const compRow = document.getElementById('comparison_row');
+    if (!compRow) return;
+
+    const isFS = isFullscreenActive();
+    const fsElem = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement;
+
+    if (isFS && (fsElem === compRow || compRow.contains(fsElem))) {
+      compRow.classList.add('is-fullscreen');
+      window.ensureFsElements();
+      window.switchEpisode(window.fsActiveEpisode || 'upscaled');
+      onMouseMoveFS();
+    } else if (!isFS) {
+      compRow.classList.remove('is-fullscreen');
+      const cOrig = document.getElementById('video_orig');
+      const cUp = document.getElementById('video_upscaled');
+      if (cOrig) {
+        cOrig.style.removeProperty('display');
+        cOrig.style.removeProperty('opacity');
+        cOrig.style.removeProperty('z-index');
+        cOrig.style.removeProperty('pointer-events');
+        cOrig.style.display = 'block';
+        cOrig.style.width = '50%';
+        cOrig.style.maxWidth = '50%';
+        cOrig.style.flex = '1 1 50%';
+      }
+      if (cUp) {
+        cUp.style.removeProperty('display');
+        cUp.style.removeProperty('opacity');
+        cUp.style.removeProperty('z-index');
+        cUp.style.removeProperty('pointer-events');
+        cUp.style.display = 'block';
+        cUp.style.width = '50%';
+        cUp.style.maxWidth = '50%';
+        cUp.style.flex = '1 1 50%';
+      }
+      const hud = document.getElementById('fs-hud');
+      if (hud) hud.classList.remove('visible');
+      const ctrl = document.getElementById('fs-controls');
+      if (ctrl) ctrl.classList.remove('visible');
+    }
+  }
+
+  document.addEventListener('fullscreenchange', handleFsChange);
+  document.addEventListener('webkitfullscreenchange', handleFsChange);
+  document.addEventListener('mozfullscreenchange', handleFsChange);
+
+  /* KHÓA ĐỒNG BỘ THỜI GIAN HAI VIDEO LIÊN TỤC (LOCKSTEP SYNC) */
   function attachTimeSync() {
     const { v1, v2 } = getVideos();
     if (!v1 || !v2) return;
