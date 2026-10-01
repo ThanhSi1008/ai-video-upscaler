@@ -245,7 +245,7 @@ def get_hevc_encoder_flags(device_type):
         try:
             res = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if 'hevc_nvenc' in res.stdout:
-                return [
+                test_flags = [
                     '-c:v', 'hevc_nvenc',
                     '-preset', 'p4',
                     '-tune', 'hq',
@@ -253,7 +253,31 @@ def get_hevc_encoder_flags(device_type):
                     '-spatial-aq', '1',
                     '-pix_fmt', 'yuv420p10le',
                     '-profile:v', 'main10'
-                ], "hevc_nvenc 10-bit (NVIDIA Hardware Fast)"
+                ]
+                test_cmd = [
+                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.04',
+                    *test_flags,
+                    '-f', 'null', '-'
+                ]
+                test_res = subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if test_res.returncode == 0:
+                    return test_flags, "hevc_nvenc 10-bit (NVIDIA Hardware Fast)"
+
+                # Fallback NVENC tinh gọn nếu tùy chọn nâng cao không được driver hỗ trợ
+                simple_flags = [
+                    '-c:v', 'hevc_nvenc',
+                    '-preset', 'p4',
+                    '-cq', '18',
+                    '-pix_fmt', 'yuv420p10le'
+                ]
+                test_cmd2 = [
+                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.04',
+                    *simple_flags,
+                    '-f', 'null', '-'
+                ]
+                test_res2 = subprocess.run(test_cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if test_res2.returncode == 0:
+                    return simple_flags, "hevc_nvenc 10-bit (NVIDIA Hardware Fast)"
         except Exception:
             pass
 
@@ -388,7 +412,7 @@ def render_segment(
     frame_size = src_w * src_h * 3
     queue_size = 8
     input_queue = Queue(maxsize=queue_size)
-    output_queue = Queue(maxsize=queue_size)
+    output_queue = Queue(maxsize=4)
 
     def reader_worker():
         try:
@@ -714,8 +738,19 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
         print(f"🔄 CHECKPOINT TỰ ĐỘNG: Đã tìm thấy {len(completed_segs)}/{total_segments} phân đoạn ({already_rendered_frames}/{expected_frames} frames) hoàn tất trên Google Drive!")
         print(f"⏩ Tự động bỏ qua các phân đoạn cũ và tiếp tục xử lý các phần còn lại...")
 
-    has_large_vram = (device.type == 'cuda' and torch.cuda.get_device_properties(device).total_memory > 10 * 1024**3)
-    batch_size = 2 if (has_large_vram and src_h <= 1080) else 1
+    if device.type == 'cuda':
+        total_mem = torch.cuda.get_device_properties(device).total_memory
+        # Tesla T4 (15GB), V100 (16/32GB), A100 (40/80GB), L4 (24GB) -> Batch 4
+        if total_mem >= 14 * 1024**3 and src_h <= 1080:
+            batch_size = 4
+        elif total_mem > 8 * 1024**3 and src_h <= 1080:
+            batch_size = 2
+        else:
+            batch_size = 1
+        print(f"⚡ Cấu hình Batch size: {batch_size} (VRAM khả dụng: {total_mem / (1024**3):.1f} GB)")
+    else:
+        batch_size = 1
+        print(f"⚡ Cấu hình Batch size: {batch_size}")
 
     todo_segments = [seg for seg in segments if seg[0] not in completed_segs]
     start_time = time.time()
