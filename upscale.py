@@ -226,12 +226,12 @@ WEIGHTS_INFO = {
         "zip_url": "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3_Compact.pth"
     },
-    # NGUỒN A: BDRip / BD Remux (Master đĩa Blu-ray sắc nét, bảo toàn grain)
+    # NGUỒN A: BDRip 10-bit (Hi10P / Main 10) (Đã xử lý deband/dither 16-bit, viền nét đanh, không color banding)
     "animejanai_v3_sharp": {
         "file": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth",
         "arch": "srvggnet_compact",
         "scale": 2,
-        "desc": "AnimeJaNai V3 Sharp (Khuyên dùng BDRip/BD Remux - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)",
+        "desc": "AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)",
         "zip_url": "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth"
     },
@@ -250,7 +250,7 @@ WEIGHTS_INFO = {
         "file": "up2x-latest-no-denoise.pth",
         "arch": "upcunet2x",
         "scale": 2,
-        "desc": "Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)",
+        "desc": "Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip 10-bit - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)",
         "urls": [
             "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-no-denoise.pth",
             "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-no-denoise.pth"
@@ -270,8 +270,8 @@ WEIGHTS_INFO = {
 
 def resolve_model_key(name):
     name_l = (name or "").lower()
-    # Nhận diện Nguồn A: BDRip / BD Remux
-    if any(k in name_l for k in ["bdrip", "bd_remux", "remux", "sharp", "nguồn a", "nguon a"]):
+    # Nhận diện Nguồn A: BDRip 10-bit (Hi10P / Main 10)
+    if any(k in name_l for k in ["bdrip", "10-bit", "10bit", "hi10p", "main10", "main 10", "sharp", "nguồn a", "nguon a"]):
         return "animejanai_v3_sharp"
     # Nhận diện Nguồn B: WEB-DL Gốc
     elif any(k in name_l for k in ["webdl", "web-dl", "web_dl", "web", "compact", "nguồn b", "nguon b", "subsplease", "erai"]):

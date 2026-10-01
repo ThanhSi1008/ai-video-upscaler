@@ -39,9 +39,9 @@ else:
 
 MODEL_MAP = {
     "⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)": "animejanai_v3_compact",
-    "⚡ NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip/BD Remux - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)": "animejanai_v3_sharp",
+    "⚡ NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)": "animejanai_v3_sharp",
     "👑 Real-CUGAN 2x Conservative (Chất lượng tối đa cho WEB-DL - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_conservative",
-    "👑 Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_no_denoise",
+    "👑 Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip 10-bit - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_no_denoise",
     "✨ Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng - Rất nặng ~1.6 FPS)": "cugan_denoise3x"
 }
 
@@ -202,7 +202,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
             2. **Mô Hình AI**:
                - **NGUỒN B: AnimeJaNai V3 Compact**: Khuyên dùng cho **WEB-DL Gốc** (SubsPlease, Erai-raws, Crunchyroll/Netflix). Tốc độ siêu tốc ~25–40 phút/tập, hoàn thành trong ngân sách 2 giờ.
-               - **NGUỒN A: AnimeJaNai V3 Sharp**: Khuyên dùng cho **BDRip / BD Remux**. Giữ nét đanh thép và bảo toàn film grain tự nhiên của bản master Blu-ray.
+               - **NGUỒN A: AnimeJaNai V3 Sharp**: Khuyên dùng cho **BDRip 10-bit (Hi10P / Main 10)**. Giữ nét đanh thép, tận dụng dải màu 10-bit đã deband sạch từ các nhóm encode uy tín (VCB-Studio, Beatrice-Raws...) để triệt tiêu hiện tượng banding.
                - **Real-CUGAN 2x (Conservative / No-Denoise / Denoise3x)**: Tùy chọn chất lượng tối đa cho phần cứng cao cấp (nặng ~1.6 FPS, ~5.5 tiếng/tập).
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
