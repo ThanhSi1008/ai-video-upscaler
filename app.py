@@ -335,28 +335,110 @@ CUSTOM_CSS = """
 .fs-controls {
     display: none;
     position: absolute;
-    bottom: 30px;
+    bottom: 24px;
     left: 50%;
     transform: translateX(-50%) translateY(20px);
-    background: rgba(15, 23, 42, 0.9);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(51, 65, 85, 0.8);
-    border-radius: 14px;
-    padding: 8px 14px;
+    width: 92%;
+    max-width: 1050px;
+    background: rgba(15, 23, 42, 0.94);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    border-radius: 16px;
+    padding: 12px 20px;
+    flex-direction: column;
     gap: 10px;
-    align-items: center;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9), 0 0 25px rgba(56, 189, 248, 0.2);
     z-index: 1000000;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.35s ease, transform 0.35s ease;
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .fs-controls.visible {
     opacity: 1 !important;
     transform: translateX(-50%) translateY(0) !important;
     pointer-events: auto !important;
 }
+
+/* THANH TUA TIMELINE */
+.fs-timeline-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+}
+.fs-time-text {
+    font-family: monospace;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #e2e8f0;
+    min-width: 52px;
+    text-align: center;
+}
+.fs-timeline-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    width: 100%;
+    height: 8px;
+    background: rgba(51, 65, 85, 0.8);
+    border-radius: 9999px;
+    outline: none;
+    cursor: pointer;
+    transition: height 0.15s ease;
+}
+.fs-timeline-slider:hover {
+    height: 10px;
+}
+.fs-timeline-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #38bdf8;
+    border: 2px solid #ffffff;
+    cursor: pointer;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.8);
+    transition: transform 0.15s ease, background 0.15s ease;
+}
+.fs-timeline-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.25);
+    background: #60a5fa;
+}
+.fs-timeline-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #38bdf8;
+    border: 2px solid #ffffff;
+    cursor: pointer;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.8);
+}
+
+/* HÀNG CÁC NÚT ĐIỀU KHIỂN */
+.fs-btn-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.fs-btn-group-left,
+.fs-btn-group-center,
+.fs-btn-group-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.fs-ep-btn.active-ep {
+    background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+    border-color: #38bdf8 !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 12px rgba(56, 189, 248, 0.5) !important;
+}
+
 .fs-ctrl-btn {
     background: #1e293b;
     border: 1px solid #475569;
@@ -493,6 +575,17 @@ HEAD_SCRIPTS = """
     }
   }
 
+  function formatTime(seconds) {
+    if (isNaN(seconds) || seconds < 0) return '00:00';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) {
+      return `${h}:${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+    }
+    return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+  }
+
   window.ensureFsElements = function() {
     const compRow = document.getElementById('comparison_row');
     if (!compRow) return;
@@ -516,23 +609,80 @@ HEAD_SCRIPTS = """
       ctrl.id = 'fs-controls';
       ctrl.className = 'fs-controls';
       ctrl.innerHTML = `
-        <button type="button" class="fs-ctrl-btn" onclick="window.switchEpisode('orig')">
-          ⏮ Tập Video Gốc (Phím ←)
-        </button>
-        <button type="button" class="fs-ctrl-btn fs-ctrl-play" onclick="window.toggleSyncPlay()">
-          ⏯️ Phát / Tạm Dừng (Space)
-        </button>
-        <button type="button" class="fs-ctrl-btn" onclick="window.switchEpisode('upscaled')">
-          Tập Video 4K (Phím →) ⏭
-        </button>
-        <button type="button" class="fs-ctrl-btn" onclick="window.toggleAudioSource()">
-          🔊 Đổi Âm Thanh
-        </button>
-        <button type="button" class="fs-ctrl-btn fs-ctrl-exit" onclick="window.exitComparisonFullscreen()">
-          ✕ Thoát Toàn Màn Hình (Esc)
-        </button>
+        <!-- DÒNG 1: THANH TUA TIMELINE ĐỒNG BỘ -->
+        <div class="fs-timeline-row">
+          <span id="fs-time-current" class="fs-time-text">00:00</span>
+          <input type="range" id="fs-timeline-slider" class="fs-timeline-slider" min="0" max="100" step="0.05" value="0">
+          <span id="fs-time-total" class="fs-time-text">00:00</span>
+        </div>
+
+        <!-- DÒNG 2: CÁC NÚT ĐIỀU KHIỂN & CHUYỂN TẬP -->
+        <div class="fs-btn-row">
+          <div class="fs-btn-group-left">
+            <button type="button" id="fs-btn-play" class="fs-ctrl-btn fs-ctrl-play" onclick="window.toggleSyncPlay()">
+              ⏯️ Phát / Tạm Dừng (Space)
+            </button>
+            <button type="button" class="fs-ctrl-btn" onclick="window.seekSyncBoth(-10)">
+              ⏪ -10s
+            </button>
+            <button type="button" class="fs-ctrl-btn" onclick="window.seekSyncBoth(10)">
+              ⏩ +10s
+            </button>
+          </div>
+
+          <div class="fs-btn-group-center">
+            <button type="button" id="fs-btn-ep-orig" class="fs-ctrl-btn fs-ep-btn" onclick="window.switchEpisode('orig')">
+              ⏮ Tập Video Gốc (Phím ←)
+            </button>
+            <button type="button" id="fs-btn-ep-up" class="fs-ctrl-btn fs-ep-btn active-ep" onclick="window.switchEpisode('upscaled')">
+              Tập Video 4K (Phím →) ⏭
+            </button>
+          </div>
+
+          <div class="fs-btn-group-right">
+            <button type="button" id="fs-btn-audio" class="fs-ctrl-btn" onclick="window.toggleAudioSource()">
+              🔊 Âm Thanh: 4K
+            </button>
+            <button type="button" class="fs-ctrl-btn fs-ctrl-exit" onclick="window.exitComparisonFullscreen()">
+              ✕ Thoát Toàn Màn Hình (Esc)
+            </button>
+          </div>
+        </div>
       `;
       compRow.appendChild(ctrl);
+
+      const slider = ctrl.querySelector('#fs-timeline-slider');
+      slider.addEventListener('input', function() {
+        window.isScrubbing = true;
+        const { v1, v2 } = getVideos();
+        const refVid = (window.fsActiveEpisode === 'orig' ? (v1 || v2) : (v2 || v1));
+        if (!refVid || !refVid.duration) return;
+        const targetTime = (parseFloat(slider.value) / 100) * refVid.duration;
+        if (v1) v1.currentTime = targetTime;
+        if (v2) v2.currentTime = targetTime;
+        const curEl = document.getElementById('fs-time-current');
+        if (curEl) curEl.innerText = formatTime(targetTime);
+      });
+
+      slider.addEventListener('change', function() {
+        window.isScrubbing = false;
+        const { v1, v2 } = getVideos();
+        const refVid = (window.fsActiveEpisode === 'orig' ? (v1 || v2) : (v2 || v1));
+        if (!refVid || !refVid.duration) return;
+        const targetTime = (parseFloat(slider.value) / 100) * refVid.duration;
+        if (v1) v1.currentTime = targetTime;
+        if (v2) v2.currentTime = targetTime;
+        onMouseMoveFS();
+      });
+
+      ctrl.addEventListener('mouseenter', () => {
+        clearTimeout(fsHideTimer);
+        ctrl.classList.add('visible');
+      });
+      ctrl.addEventListener('mouseleave', () => {
+        onMouseMoveFS();
+      });
+
       compRow.addEventListener('mousemove', onMouseMoveFS);
     }
   };
@@ -640,19 +790,32 @@ HEAD_SCRIPTS = """
 
       window.showFsHud('✨', 'TẬP 2: VIDEO 4K UHD (Native 2x)', 'Dùng phím ← để chuyển về Tập Video Gốc (1080p)');
     }
+
+    const btnEpOrig = document.getElementById('fs-btn-ep-orig');
+    const btnEpUp = document.getElementById('fs-btn-ep-up');
+    if (target === 'orig') {
+      if (btnEpOrig) btnEpOrig.classList.add('active-ep');
+      if (btnEpUp) btnEpUp.classList.remove('active-ep');
+    } else {
+      if (btnEpOrig) btnEpOrig.classList.remove('active-ep');
+      if (btnEpUp) btnEpUp.classList.add('active-ep');
+    }
   };
 
   window.toggleSyncPlay = function() {
     const { v1, v2 } = getVideos();
     if (!v1 && !v2) return;
     const isPaused = (v2 ? v2.paused : (v1 ? v1.paused : true));
+    const btnPlay = document.getElementById('fs-btn-play');
     if (isPaused) {
       if (v1 && v2) v1.currentTime = v2.currentTime;
       if (v1) v1.play().catch(()=>{});
       if (v2) v2.play().catch(()=>{});
+      if (btnPlay) btnPlay.innerText = '⏸️ Tạm Dừng (Space)';
     } else {
       if (v1) v1.pause();
       if (v2) v2.pause();
+      if (btnPlay) btnPlay.innerText = '▶️ Tiếp Tục Phát (Space)';
     }
   };
 
@@ -815,7 +978,9 @@ HEAD_SCRIPTS = """
       if (!v1.paused && !isSyncing && Math.abs(v1.currentTime - v2.currentTime) > 0.15) {
         v2.currentTime = v1.currentTime;
       }
+      updateTimelineUI();
     });
+    v1.addEventListener('durationchange', updateTimelineUI);
 
     v2.addEventListener('play', () => sync(v2, v1));
     v2.addEventListener('pause', () => sync(v2, v1));
@@ -825,7 +990,23 @@ HEAD_SCRIPTS = """
       if (!v2.paused && !isSyncing && Math.abs(v2.currentTime - v1.currentTime) > 0.15) {
         v1.currentTime = v2.currentTime;
       }
+      updateTimelineUI();
     });
+    v2.addEventListener('durationchange', updateTimelineUI);
+
+    function updateTimelineUI() {
+      if (window.isScrubbing) return;
+      const refVid = (window.fsActiveEpisode === 'orig' ? (v1 || v2) : (v2 || v1));
+      if (!refVid || isNaN(refVid.duration) || refVid.duration <= 0) return;
+
+      const slider = document.getElementById('fs-timeline-slider');
+      const curEl = document.getElementById('fs-time-current');
+      const totEl = document.getElementById('fs-time-total');
+
+      if (slider) slider.value = (refVid.currentTime / refVid.duration) * 100;
+      if (curEl) curEl.innerText = formatTime(refVid.currentTime);
+      if (totEl) totEl.innerText = formatTime(refVid.duration);
+    }
 
     const statusText = document.getElementById('sync-status-text');
     if (statusText) statusText.innerText = 'Đồng Bộ Khóa Lockstep: HOẠT ĐỘNG';
