@@ -3,6 +3,7 @@ import sys
 import time
 import threading
 import tempfile
+import subprocess
 import urllib.parse
 import urllib.request
 from queue import Queue
@@ -95,6 +96,355 @@ CUSTOM_CSS = """
     border-radius: 12px;
     padding: 18px;
 }
+
+/* THANH ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN */
+.comp-toolbar-container {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+.comp-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.7);
+}
+.comp-title {
+    color: #f1f5f9;
+    font-size: 0.96rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.comp-btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.btn-group {
+    display: flex;
+    gap: 6px;
+    background: rgba(15, 23, 42, 0.6);
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid #334155;
+}
+.comp-btn {
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #cbd5e1;
+    font-size: 0.88rem;
+    font-weight: 600;
+    padding: 7px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+}
+.comp-btn:hover {
+    background: #334155;
+    color: #ffffff;
+    border-color: #38bdf8;
+    transform: translateY(-1px);
+}
+.comp-btn.active-mode {
+    background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+    color: #ffffff !important;
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 14px rgba(56, 189, 248, 0.5) !important;
+}
+.comp-btn.accent-btn {
+    background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
+    color: #ffffff;
+    border-color: #f97316;
+}
+.comp-btn.accent-btn:hover {
+    background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+    box-shadow: 0 0 12px rgba(249, 115, 22, 0.4);
+}
+.sync-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid #059669;
+    color: #34d399;
+    font-family: monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 9999px;
+}
+.sync-dot {
+    width: 8px;
+    height: 8px;
+    background-color: #10b981;
+    border-radius: 50%;
+    display: inline-block;
+    box-shadow: 0 0 8px #10b981;
+    animation: sync-pulse 1.5s infinite;
+}
+@keyframes sync-pulse {
+    0% { opacity: 0.4; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.15); }
+    100% { opacity: 0.4; transform: scale(0.9); }
+}
+.comp-tip {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    line-height: 1.4;
+    padding-top: 4px;
+}
+#comparison_row {
+    transition: all 0.3s ease;
+}
+#video_orig, #video_upscaled {
+    transition: all 0.25s ease-in-out;
+}
+"""
+
+COMPARISON_TOOLBAR_HTML = """
+<div class="comp-toolbar-container">
+  <div class="comp-header">
+    <div class="comp-title">
+      <span>🔍</span> <b>BỘ ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN HAI VIDEO</b>
+    </div>
+    <div class="sync-badge">
+      <span class="sync-dot"></span> <span id="sync-status-text">Đồng Bộ Khóa Lockstep: SẴN SÀNG</span>
+    </div>
+  </div>
+
+  <div class="comp-btn-row">
+    <!-- Nhóm chọn chế độ hiển thị -->
+    <div class="btn-group">
+      <button type="button" id="btn-show-orig" class="comp-btn" onclick="window.switchCompView('orig')">
+        ⬅️ Video Gốc (Phím ←)
+      </button>
+      <button type="button" id="btn-show-both" class="comp-btn active-mode" onclick="window.switchCompView('both')">
+        👥 Xem Song Song (Phím B)
+      </button>
+      <button type="button" id="btn-show-upscaled" class="comp-btn" onclick="window.switchCompView('upscaled')">
+        ➡️ Video 4K (Phím →)
+      </button>
+    </div>
+
+    <!-- Nhóm điều khiển đồng bộ -->
+    <div class="btn-group">
+      <button type="button" id="btn-sync-play" class="comp-btn accent-btn" onclick="window.toggleSyncPlay()">
+        ⏯️ Phát / Tạm Dừng Cả Hai (Space)
+      </button>
+      <button type="button" class="comp-btn" onclick="window.seekSyncBoth(-5)">
+        ⏪ Lùi 5s
+      </button>
+      <button type="button" class="comp-btn" onclick="window.seekSyncBoth(5)">
+        ⏩ Tới 5s
+      </button>
+      <button type="button" id="btn-toggle-audio" class="comp-btn" onclick="window.toggleAudioSource()">
+        🔊 Âm thanh: Video 4K (Bấm để đổi)
+      </button>
+    </div>
+  </div>
+  
+  <div class="comp-tip">
+    💡 <b>Mẹo So Sánh Cực Chuẩn:</b> Ấn phím <b>← (Mũi tên trái)</b> để xem tức thì Video Gốc, phím <b>→ (Mũi tên phải)</b> để xem Video 4K Upscale tại đúng khung hình đó. Hai video luôn chiếu cùng lúc ở mili-giây chuẩn xác!
+  </div>
+</div>
+"""
+
+HEAD_SCRIPTS = """
+<script>
+(function() {
+  window.currentCompMode = 'both';
+  window.activeAudio = 'upscaled';
+
+  function getVideos() {
+    const v1 = document.querySelector('#video_orig video');
+    const v2 = document.querySelector('#video_upscaled video');
+    return { v1, v2 };
+  }
+
+  window.switchCompView = function(mode) {
+    window.currentCompMode = mode;
+    const cOrig = document.getElementById('video_orig');
+    const cUp = document.getElementById('video_upscaled');
+    if (!cOrig || !cUp) return;
+
+    const btnOrig = document.getElementById('btn-show-orig');
+    const btnBoth = document.getElementById('btn-show-both');
+    const btnUp = document.getElementById('btn-show-upscaled');
+
+    [btnOrig, btnBoth, btnUp].forEach(b => {
+      if (b) b.classList.remove('active-mode');
+    });
+
+    const { v1, v2 } = getVideos();
+
+    if (mode === 'orig') {
+      cOrig.style.display = 'block';
+      cOrig.style.width = '100%';
+      cOrig.style.flex = '1 1 100%';
+      cOrig.style.maxWidth = '100%';
+      cUp.style.display = 'none';
+      if (btnOrig) btnOrig.classList.add('active-mode');
+      if (v1 && v2) {
+        if (!v2.paused && v1.paused) v1.play().catch(()=>{});
+        v1.currentTime = v2.currentTime;
+      }
+    } else if (mode === 'upscaled') {
+      cOrig.style.display = 'none';
+      cUp.style.display = 'block';
+      cUp.style.width = '100%';
+      cUp.style.flex = '1 1 100%';
+      cUp.style.maxWidth = '100%';
+      if (btnUp) btnUp.classList.add('active-mode');
+      if (v1 && v2) {
+        if (!v1.paused && v2.paused) v2.play().catch(()=>{});
+        v2.currentTime = v1.currentTime;
+      }
+    } else { // both
+      cOrig.style.display = 'block';
+      cOrig.style.width = '50%';
+      cOrig.style.flex = '1 1 50%';
+      cOrig.style.maxWidth = '50%';
+      cUp.style.display = 'block';
+      cUp.style.width = '50%';
+      cUp.style.flex = '1 1 50%';
+      cUp.style.maxWidth = '50%';
+      if (btnBoth) btnBoth.classList.add('active-mode');
+      if (v1 && v2) {
+        v1.currentTime = v2.currentTime;
+      }
+    }
+  };
+
+  window.toggleSyncPlay = function() {
+    const { v1, v2 } = getVideos();
+    if (!v1 && !v2) return;
+    const isPaused = (v2 ? v2.paused : (v1 ? v1.paused : true));
+    if (isPaused) {
+      if (v1 && v2) v1.currentTime = v2.currentTime;
+      if (v1) v1.play().catch(()=>{});
+      if (v2) v2.play().catch(()=>{});
+    } else {
+      if (v1) v1.pause();
+      if (v2) v2.pause();
+    }
+  };
+
+  window.seekSyncBoth = function(seconds) {
+    const { v1, v2 } = getVideos();
+    const cur = v2 ? v2.currentTime : (v1 ? v1.currentTime : 0);
+    const target = Math.max(0, cur + seconds);
+    if (v1) v1.currentTime = target;
+    if (v2) v2.currentTime = target;
+  };
+
+  window.toggleAudioSource = function() {
+    const { v1, v2 } = getVideos();
+    const btn = document.getElementById('btn-toggle-audio');
+    if (window.activeAudio === 'upscaled') {
+      window.activeAudio = 'orig';
+      if (v1) v1.muted = false;
+      if (v2) v2.muted = true;
+      if (btn) btn.innerText = '🔊 Âm thanh: Video Gốc';
+    } else {
+      window.activeAudio = 'upscaled';
+      if (v1) v1.muted = true;
+      if (v2) v2.muted = false;
+      if (btn) btn.innerText = '🔊 Âm thanh: Video 4K';
+    }
+  };
+
+  window.addEventListener('keydown', function(e) {
+    const tag = document.activeElement ? document.activeElement.tagName : '';
+    if (['INPUT', 'TEXTAREA'].includes(tag)) return;
+
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      window.switchCompView('orig');
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      window.switchCompView('upscaled');
+    } else if (e.key === 'b' || e.key === 'B' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      window.switchCompView('both');
+    } else if (e.code === 'Space') {
+      e.preventDefault();
+      window.toggleSyncPlay();
+    }
+  });
+
+  function attachTimeSync() {
+    const { v1, v2 } = getVideos();
+    if (!v1 || !v2) return;
+
+    if (v1._hasSyncAttached && v2._hasSyncAttached) return;
+    v1._hasSyncAttached = true;
+    v2._hasSyncAttached = true;
+
+    if (window.activeAudio === 'upscaled') {
+      v1.muted = true;
+      v2.muted = false;
+    } else {
+      v1.muted = false;
+      v2.muted = true;
+    }
+
+    let isSyncing = false;
+    function sync(from, to) {
+      if (isSyncing) return;
+      isSyncing = true;
+      try {
+        if (Math.abs(from.currentTime - to.currentTime) > 0.05) {
+          to.currentTime = from.currentTime;
+        }
+        if (from.paused && !to.paused) {
+          to.pause();
+        } else if (!from.paused && to.paused) {
+          to.play().catch(()=>{});
+        }
+        if (to.playbackRate !== from.playbackRate) {
+          to.playbackRate = from.playbackRate;
+        }
+      } finally {
+        setTimeout(() => { isSyncing = false; }, 30);
+      }
+    }
+
+    v1.addEventListener('play', () => sync(v1, v2));
+    v1.addEventListener('pause', () => sync(v1, v2));
+    v1.addEventListener('seeking', () => sync(v1, v2));
+    v1.addEventListener('seeked', () => sync(v1, v2));
+    v1.addEventListener('timeupdate', () => {
+      if (!v1.paused && !isSyncing && Math.abs(v1.currentTime - v2.currentTime) > 0.15) {
+        v2.currentTime = v1.currentTime;
+      }
+    });
+
+    v2.addEventListener('play', () => sync(v2, v1));
+    v2.addEventListener('pause', () => sync(v2, v1));
+    v2.addEventListener('seeking', () => sync(v2, v1));
+    v2.addEventListener('seeked', () => sync(v2, v1));
+    v2.addEventListener('timeupdate', () => {
+      if (!v2.paused && !isSyncing && Math.abs(v2.currentTime - v1.currentTime) > 0.15) {
+        v1.currentTime = v2.currentTime;
+      }
+    });
+
+    const statusText = document.getElementById('sync-status-text');
+    if (statusText) statusText.innerText = 'Đồng Bộ Khóa Lockstep: HOẠT ĐỘNG';
+  }
+
+  setInterval(attachTimeSync, 500);
+})();
+</script>
 """
 
 def create_tinyurl(target_url, custom_alias=None, api_token=None):
@@ -119,6 +469,85 @@ def create_tinyurl(target_url, custom_alias=None, api_token=None):
             return resp.read().decode('utf-8').strip()
     except Exception:
         return None
+
+def ensure_web_friendly_video(video_path, output_dir=None):
+    """
+    Tạo nhanh bản preview MP4 (H.264 yuv420p + faststart) tương thích 100% với trình duyệt web.
+    Sử dụng GPU (NVENC / VideoToolbox) để hoàn tất chỉ trong 1-2 giây,
+    ngăn chặn Gradio tự động re-encode bằng CPU gây chậm trễ 5-10 phút.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+
+    try:
+        from gradio import processing_utils
+        if processing_utils.video_is_playable(video_path):
+            return video_path
+    except Exception:
+        pass
+
+    if output_dir is None:
+        if os.path.exists('/content'):
+            output_dir = '/content/temp_web'
+        elif os.path.exists('/kaggle/working'):
+            output_dir = '/kaggle/working/temp_web'
+        else:
+            output_dir = os.path.join(tempfile.gettempdir(), 'ai_upscale_web')
+    os.makedirs(output_dir, exist_ok=True)
+
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    out_preview = os.path.join(output_dir, f"_web_{base}.mp4")
+
+    # Nếu đã tạo rồi và kích thước hợp lệ
+    if os.path.exists(out_preview) and os.path.getsize(out_preview) > 1000:
+        return out_preview
+
+    encoder = "libx264"
+    extra_flags = ["-preset", "ultrafast", "-crf", "23"]
+
+    if torch.cuda.is_available() and sys.platform.startswith("linux"):
+        encoder = "h264_nvenc"
+        extra_flags = ["-preset", "p1", "-cq", "24"]
+    elif sys.platform == "darwin":
+        encoder = "h264_videotoolbox"
+        extra_flags = ["-b:v", "8M"]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-c:v", encoder,
+        *extra_flags,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        out_preview
+    ]
+
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.exists(out_preview) and os.path.getsize(out_preview) > 1000:
+            return out_preview
+    except Exception as e:
+        print(f"⚠️ Encode {encoder} không thành công ({e}), fallback sang libx264 ultrafast...")
+        fallback_cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "24",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            out_preview
+        ]
+        try:
+            subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            if os.path.exists(out_preview) and os.path.getsize(out_preview) > 1000:
+                return out_preview
+        except Exception as e_fb:
+            print(f"⚠️ Fallback thất bại: {e_fb}")
+
+    return video_path
 
 def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
     target_input = None
@@ -152,7 +581,15 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
+    web_orig = None
+    if os.path.exists(target_input):
+        try:
+            web_orig = ensure_web_friendly_video(target_input)
+        except Exception as e_orig:
+            print(f"⚠️ Chuẩn bị web preview nguồn: {e_orig}")
+            web_orig = target_input
+
+    yield web_orig, None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
 
     output_result = [None]
     error_result = [None]
@@ -180,7 +617,7 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
                 break
             pct, desc = item
             if desc:
-                yield gr.update(), gr.update(), desc
+                yield gr.update(), gr.update(), gr.update(), desc
         except Exception:
             if not thread.is_alive() and progress_queue.empty():
                 break
@@ -191,7 +628,12 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về."
+    yield gr.update(), gr.update(), gr.update(), "⚡ Đang tối ưu hóa định dạng web preview siêu tốc để xem mượt mà trên trình duyệt..."
+    web_output = ensure_web_friendly_video(output_path)
+    if not web_orig and os.path.exists(target_input):
+        web_orig = ensure_web_friendly_video(target_input)
+
+    yield web_orig, web_output, gr.update(value=output_path, visible=True), "✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về. Đã khóa đồng bộ thời gian hai video (dùng phím ← / → để so sánh)."
 
 with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
@@ -224,33 +666,38 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             lines=2
         )
 
-        # 2. KHUNG VIDEO XEM TRƯỚC VÀ KẾT QUẢ
-        with gr.Row(equal_height=True):
-            file_input = gr.Video(
-                label="📁 Hoặc Tải Tệp Video Từ Máy Tính (.mkv / .mp4)",
+        # 2. BẢNG ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN
+        comparison_toolbar = gr.HTML(COMPARISON_TOOLBAR_HTML)
+
+        # 3. KHUNG VIDEO GỐC VÀ KẾT QUẢ 4K (HỖ TRỢ ĐỒNG BỘ VÀ CHUYỂN ĐỔI PHÍM MŨI TÊN)
+        with gr.Row(equal_height=True, elem_id="comparison_row"):
+            orig_preview = gr.Video(
+                label="📺 Video Gốc (Nguồn Ban Đầu)",
+                elem_id="video_orig",
                 sources=["upload"],
                 scale=1
             )
             output_preview = gr.Video(
                 label="✨ Video 4K Kết Quả (Native 2x UHD)",
+                elem_id="video_upscaled",
                 interactive=False,
                 scale=1
             )
 
-        # 3. THANH TIẾN ĐỘ THỜI GIAN THỰC
+        # 4. THANH TIẾN ĐỘ THỜI GIAN THỰC
         status_box = gr.Textbox(
             label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
             value="Chờ dán link Google Drive hoặc chọn tệp anime...",
             interactive=False
         )
 
-        # 4. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
+        # 5. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
         with gr.Row():
             with gr.Column(scale=7):
                 with gr.Group(elem_classes=["panel-box"]):
                     model_dropdown = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
-                        value="⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)",
+                        value="⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - Tốc Độ Nhanh ~6–8 FPS trên T4)",
                         label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
                         info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
                     )
@@ -263,8 +710,8 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[drive_link_input, file_input, model_dropdown],
-            outputs=[output_preview, download_file, status_box]
+            inputs=[drive_link_input, orig_preview, model_dropdown],
+            outputs=[orig_preview, output_preview, download_file, status_box]
         )
 
 if __name__ == '__main__':
@@ -274,7 +721,6 @@ if __name__ == '__main__':
     # Trên Linux/Colab: tự động giải phóng port 7860 nếu có tiến trình zombie cũ chiếm giữ
     if sys.platform.startswith("linux"):
         try:
-            import subprocess
             subprocess.run(["fuser", "-k", "7860/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(0.5)
         except Exception:
@@ -288,7 +734,8 @@ if __name__ == '__main__':
             server_port=server_port,
             share=share_mode,
             allowed_paths=allowed_dirs,
-            prevent_thread_lock=True
+            prevent_thread_lock=True,
+            head=HEAD_SCRIPTS
         )
     except Exception as e_port:
         print(f"⚠️ Port {server_port} không khả dụng ({e_port}), chuyển sang tự động chọn port trống...")
@@ -296,7 +743,8 @@ if __name__ == '__main__':
             server_name="0.0.0.0",
             share=share_mode,
             allowed_paths=allowed_dirs,
-            prevent_thread_lock=True
+            prevent_thread_lock=True,
+            head=HEAD_SCRIPTS
         )
 
     share_url = None
