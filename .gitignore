@@ -49,6 +49,8 @@ sample_preview.*
 !2x_AnimeJaNai_HD_V3Sharp1_Compact.pth
 !2x_AnimeJaNai_HD_V3_UltraCompact.pth
 !2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth
+!2x_AnimeJaNai_HD_V3_SuperUltraCompact.pth
+!2x_AnimeJaNai_HD_V3Sharp1_SuperUltraCompact.pth
 
 # OS & IDE files
 .DS_Store

@@ -43,8 +43,10 @@ else:
     device_badge = f"💻 CPU Software Mode | MÃ HÓA: {encoder_desc}"
 
 MODEL_MAP = {
-    "⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)": "animejanai_v3_ultracompact",
-    "⚡ NGUỒN A: AnimeJaNai V3 Sharp UltraCompact (BDRip 10-bit - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)": "animejanai_v3_sharp_ultracompact",
+    "⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - Tốc Độ Nhanh ~6–8 FPS trên T4)": "animejanai_v3_ultracompact",
+    "⚡ NGUỒN A: AnimeJaNai V3 Sharp UltraCompact (BDRip 10-bit - Tốc Độ Nhanh ~6–8 FPS trên T4)": "animejanai_v3_sharp_ultracompact",
+    "🚀 NGUỒN B: AnimeJaNai V3 SuperUltraCompact (WEB-DL Gốc - SIÊU TỐC ~14–18 FPS trên T4)": "animejanai_v3_superultracompact",
+    "🚀 NGUỒN A: AnimeJaNai V3 Sharp SuperUltraCompact (BDRip 10-bit - SIÊU TỐC ~14–18 FPS trên T4)": "animejanai_v3_sharp_superultracompact",
     "🎯 NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Master Quality ~3.8 FPS)": "animejanai_v3_compact",
     "🎯 NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain ~3.8 FPS)": "animejanai_v3_sharp",
 }
@@ -209,9 +211,8 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
             2. **Mô Hình AI**:
-               - **⚡ UltraCompact (8-lớp - Khuyên dùng cho GPU T4)**: Tốc độ gấp đôi **~7.5–8.0 FPS** (chỉ mất ~1 giờ 10 phút/tập 24 phút).
-                 - **NGUỒN B UltraCompact**: Tối ưu cho WEB-DL Gốc (SubsPlease, Erai-raws, Crunchyroll/Netflix).
-                 - **NGUỒN A Sharp UltraCompact**: Tối ưu cho BDRip 10-bit (Hi10P / Main 10) đã deband sạch.
+               - **🚀 SuperUltraCompact (24 features - SIÊU TỐC TỐI ĐA)**: Tốc độ bứt phá **~14–18 FPS** trên T4 (chỉ ~35–45 phút/tập 24 phút). Rất thích hợp khi cần xem nhanh hoặc render nhiều tập liên tiếp.
+               - **⚡ UltraCompact (8-lớp - Khuyên dùng cân bằng)**: Tốc độ **~6.5–8.0 FPS** (chỉ mất ~1 giờ 10 phút/tập 24 phút).
                - **🎯 Compact (16-lớp - Master Quality)**: Chất lượng gốc tối đa với 16 tầng tích chập (~3.8 FPS trên T4, ~2.5 giờ/tập).
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)

@@ -23,7 +23,8 @@ An AI-powered video super-resolution platform optimized for **Native 2x Super-Re
 
 ## 🌟 Key Features
 
-- **⚡ NGUỒN B & A UltraCompact (Native 2x - 8-lớp)**: Siêu tốc độ x2 (**~7.5–8.0 FPS** trên GPU Colab T4, chỉ ~1h10p cho tập 24 phút). Gồm 2 phiên bản: `UltraCompact` (tối ưu WEB-DL Gốc) và `Sharp UltraCompact` (tối ưu BDRip 10-bit Hi10P/Main 10).
+- **🚀 NGUỒN B & A SuperUltraCompact (Native 2x - 24 filters)**: Siêu tốc độ tối đa (**~14–18 FPS** trên GPU Colab T4, chỉ ~35–45 phút cho tập 24 phút). Thích hợp khi cần render siêu tốc.
+- **⚡ NGUỒN B & A UltraCompact (Native 2x - 8-lớp)**: Tốc độ cao cân bằng chất lượng (**~6.5–8.0 FPS** trên GPU Colab T4, ~1h10p cho tập 24 phút).
 - **🎯 NGUỒN B & A Compact (Native 2x - 16-lớp)**: Chất lượng Master Quality tối đa với 16 tầng tích chập sâu (~3.8 FPS trên Colab T4). Giữ trọn từng nét vẽ vector tinh xảo nhất.
 - **🛡️ Google Colab Free-Proof Auto-Checkpoint & Resume**: Video is processed in resilient 2,400-frame segments saved directly to Google Drive. If a Colab session disconnects, it resumes instantly from the exact missing segment without losing hours of work!
 - **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 18 -profile:v main10 -spatial-aq 1` completely eliminating color banding on 4K HDR displays.

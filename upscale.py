@@ -118,13 +118,37 @@ WEIGHTS_INFO = {
         "desc": "AnimeJaNai V3 Sharp UltraCompact 8-lớp (BDRip 10-bit - Tốc độ gấp đôi ~7.5–8.0 FPS trên T4)",
         "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth"
+    },
+    # NGUỒN B - SUPER ULTRA COMPACT: WEB-DL Gốc (24 features, Siêu tốc độ ~14–18 FPS trên T4)
+    "animejanai_v3_superultracompact": {
+        "file": "2x_AnimeJaNai_HD_V3_SuperUltraCompact.pth",
+        "arch": "srvggnet_compact",
+        "scale": 2,
+        "desc": "AnimeJaNai V3 SuperUltraCompact (WEB-DL Gốc - Siêu tốc độ ~14–18 FPS trên T4)",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_extract": "2x_AnimeJaNai_HD_V3_SuperUltraCompact.pth"
+    },
+    # NGUỒN A - SUPER ULTRA COMPACT: BDRip 10-bit Sharp (24 features, Siêu tốc độ ~14–18 FPS trên T4)
+    "animejanai_v3_sharp_superultracompact": {
+        "file": "2x_AnimeJaNai_HD_V3Sharp1_SuperUltraCompact.pth",
+        "arch": "srvggnet_compact",
+        "scale": 2,
+        "desc": "AnimeJaNai V3 Sharp SuperUltraCompact (BDRip 10-bit - Siêu tốc độ ~14–18 FPS trên T4)",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_SuperUltraCompact.pth"
     }
 }
 
 def resolve_model_key(name):
     name_l = (name or "").lower()
+    is_super = any(k in name_l for k in ["super", "superultra", "super-ultra", "super ultra", "cực nhanh", "cuc nhanh", "14-18 fps", "15 fps"])
     is_ultra = any(k in name_l for k in ["ultra", "ultracompact", "ultra compact", "ultra-compact", "8-lớp", "8 lop", "gấp đôi", "gap doi"])
     is_sharp = any(k in name_l for k in ["bdrip", "10-bit", "10bit", "hi10p", "main10", "main 10", "sharp", "nguồn a", "nguon a"])
+
+    if is_super:
+        if is_sharp:
+            return "animejanai_v3_sharp_superultracompact"
+        return "animejanai_v3_superultracompact"
 
     if is_ultra:
         if is_sharp:
@@ -601,7 +625,8 @@ def render_segment(
             t2 = time.perf_counter()
             with torch.inference_mode():
                 raw_out = model(img_t)
-                if device.type == 'cuda':
+                # Chỉ đồng bộ CUDA khi cần đo mẫu cho profiler (mỗi 20 frames) để luồng CUDA stream chạy ngầm song song tối đa
+                if device.type == 'cuda' and profile_cnt == 0:
                     torch.cuda.synchronize(device)
             t3 = time.perf_counter()
 
@@ -616,7 +641,7 @@ def render_segment(
                 if raw_out.shape[2] != target_h or raw_out.shape[3] != target_w:
                     raw_out = F.interpolate(raw_out, size=(target_h, target_w), mode='area')
 
-                output = raw_out.mul_(255.0).clamp_(0.0, 255.0).to(torch.uint8).permute(0, 2, 3, 1).contiguous()
+                output = raw_out.mul_(255.0).to(torch.uint8).permute(0, 2, 3, 1).contiguous()
                 out_bytes = memoryview(output.cpu().numpy()).cast('B')
             t4 = time.perf_counter()
 
