@@ -311,6 +311,7 @@ if __name__ == '__main__':
         print("="*68 + "\n", flush=True)
 
     try:
-        app.block()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        print("🛑 Ứng dụng đã dừng.")
+        print("\n🛑 Ứng dụng đã dừng.")
