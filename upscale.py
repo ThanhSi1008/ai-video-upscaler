@@ -88,7 +88,7 @@ WEIGHTS_INFO = {
         "file": "2x_AnimeJaNai_HD_V3_Compact.pth",
         "arch": "srvggnet_compact",
         "scale": 2,
-        "desc": "AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)",
+        "desc": "AnimeJaNai V3 Compact 16-lớp (WEB-DL Gốc: SubsPlease/Erai - Master Quality ~3.8 FPS trên T4)",
         "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3_Compact.pth"
     },
@@ -97,16 +97,42 @@ WEIGHTS_INFO = {
         "file": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth",
         "arch": "srvggnet_compact",
         "scale": 2,
-        "desc": "AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)",
+        "desc": "AnimeJaNai V3 Sharp 16-lớp (BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain ~3.8 FPS trên T4)",
         "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth"
+    },
+    # NGUỒN B - ULTRA COMPACT: WEB-DL Gốc (8-lớp, Tốc độ gấp đôi ~7.5–8.0 FPS trên T4)
+    "animejanai_v3_ultracompact": {
+        "file": "2x_AnimeJaNai_HD_V3_UltraCompact.pth",
+        "arch": "srvggnet_compact",
+        "scale": 2,
+        "desc": "AnimeJaNai V3 UltraCompact 8-lớp (WEB-DL Gốc - Tốc độ gấp đôi ~7.5–8.0 FPS trên T4)",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_extract": "2x_AnimeJaNai_HD_V3_UltraCompact.pth"
+    },
+    # NGUỒN A - ULTRA COMPACT: BDRip 10-bit Sharp (8-lớp, Tốc độ gấp đôi ~7.5–8.0 FPS trên T4)
+    "animejanai_v3_sharp_ultracompact": {
+        "file": "2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth",
+        "arch": "srvggnet_compact",
+        "scale": 2,
+        "desc": "AnimeJaNai V3 Sharp UltraCompact 8-lớp (BDRip 10-bit - Tốc độ gấp đôi ~7.5–8.0 FPS trên T4)",
+        "zip_url": "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
+        "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth"
     }
 }
 
 def resolve_model_key(name):
     name_l = (name or "").lower()
+    is_ultra = any(k in name_l for k in ["ultra", "ultracompact", "ultra compact", "ultra-compact", "8-lớp", "8 lop", "gấp đôi", "gap doi"])
+    is_sharp = any(k in name_l for k in ["bdrip", "10-bit", "10bit", "hi10p", "main10", "main 10", "sharp", "nguồn a", "nguon a"])
+
+    if is_ultra:
+        if is_sharp:
+            return "animejanai_v3_sharp_ultracompact"
+        return "animejanai_v3_ultracompact"
+
     # Nhận diện Nguồn A: BDRip 10-bit (Hi10P / Main 10)
-    if any(k in name_l for k in ["bdrip", "10-bit", "10bit", "hi10p", "main10", "main 10", "sharp", "nguồn a", "nguon a"]):
+    if is_sharp:
         return "animejanai_v3_sharp"
     # Mặc định tối ưu cho Nguồn B: WEB-DL Gốc
     return "animejanai_v3_compact"
@@ -190,9 +216,17 @@ def load_model(model_key, weights_path, device):
         gc.collect()
         torch.cuda.empty_cache()
 
-    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=2, act_type='prelu')
     state_dict = torch.load(weights_path, map_location='cpu')
     state_dict = state_dict.get('params_ema', state_dict.get('params', state_dict))
+
+    # Tự động nhận diện cấu hình số lớp từ trọng số (16 cho Compact, 8 cho UltraCompact, 4 cho SuperUltraCompact)
+    conv_keys = [k for k, v in state_dict.items() if k.endswith('.weight') and v.dim() == 4]
+    num_feat = state_dict['body.0.weight'].shape[0] if 'body.0.weight' in state_dict else 64
+    num_in_ch = state_dict['body.0.weight'].shape[1] if 'body.0.weight' in state_dict else 3
+    num_conv = len(conv_keys) - 2 if len(conv_keys) >= 2 else 16
+    act_type = 'prelu' if any('weight' in k and v.dim() == 1 for k, v in state_dict.items()) else 'relu'
+
+    model = SRVGGNetCompact(num_in_ch=num_in_ch, num_out_ch=3, num_feat=num_feat, num_conv=num_conv, upscale=2, act_type=act_type)
     model.load_state_dict(state_dict, strict=True)
 
     model.eval()
@@ -1034,7 +1068,7 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
 def main():
     if len(sys.argv) < 2:
         print("❌ Lỗi: Vui lòng cung cấp đường dẫn video hoặc link Google Drive!")
-        print("💡 Sử dụng: python3 upscale.py <video.mkv hoặc link_gdrive> [animejanai_v3_compact / animejanai_v3_sharp]")
+        print("💡 Sử dụng: python3 upscale.py <video.mkv hoặc link_gdrive> [animejanai_v3_ultracompact / animejanai_v3_sharp_ultracompact / animejanai_v3_compact / animejanai_v3_sharp]")
         return
 
     video_input = sys.argv[1]

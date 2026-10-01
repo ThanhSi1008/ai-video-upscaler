@@ -43,8 +43,10 @@ else:
     device_badge = f"💻 CPU Software Mode | MÃ HÓA: {encoder_desc}"
 
 MODEL_MAP = {
-    "⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)": "animejanai_v3_compact",
-    "⚡ NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)": "animejanai_v3_sharp",
+    "⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)": "animejanai_v3_ultracompact",
+    "⚡ NGUỒN A: AnimeJaNai V3 Sharp UltraCompact (BDRip 10-bit - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)": "animejanai_v3_sharp_ultracompact",
+    "🎯 NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Master Quality ~3.8 FPS)": "animejanai_v3_compact",
+    "🎯 NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain ~3.8 FPS)": "animejanai_v3_sharp",
 }
 
 CUSTOM_CSS = """
@@ -207,8 +209,10 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
             2. **Mô Hình AI**:
-               - **NGUỒN B: AnimeJaNai V3 Compact**: Khuyên dùng cho **WEB-DL Gốc** (SubsPlease, Erai-raws, Crunchyroll/Netflix). Tốc độ siêu tốc ~25–40 phút/tập, hoàn thành trong ngân sách 2 giờ.
-               - **NGUỒN A: AnimeJaNai V3 Sharp**: Khuyên dùng cho **BDRip 10-bit (Hi10P / Main 10)**. Giữ nét đanh thép, tận dụng dải màu 10-bit đã deband sạch từ các nhóm encode uy tín (VCB-Studio, Beatrice-Raws...) để triệt tiêu hiện tượng banding.
+               - **⚡ UltraCompact (8-lớp - Khuyên dùng cho GPU T4)**: Tốc độ gấp đôi **~7.5–8.0 FPS** (chỉ mất ~1 giờ 10 phút/tập 24 phút).
+                 - **NGUỒN B UltraCompact**: Tối ưu cho WEB-DL Gốc (SubsPlease, Erai-raws, Crunchyroll/Netflix).
+                 - **NGUỒN A Sharp UltraCompact**: Tối ưu cho BDRip 10-bit (Hi10P / Main 10) đã deband sạch.
+               - **🎯 Compact (16-lớp - Master Quality)**: Chất lượng gốc tối đa với 16 tầng tích chập (~3.8 FPS trên T4, ~2.5 giờ/tập).
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
 
@@ -246,7 +250,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
                 with gr.Group(elem_classes=["panel-box"]):
                     model_dropdown = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
-                        value="⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)",
+                        value="⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - TỐC ĐỘ GẤP ĐÔI ~7.5–8.0 FPS trên T4)",
                         label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
                         info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
                     )

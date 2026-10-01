@@ -23,8 +23,8 @@ An AI-powered video super-resolution platform optimized for **Native 2x Super-Re
 
 ## 🌟 Key Features
 
-- **⚡ NGUỒN B: AnimeJaNai V3 Compact (Native 2x)**: Specially trained for **WEB-DL Gốc** (SubsPlease / Erai-raws / Crunchyroll / Netflix 1080p). Cleans streaming ringing and 8-bit banding while keeping line-art crisp. Ultra-fast (~12–15 FPS on Colab T4, ~25–40 mins per 24-minute episode).
-- **⚡ NGUỒN A: AnimeJaNai V3 Sharp (Native 2x)**: Specially tuned for **BDRip 10-bit (Hi10P / Main 10)**. Preserves razor-sharp line-art and clean gradients without watercolor artifacts (~12–15 FPS on Colab T4).
+- **⚡ NGUỒN B & A UltraCompact (Native 2x - 8-lớp)**: Siêu tốc độ x2 (**~7.5–8.0 FPS** trên GPU Colab T4, chỉ ~1h10p cho tập 24 phút). Gồm 2 phiên bản: `UltraCompact` (tối ưu WEB-DL Gốc) và `Sharp UltraCompact` (tối ưu BDRip 10-bit Hi10P/Main 10).
+- **🎯 NGUỒN B & A Compact (Native 2x - 16-lớp)**: Chất lượng Master Quality tối đa với 16 tầng tích chập sâu (~3.8 FPS trên Colab T4). Giữ trọn từng nét vẽ vector tinh xảo nhất.
 - **🛡️ Google Colab Free-Proof Auto-Checkpoint & Resume**: Video is processed in resilient 2,400-frame segments saved directly to Google Drive. If a Colab session disconnects, it resumes instantly from the exact missing segment without losing hours of work!
 - **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 18 -profile:v main10 -spatial-aq 1` completely eliminating color banding on 4K HDR displays.
 - **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of all original Japanese/English audio tracks, styled ASS/SSA subtitles, embedded font attachments (.ttf), and chapters into `.mkv`.
