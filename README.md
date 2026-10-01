@@ -17,7 +17,7 @@ license: mit
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Gradio](https://img.shields.io/badge/Gradio-4.0+-orange.svg)](https://gradio.app/)
 
-An AI-powered video super-resolution platform optimized for **Native 2x Super-Resolution (AnimeJaNai V3)**, **HEVC 10-bit Master Quality NVENC**, **Automatic Segment Checkpointing & Resilient Resume**, **High-speed Magnet Ingestion (`aria2c`)**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Multi-GPU Parallel Processing**.
+An AI-powered video super-resolution platform optimized for **Native 2x Super-Resolution (AnimeJaNai V3)**, **HEVC 10-bit Master Quality NVENC**, **Automatic Segment Checkpointing & Resilient Resume**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Multi-GPU Parallel Processing**.
 
 ---
 
@@ -28,7 +28,6 @@ An AI-powered video super-resolution platform optimized for **Native 2x Super-Re
 - **🛡️ Google Colab Free-Proof Auto-Checkpoint & Resume**: Video is processed in resilient 2,400-frame segments saved directly to Google Drive. If a Colab session disconnects, it resumes instantly from the exact missing segment without losing hours of work!
 - **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 18 -profile:v main10 -spatial-aq 1` completely eliminating color banding on 4K HDR displays.
 - **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of all original Japanese/English audio tracks, styled ASS/SSA subtitles, embedded font attachments (.ttf), and chapters into `.mkv`.
-- **🧲 Direct Magnet / Torrent Ingestion**: Powered by `aria2c` multi-connection downloading (downloading a 1.4 GB episode in ~30 seconds on Kaggle).
 - **🚀 Dual-GPU Multi-Processing Acceleration**: Dynamically distributes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle).
 - **🔍 Native Resolution Quality Checker**: Built-in independent tool to verify whether a video is true native 1080p or upscaled from 720p / ~810p / ~878p (see [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md)).
 
@@ -79,7 +78,7 @@ Run the following cell inside a free **Kaggle GPU Notebook** (with Accelerator s
 # @title 🎬 AI Video Upscaler 4K - Ultra High Speed WebUI (Real-CUGAN Pro)
 import os, sys
 
-!apt-get update -qq && apt-get install -y ffmpeg aria2 -qq
+!apt-get update -qq && apt-get install -y ffmpeg -qq
 !pip install -q --no-cache-dir gradio torch torchvision
 
 repo_dir = "/kaggle/working/ai-video-upscaler"

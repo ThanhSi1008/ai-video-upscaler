@@ -122,6 +122,10 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
     target_input = None
     cleaned_input = drive_or_path.strip() if drive_or_path else ""
 
+    # Chặn link Magnet/P2P để bảo vệ an toàn tài khoản Colab/Kaggle
+    if cleaned_input.startswith("magnet:"):
+        raise gr.Error("❌ Hệ thống không hỗ trợ Magnet/Torrent nhằm tuân thủ điều khoản chống P2P của Google Colab (tránh bị khoá tài khoản). Vui lòng lưu video vào Google Drive hoặc tải tệp trực tiếp!")
+
     # Nếu người dùng chỉ để nguyên tiền tố mặc định mà không điền tên file
     if cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
         if video_file is None:
@@ -129,7 +133,7 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
         target_input = video_file
     elif cleaned_input:
         # Nếu người dùng chỉ gõ tên file mà quên tiền tố (ví dụ: Mushoku_Tensei_14.mkv)
-        if not cleaned_input.startswith("/") and not cleaned_input.startswith("http") and not cleaned_input.startswith("magnet:"):
+        if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
             target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
         else:
             target_input = cleaned_input

@@ -237,7 +237,7 @@ def get_hevc_encoder_flags(device_type):
     ], "libx265 10-bit (CPU Software - Fast)"
 
 # ==============================================================================
-# --- 4. TẢI TẬP PHIM TỪ GOOGLE DRIVE HOẶC MAGNET ---
+# --- 4. TẢI TẬP PHIM TỪ GOOGLE DRIVE ---
 # ==============================================================================
 
 def download_gdrive(url, output_dir="/content/input", progress_cb=None):
@@ -283,67 +283,6 @@ def download_gdrive(url, output_dir="/content/input", progress_cb=None):
 
     print(f"✅ Tải thành công video từ Google Drive: '{target_file}' ({os.path.getsize(target_file)/(1024*1024):.1f} MB)")
     return target_file
-
-def download_magnet(magnet_uri, output_dir="/content/input", progress_cb=None):
-    os.makedirs(output_dir, exist_ok=True)
-    if shutil.which("aria2c") is None:
-        raise RuntimeError(
-            "❌ Lệnh 'aria2c' chưa được cài đặt!\n"
-            "Chạy lệnh sau trên Colab/Kaggle:\n"
-            "  !apt-get update -qq && apt-get install -y aria2 -qq"
-        )
-
-    if progress_cb:
-        progress_cb(0.01, desc="🧲 Đang kết nối aria2c tải tập anime qua Magnet...")
-
-    print(f"📥 Bắt đầu kéo Magnet link bằng aria2c vào: {output_dir}")
-    cmd = [
-        "aria2c",
-        "--seed-time=0",
-        "--disable-ipv6=true",
-        "--max-connection-per-server=16",
-        "--split=16",
-        "--bt-stop-timeout=120",
-        "--summary-interval=5",
-        f"--dir={output_dir}",
-        magnet_uri
-    ]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        line_clean = line.strip()
-        if line_clean:
-            print(f"[aria2] {line_clean}")
-            if "%" in line_clean and progress_cb:
-                try:
-                    match = re.search(r'\((\d+)%\)', line_clean)
-                    if match:
-                        pct = int(match.group(1))
-                        progress_cb(0.01 + 0.08 * (pct / 100.0), desc=f"🧲 Đang kéo torrent: {pct}%...")
-                except Exception:
-                    pass
-
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Lỗi khi tải torrent bằng aria2c (Mã lỗi: {proc.returncode})")
-
-    video_exts = {".mkv", ".mp4", ".ts", ".m2ts"}
-    downloaded_videos = []
-    for root, _, files in os.walk(output_dir):
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in video_exts:
-                p = os.path.join(root, f)
-                if os.path.getsize(p) > 50 * 1024 * 1024:
-                    downloaded_videos.append(p)
-
-    if not downloaded_videos:
-        raise FileNotFoundError(f"Không tìm thấy file video anime trong thư mục '{output_dir}'!")
-
-    downloaded_videos.sort(key=lambda x: os.path.getsize(x), reverse=True)
-    selected_video = downloaded_videos[0]
-    print(f"✅ Tải thành công tập phim: '{selected_video}' ({os.path.getsize(selected_video)/(1024*1024):.1f} MB)")
-    return selected_video
 
 # ==============================================================================
 # --- 5. HỆ THỐNG XỬ LÝ PHÂN ĐOẠN & CHECKPOINT / AUTO-RESUME AN TOÀN ---
@@ -614,7 +553,9 @@ def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w,
 # ==============================================================================
 
 def upscale_video(video_input, output_dir=None, model_name=None, progress_callback=None):
-    is_magnet = isinstance(video_input, str) and video_input.strip().startswith("magnet:?")
+    if isinstance(video_input, str) and video_input.strip().startswith("magnet:?"):
+        raise ValueError("❌ Không hỗ trợ Magnet/Torrent nhằm tuân thủ chính sách của Google Colab và chống khoá tài khoản (P2P Ban). Vui lòng tải video về Google Drive hoặc upload trực tiếp!")
+
     is_gdrive = isinstance(video_input, str) and ("drive.google.com" in video_input or "drive.usercontent.google.com" in video_input)
 
     if output_dir is None:
@@ -656,12 +597,6 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
         if progress_callback:
             progress_callback(0.01, desc="☁️ Đang kết nối tải video từ Google Drive...")
         temp_downloaded_file = download_gdrive(video_input.strip(), output_dir=os.path.join(output_dir, "input"), progress_cb=progress_callback)
-        video_input = temp_downloaded_file
-    elif is_magnet:
-        print("🧲 Nhận diện Magnet link. Bắt đầu tải tập anime bằng aria2c...")
-        if progress_callback:
-            progress_callback(0.01, desc="🧲 Đang tải anime qua Magnet link (aria2c)...")
-        temp_downloaded_file = download_magnet(video_input.strip(), output_dir=os.path.join(output_dir, "input"), progress_cb=progress_callback)
         video_input = temp_downloaded_file
     else:
         if not os.path.exists(video_input):
@@ -928,8 +863,8 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
 
 def main():
     if len(sys.argv) < 2:
-        print("❌ Lỗi: Vui lòng cung cấp link Magnet hoặc đường dẫn file video!")
-        print("💡 Sử dụng: python3 upscale.py <magnet:... hoặc video.mkv> [animejanai_v3_compact / animejanai_v3_sharp / cugan_conservative]")
+        print("❌ Lỗi: Vui lòng cung cấp đường dẫn video hoặc link Google Drive!")
+        print("💡 Sử dụng: python3 upscale.py <video.mkv hoặc link_gdrive> [animejanai_v3_compact / animejanai_v3_sharp]")
         return
 
     video_input = sys.argv[1]
