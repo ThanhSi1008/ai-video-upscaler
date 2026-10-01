@@ -220,6 +220,40 @@ def get_best_device():
         return torch.device('mps'), 'mps', "Apple Silicon (Metal Performance Shaders - MPS)"
     return torch.device('cpu'), 'cpu', "CPU (Software Mode)"
 
+def ensure_ffmpeg_nvenc():
+    """
+    Tự động kiểm tra và cài đặt FFmpeg có hỗ trợ NVIDIA NVENC
+    nếu đang chạy trên môi trường Linux GPU (Google Colab / Kaggle).
+    """
+    if sys.platform != 'linux' or not torch.cuda.is_available():
+        return
+
+    try:
+        res = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if 'hevc_nvenc' in res.stdout:
+            return  # Đã có sẵn NVENC
+    except Exception:
+        pass
+
+    # Tự động nạp bản build FFmpeg NVENC nếu chạy trên Colab (/content) hoặc Kaggle (/kaggle)
+    if os.path.exists('/content') or os.path.exists('/kaggle'):
+        print("⚡ [Auto-Setup] Phát hiện thiếu FFmpeg NVENC trên GPU. Đang tự động nạp FFmpeg NVENC (~15s)...", flush=True)
+        setup_cmd = (
+            "wget -q --timeout=30 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -O /tmp/ffmpeg.tar.xz && "
+            "tar -xf /tmp/ffmpeg.tar.xz -C /tmp && "
+            "cp -f /tmp/ffmpeg-*-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg 2>/dev/null || true && "
+            "cp -f /tmp/ffmpeg-*-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe 2>/dev/null || true && "
+            "cp -f /tmp/ffmpeg-*-linux64-gpl/bin/ffmpeg /usr/bin/ffmpeg 2>/dev/null || true && "
+            "cp -f /tmp/ffmpeg-*-linux64-gpl/bin/ffprobe /usr/bin/ffprobe 2>/dev/null || true && "
+            "chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/bin/ffmpeg /usr/bin/ffprobe 2>/dev/null || true && "
+            "rm -rf /tmp/ffmpeg*"
+        )
+        try:
+            subprocess.run(setup_cmd, shell=True, check=False)
+            print("✅ [Auto-Setup] Đã kích hoạt FFmpeg NVIDIA NVENC phần cứng thành công!", flush=True)
+        except Exception as e:
+            print(f"⚠️ [Auto-Setup] Không thể tự động cài FFmpeg NVENC: {e}")
+
 def get_hevc_encoder_flags(device_type):
     """
     Tự động chọn encoder HEVC 10-bit tối ưu nhất theo phần cứng:
@@ -242,6 +276,7 @@ def get_hevc_encoder_flags(device_type):
             pass
 
     if device_type == 'cuda':
+        ensure_ffmpeg_nvenc()
         try:
             res = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if 'hevc_nvenc' in res.stdout:
@@ -254,8 +289,9 @@ def get_hevc_encoder_flags(device_type):
                     '-pix_fmt', 'yuv420p10le',
                     '-profile:v', 'main10'
                 ]
+                # NVENC phần cứng yêu cầu độ phân giải tối thiểu >= 160x160 (dùng 256x256 để kiểm tra)
                 test_cmd = [
-                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.04',
+                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.04',
                     *test_flags,
                     '-f', 'null', '-'
                 ]
@@ -271,7 +307,7 @@ def get_hevc_encoder_flags(device_type):
                     '-pix_fmt', 'yuv420p10le'
                 ]
                 test_cmd2 = [
-                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.04',
+                    'ffmpeg', '-y', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.04',
                     *simple_flags,
                     '-f', 'null', '-'
                 ]
@@ -740,10 +776,10 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
 
     if device.type == 'cuda':
         total_mem = torch.cuda.get_device_properties(device).total_memory
-        # Tesla T4 (15GB), V100 (16/32GB), A100 (40/80GB), L4 (24GB) -> Batch 4
-        if total_mem >= 14 * 1024**3 and src_h <= 1080:
+        # A100 (40/80GB) hoặc GPU HBM2 băng thông lớn (>= 24GB) -> Batch 4
+        if total_mem >= 24 * 1024**3 and src_h <= 1080:
             batch_size = 4
-        elif total_mem > 8 * 1024**3 and src_h <= 1080:
+        elif total_mem >= 6 * 1024**3 and src_h <= 1080:
             batch_size = 2
         else:
             batch_size = 1
