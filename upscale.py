@@ -22,6 +22,7 @@ warnings.filterwarnings("ignore")
 os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TORCH_LOGS"] = "-inductor"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ==============================================================================
 # --- 1. KIẾN TRÚC MÔ HÌNH: SRVGGNetCompact (AnimeJaNai V3) & UpCunet2x (Real-CUGAN) ---
@@ -185,6 +186,10 @@ def load_model(model_key, weights_path, device):
     arch = info.get("arch", "srvggnet_compact")
     is_pro = False
 
+    if device.type == 'cuda':
+        gc.collect()
+        torch.cuda.empty_cache()
+
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=2, act_type='prelu')
     state_dict = torch.load(weights_path, map_location='cpu')
     state_dict = state_dict.get('params_ema', state_dict.get('params', state_dict))
@@ -200,10 +205,13 @@ def load_model(model_key, weights_path, device):
     # Tối ưu hóa PyTorch JIT Graph cho GPU để triệt tiêu overhead CPU kernel launch
     if device.type == 'cuda':
         try:
-            dummy_in = torch.zeros(2, 3, 1080, 1920, dtype=torch.float16, device=device).to(memory_format=torch.channels_last)
+            # Dùng tensor nhỏ (256x256) chỉ tốn ~384 KB VRAM để trace graph an toàn tuyệt đối chống OOM
+            dummy_in = torch.zeros(1, 3, 256, 256, dtype=torch.float16, device=device).to(memory_format=torch.channels_last)
             traced = torch.jit.trace(model, dummy_in)
             traced = torch.jit.optimize_for_inference(traced)
             model = traced
+            del dummy_in
+            torch.cuda.empty_cache()
             print("⚡ Đã kích hoạt PyTorch JIT Graph & Tensor Fusion siêu tốc!")
         except Exception as e_jit:
             print(f"ℹ️ Sử dụng mô hình PyTorch chuẩn ({e_jit})")
@@ -588,20 +596,25 @@ def render_segment(
             profile_cnt += current_b
 
             if profile_cnt >= 20:
-                print(f"\n📊 [Profiler] GPU Infer: {t_gpu_infer/profile_cnt*1000:.1f}ms/f | "
-                      f"Post+PCIe: {t_post_pcie/profile_cnt*1000:.1f}ms | "
-                      f"Đọc: {t_wait_read/profile_cnt*1000:.1f}ms | "
-                      f"Ghi: {t_wait_write/profile_cnt*1000:.1f}ms | "
+                gpu_ms = t_gpu_infer / profile_cnt * 1000
+                post_ms = t_post_pcie / profile_cnt * 1000
+                read_ms = t_wait_read / profile_cnt * 1000
+                write_ms = t_wait_write / profile_cnt * 1000
+                latest_profiler_str = f"GPU: {gpu_ms:.0f}ms | Post: {post_ms:.0f}ms | Đọc: {read_ms:.0f}ms | Ghi: {write_ms:.0f}ms"
+                print(f"\n📊 [Profiler] GPU Infer: {gpu_ms:.1f}ms/f | "
+                      f"Post+PCIe: {post_ms:.1f}ms | "
+                      f"Đọc: {read_ms:.1f}ms | "
+                      f"Ghi: {write_ms:.1f}ms | "
                       f"Buffers: in={input_queue.qsize()}/{queue_size}, out={output_queue.qsize()}/4", flush=True)
                 profile_cnt = 0
                 t_wait_read = t_gpu_infer = t_post_pcie = t_wait_write = 0.0
 
             processed_cnt += current_b
             if progress_queue:
-                try: progress_queue.put(current_b)
+                try: progress_queue.put((current_b, latest_profiler_str))
                 except Exception: pass
             if live_progress_cb:
-                try: live_progress_cb(current_b)
+                try: live_progress_cb(current_b, latest_profiler_str)
                 except Exception: pass
     finally:
         output_queue.put(None)
@@ -864,10 +877,17 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
             processes.append(p)
 
         completed_total = already_rendered_frames
+        latest_prof = ""
         while completed_total < expected_frames:
             try:
                 added = progress_queue.get(timeout=0.3)
-                completed_total += added
+                if isinstance(added, tuple):
+                    cnt, prof = added
+                    completed_total += cnt
+                    if prof:
+                        latest_prof = prof
+                else:
+                    completed_total += added
             except Exception:
                 if not any(p.is_alive() for p in processes) and task_queue.empty():
                     break
@@ -885,7 +905,8 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
                 eta_sec = (expected_frames - completed_total) / speed_fps if speed_fps > 0 else 0
                 eta_str = f"{int(eta_sec // 60):02d}:{int(eta_sec % 60):02d}"
 
-                status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}"
+                prof_part = f" | ⚡ {latest_prof}" if latest_prof else ""
+                status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}{prof_part}"
                 print(status_msg + "    ", end='\r', flush=True)
 
                 if progress_callback:
@@ -899,14 +920,17 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
     elif len(todo_segments) > 0:
         model, arch, is_pro = load_model(model_key, weights_path, device)
         completed_total = already_rendered_frames
+        latest_prof = ""
 
         for seg_idx, s_frame, n_frames, seg_file in todo_segments:
             seg_banner = f"🎞️ [Phân đoạn {seg_idx + 1}/{total_segments}] Đang render frame {s_frame} -> {s_frame + n_frames}..."
             print(f"\n{seg_banner}", flush=True)
 
-            def live_cb(cnt):
-                nonlocal completed_total, last_print_time
+            def live_cb(cnt, prof=""):
+                nonlocal completed_total, last_print_time, latest_prof
                 completed_total += cnt
+                if prof:
+                    latest_prof = prof
                 now = time.time()
                 if (now - last_print_time) >= 0.5 or completed_total >= expected_frames:
                     last_print_time = now
@@ -920,7 +944,8 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
                     eta_sec = (expected_frames - completed_total) / speed_fps if speed_fps > 0 else 0
                     eta_str = f"{int(eta_sec // 60):02d}:{int(eta_sec % 60):02d}"
 
-                    status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}"
+                    prof_part = f" | ⚡ {latest_prof}" if latest_prof else ""
+                    status_msg = f"⏳ {completed_total}/{expected_frames} ({pct:.1f}%) | {speed_fps:.2f} fps | {cur_str}/{tot_str} | ETA: {eta_str}{prof_part}"
                     print(status_msg + "    ", end='\r', flush=True)
                     if progress_callback:
                         try: progress_callback(pct / 100.0, desc=status_msg)
