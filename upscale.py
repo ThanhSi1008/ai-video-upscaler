@@ -77,141 +77,6 @@ class SRVGGNetCompact(nn.Module):
         base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
         out += base
         return out
-
-
-class SEBlock(nn.Module):
-    def __init__(self, in_channels, reduction=8, bias=False):
-        super(SEBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, in_channels // reduction, 1, 1, 0, bias=bias)
-        self.conv2 = nn.Conv2d(in_channels // reduction, in_channels, 1, 1, 0, bias=bias)
-
-    def forward(self, x):
-        x0 = torch.mean(x, dim=(2, 3), keepdim=True, dtype=torch.float32).to(x.dtype)
-        x0 = self.conv1(x0)
-        x0 = F.relu(x0, inplace=True)
-        x0 = self.conv2(x0)
-        x0 = torch.sigmoid(x0)
-        return x.mul_(x0)
-
-class UNetConv(nn.Module):
-    def __init__(self, in_channels, mid_channels, out_channels, se):
-        super(UNetConv, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, 3, 1, 0),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(mid_channels, out_channels, 3, 1, 0),
-            nn.LeakyReLU(0.1, inplace=True),
-        )
-        self.seblock = SEBlock(out_channels, reduction=8, bias=True) if se else None
-
-    def forward(self, x):
-        z = self.conv(x)
-        if self.seblock is not None:
-            z = self.seblock(z)
-        return z
-
-class UNet1(nn.Module):
-    def __init__(self, in_channels, out_channels, deconv):
-        super(UNet1, self).__init__()
-        self.conv1 = UNetConv(in_channels, 32, 64, se=False)
-        self.conv1_down = nn.Conv2d(64, 64, 2, 2, 0)
-        self.conv2 = UNetConv(64, 128, 64, se=True)
-        self.conv2_up = nn.ConvTranspose2d(64, 64, 2, 2, 0)
-        self.conv3 = nn.Conv2d(64, 64, 3, 1, 0)
-
-        if deconv:
-            self.conv_bottom = nn.ConvTranspose2d(64, out_channels, 4, 2, 3)
-        else:
-            self.conv_bottom = nn.Conv2d(64, out_channels, 3, 1, 0)
-
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        x1 = self.conv1(x)
-        x2 = self.conv1_down(x1)
-        x1 = x1[:, :, 4:-4, 4:-4]
-        x2 = F.leaky_relu(x2, 0.1, inplace=True)
-        x2 = self.conv2(x2)
-        x2 = self.conv2_up(x2)
-        x2 = F.leaky_relu(x2, 0.1, inplace=True)
-        x3 = self.conv3(x1 + x2)
-        x3 = F.leaky_relu(x3, 0.1, inplace=True)
-        z = self.conv_bottom(x3)
-        return z
-
-class UNet2(nn.Module):
-    def __init__(self, in_channels, out_channels, deconv):
-        super(UNet2, self).__init__()
-        self.conv1 = UNetConv(in_channels, 32, 64, se=False)
-        self.conv1_down = nn.Conv2d(64, 64, 2, 2, 0)
-        self.conv2 = UNetConv(64, 64, 128, se=True)
-        self.conv2_down = nn.Conv2d(128, 128, 2, 2, 0)
-        self.conv3 = UNetConv(128, 256, 128, se=True)
-        self.conv3_up = nn.ConvTranspose2d(128, 128, 2, 2, 0)
-        self.conv4 = UNetConv(128, 64, 64, se=True)
-        self.conv4_up = nn.ConvTranspose2d(64, 64, 2, 2, 0)
-        self.conv5 = nn.Conv2d(64, 64, 3, 1, 0)
-
-        if deconv:
-            self.conv_bottom = nn.ConvTranspose2d(64, out_channels, 4, 2, 3)
-        else:
-            self.conv_bottom = nn.Conv2d(64, out_channels, 3, 1, 0)
-
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def forward(self, x, alpha=1.0):
-        x1 = self.conv1(x)
-        x2 = self.conv1_down(x1)
-        x1 = x1[:, :, 16:-16, 16:-16]
-        x2 = F.leaky_relu(x2, 0.1, inplace=True)
-        x2 = self.conv2(x2)
-        x3 = self.conv2_down(x2)
-        x2 = x2[:, :, 4:-4, 4:-4]
-        x3 = F.leaky_relu(x3, 0.1, inplace=True)
-        x3 = self.conv3(x3)
-        x3 = self.conv3_up(x3)
-        x3 = F.leaky_relu(x3, 0.1, inplace=True)
-        x4 = self.conv4(x2 + x3)
-        if alpha != 1.0:
-            x4 = x4 * alpha
-        x4 = self.conv4_up(x4)
-        x4 = F.leaky_relu(x4, 0.1, inplace=True)
-        x5 = self.conv5(x1 + x4)
-        x5 = F.leaky_relu(x5, 0.1, inplace=True)
-        z = self.conv_bottom(x5)
-        return z
-
-class UpCunet2x(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3):
-        super(UpCunet2x, self).__init__()
-        self.unet1 = UNet1(in_channels, out_channels, deconv=True)
-        self.unet2 = UNet2(in_channels, out_channels, deconv=False)
-
-    def forward(self, x, alpha=1.0):
-        n, c, h0, w0 = x.shape
-        ph = ((h0 - 1) // 2 + 1) * 2
-        pw = ((w0 - 1) // 2 + 1) * 2
-        x = F.pad(x, (18, 18 + pw - w0, 18, 18 + ph - h0), 'reflect')
-        x = self.unet1(x)
-        x0 = self.unet2(x, alpha)
-        x = x[:, :, 20:-20, 20:-20]
-        x0.add_(x)
-        if w0 != pw or h0 != ph:
-            x0 = x0[:, :, :h0 * 2, :w0 * 2]
-        return x0
-
 # ==============================================================================
 # --- 2. DANH MỤC WEIGHTS MÔ HÌNH SUPER-RESOLUTION CHUYÊN BIỆT ---
 # ==============================================================================
@@ -234,37 +99,6 @@ WEIGHTS_INFO = {
         "desc": "AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)",
         "zip_url": "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip",
         "zip_extract": "2x_AnimeJaNai_HD_V3Sharp1_Compact.pth"
-    },
-    # DÒNG REAL-CUGAN NATIVE 2x (CHẤT LƯỢNG TỐI ĐA CHO MÁY MẠNH / CHẠY QUA ĐÊM)
-    "cugan_conservative": {
-        "file": "up2x-latest-conservative.pth",
-        "arch": "upcunet2x",
-        "scale": 2,
-        "desc": "Real-CUGAN 2x Conservative (Chất lượng tối đa cho WEB-DL - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)",
-        "urls": [
-            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-conservative.pth",
-            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-conservative.pth"
-        ]
-    },
-    "cugan_no_denoise": {
-        "file": "up2x-latest-no-denoise.pth",
-        "arch": "upcunet2x",
-        "scale": 2,
-        "desc": "Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip 10-bit - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)",
-        "urls": [
-            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-no-denoise.pth",
-            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-no-denoise.pth"
-        ]
-    },
-    "cugan_denoise3x": {
-        "file": "up2x-latest-denoise3x.pth",
-        "arch": "upcunet2x",
-        "scale": 2,
-        "desc": "Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng - Rất nặng ~1.6 FPS)",
-        "urls": [
-            "https://huggingface.co/spaces/mayhug/Real-CUGAN/resolve/main/weights/up2x-latest-denoise3x.pth",
-            "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/weights_v3/up2x-latest-denoise3x.pth"
-        ]
     }
 }
 
@@ -273,110 +107,66 @@ def resolve_model_key(name):
     # Nhận diện Nguồn A: BDRip 10-bit (Hi10P / Main 10)
     if any(k in name_l for k in ["bdrip", "10-bit", "10bit", "hi10p", "main10", "main 10", "sharp", "nguồn a", "nguon a"]):
         return "animejanai_v3_sharp"
-    # Nhận diện Nguồn B: WEB-DL Gốc
-    elif any(k in name_l for k in ["webdl", "web-dl", "web_dl", "web", "compact", "nguồn b", "nguon b", "subsplease", "erai"]):
-        return "animejanai_v3_compact"
-    # Nhận diện Real-CUGAN
-    elif "no_denoise" in name_l or "no-denoise" in name_l:
-        return "cugan_no_denoise"
-    elif "denoise3x" in name_l or ("denoise" in name_l and "3" in name_l):
-        return "cugan_denoise3x"
-    elif "conservative" in name_l:
-        return "cugan_conservative"
-    elif "cugan" in name_l:
-        return "cugan_conservative"
-    else:
-        # Mặc định tối ưu cho nguồn thông dụng nhất trên Colab (WEB-DL Gốc)
-        return "animejanai_v3_compact"
+    # Mặc định tối ưu cho Nguồn B: WEB-DL Gốc
+    return "animejanai_v3_compact"
 
 def ensure_model_weights(model_key, progress_callback=None):
+    if model_key not in WEIGHTS_INFO:
+        model_key = resolve_model_key(model_key)
     info = WEIGHTS_INFO[model_key]
-    weights_path = info["file"]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    weights_path = os.path.join(script_dir, info["file"])
     if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
         return weights_path
+
+    # Kiểm tra xem file có ở thư mục hiện tại không
+    if os.path.exists(info["file"]) and os.path.getsize(info["file"]) > 100000:
+        return info["file"]
 
     print(f"📥 Tự động tải weights mô hình '{info['desc']}'...")
     if progress_callback:
         progress_callback(0.01, desc=f"📥 Đang chuẩn bị weights: {info['file']}...")
 
-    # Trường hợp tải gói ZIP từ GitHub Releases (AnimeJaNai V3)
+    # Tải gói ZIP từ GitHub Releases (AnimeJaNai V3)
     if "zip_url" in info:
         zip_url = info["zip_url"]
-        zip_name = "2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
-        if not os.path.exists(zip_name) or os.path.getsize(zip_name) < 100000:
+        zip_path = os.path.join(script_dir, "2x_AnimeJaNai_HD_V3_ModelsOnly.zip")
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) < 100000:
             print(f"🔗 Đang tải kho mô hình ZIP từ: {zip_url}")
             try:
                 req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=60) as resp, open(zip_name, 'wb') as f:
+                with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, 'wb') as f:
                     shutil.copyfileobj(resp, f)
             except Exception as e:
                 print(f"⚠️ Tải qua urllib thất bại ({e}), chuyển sang curl...")
-                curl_cmd = ['curl', '-L', '-o', zip_name, zip_url]
+                curl_cmd = ['curl', '-L', '-o', zip_path, zip_url]
                 subprocess.run(curl_cmd, check=True)
 
-        if os.path.exists(zip_name) and os.path.getsize(zip_name) > 100000:
+        if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100000:
             print(f"📦 Đang giải nén bộ trọng số AnimeJaNai V3...")
-            with zipfile.ZipFile(zip_name, 'r') as zf:
-                zf.extractall(".")
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(script_dir)
             if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
                 print(f"✅ Đã tải thành công: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
                 return weights_path
 
-    # Trường hợp tải trực tiếp file .pth (Real-CUGAN)
-    if "urls" in info:
-        download_success = False
-        for url in info["urls"]:
-            try:
-                print(f"🔗 Đang tải từ: {url}")
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=30) as resp, open(weights_path, 'wb') as f:
-                    shutil.copyfileobj(resp, f)
-                if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
-                    print(f"✅ Đã tải thành công: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
-                    download_success = True
-                    break
-            except Exception as e:
-                print(f"⚠️ Thất bại tải từ {url} qua urllib: {e}")
-                try:
-                    print("🔄 Thử lại bằng curl --http1.1...")
-                    curl_cmd = ['curl', '--http1.1', '-L', '-o', weights_path, url]
-                    subprocess.run(curl_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if os.path.exists(weights_path) and os.path.getsize(weights_path) > 100000:
-                        print(f"✅ Đã tải thành công bằng curl: {weights_path} ({os.path.getsize(weights_path)/(1024*1024):.2f} MB)")
-                        download_success = True
-                        break
-                except Exception as e2:
-                    print(f"⚠️ Curl cũng thất bại: {e2}")
-
-        if download_success:
-            return weights_path
-
     raise RuntimeError(f"Không thể tải weights mô hình {model_key}. Vui lòng kiểm tra kết nối mạng!")
 
 def load_model(model_key, weights_path, device):
-    info = WEIGHTS_INFO[model_key]
-    arch = info.get("arch", "upcunet2x")
+    info = WEIGHTS_INFO.get(model_key, WEIGHTS_INFO["animejanai_v3_compact"])
+    arch = info.get("arch", "srvggnet_compact")
     is_pro = False
 
-    if arch == "srvggnet_compact":
-        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=2, act_type='prelu')
-        state_dict = torch.load(weights_path, map_location='cpu')
-        state_dict = state_dict.get('params_ema', state_dict.get('params', state_dict))
-        model.load_state_dict(state_dict, strict=True)
-    else:
-        model = UpCunet2x(in_channels=3, out_channels=3)
-        state_dict = torch.load(weights_path, map_location='cpu')
-        is_pro = ("pro" in state_dict)
-        if is_pro:
-            del state_dict["pro"]
-        model.load_state_dict(state_dict, strict=True)
+    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=2, act_type='prelu')
+    state_dict = torch.load(weights_path, map_location='cpu')
+    state_dict = state_dict.get('params_ema', state_dict.get('params', state_dict))
+    model.load_state_dict(state_dict, strict=True)
 
     model.eval()
     if device.type == 'cuda':
         model = model.half().to(memory_format=torch.channels_last)
     elif device.type == 'mps':
         model = model.half()
-
     model = model.to(device)
     return model, arch, is_pro
 

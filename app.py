@@ -15,6 +15,11 @@ try:
 except Exception:
     pass
 
+repo_root = os.path.dirname(os.path.abspath(__file__))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+os.chdir(repo_root)
+
 import upscale
 importlib.reload(upscale)
 from upscale import upscale_video
@@ -40,9 +45,6 @@ else:
 MODEL_MAP = {
     "⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)": "animejanai_v3_compact",
     "⚡ NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip 10-bit: Hi10P/Main 10 - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)": "animejanai_v3_sharp",
-    "👑 Real-CUGAN 2x Conservative (Chất lượng tối đa cho WEB-DL - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_conservative",
-    "👑 Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip 10-bit - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_no_denoise",
-    "✨ Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng - Rất nặng ~1.6 FPS)": "cugan_denoise3x"
 }
 
 CUSTOM_CSS = """
@@ -203,7 +205,6 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             2. **Mô Hình AI**:
                - **NGUỒN B: AnimeJaNai V3 Compact**: Khuyên dùng cho **WEB-DL Gốc** (SubsPlease, Erai-raws, Crunchyroll/Netflix). Tốc độ siêu tốc ~25–40 phút/tập, hoàn thành trong ngân sách 2 giờ.
                - **NGUỒN A: AnimeJaNai V3 Sharp**: Khuyên dùng cho **BDRip 10-bit (Hi10P / Main 10)**. Giữ nét đanh thép, tận dụng dải màu 10-bit đã deband sạch từ các nhóm encode uy tín (VCB-Studio, Beatrice-Raws...) để triệt tiêu hiện tượng banding.
-               - **Real-CUGAN 2x (Conservative / No-Denoise / Denoise3x)**: Tùy chọn chất lượng tối đa cho phần cứng cao cấp (nặng ~1.6 FPS, ~5.5 tiếng/tập).
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
 
@@ -261,18 +262,44 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
 if __name__ == '__main__':
     share_mode = True if ("--share" in sys.argv or "--public" in sys.argv or os.environ.get("GRADIO_SHARE") == "True") else False
     allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd(), os.path.expanduser('~/Movies/Upscaled'), "/content"]
-    
-    app_obj, local_url, share_url = app.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=share_mode,
-        allowed_paths=allowed_dirs,
-        prevent_thread_lock=True
-    )
+
+    # Trên Linux/Colab: tự động giải phóng port 7860 nếu có tiến trình zombie cũ chiếm giữ
+    if sys.platform.startswith("linux"):
+        try:
+            import subprocess
+            subprocess.run(["fuser", "-k", "7860/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+    server_port = 7860
+    launch_res = None
+    try:
+        launch_res = app.queue().launch(
+            server_name="0.0.0.0",
+            server_port=server_port,
+            share=share_mode,
+            allowed_paths=allowed_dirs,
+            prevent_thread_lock=True
+        )
+    except Exception as e_port:
+        print(f"⚠️ Port {server_port} không khả dụng ({e_port}), chuyển sang tự động chọn port trống...")
+        launch_res = app.queue().launch(
+            server_name="0.0.0.0",
+            share=share_mode,
+            allowed_paths=allowed_dirs,
+            prevent_thread_lock=True
+        )
+
+    share_url = None
+    if isinstance(launch_res, tuple) and len(launch_res) == 3:
+        share_url = launch_res[2]
+    if not share_url:
+        share_url = getattr(app, "share_url", None)
 
     if share_url:
         print("\n" + "="*68, flush=True)
-        print(f"🌐 GRADIO ORIGINAL URL: {share_url}", flush=True)
+        print(f"🌐 GRADIO PUBLIC URL:  {share_url}", flush=True)
         tiny_url = create_tinyurl(share_url)
         if tiny_url:
             print(f"🔗 TINYURL SHORTLINK:   {tiny_url}", flush=True)
@@ -280,7 +307,6 @@ if __name__ == '__main__':
         print("="*68 + "\n", flush=True)
 
     try:
-        while True:
-            time.sleep(3600)
+        app.block()
     except KeyboardInterrupt:
         print("🛑 Ứng dụng đã dừng.")

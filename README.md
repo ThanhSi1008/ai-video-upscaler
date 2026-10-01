@@ -17,7 +17,7 @@ license: mit
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Gradio](https://img.shields.io/badge/Gradio-4.0+-orange.svg)](https://gradio.app/)
 
-An AI-powered video super-resolution platform optimized for **Native 2x Super-Resolution (AnimeJaNai V3 & Real-CUGAN)**, **HEVC 10-bit Master Quality NVENC**, **Automatic Segment Checkpointing & Resilient Resume**, **High-speed Magnet Ingestion (`aria2c`)**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Multi-GPU Parallel Processing**.
+An AI-powered video super-resolution platform optimized for **Native 2x Super-Resolution (AnimeJaNai V3)**, **HEVC 10-bit Master Quality NVENC**, **Automatic Segment Checkpointing & Resilient Resume**, **High-speed Magnet Ingestion (`aria2c`)**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Multi-GPU Parallel Processing**.
 
 ---
 
@@ -25,7 +25,6 @@ An AI-powered video super-resolution platform optimized for **Native 2x Super-Re
 
 - **⚡ NGUỒN B: AnimeJaNai V3 Compact (Native 2x)**: Specially trained for **WEB-DL Gốc** (SubsPlease / Erai-raws / Crunchyroll / Netflix 1080p). Cleans streaming ringing and 8-bit banding while keeping line-art crisp. Ultra-fast (~12–15 FPS on Colab T4, ~25–40 mins per 24-minute episode).
 - **⚡ NGUỒN A: AnimeJaNai V3 Sharp (Native 2x)**: Specially tuned for **BDRip 10-bit (Hi10P / Main 10)**. Preserves razor-sharp line-art and clean gradients without watercolor artifacts (~12–15 FPS on Colab T4).
-- **👑 Real-CUGAN Pro Native 2x**: Ultra-high quality cascaded U-Net options for high-end GPUs (`cugan_conservative`, `cugan_no_denoise`, `cugan_denoise3x`).
 - **🛡️ Google Colab Free-Proof Auto-Checkpoint & Resume**: Video is processed in resilient 2,400-frame segments saved directly to Google Drive. If a Colab session disconnects, it resumes instantly from the exact missing segment without losing hours of work!
 - **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 18 -profile:v main10 -spatial-aq 1` completely eliminating color banding on 4K HDR displays.
 - **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of all original Japanese/English audio tracks, styled ASS/SSA subtitles, embedded font attachments (.ttf), and chapters into `.mkv`.

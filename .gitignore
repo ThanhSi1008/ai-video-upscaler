@@ -56,3 +56,4 @@ sample_preview.*
 .vscode/
 .idea/
 *.swp
+.gradio/
