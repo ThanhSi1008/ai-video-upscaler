@@ -734,7 +734,16 @@ def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w,
 # --- 7. HÀM UPSCALE CHÍNH CHO GOOGLE COLAB & KAGGLE DUAL NVIDIA T4 ---
 # ==============================================================================
 
-def upscale_video(video_input, output_dir=None, model_name=None, progress_callback=None):
+def upscale_video(
+    video_input,
+    output_dir=None,
+    model_name=None,
+    progress_callback=None,
+    translate_sub=False,
+    sub_api_key=None,
+    sub_api_type="gemini",
+    sub_model=None
+):
     if isinstance(video_input, str) and video_input.strip().startswith("magnet:?"):
         raise ValueError("❌ Không hỗ trợ Magnet/Torrent nhằm tuân thủ chính sách của Google Colab và chống khoá tài khoản (P2P Ban). Vui lòng tải video về Google Drive hoặc upload trực tiếp!")
 
@@ -797,6 +806,33 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
 
     video_base = os.path.basename(os.path.splitext(video_input)[0])
     video_output = os.path.join(output_dir, f"{video_base}_4K.mkv")
+
+    # DỊCH PHỤ ĐỀ TIẾNG VIỆT TỰ ĐỘNG BẰNG TRISUB AI (NẾU ĐƯỢC BẬT)
+    vi_sub_path = None
+    if translate_sub:
+        try:
+            print("🌐 [TriSub AI] Đang tự động dịch phụ đề Anime sang Tiếng Việt...", flush=True)
+            if progress_callback:
+                progress_callback(0.01, desc="🌐 [TriSub AI] Đang dịch phụ đề Anime sang Tiếng Việt...")
+
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            from trisub_ai.tri_sub_translate import translate_subtitles_for_video
+
+            vi_srt_output = os.path.join(output_dir, f"{video_base}_Vietsub.srt")
+            vi_sub_path = translate_subtitles_for_video(
+                video_path=video_input,
+                output_srt=vi_srt_output,
+                api_key=sub_api_key,
+                api_type=sub_api_type,
+                model_name=sub_model,
+                progress_callback=progress_callback
+            )
+            print(f"✅ [TriSub AI] Đã tạo thành công file Vietsub: {vi_sub_path}", flush=True)
+        except Exception as e_sub:
+            print(f"⚠️ [TriSub AI] Lỗi trong quá trình dịch phụ đề: {e_sub}. Tiếp tục quá trình nâng cấp 4K...", flush=True)
+
 
     # Đọc thông số metadata gốc
     try:
@@ -1027,19 +1063,41 @@ def upscale_video(video_input, output_dir=None, model_name=None, progress_callba
     # BẢO TỒN 100% METADATA: VIDEO 4K + TOÀN BỘ AUDIO + PHỤ ĐỀ MỀM (.ASS) + FONT ĐÍNH KÈM + CHAPTERS
     print("🔊 Ghép 100% Audio gốc, Subtitle (.ass), Font đính kèm và Chapters vào tệp MKV xuất xưởng...", flush=True)
     temp_final = os.path.join(scratch_dir, f"_final_{os.path.basename(video_output)}")
-    mux_cmd = [
-        'ffmpeg', '-y',
-        '-i', temp_merged,
-        '-i', video_input,
-        '-c', 'copy',
-        '-map', '0:v:0',
-        '-map', '1:a?',
-        '-map', '1:s?',
-        '-map', '1:t?',
-        '-map_metadata', '1',
-        '-map_chapters', '1',
-        temp_final
-    ]
+    
+    if vi_sub_path and os.path.exists(vi_sub_path):
+        print("✨ [TriSub AI] Đang tích hợp track Phụ đề Tiếng Việt làm mặc định vào tập phim 4K...", flush=True)
+        mux_cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_merged,
+            '-i', video_input,
+            '-sub_charenc', 'UTF-8', '-i', vi_sub_path,
+            '-c', 'copy',
+            '-map', '0:v:0',
+            '-map', '1:a?',
+            '-map', '2:s:0',          # Phụ đề Tiếng Việt mới từ TriSub AI
+            '-map', '1:s?',            # Toàn bộ phụ đề gốc có sẵn
+            '-map', '1:t?',            # Font đính kèm
+            '-map_metadata', '1',
+            '-map_chapters', '1',
+            '-metadata:s:s:0', 'language=vie',
+            '-metadata:s:s:0', 'title=Tiếng Việt (TriSub AI)',
+            '-disposition:s:0', 'default',
+            temp_final
+        ]
+    else:
+        mux_cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_merged,
+            '-i', video_input,
+            '-c', 'copy',
+            '-map', '0:v:0',
+            '-map', '1:a?',
+            '-map', '1:s?',
+            '-map', '1:t?',
+            '-map_metadata', '1',
+            '-map_chapters', '1',
+            temp_final
+        ]
     subprocess.run(mux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     # DỌN DẸP FILE TẠM & CHECKPOINTS KHI HOÀN TẤT

@@ -1119,7 +1119,24 @@ def ensure_web_friendly_video(video_path, output_dir=None):
 
     return video_path
 
-def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True)):
+def update_sub_model_choices(provider):
+    if "Gemini" in provider:
+        return gr.update(choices=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"], value="gemini-2.5-flash")
+    elif "DeepSeek" in provider:
+        return gr.update(choices=["deepseek-chat", "deepseek-reasoner"], value="deepseek-chat")
+    elif "OpenAI" in provider:
+        return gr.update(choices=["gpt-4o-mini", "gpt-4o"], value="gpt-4o-mini")
+    return gr.update(choices=["gemini-2.5-flash", "gemini-1.5-flash"], value="gemini-2.5-flash")
+
+def process_ui(
+    drive_or_path,
+    model_choice,
+    translate_sub=False,
+    sub_provider="Google Gemini (Khuyên dùng - Nhanh & Miễn phí)",
+    sub_model="gemini-2.5-flash",
+    sub_api_key="",
+    progress=gr.Progress(track_tqdm=True)
+):
     cleaned_input = drive_or_path.strip() if drive_or_path else ""
 
     # Chặn link Magnet/P2P để bảo vệ an toàn tài khoản Colab/Kaggle
@@ -1135,6 +1152,24 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
         target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
     else:
         target_input = cleaned_input
+
+    api_type = "gemini"
+    if "DeepSeek" in sub_provider:
+        api_type = "deepseek"
+    elif "OpenAI" in sub_provider:
+        api_type = "openai"
+
+    api_key_clean = sub_api_key.strip() if sub_api_key else ""
+    if translate_sub and not api_key_clean:
+        if api_type == "gemini":
+            api_key_clean = os.environ.get("GEMINI_API_KEY", "")
+        elif api_type == "deepseek":
+            api_key_clean = os.environ.get("DEEPSEEK_API_KEY", "")
+        elif api_type == "openai":
+            api_key_clean = os.environ.get("OPENAI_API_KEY", "")
+
+    if translate_sub and not api_key_clean:
+        raise gr.Error("❌ Bạn đã bật tính năng dịch phụ đề TriSub AI nhưng chưa nhập API Key! Vui lòng nhập API Key (lấy Gemini API Key miễn phí tại https://aistudio.google.com) hoặc cài biến môi trường GEMINI_API_KEY.")
 
     model_name = MODEL_MAP.get(model_choice, "animejanai_v3_compact")
     progress_queue = Queue()
@@ -1152,7 +1187,7 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
             print(f"⚠️ Chuẩn bị web preview nguồn: {e_orig}")
             web_orig = target_input
 
-    yield web_orig, None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
+    yield web_orig, None, gr.update(visible=False), gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
 
     output_result = [None]
     error_result = [None]
@@ -1162,7 +1197,11 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
             res = upscale.upscale_video(
                 video_input=target_input,
                 model_name=model_name,
-                progress_callback=progress_cb
+                progress_callback=progress_cb,
+                translate_sub=translate_sub,
+                sub_api_key=api_key_clean if translate_sub else None,
+                sub_api_type=api_type,
+                sub_model=sub_model.strip() if sub_model else None
             )
             output_result[0] = res
         except Exception as e:
@@ -1180,7 +1219,7 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
                 break
             pct, desc = item
             if desc:
-                yield gr.update(), gr.update(), gr.update(), desc
+                yield gr.update(), gr.update(), gr.update(), gr.update(), desc
         except Exception:
             if not thread.is_alive() and progress_queue.empty():
                 break
@@ -1191,7 +1230,7 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield gr.update(), gr.update(), gr.update(), "⚡ Đang tối ưu hóa định dạng web preview siêu tốc để xem mượt mà trên trình duyệt..."
+    yield gr.update(), gr.update(), gr.update(), gr.update(), "⚡ Đang tối ưu hóa định dạng web preview siêu tốc để xem mượt mà trên trình duyệt..."
     web_output = ensure_web_friendly_video(output_path)
 
     # Nếu ban đầu là link Drive tải về, tìm file nguồn tải về để nạp vào web_orig
@@ -1207,7 +1246,146 @@ def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True
                         web_orig = ensure_web_friendly_video(latest_file)
                         break
 
-    yield web_orig, web_output, gr.update(value=output_path, visible=True), "✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về. Đã khóa đồng bộ thời gian hai video (dùng phím ← / → để so sánh)."
+    sub_download_update = gr.update(visible=False)
+    has_sub = False
+    if output_path:
+        out_dir = os.path.dirname(output_path)
+        base_name = os.path.basename(os.path.splitext(output_path)[0]).replace("_4K", "")
+        possible_srt = os.path.join(out_dir, f"{base_name}_Vietsub.srt")
+        if os.path.exists(possible_srt) and os.path.getsize(possible_srt) > 20:
+            sub_download_update = gr.update(value=possible_srt, visible=True)
+            has_sub = True
+
+    status_msg = "✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về."
+    if translate_sub and has_sub:
+        status_msg += " Đã tự động dịch và nhúng phụ đề Tiếng Việt (TriSub AI) làm track mặc định!"
+    status_msg += " Đã khóa đồng bộ thời gian hai video (dùng phím ← / → để so sánh)."
+
+    yield web_orig, web_output, gr.update(value=output_path, visible=True), sub_download_update, status_msg
+
+def process_quick_sub_ui(
+    sub_source_input,
+    sub_provider,
+    sub_model,
+    sub_api_key,
+    progress=gr.Progress(track_tqdm=True)
+):
+    cleaned_input = sub_source_input.strip() if sub_source_input else ""
+    if not cleaned_input or cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
+        raise gr.Error("❌ Vui lòng điền đường dẫn file hoặc dán link chia sẻ Google Drive!")
+
+    if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
+        target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
+    else:
+        target_input = cleaned_input
+
+    api_type = "gemini"
+    if "DeepSeek" in sub_provider:
+        api_type = "deepseek"
+    elif "OpenAI" in sub_provider:
+        api_type = "openai"
+
+    api_key_clean = sub_api_key.strip() if sub_api_key else ""
+    if not api_key_clean:
+        if api_type == "gemini":
+            api_key_clean = os.environ.get("GEMINI_API_KEY", "")
+        elif api_type == "deepseek":
+            api_key_clean = os.environ.get("DEEPSEEK_API_KEY", "")
+        elif api_type == "openai":
+            api_key_clean = os.environ.get("OPENAI_API_KEY", "")
+
+    if not api_key_clean:
+        raise gr.Error("❌ Thiếu API Key! Vui lòng nhập API Key (lấy Gemini API Key miễn phí tại https://aistudio.google.com).")
+
+    is_gdrive = "drive.google.com" in target_input or "drive.usercontent.google.com" in target_input
+
+    if os.path.exists('/content/drive/MyDrive'):
+        out_dir = '/content/drive/MyDrive/Upscaled'
+    elif os.path.exists('/kaggle/working'):
+        out_dir = '/kaggle/working'
+    else:
+        out_dir = os.path.expanduser('~/Movies/Upscaled')
+    os.makedirs(out_dir, exist_ok=True)
+
+    yield gr.update(visible=False), gr.update(visible=False), "☁️ Đang kết nối và chuẩn bị file nguồn..."
+
+    if is_gdrive:
+        def dl_cb(pct, desc=""):
+            progress(pct * 0.2, desc=desc)
+        local_file = upscale.download_gdrive(target_input, output_dir=os.path.join(out_dir, "input"), progress_cb=dl_cb)
+    else:
+        if not os.path.exists(target_input):
+            raise gr.Error(f"❌ Không tìm thấy file: {target_input}")
+        local_file = target_input
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from trisub_ai.tri_sub_translate import translate_subtitles_for_video
+
+    base_name = os.path.basename(os.path.splitext(local_file)[0])
+    out_srt = os.path.join(out_dir, f"{base_name}_Vietsub.srt")
+
+    progress_queue = Queue()
+    def sub_cb(pct, desc=""):
+        progress_queue.put((pct, desc))
+        if pct is not None:
+            progress(pct, desc=desc)
+
+    output_result = [None]
+    error_result = [None]
+
+    def sub_worker():
+        try:
+            res = translate_subtitles_for_video(
+                video_path=local_file,
+                output_srt=out_srt,
+                api_key=api_key_clean,
+                api_type=api_type,
+                model_name=sub_model.strip() if sub_model else None,
+                progress_callback=sub_cb
+            )
+            output_result[0] = res
+        except Exception as e:
+            error_result[0] = e
+        finally:
+            progress_queue.put(None)
+
+    sub_thread = threading.Thread(target=sub_worker, daemon=True)
+    sub_thread.start()
+
+    while True:
+        try:
+            item = progress_queue.get(timeout=0.2)
+            if item is None:
+                break
+            pct, desc = item
+            if desc:
+                yield gr.update(visible=False), gr.update(visible=False), desc
+        except Exception:
+            if not sub_thread.is_alive() and progress_queue.empty():
+                break
+
+    sub_thread.join()
+
+    if error_result[0]:
+        raise gr.Error(f"❌ Lỗi dịch phụ đề: {str(error_result[0])}")
+
+    out_path = output_result[0]
+
+    # Đọc 25 câu đầu tiên làm preview
+    preview_lines = []
+    if os.path.exists(out_path):
+        with open(out_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            preview_lines = lines[:75]
+    preview_text = "".join(preview_lines)
+
+    yield (
+        gr.update(value=out_path, visible=True),
+        gr.update(value=preview_text, visible=True),
+        f"✅ Dịch thành công chỉ trong vài chục giây! File phụ đề lưu tại: {out_path}"
+    )
 
 with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
@@ -1215,78 +1393,185 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             gr.Markdown(f"""
             # 🎬 AI Video Upscaler 4K - Native 2x Ultra-HD
             Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)**. Khôi phục nét vẽ vector nguyên bản, mã hóa HEVC 10-bit chống banding và bảo tồn 100% Phụ đề mềm (.ass) & Âm thanh gốc.
-            Tích hợp cơ chế **Checkpoint Tự Động** chống ngắt quãng session Google Colab Free.
+            Tích hợp cơ chế **Checkpoint Tự Động** và dịch phụ đề Anime Tiếng Việt **TriSub AI**.
             
             <div class="badge">THIẾT BỊ: {device_badge}</div>
             """)
 
-        with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Google Colab & Mac)", open=False):
-            gr.Markdown("""
-            ### 📖 Hướng Dẫn Sử Dụng
-            1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
-            2. **Mô Hình AI**:
-               - **⚡ UltraCompact (8-lớp - Khuyên dùng tối ưu T4)**: Tốc độ cao **~6.5–8.0 FPS** (chỉ mất ~1 giờ 15 phút/tập 24 phút).
-                 - **NGUỒN B UltraCompact**: Tối ưu cho WEB-DL Gốc (SubsPlease, Erai-raws, Crunchyroll/Netflix).
-                 - **NGUỒN A Sharp UltraCompact**: Tối ưu cho BDRip 10-bit (Hi10P / Main 10) đã deband sạch.
-               - **🎯 Compact (16-lớp - Master Quality)**: Chất lượng gốc tối đa với 16 tầng tích chập (~3.8 FPS trên T4, ~2.5 giờ/tập).
-            3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
-            """)
+        with gr.Tabs():
+            with gr.Tab("🎬 Nâng Cấp 4K & Dịch Phụ Đề (All-in-One)"):
+                with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Google Colab & Mac)", open=False):
+                    gr.Markdown("""
+                    ### 📖 Hướng Dẫn Sử Dụng
+                    1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
+                    2. **Mô Hình AI**:
+                       - **⚡ UltraCompact (8-lớp - Khuyên dùng tối ưu T4)**: Tốc độ cao **~6.5–8.0 FPS** (chỉ mất ~1 giờ 15 phút/tập 24 phút).
+                         - **NGUỒN B UltraCompact**: Tối ưu cho WEB-DL Gốc (SubsPlease, Erai-raws, Crunchyroll/Netflix).
+                         - **NGUỒN A Sharp UltraCompact**: Tối ưu cho BDRip 10-bit (Hi10P / Main 10) đã deband sạch.
+                       - **🎯 Compact (16-lớp - Master Quality)**: Chất lượng gốc tối đa với 16 tầng tích chập (~3.8 FPS trên T4, ~2.5 giờ/tập).
+                    3. **Dịch Phụ Đề Tiếng Việt (TriSub AI)**: Mở mục *Dịch Phụ Đề Tiếng Việt*, tích chọn bật dịch và dán API Key (Gemini miễn phí tại https://aistudio.google.com).
+                    4. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
+                    """)
 
-        # 1. Ô NHẬP LINK GOOGLE DRIVE / ĐƯỜNG DẪN TẬP PHIM
-        drive_link_input = gr.Textbox(
-            value="/content/drive/MyDrive/Resources/",
-            label="☁️ Đường Dẫn File Trong Drive (/content/drive/MyDrive/Resources/...) HOẶC Link Google Drive",
-            placeholder="Chỉ cần điền thêm tên file vào sau (ví dụ: Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Drive https://drive.google.com/...",
-            lines=2
-        )
-
-        # 2. BẢNG ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN
-        comparison_toolbar = gr.HTML(COMPARISON_TOOLBAR_HTML)
-
-        # 3. KHUNG VIDEO GỐC VÀ KẾT QUẢ 4K (CHỈ DÙNG ĐỂ PHÁT & SO SÁNH ĐỒNG BỘ)
-        with gr.Row(equal_height=True, elem_id="comparison_row"):
-            orig_preview = gr.Video(
-                label="📺 Video Gốc (Nguồn Ban Đầu)",
-                elem_id="video_orig",
-                interactive=False,
-                scale=1
-            )
-            output_preview = gr.Video(
-                label="✨ Video 4K Kết Quả (Native 2x UHD)",
-                elem_id="video_upscaled",
-                interactive=False,
-                scale=1
-            )
-
-        # 4. THANH TIẾN ĐỘ THỜI GIAN THỰC
-        status_box = gr.Textbox(
-            label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-            value="Chờ điền tên file hoặc dán link Google Drive...",
-            interactive=False
-        )
-
-        # 5. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
-        with gr.Row():
-            with gr.Column(scale=7):
-                with gr.Group(elem_classes=["panel-box"]):
-                    model_dropdown = gr.Dropdown(
-                        choices=list(MODEL_MAP.keys()),
-                        value="⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - Tốc Độ Nhanh ~6–8 FPS trên T4)",
-                        label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
-                        info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
-                    )
-            with gr.Column(scale=5):
-                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Native 2x UHD)", variant="primary", size="lg")
-                download_file = gr.File(
-                    label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
-                    visible=False
+                # 1. Ô NHẬP LINK GOOGLE DRIVE / ĐƯỜNG DẪN TẬP PHIM
+                drive_link_input = gr.Textbox(
+                    value="/content/drive/MyDrive/Resources/",
+                    label="☁️ Đường Dẫn File Trong Drive (/content/drive/MyDrive/Resources/...) HOẶC Link Google Drive",
+                    placeholder="Chỉ cần điền thêm tên file vào sau (ví dụ: Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Drive https://drive.google.com/...",
+                    lines=2
                 )
 
-        submit_btn.click(
-            fn=process_ui,
-            inputs=[drive_link_input, model_dropdown],
-            outputs=[orig_preview, output_preview, download_file, status_box]
-        )
+                # 2. BẢNG ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN
+                comparison_toolbar = gr.HTML(COMPARISON_TOOLBAR_HTML)
+
+                # 3. KHUNG VIDEO GỐC VÀ KẾT QUẢ 4K (CHỈ DÙNG ĐỂ PHÁT & SO SÁNH ĐỒNG BỘ)
+                with gr.Row(equal_height=True, elem_id="comparison_row"):
+                    orig_preview = gr.Video(
+                        label="📺 Video Gốc (Nguồn Ban Đầu)",
+                        elem_id="video_orig",
+                        interactive=False,
+                        scale=1
+                    )
+                    output_preview = gr.Video(
+                        label="✨ Video 4K Kết Quả (Native 2x UHD)",
+                        elem_id="video_upscaled",
+                        interactive=False,
+                        scale=1
+                    )
+
+                # 4. THANH TIẾN ĐỘ THỜI GIAN THỰC
+                status_box = gr.Textbox(
+                    label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
+                    value="Chờ điền tên file hoặc dán link Google Drive...",
+                    interactive=False
+                )
+
+                # 5. BẢNG CẤU HÌNH & NÚT BẮT ĐẦU / TẢI VỀ
+                with gr.Row():
+                    with gr.Column(scale=7):
+                        with gr.Group(elem_classes=["panel-box"]):
+                            model_dropdown = gr.Dropdown(
+                                choices=list(MODEL_MAP.keys()),
+                                value="⚡ NGUỒN B: AnimeJaNai V3 UltraCompact (WEB-DL Gốc - Tốc Độ Nhanh ~6–8 FPS trên T4)",
+                                label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
+                                info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
+                            )
+
+                            with gr.Accordion("🌐 Dịch Phụ Đề Tiếng Việt (TriSub AI Vietsub)", open=False):
+                                translate_sub_cb = gr.Checkbox(
+                                    label="Bật tự động dịch phụ đề Anime sang Tiếng Việt",
+                                    value=False,
+                                    info="Trích xuất phụ đề mềm từ video, đối chiếu 3 thứ tiếng (Anh + Nhật + Trung) để dịch chuẩn phong cách Anime."
+                                )
+                                with gr.Row():
+                                    sub_provider_radio = gr.Radio(
+                                        choices=["Google Gemini (Khuyên dùng - Nhanh & Miễn phí)", "DeepSeek", "OpenAI"],
+                                        value="Google Gemini (Khuyên dùng - Nhanh & Miễn phí)",
+                                        label="Nhà cung cấp AI"
+                                    )
+                                    sub_model_dropdown = gr.Dropdown(
+                                        choices=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"],
+                                        value="gemini-2.5-flash",
+                                        label="Mô hình AI"
+                                    )
+                                sub_api_key_box = gr.Textbox(
+                                    label="API Key (Gemini / DeepSeek / OpenAI)",
+                                    placeholder="Dán API Key (Gemini lấy miễn phí tại https://aistudio.google.com)",
+                                    type="password",
+                                    value=os.environ.get("GEMINI_API_KEY", "")
+                                )
+                                gr.Markdown("💡 **TriSub AI** sẽ tự động trích xuất phụ đề gốc trong video, dịch sang Tiếng Việt và nhúng làm track phụ đề mặc định trong file MKV 4K kết quả (giữ nguyên phụ đề gốc và font chữ).")
+
+                                sub_provider_radio.change(
+                                    fn=update_sub_model_choices,
+                                    inputs=[sub_provider_radio],
+                                    outputs=[sub_model_dropdown]
+                                )
+
+                    with gr.Column(scale=5):
+                        submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Native 2x UHD)", variant="primary", size="lg")
+                        download_file = gr.File(
+                            label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
+                            visible=False
+                        )
+                        download_sub_file = gr.File(
+                            label="📝 Tải file phụ đề Tiếng Việt riêng (.srt)",
+                            visible=False
+                        )
+
+                submit_btn.click(
+                    fn=process_ui,
+                    inputs=[
+                        drive_link_input,
+                        model_dropdown,
+                        translate_sub_cb,
+                        sub_provider_radio,
+                        sub_model_dropdown,
+                        sub_api_key_box
+                    ],
+                    outputs=[orig_preview, output_preview, download_file, download_sub_file, status_box]
+                )
+
+            with gr.Tab("⚡ Dịch Phụ Đề Nhanh (TriSub AI Standalone - Chỉ 30s)"):
+                with gr.Group(elem_classes=["panel-box"]):
+                    gr.Markdown("""
+                    ### 🌐 Dịch Phụ Đề Siêu Tốc Bằng TriSub AI
+                    Nếu bạn đã có video hoặc file phụ đề và **chỉ muốn dịch sang Tiếng Việt** mà không cần chờ đợi nâng cấp video 4K:
+                    - **⚡ Tốc độ cao**: Chỉ mất ~30 đến 60 giây cho cả tập phim 24 phút (~400 câu thoại).
+                    - **🎬 Định dạng hỗ trợ**: Video MKV, MP4 (chứa phụ đề mềm) hoặc file phụ đề trực tiếp (.srt, .ass, .vtt).
+                    - **🎯 Chất lượng dịch**: Đối chiếu 3 ngôn ngữ (Anh + Nhật + Trung) để xưng hô chuẩn phong cách Anime.
+                    """)
+                    quick_sub_input = gr.Textbox(
+                        value="/content/drive/MyDrive/Resources/",
+                        label="☁️ File Video / Phụ Đề Gốc (Đường dẫn Drive hoặc Link chia sẻ Google Drive)",
+                        placeholder="Điền tên file (ví dụ: Mushoku_Tensei_S02E14.mkv hoặc .ass) HOẶC dán link Google Drive...",
+                        lines=2
+                    )
+                    with gr.Row():
+                        quick_provider_radio = gr.Radio(
+                            choices=["Google Gemini (Khuyên dùng - Nhanh & Miễn phí)", "DeepSeek", "OpenAI"],
+                            value="Google Gemini (Khuyên dùng - Nhanh & Miễn phí)",
+                            label="Nhà cung cấp AI"
+                        )
+                        quick_model_dropdown = gr.Dropdown(
+                            choices=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"],
+                            value="gemini-2.5-flash",
+                            label="Mô hình AI"
+                        )
+                    quick_api_key_box = gr.Textbox(
+                        label="API Key (Gemini / DeepSeek / OpenAI)",
+                        placeholder="Dán API Key (Gemini lấy miễn phí tại https://aistudio.google.com)",
+                        type="password",
+                        value=os.environ.get("GEMINI_API_KEY", "")
+                    )
+                    quick_provider_radio.change(
+                        fn=update_sub_model_choices,
+                        inputs=[quick_provider_radio],
+                        outputs=[quick_model_dropdown]
+                    )
+
+                    quick_sub_btn = gr.Button("🌐 Bắt Đầu Dịch Phụ Đề Tiếng Việt (~30 giây)", variant="primary", size="lg")
+                    quick_sub_status = gr.Textbox(
+                        label="📊 Tiến độ dịch",
+                        value="Chờ nhấn bắt đầu...",
+                        interactive=False
+                    )
+                    quick_sub_file = gr.File(
+                        label="📥 Tải file phụ đề Tiếng Việt kết quả (.srt)",
+                        visible=False
+                    )
+                    quick_sub_preview = gr.Textbox(
+                        label="📝 Xem trước nội dung phụ đề Tiếng Việt vừa dịch",
+                        lines=12,
+                        interactive=False,
+                        visible=False
+                    )
+
+                    quick_sub_btn.click(
+                        fn=process_quick_sub_ui,
+                        inputs=[quick_sub_input, quick_provider_radio, quick_model_dropdown, quick_api_key_box],
+                        outputs=[quick_sub_file, quick_sub_preview, quick_sub_status]
+                    )
 
 if __name__ == '__main__':
     share_mode = True if ("--share" in sys.argv or "--public" in sys.argv or os.environ.get("GRADIO_SHARE") == "True") else False
