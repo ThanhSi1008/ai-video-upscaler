@@ -38,9 +38,11 @@ else:
     device_badge = f"💻 CPU Software Mode | MÃ HÓA: {encoder_desc}"
 
 MODEL_MAP = {
-    "⚡ Real-CUGAN 2x Conservative (Cân bằng sắc nét & sạch nhiễu - Khuyên dùng)": "cugan_conservative",
-    "🎬 Real-CUGAN 2x No-Denoise (Giữ nguyên hạt phim - Tối ưu cho Blu-ray Remux)": "cugan_no_denoise",
-    "✨ Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng)": "cugan_denoise3x"
+    "⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)": "animejanai_v3_compact",
+    "⚡ NGUỒN A: AnimeJaNai V3 Sharp (Khuyên dùng BDRip/BD Remux - Nét đanh giữ grain, siêu tốc ~25–40 phút/tập)": "animejanai_v3_sharp",
+    "👑 Real-CUGAN 2x Conservative (Chất lượng tối đa cho WEB-DL - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_conservative",
+    "👑 Real-CUGAN 2x No-Denoise (Chất lượng tối đa cho BDRip - Rất nặng ~1.6 FPS, ~5.5 tiếng/tập)": "cugan_no_denoise",
+    "✨ Real-CUGAN 2x Denoise3x (Khử nhiễu mạnh cho Anime cũ/nhiễu nén nặng - Rất nặng ~1.6 FPS)": "cugan_denoise3x"
 }
 
 CUSTOM_CSS = """
@@ -134,7 +136,7 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
     else:
         raise gr.Error("❌ Vui lòng điền tên file trong thư mục /content/drive/MyDrive/Resources/ HOẶC dán link Google Drive!")
 
-    model_name = MODEL_MAP.get(model_choice, "cugan_conservative")
+    model_name = MODEL_MAP.get(model_choice, "animejanai_v3_compact")
     progress_queue = Queue()
 
     def progress_cb(pct, desc=""):
@@ -142,7 +144,7 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
         if pct is not None:
             progress(pct, desc=desc)
 
-    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Real-CUGAN Pro Native 2x (4K HEVC 10-bit)..."
+    yield None, gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
 
     output_result = [None]
     error_result = [None]
@@ -183,12 +185,13 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
     output_path = output_result[0]
     yield output_path, gr.update(value=output_path, visible=True), f"✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về."
 
-with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
+with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
         with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
-            # 🎬 AI Video Upscaler 4K - Real-CUGAN Pro
+            # 🎬 AI Video Upscaler 4K - Native 2x Ultra-HD
             Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)**. Khôi phục nét vẽ vector nguyên bản, mã hóa HEVC 10-bit chống banding và bảo tồn 100% Phụ đề mềm (.ass) & Âm thanh gốc.
+            Tích hợp cơ chế **Checkpoint Tự Động** chống ngắt quãng session Google Colab Free.
             
             <div class="badge">THIẾT BỊ: {device_badge}</div>
             """)
@@ -197,7 +200,10 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
             gr.Markdown("""
             ### 📖 Hướng Dẫn Sử Dụng
             1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
-            2. **Mô Hình AI**: Chọn **Conservative** (mặc định cho Web-DL/SubsPlease) hoặc **No-Denoise** cho Blu-ray Remux.
+            2. **Mô Hình AI**:
+               - **NGUỒN B: AnimeJaNai V3 Compact**: Khuyên dùng cho **WEB-DL Gốc** (SubsPlease, Erai-raws, Crunchyroll/Netflix). Tốc độ siêu tốc ~25–40 phút/tập, hoàn thành trong ngân sách 2 giờ.
+               - **NGUỒN A: AnimeJaNai V3 Sharp**: Khuyên dùng cho **BDRip / BD Remux**. Giữ nét đanh thép và bảo toàn film grain tự nhiên của bản master Blu-ray.
+               - **Real-CUGAN 2x (Conservative / No-Denoise / Denoise3x)**: Tùy chọn chất lượng tối đa cho phần cứng cao cấp (nặng ~1.6 FPS, ~5.5 tiếng/tập).
             3. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
             """)
 
@@ -217,7 +223,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
                 scale=1
             )
             output_preview = gr.Video(
-                label="✨ Video 4K Kết Quả (Real-CUGAN Pro 2x UHD)",
+                label="✨ Video 4K Kết Quả (Native 2x UHD)",
                 interactive=False,
                 scale=1
             )
@@ -235,12 +241,12 @@ with gr.Blocks(title="AI Video Upscaler 4K - Real-CUGAN Pro", theme=gr.themes.De
                 with gr.Group(elem_classes=["panel-box"]):
                     model_dropdown = gr.Dropdown(
                         choices=list(MODEL_MAP.keys()),
-                        value="⚡ Real-CUGAN 2x Conservative (Cân bằng sắc nét & sạch nhiễu - Khuyên dùng)",
-                        label="🤖 Mô Hình AI (Real-CUGAN Native 2x UHD)",
-                        info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ tối ưu và giữ nguyên 100% chi tiết gốc."
+                        value="⚡ NGUỒN B: AnimeJaNai V3 Compact (Khuyên dùng WEB-DL Gốc: SubsPlease/Erai - Siêu tốc ~25–40 phút/tập)",
+                        label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
+                        info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
                     )
             with gr.Column(scale=5):
-                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Real-CUGAN Native 2x UHD)", variant="primary", size="lg")
+                submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Native 2x UHD)", variant="primary", size="lg")
                 download_file = gr.File(
                     label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
                     visible=False
