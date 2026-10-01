@@ -938,29 +938,22 @@ def ensure_web_friendly_video(video_path, output_dir=None):
 
     return video_path
 
-def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(track_tqdm=True)):
-    target_input = None
+def process_ui(drive_or_path, model_choice, progress=gr.Progress(track_tqdm=True)):
     cleaned_input = drive_or_path.strip() if drive_or_path else ""
 
     # Chặn link Magnet/P2P để bảo vệ an toàn tài khoản Colab/Kaggle
     if cleaned_input.startswith("magnet:"):
-        raise gr.Error("❌ Hệ thống không hỗ trợ Magnet/Torrent nhằm tuân thủ điều khoản chống P2P của Google Colab (tránh bị khoá tài khoản). Vui lòng lưu video vào Google Drive hoặc tải tệp trực tiếp!")
+        raise gr.Error("❌ Hệ thống không hỗ trợ Magnet/Torrent nhằm tuân thủ điều khoản chống P2P của Google Colab (tránh bị khoá tài khoản). Vui lòng lưu video vào Google Drive!")
 
-    # Nếu người dùng chỉ để nguyên tiền tố mặc định mà không điền tên file
-    if cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
-        if video_file is None:
-            raise gr.Error("❌ Bạn chưa điền tên file anime sau đường dẫn! Ví dụ: /content/drive/MyDrive/Resources/Mushoku_Tensei_S02E14.mkv")
-        target_input = video_file
-    elif cleaned_input:
-        # Nếu người dùng chỉ gõ tên file mà quên tiền tố (ví dụ: Mushoku_Tensei_14.mkv)
-        if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
-            target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
-        else:
-            target_input = cleaned_input
-    elif video_file is not None:
-        target_input = video_file
+    # Nếu người dùng chưa điền hoặc chỉ để nguyên tiền tố mặc định
+    if not cleaned_input or cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
+        raise gr.Error("❌ Vui lòng điền thêm tên file anime sau đường dẫn (ví dụ: /content/drive/MyDrive/Resources/Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Google Drive!")
+
+    # Nếu người dùng chỉ gõ tên file mà quên tiền tố (ví dụ: Mushoku_Tensei_14.mkv)
+    if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
+        target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
     else:
-        raise gr.Error("❌ Vui lòng điền tên file trong thư mục /content/drive/MyDrive/Resources/ HOẶC dán link Google Drive!")
+        target_input = cleaned_input
 
     model_name = MODEL_MAP.get(model_choice, "animejanai_v3_compact")
     progress_queue = Queue()
@@ -1019,8 +1012,19 @@ def process_ui(drive_or_path, video_file, model_choice, progress=gr.Progress(tra
     output_path = output_result[0]
     yield gr.update(), gr.update(), gr.update(), "⚡ Đang tối ưu hóa định dạng web preview siêu tốc để xem mượt mà trên trình duyệt..."
     web_output = ensure_web_friendly_video(output_path)
-    if not web_orig and os.path.exists(target_input):
-        web_orig = ensure_web_friendly_video(target_input)
+
+    # Nếu ban đầu là link Drive tải về, tìm file nguồn tải về để nạp vào web_orig
+    if not web_orig:
+        if os.path.exists(target_input):
+            web_orig = ensure_web_friendly_video(target_input)
+        else:
+            for possible_input_dir in ['/content/drive/MyDrive/Upscaled/input', '/content/input', '/kaggle/working/input', os.path.expanduser('~/Movies/Upscaled/input')]:
+                if os.path.exists(possible_input_dir):
+                    files = [os.path.join(possible_input_dir, f) for f in os.listdir(possible_input_dir) if not f.startswith('.')]
+                    if files:
+                        latest_file = max(files, key=os.path.getmtime)
+                        web_orig = ensure_web_friendly_video(latest_file)
+                        break
 
     yield web_orig, web_output, gr.update(value=output_path, visible=True), "✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về. Đã khóa đồng bộ thời gian hai video (dùng phím ← / → để so sánh)."
 
@@ -1058,12 +1062,12 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
         # 2. BẢNG ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN
         comparison_toolbar = gr.HTML(COMPARISON_TOOLBAR_HTML)
 
-        # 3. KHUNG VIDEO GỐC VÀ KẾT QUẢ 4K (HỖ TRỢ ĐỒNG BỘ VÀ CHUYỂN ĐỔI PHÍM MŨI TÊN)
+        # 3. KHUNG VIDEO GỐC VÀ KẾT QUẢ 4K (CHỈ DÙNG ĐỂ PHÁT & SO SÁNH ĐỒNG BỘ)
         with gr.Row(equal_height=True, elem_id="comparison_row"):
             orig_preview = gr.Video(
                 label="📺 Video Gốc (Nguồn Ban Đầu)",
                 elem_id="video_orig",
-                sources=["upload"],
+                interactive=False,
                 scale=1
             )
             output_preview = gr.Video(
@@ -1076,7 +1080,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
         # 4. THANH TIẾN ĐỘ THỜI GIAN THỰC
         status_box = gr.Textbox(
             label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-            value="Chờ dán link Google Drive hoặc chọn tệp anime...",
+            value="Chờ điền tên file hoặc dán link Google Drive...",
             interactive=False
         )
 
@@ -1099,7 +1103,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
 
         submit_btn.click(
             fn=process_ui,
-            inputs=[drive_link_input, orig_preview, model_dropdown],
+            inputs=[drive_link_input, model_dropdown],
             outputs=[orig_preview, output_preview, download_file, status_box]
         )
 
