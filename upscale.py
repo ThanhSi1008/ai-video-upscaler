@@ -806,7 +806,7 @@ def upscale_video(
         elif os.path.exists('/kaggle/working'):
             output_dir = '/kaggle/working'
         else:
-            output_dir = os.path.expanduser('~/Movies/Upscaled')
+            output_dir = os.path.expanduser('~/Documents/Upscaled')
     else:
         output_dir = os.path.expanduser(str(output_dir).strip())
     os.makedirs(output_dir, exist_ok=True)

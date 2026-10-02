@@ -1161,7 +1161,7 @@ def process_ui(
     if not is_gdrive and not os.path.exists(target_input):
         raise gr.Error(f"❌ Không tìm thấy file: '{target_input}'. Vui lòng kiểm tra lại đường dẫn!")
 
-    out_dir_clean = os.path.expanduser(output_dir_custom.strip()) if output_dir_custom and output_dir_custom.strip() else os.path.expanduser('~/Movies/Upscaled')
+    out_dir_clean = os.path.expanduser(output_dir_custom.strip()) if output_dir_custom and output_dir_custom.strip() else os.path.expanduser('~/Documents/Upscaled')
     os.makedirs(out_dir_clean, exist_ok=True)
 
     api_type = "gemini"
@@ -1289,7 +1289,7 @@ def process_quick_sub_ui(
     if not is_gdrive and not os.path.exists(target_input):
         raise gr.Error(f"❌ Không tìm thấy file: '{target_input}'!")
 
-    out_dir = os.path.expanduser(sub_out_dir_input.strip()) if sub_out_dir_input and sub_out_dir_input.strip() else os.path.expanduser('~/Movies/Upscaled')
+    out_dir = os.path.expanduser(sub_out_dir_input.strip()) if sub_out_dir_input and sub_out_dir_input.strip() else os.path.expanduser('~/Documents/Upscaled')
     os.makedirs(out_dir, exist_ok=True)
 
     api_type = "gemini"
@@ -1412,7 +1412,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                        - **🎯 Compact (Master Quality)**: Chi tiết tối đa cho từng nét vẽ nghệ thuật.
                     3. **Smart Anime Deduplication**: Bật để tự động phát hiện và bỏ qua các khung hình tĩnh/trùng lặp của Anime, đẩy tốc độ render lên gấp ~2 lần mà chất lượng vẫn bảo tồn 100%.
                     4. **Dịch Phụ Đề Tiếng Việt (TriSub AI)**: Mở mục *Dịch Phụ Đề Tiếng Việt*, tích chọn bật dịch và dán API Key (Gemini miễn phí tại https://aistudio.google.com).
-                    5. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `~/Movies/Upscaled`!
+                    5. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `~/Documents/Upscaled`!
                     """)
 
                 # 1. CHỌN FILE VIDEO TRÊN MÁY TÍNH
@@ -1430,9 +1430,9 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                             lines=2
                         )
                         output_folder_input = gr.Textbox(
-                            value="~/Movies/Upscaled",
-                            label="💾 Thư Mục Lưu Video 4K Kết Quả (Mặc định: ~/Movies/Upscaled)",
-                            placeholder="Mặc định: ~/Movies/Upscaled",
+                            value="~/Documents/Upscaled",
+                            label="💾 Thư Mục Lưu Video 4K Kết Quả (Mặc định: ~/Documents/Upscaled)",
+                            placeholder="Mặc định: ~/Documents/Upscaled",
                             lines=1
                         )
 
@@ -1577,7 +1577,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                                 lines=2
                             )
                             quick_out_dir = gr.Textbox(
-                                value="~/Movies/Upscaled",
+                                value="~/Documents/Upscaled",
                                 label="💾 Thư Mục Lưu File Phụ Đề Tiếng Việt (.srt)",
                                 lines=1
                             )
@@ -1641,6 +1641,7 @@ if __name__ == '__main__':
         tempfile.gettempdir(),
         os.getcwd(),
         os.path.expanduser('~'),
+        os.path.expanduser('~/Documents'),
         os.path.expanduser('~/Movies'),
         os.path.expanduser('~/Downloads'),
         os.path.expanduser('~/Desktop'),

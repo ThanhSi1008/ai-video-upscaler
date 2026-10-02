@@ -118,7 +118,7 @@ brew install ffmpeg
 ./venv/bin/python upscale.py /path/to/anime_episode.mkv
 ```
 
-- Output videos are saved to `~/Movies/Upscaled` with bit-exact softsub `.ass` and font preservation.
+- Output videos are saved to `~/Documents/Upscaled` with bit-exact softsub `.ass` and font preservation.
 - Open and enjoy directly in **IINA** (`/Applications/IINA.app`) with full HDR/Retina color fidelity.
 
 ---
