@@ -1,149 +1,78 @@
----
-title: AI Video Upscaler 4K
-emoji: 🎬
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: 4.44.0
-app_file: app.py
-pinned: false
-license: mit
----
+# AI Video Upscaler 4K & AI Subtitle Translator (Apple Silicon M3 Pro)
 
-# 🎬 AI Video Upscaler 4K & Super-Resolution Master Suite
-
-[![Deploy to Spaces](https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/deploy-to-spaces-lg.svg)](https://huggingface.co/new-space?template=ThanhSi1008/ai-video-upscaler)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![Gradio](https://img.shields.io/badge/Gradio-4.0+-orange.svg)](https://gradio.app/)
-
-An AI-powered video super-resolution platform optimized for **Native 2x Super-Resolution (AnimeJaNai V3)**, **HEVC 10-bit Master Quality NVENC**, **Automatic Segment Checkpointing & Resilient Resume**, **Full Audio/Subtitle/Font Preservation**, and **NVIDIA Multi-GPU Parallel Processing**.
+Công cụ tối ưu hóa chuyên sâu cho macOS để **Upscale Video Anime lên 4K (2x Super-Resolution)** và **Dịch phụ đề Anime bằng AI (TriSub AI)** chạy hoàn toàn cục bộ trên Terminal.
 
 ---
 
-## 🌟 Key Features
+## ⚡ 1. Công Cụ Upscale Video Anime 4K (`upscale.py` / `upscale.sh`)
 
-- **⚡ NGUỒN B & A UltraCompact (Native 2x - 8-lớp)**: Tốc độ cao cân bằng chất lượng (**~6.5–8.0 FPS** trên GPU Colab T4, ~1h15p cho tập 24 phút). Gồm 2 phiên bản: `UltraCompact` (tối ưu WEB-DL Gốc) và `Sharp UltraCompact` (tối ưu BDRip 10-bit Hi10P/Main 10).
-- **🎯 NGUỒN B & A Compact (Native 2x - 16-lớp)**: Chất lượng Master Quality tối đa với 16 tầng tích chập sâu (~3.8 FPS trên Colab T4). Giữ trọn từng nét vẽ vector tinh xảo nhất.
-- **🛡️ Google Colab Free-Proof Auto-Checkpoint & Resume**: Video is processed in resilient 2,400-frame segments saved directly to Google Drive. If a Colab session disconnects, it resumes instantly from the exact missing segment without losing hours of work!
-- **🎨 HEVC 10-Bit Color (`yuv420p10le`)**: Master Quality hardware encoding with `-cq 18 -profile:v main10 -spatial-aq 1` completely eliminating color banding on 4K HDR displays.
-- **📝 100% Subtitle, Font & Audio Preservation**: Full bit-exact copying of all original Japanese/English audio tracks, styled ASS/SSA subtitles, embedded font attachments (.ttf), and chapters into `.mkv`.
-- **🚀 Dual-GPU Multi-Processing Acceleration**: Dynamically distributes video segments in parallel across multi-GPU setups (e.g. Dual NVIDIA T4 on Kaggle).
-- **🔍 Native Resolution Quality Checker**: Built-in independent tool to verify whether a video is true native 1080p or upscaled from 720p / ~810p / ~878p (see [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md)).
+Sử dụng trực tiếp nhân **Apple Silicon GPU Metal / Vulkan** kết hợp **Apple Media Engine (VideoToolbox)** để đạt chất lượng chuẩn tham chiếu phòng thu:
 
----
+* **Mô hình AI:** `realesr-animevideov3` chuyên dụng cho video anime 2x (khử nhiễu nén, giữ nét tự nhiên).
+* **Mã hóa phần cứng 10-bit:** `hevc_videotoolbox` Main 10 Profile (`p010le`, BT.709 Limited Range TV, Tag `hvc1`, Spatial AQ).
+* **Bảo vệ tuyệt đối NVMe SSD:** Sử dụng **RAM Disk ảo HFS+ trên macOS** để đệm khung hình trung gian. Khung hình thô và 4K chỉ sinh ra trong RAM và xóa ngay lập tức khi chunk được encode xong ➔ **0 byte ảnh tĩnh ghi xuống SSD!**
+* **Bảo toàn 100% dữ liệu gốc:** Tự động **Stream Copy** toàn bộ audio đa kênh, phụ đề mềm đa ngôn ngữ (ASS/SRT), font chữ nhúng (TrueType) và chapters từ file gốc.
+* **Checkpoint Resume:** Hỗ trợ tiếp tục chạy ngay từ phân đoạn đang dở nếu bị tạm dừng (Ctrl+C hoặc tắt máy).
 
-## 🔍 Native Resolution Quality Checker (Tools)
-
-Check whether your video is genuine Native 1080p or just an upscaled 720p file before running AI super-resolution:
+### Cách sử dụng trên Terminal:
 
 ```bash
-# Analyze video directly (auto-detects sharpest keyframe)
-python3 check_native.py samples/my_video.mkv
+# 1. Chạy nhanh bằng shell launcher (mặc định phân đoạn 15s + RAM Disk):
+./upscale.sh samples/sample_30s.mkv
 
-# Or launch standalone Web UI on port 7865
-python3 check_native.py --web
-```
-👉 Full documentation and mathematical details: [docs/README_CHECK_NATIVE.md](docs/README_CHECK_NATIVE.md).
-
----
-
-## 🚀 Deployment Options
-
-### Option A: 1-Click Deploy to Hugging Face Spaces (Always-On / Easy Demo)
-
-Click the badge below to duplicate this app directly into your Hugging Face Spaces account:
-
-[![Deploy to Spaces](https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/deploy-to-spaces-lg.svg)](https://huggingface.co/new-space?template=ThanhSi1008/ai-video-upscaler)
-
-> 💡 **Note**: Free Spaces run on CPU. For maximum GPU acceleration, upgrade the Space hardware to T4 / A10G GPU in Space Settings.
-
-### Option B: Free Google Colab Deployment (1-Click T4 GPU - No Phone Verification)
-
-Run directly on Google Colab with free NVIDIA T4 GPU acceleration:
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ThanhSi1008/ai-video-upscaler/blob/main/notebooks/Google_Colab_RealCUGAN_4K.ipynb)
-
-1. Click the badge above to open the official notebook in Google Colab.
-2. Select **Runtime -> Change runtime type -> T4 GPU**.
-3. Mount Google Drive and run the cells. Upscaled 4K videos save directly to your Google Drive!
-
----
-
-### Option C: Free Kaggle Notebook Deployment (Dual NVIDIA T4 GPUs ~16+ FPS)
-
-Run the following cell inside a free **Kaggle GPU Notebook** (with Accelerator set to **GPU T4 x2**):
-
-```python
-# @title 🎬 AI Video Upscaler 4K - Ultra High Speed WebUI (Real-CUGAN Pro)
-import os, sys
-
-!apt-get update -qq && apt-get install -y ffmpeg -qq
-!pip install -q --no-cache-dir gradio torch torchvision
-
-repo_dir = "/kaggle/working/ai-video-upscaler"
-if os.path.exists(repo_dir):
-    %cd {repo_dir}
-    !git pull
-else:
-    !git clone https://github.com/ThanhSi1008/ai-video-upscaler.git {repo_dir}
-    %cd {repo_dir}
-
-# Khởi chạy WebUI song song Dual GPU với TinyURL alias cố định
-!python3 app.py --share --alias=4k-upscaler
+# 2. Hoặc chạy qua Python CLI với đầy đủ tùy chọn:
+python3 upscale.py samples/sample_30s.mkv -b 28M -s 15 -o ~/Documents/Upscaled/output_4K.mkv
 ```
 
+**Các tham số tùy chọn:**
+* `-o`, `--output`: Đường dẫn file hoặc thư mục xuất (Mặc định: `~/Documents/Upscaled/<tên>_4K.mkv`).
+* `-m`, `--model`: Mô hình AI (`realesr-animevideov3`, `realesrgan-x4plus-anime`, `realesrgan-x4plus`).
+* `-b`, `--bitrate`: Bitrate video 4K (Mặc định: `28M`).
+* `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `15` giây - tối ưu vừa vặn trong RAM Disk).
+* `-f`, `--format`: Định dạng khung hình trung gian (`jpg` chất lượng cao hoặc `png` lossless).
+* `--no-ramdisk`: Buộc dùng thư mục tạm trên SSD nếu máy thiếu RAM.
+* `--no-resume`: Buộc chạy lại từ đầu thay vì tiếp tục phân đoạn cũ.
+
 ---
 
-### Option D: Apple Silicon Mac (M1/M2/M3 Pro/Max) & Local Offline
+## 📊 2. Số Liệu Đo Đạc Thực Tế Trên Apple Silicon M3 Pro
 
-Optimized natively for Apple Silicon hardware using **MPS (Metal Performance Shaders)** and **VideoToolbox Hardware 10-bit HEVC (`hevc_videotoolbox`)**:
+* **Tốc độ suy luận AI (1080p ➔ 4K):** ~**1.1 – 1.2 fps** trên GPU Metal / MoltenVK (đáp ứng đúng giới hạn phần cứng tính toán TFLOPS thực tế của M3 Pro).
+* **Thời gian xử lý video 30 giây (~720 frames):** ~10 – 11 phút.
+* **Thời gian xử lý tập phim 24 phút (~34.000 frames):** ~7.5 – 8 giờ (chạy qua đêm với Checkpoint Resume an toàn).
+* **Mức độ tiêu thụ ổ cứng:** **0 GB ghi frame trung gian vào SSD** khi bật RAM Disk ảo.
+
+---
+
+## 🌐 3. Dịch Phụ Đề Anime Bằng AI (`trisub_ai/`)
+
+Thư mục `trisub_ai/` chứa module dịch phụ đề anime chuyên sâu bằng LLM (Gemini / Claude / OpenAI):
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/ThanhSi1008/ai-video-upscaler.git
-cd ai-video-upscaler
-
-# 2. Create Python 3.12 virtual environment & install requirements
-python3.12 -m venv venv
-./venv/bin/pip install -r requirements.txt
-
-# 3. Ensure FFmpeg is installed (with VideoToolbox support)
-brew install ffmpeg
-
-# 4. Launch the Web UI
-./venv/bin/python app.py
-
-# Or run CLI directly on any video file
-./venv/bin/python upscale.py /path/to/anime_episode.mkv
-```
-
-- Output videos are saved to `~/Documents/Upscaled` with bit-exact softsub `.ass` and font preservation.
-- Open and enjoy directly in **IINA** (`/Applications/IINA.app`) with full HDR/Retina color fidelity.
-
----
-
-### Option E: Docker Container Deployment
-
-```bash
-# Build Docker image
-docker build -t ai-video-upscaler .
-
-# Run with GPU support
-docker run --gpus all -p 7860:7860 ai-video-upscaler
+cd trisub_ai
+python3 tri_sub_translate.py --help
 ```
 
 ---
 
-## 🛠️ Architecture & Technologies
+## 📁 4. Cấu Trúc Thư Mục Chuẩn Hóa
 
-- **Frontend / UI**: Gradio 4.x
-- **Backend / Deep Learning**: PyTorch 2.x, TorchVision, Real-ESRGAN
-- **Video I/O & Encoding**: FFmpeg, PyTorch IPC Multiprocessing, NVENC / VideoToolbox / libx264
-- **Media Ingestion**: yt-dlp
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+```text
+upscale/
+├── upscale.sh                  # Launcher tiện lợi chạy nhanh trên Terminal
+├── upscale.py                  # CLI Entrypoint với đầy đủ tùy chọn
+├── bin/
+│   └── realesrgan/             # Binary ncnn-vulkan Mach-O & Models NCNN
+├── src/
+│   ├── config.py               # Thiết lập cấu hình, hằng số, encoder params
+│   ├── ramdisk.py              # Quản lý RAM Disk ảo (Zero NVMe wear, Auto Eject)
+│   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (10-bit BT.709, Stream Copy)
+│   ├── ai_engine.py            # Quản lý suy luận NCNN Vulkan trên GPU M3 Pro
+│   ├── pipeline.py             # Bộ điều phối Rolling Segments Pipeline + Checkpoint Resume
+│   └── logger.py               # Hiển thị thanh tiến trình & Báo cáo Benchmark thực tế
+├── samples/
+│   ├── sample_30s.mkv          # File mẫu WEB-DL 1080p Crunchyroll
+│   └── README.md
+├── trisub_ai/                  # Module dịch phụ đề anime bằng AI
+└── requirements.txt            # Dependencies tối giản
+```

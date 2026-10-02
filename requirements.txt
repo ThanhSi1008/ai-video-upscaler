@@ -1,7 +1,4 @@
-torch
-torchvision
-numpy
-Pillow
-gradio
-opencv-python
-matplotlib
+# AI Video Upscaler 4K & TriSub AI Dependencies
+# Core upscaler uses macOS system binaries (ffmpeg, videotoolbox, ncnn-vulkan)
+# TriSub AI LLM Translation dependencies:
+requests>=2.31.0

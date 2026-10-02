@@ -1,0 +1,196 @@
+# -*- coding: utf-8 -*-
+"""
+src/ffmpeg_ops.py
+Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
+- Trích xuất metadata chuyên sâu (độ phân giải, fps, audio, subs, font attachments)
+- Phân đoạn video không giải mã (Lossless Stream Copy)
+- Trích xuất khung hình PNG Lossless với chuyển đổi ma trận màu BT.709 chuẩn xác
+- Nén phần cứng Apple VideoToolbox HEVC 10-bit (Main 10, p010le, BT.709 TV Limited Range, Spatial AQ)
+- Ghép nối phân đoạn và Muxing bảo toàn 100% dữ liệu gốc
+"""
+
+import os
+import json
+import subprocess
+from glob import glob
+from typing import Dict, Any, List
+
+from src.config import (
+    HEVC_ENCODER,
+    HEVC_PROFILE,
+    HEVC_PIX_FMT,
+    HEVC_COLOR_RANGE,
+    HEVC_COLORSPACE,
+    HEVC_COLOR_PRIMARIES,
+    HEVC_COLOR_TRC,
+    HEVC_TAG
+)
+
+
+def probe_video(video_path: str) -> Dict[str, Any]:
+    """Trích xuất thông số kỹ thuật chi tiết của video bằng ffprobe"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_streams",
+        "-show_format",
+        "-show_chapters",
+        "-of", "json",
+        video_path
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    data = json.loads(res.stdout)
+
+    streams = data.get("streams", [])
+    fmt = data.get("format", {})
+    chapters = data.get("chapters", [])
+
+    video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
+    attachment_streams = [s for s in streams if s.get("codec_type") == "attachment"]
+
+    width = int(video_stream.get("width", 1920))
+    height = int(video_stream.get("height", 1080))
+    codec = video_stream.get("codec_name", "unknown")
+
+    # Tính toán chính xác FPS
+    r_fps = video_stream.get("r_frame_rate", "24/1")
+    if "/" in r_fps:
+        num, den = r_fps.split("/")
+        fps = float(num) / float(den) if float(den) > 0 else 23.976
+    else:
+        fps = float(r_fps)
+
+    duration = float(video_stream.get("duration") or fmt.get("duration") or 0)
+    size_bytes = int(fmt.get("size") or os.path.getsize(video_path))
+    nb_frames = int(video_stream.get("nb_frames") or 0)
+
+    return {
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "duration": duration,
+        "size_bytes": size_bytes,
+        "codec": codec,
+        "nb_frames": nb_frames,
+        "audio_count": len(audio_streams),
+        "subtitle_count": len(sub_streams),
+        "attachment_count": len(attachment_streams),
+        "chapter_count": len(chapters)
+    }
+
+
+def split_video_segments(input_path: str, segs_dir: str, segment_time: int) -> List[str]:
+    """
+    Phân đoạn video thành các block nhỏ mà không giải mã lại (Lossless Stream Copy).
+    Tốc độ cực nhanh (vài giây), không tiêu tốn GPU / CPU.
+    """
+    os.makedirs(segs_dir, exist_ok=True)
+    seg_pattern = os.path.join(segs_dir, "seg_%04d.mp4")
+
+    seg_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-an", "-sn",
+        "-c:v", "copy",
+        "-f", "segment",
+        "-segment_time", str(segment_time),
+        "-reset_timestamps", "1",
+        "-avoid_negative_ts", "make_zero",
+        seg_pattern
+    ]
+    subprocess.run(seg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return sorted(glob(os.path.join(segs_dir, "seg_*.mp4")))
+
+
+def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png") -> int:
+    """
+    Trích xuất toàn bộ khung hình từ phân đoạn video vào thư mục đệm.
+    Khi dùng PNG: ánh xạ ma trận màu BT.709 Limited (YUV) sang Full Range RGB24 chính xác.
+    """
+    os.makedirs(frames_dir, exist_ok=True)
+    ext = "png" if fmt == "png" else "jpg"
+    frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
+
+    extract_cmd = ["ffmpeg", "-y", "-i", seg_path]
+    if fmt == "png":
+        extract_cmd.extend([
+            "-vf", "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc",
+            "-vsync", "0",
+            frame_pattern
+        ])
+    else:
+        # Fallback JPEG chất lượng cao nhất
+        extract_cmd.extend([
+            "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
+            "-vsync", "0",
+            frame_pattern
+        ])
+
+    subprocess.run(extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return len(glob(os.path.join(frames_dir, f"*.{ext}")))
+
+
+def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: str = "28M", fmt: str = "png"):
+    """
+    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng Apple Media Engine.
+    Ánh xạ ngược ma trận màu RGB24 sang BT.709 Limited Range (tv) p010le chuẩn xác.
+    """
+    ext = "png" if fmt == "png" else "jpg"
+    frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
+
+    encode_cmd = [
+        "ffmpeg", "-y",
+        "-framerate", str(fps),
+        "-i", frame_pattern,
+        "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv",
+        "-c:v", HEVC_ENCODER,
+        "-b:v", bitrate,
+        "-profile:v", HEVC_PROFILE,
+        "-pix_fmt", HEVC_PIX_FMT,
+        "-color_range", HEVC_COLOR_RANGE,
+        "-colorspace", HEVC_COLORSPACE,
+        "-color_primaries", HEVC_COLOR_PRIMARIES,
+        "-color_trc", HEVC_COLOR_TRC,
+        "-tag:v", HEVC_TAG,
+        "-spatial_aq", "1",
+        output_path
+    ]
+    subprocess.run(encode_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def concat_segments(segment_files: List[str], work_dir: str, output_path: str):
+    """Nối không mất dữ liệu (Lossless Concat) các phân đoạn 4K HEVC"""
+    concat_list = os.path.join(work_dir, "concat.txt")
+    with open(concat_list, "w") as f:
+        for f_seg in segment_files:
+            f.write(f"file '{f_seg}'\n")
+
+    concat_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list,
+        "-c", "copy",
+        output_path
+    ]
+    subprocess.run(concat_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def mux_final_container(upscaled_video: str, original_video: str, final_output: str):
+    """
+    Đóng gói lại toàn bộ Audio, Subtitles, Phông chữ nhúng và Chapters gốc từ video nguồn.
+    Sử dụng Bit-exact Stream Copy 100% (không re-encode bất kỳ luồng âm thanh hay phụ đề nào).
+    """
+    mux_cmd = [
+        "ffmpeg", "-y",
+        "-i", upscaled_video,
+        "-i", original_video,
+        "-map", "0:v:0",
+        "-map", "1:a?",
+        "-map", "1:s?",
+        "-map", "1:t?",
+        "-map_chapters", "1",
+        "-c", "copy",
+        final_output
+    ]
+    subprocess.run(mux_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -29,26 +29,20 @@ venv.bak/
 # Project temporary & output files
 *.mp4
 *.mkv
+!samples/sample_30s.mkv
 *.mov
 *.avi
-yt_temp_input.*
-failed_frames.txt
-*.tmp_media
 *.tmp
+.temp_*
+logs/*.log
+!logs/.gitkeep
 
-# Video resolution checker outputs & temporary plots
-result_analysis.png
-result_web_*.png
-*_analysis.png
-sharpest_frame_preview.jpg
-sample_preview.*
-
-# Model weights downloaded automatically
+# Model weights
 *.pth
-!2x_AnimeJaNai_HD_V3_Compact.pth
-!2x_AnimeJaNai_HD_V3Sharp1_Compact.pth
-!2x_AnimeJaNai_HD_V3_UltraCompact.pth
-!2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth
+*.bin
+*.param
+!bin/realesrgan/models/*.bin
+!bin/realesrgan/models/*.param
 
 # OS & IDE files
 .DS_Store
@@ -60,4 +54,3 @@ sample_preview.*
 .vscode/
 .idea/
 *.swp
-.gradio/
