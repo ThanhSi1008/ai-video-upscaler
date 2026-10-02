@@ -56,3 +56,10 @@ tests/*.png
 .vscode/
 .idea/
 *.swp
+
+# Environment & API Key security
+.env
+.env.*
+.cache/
+subtrans/.env
+subtrans/.cache/
