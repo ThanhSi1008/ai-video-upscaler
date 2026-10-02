@@ -68,6 +68,20 @@ def parse_args():
         action="store_true",
         help="Không tiếp tục từ phân đoạn đã làm dở mà chạy lại từ đầu"
     )
+    parser.add_argument(
+        "--no-caffeinate",
+        action="store_true",
+        help="Không tự động kích hoạt caffeinate để chống sleep máy trong khi chạy"
+    )
+    parser.add_argument(
+        "--preview",
+        type=int,
+        nargs="?",
+        const=10,
+        default=None,
+        metavar="SECONDS",
+        help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng IINA"
+    )
 
     return parser.parse_args()
 
@@ -84,7 +98,9 @@ def main():
             segment_time=args.segment,
             fmt=args.format,
             use_ramdisk=not args.no_ramdisk,
-            resume=not args.no_resume
+            resume=not args.no_resume,
+            caffeinate=not args.no_caffeinate,
+            preview_seconds=args.preview
         )
     except KeyboardInterrupt:
         print("\n\n⚠️ Đã tạm dừng quá trình theo yêu cầu (Ctrl+C).")

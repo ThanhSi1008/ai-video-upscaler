@@ -13,25 +13,33 @@ Sử dụng trực tiếp nhân **Apple Silicon GPU Metal / Vulkan** kết hợp
 * **Bảo vệ tuyệt đối NVMe SSD:** Sử dụng **RAM Disk ảo HFS+ trên macOS** để đệm khung hình trung gian. Khung hình thô và 4K chỉ sinh ra trong RAM và xóa ngay lập tức khi chunk được encode xong ➔ **0 byte ảnh tĩnh ghi xuống SSD!**
 * **Bảo toàn 100% dữ liệu gốc:** Tự động **Stream Copy** toàn bộ audio đa kênh, phụ đề mềm đa ngôn ngữ (ASS/SRT), font chữ nhúng (TrueType) và chapters từ file gốc.
 * **Checkpoint Resume:** Hỗ trợ tiếp tục chạy ngay từ phân đoạn đang dở nếu bị tạm dừng (Ctrl+C hoặc tắt máy).
+* **Cơ chế chống ngủ máy (caffeinate):** Tự động gọi `caffeinate -dims` gắn chặt với PID của phiên chạy; tự động dọn dẹp khi kết thúc hoặc bị gián đoạn.
+* **Kiểm tra an toàn trước khi chạy (Pre-flight Checks):** Cảnh báo sạc AC vs Pin (chống sập nguồn giữa chừng), kiểm tra dung lượng ổ cứng trống tối thiểu an toàn.
+* **Thông báo macOS:** Tự động bắn thông báo Notification Center và chuông âm thanh (`Glass`) ngay khi hoàn tất.
 
 ### Cách sử dụng trên Terminal:
 
 ```bash
-# 1. Chạy nhanh bằng shell launcher (mặc định phân đoạn 15s + RAM Disk):
-./upscale.sh samples/sample_30s.mkv
+# 1. Chạy nhanh bằng shell launcher (mặc định phân đoạn 8s + RAM Disk + Caffeinate):
+./upscale.sh samples/sample_3min.mkv
 
-# 2. Hoặc chạy qua Python CLI với đầy đủ tùy chọn:
-python3 upscale.py samples/sample_30s.mkv -b 28M -s 15 -o ~/Documents/Upscaled/output_4K.mkv
+# 2. Xem trước nhanh 10 giây (tự động cắt tại 30% phim, upscale và mở bằng IINA):
+python3 upscale.py samples/sample_3min.mkv --preview 10
+
+# 3. Chạy đầy đủ với tùy biến bitrate và đường dẫn xuất:
+python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/output_4K.mkv
 ```
 
 **Các tham số tùy chọn:**
 * `-o`, `--output`: Đường dẫn file hoặc thư mục xuất (Mặc định: `~/Documents/Upscaled/<tên>_4K.mkv`).
 * `-m`, `--model`: Mô hình AI (`realesr-animevideov3`, `realesrgan-x4plus-anime`, `realesrgan-x4plus`).
 * `-b`, `--bitrate`: Bitrate video 4K (Mặc định: `28M`).
-* `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `15` giây - tối ưu vừa vặn trong RAM Disk).
-* `-f`, `--format`: Định dạng khung hình trung gian (`jpg` chất lượng cao hoặc `png` lossless).
+* `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `8` giây - tối ưu vừa vặn trong RAM Disk).
+* `-f`, `--format`: Định dạng khung hình trung gian (`png` lossless BT.709 hoặc `jpg`).
 * `--no-ramdisk`: Buộc dùng thư mục tạm trên SSD nếu máy thiếu RAM.
 * `--no-resume`: Buộc chạy lại từ đầu thay vì tiếp tục phân đoạn cũ.
+* `--no-caffeinate`: Không tự động kích hoạt caffeinate để chống sleep máy trong khi chạy.
+* `--preview [giây]`: Chế độ xem trước N giây ở giữa phim, sau đó tự mở bằng IINA.
 
 ---
 
@@ -39,7 +47,8 @@ python3 upscale.py samples/sample_30s.mkv -b 28M -s 15 -o ~/Documents/Upscaled/o
 
 * **Tốc độ suy luận AI (1080p ➔ 4K):** ~**1.1 – 1.2 fps** trên GPU Metal / MoltenVK (đáp ứng đúng giới hạn phần cứng tính toán TFLOPS thực tế của M3 Pro).
 * **Thời gian xử lý video 30 giây (~720 frames):** ~10 – 11 phút.
-* **Thời gian xử lý tập phim 24 phút (~34.000 frames):** ~7.5 – 8 giờ (chạy qua đêm với Checkpoint Resume an toàn).
+* **Thời gian xử lý video 3 phút (~4.360 frames):** ~60 – 65 phút.
+* **Thời gian xử lý tập phim 24 phút (~34.000 frames):** ~7.5 – 8 giờ (chạy qua đêm với Checkpoint Resume & Caffeinate an toàn).
 * **Mức độ tiêu thụ ổ cứng:** **0 GB ghi frame trung gian vào SSD** khi bật RAM Disk ảo.
 
 ---
@@ -68,11 +77,14 @@ upscale/
 │   ├── ramdisk.py              # Quản lý RAM Disk ảo (Zero NVMe wear, Auto Eject)
 │   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (10-bit BT.709, Stream Copy)
 │   ├── ai_engine.py            # Quản lý suy luận NCNN Vulkan trên GPU M3 Pro
+│   ├── preflight.py            # Kiểm tra nguồn điện, đĩa trống & Caffeinate chống ngủ
 │   ├── pipeline.py             # Bộ điều phối Rolling Segments Pipeline + Checkpoint Resume
 │   └── logger.py               # Hiển thị thanh tiến trình & Báo cáo Benchmark thực tế
 ├── samples/
-│   ├── sample_30s.mkv          # File mẫu WEB-DL 1080p Crunchyroll
+│   ├── sample_30s.mkv          # Clip mẫu 32s (Crunchyroll WEB-DL 1080p)
+│   ├── sample_3min.mkv         # Clip mẫu 3 phút (Mushoku Tensei S3 Ep 14 climax)
 │   └── README.md
+├── logs/                       # Log có cấu trúc chi tiết từng phiên chạy
 ├── trisub_ai/                  # Module dịch phụ đề anime bằng AI
 └── requirements.txt            # Dependencies tối giản
 ```
