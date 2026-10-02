@@ -1123,6 +1123,37 @@ def ensure_web_friendly_video(video_path, output_dir=None):
             return video_path
     return video_path
 
+def open_mac_file_dialog(file_types="mkv, mp4, mov, avi, webm, m4v"):
+    """Mở hộp thoại Finder nguyên bản của macOS để chọn file trực tiếp không qua temp upload."""
+    if not sys.platform.startswith("darwin"):
+        return ""
+    types_list = ', '.join([f'"{t.strip()}"' for t in file_types.split(',')])
+    script = f'''
+    try
+        tell application "System Events"
+            activate
+        end tell
+        set chosenFile to choose file of type {{{types_list}}} with prompt "Chọn file trên máy Mac:"
+        return POSIX path of chosenFile
+    on error
+        return ""
+    end try
+    '''
+    try:
+        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        return res.stdout.strip()
+    except Exception as e:
+        print(f"⚠️ Không thể mở Finder dialog: {e}")
+        return ""
+
+def choose_video_file_mac(current_val):
+    chosen = open_mac_file_dialog("mkv, mp4, mov, avi, webm, m4v")
+    return chosen if chosen else current_val
+
+def choose_sub_file_mac(current_val):
+    chosen = open_mac_file_dialog("mkv, mp4, mov, ass, srt, vtt")
+    return chosen if chosen else current_val
+
 def update_sub_model_choices(provider):
     if "DeepSeek" in provider:
         return gr.update(choices=["deepseek-chat", "deepseek-coder"], value="deepseek-chat")
@@ -1145,16 +1176,16 @@ def process_ui(
     progress=gr.Progress(track_tqdm=True)
 ):
     target_input = None
-    if file_upload is not None:
+    if local_path_or_link and local_path_or_link.strip():
+        target_input = os.path.expanduser(local_path_or_link.strip())
+    elif file_upload is not None:
         if isinstance(file_upload, str):
             target_input = file_upload
         elif hasattr(file_upload, 'name'):
             target_input = file_upload.name
-    elif local_path_or_link and local_path_or_link.strip():
-        target_input = os.path.expanduser(local_path_or_link.strip())
 
     if not target_input:
-        raise gr.Error("❌ Vui lòng kéo thả file video từ Finder hoặc nhập đường dẫn file trên máy Mac!")
+        raise gr.Error("❌ Vui lòng chọn file video từ Finder hoặc nhập đường dẫn file trên máy Mac!")
 
     # Nếu là file cục bộ, kiểm tra xem có tồn tại không
     is_gdrive = isinstance(target_input, str) and ("drive.google.com" in target_input or "drive.usercontent.google.com" in target_input)
@@ -1277,13 +1308,13 @@ def process_quick_sub_ui(
     progress=gr.Progress(track_tqdm=True)
 ):
     target_input = None
-    if sub_file_upload is not None:
-        target_input = sub_file_upload if isinstance(sub_file_upload, str) else sub_file_upload.name
-    elif sub_path_input and sub_path_input.strip():
+    if sub_path_input and sub_path_input.strip():
         target_input = os.path.expanduser(sub_path_input.strip())
+    elif sub_file_upload is not None:
+        target_input = sub_file_upload if isinstance(sub_file_upload, str) else getattr(sub_file_upload, 'name', None)
 
     if not target_input:
-        raise gr.Error("❌ Vui lòng chọn/kéo thả file từ Finder hoặc nhập đường dẫn file video / phụ đề!")
+        raise gr.Error("❌ Vui lòng chọn file từ Finder hoặc nhập đường dẫn file video / phụ đề!")
 
     is_gdrive = isinstance(target_input, str) and ("drive.google.com" in target_input or "drive.usercontent.google.com" in target_input)
     if not is_gdrive and not os.path.exists(target_input):
@@ -1417,16 +1448,11 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
 
                 # 1. CHỌN FILE VIDEO TRÊN MÁY TÍNH
                 with gr.Row():
-                    file_uploader = gr.File(
-                        label="📂 Chọn File Video Trên Máy (Kéo thả từ Finder hoặc Click để chọn file)",
-                        file_types=[".mkv", ".mp4", ".mov", ".avi", ".webm"],
-                        scale=6
-                    )
-                    with gr.Column(scale=6):
+                    with gr.Column(scale=8):
                         local_path_input = gr.Textbox(
                             value="",
-                            label="📁 Hoặc Nhập Trực Tiếp Đường Dẫn File Trên Máy Mac",
-                            placeholder="Ví dụ: ~/Movies/Mushoku_Tensei.mkv (tiện cho file dung lượng lớn)",
+                            label="📁 File Video Cần Nâng Cấp (Đường dẫn cục bộ trên Mac)",
+                            placeholder="Bấm nút 'Mở Finder Chọn File' bên phải hoặc dán/kéo thả file vào đây...",
                             lines=2
                         )
                         output_folder_input = gr.Textbox(
@@ -1435,10 +1461,17 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                             placeholder="Mặc định: ~/Documents/Upscaled",
                             lines=1
                         )
+                    with gr.Column(scale=4):
+                        choose_file_btn = gr.Button("📂 Mở Finder Chọn File", variant="primary", size="lg")
+                        with gr.Accordion("Hoặc Kéo Thả File Trực Tiếp Vào WebUI", open=False):
+                            file_uploader = gr.File(
+                                label="Kéo thả file video (.mkv, .mp4, .mov)",
+                                file_types=[".mkv", ".mp4", ".mov", ".avi", ".webm"]
+                            )
 
-                file_uploader.change(
-                    fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
-                    inputs=[file_uploader],
+                choose_file_btn.click(
+                    fn=choose_video_file_mac,
+                    inputs=[local_path_input],
                     outputs=[local_path_input]
                 )
 
@@ -1564,16 +1597,11 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                     - **🎯 Chất lượng dịch**: Đối chiếu 3 ngôn ngữ (Anh + Nhật + Trung) để xưng hô chuẩn phong cách Anime.
                     """)
                     with gr.Row():
-                        quick_sub_file_upload = gr.File(
-                            label="📂 Chọn File Video Hoặc Phụ Đề Trên Máy (Finder)",
-                            file_types=[".mkv", ".mp4", ".mov", ".ass", ".srt", ".vtt"],
-                            scale=6
-                        )
-                        with gr.Column(scale=6):
+                        with gr.Column(scale=8):
                             quick_sub_path = gr.Textbox(
                                 value="",
-                                label="📁 Hoặc Nhập Trực Tiếp Đường Dẫn File Trên Máy Mac",
-                                placeholder="Ví dụ: ~/Movies/ReZero_19.ass hoặc .mkv",
+                                label="📁 File Video Hoặc Phụ Đề Cần Dịch (Trên Máy Mac)",
+                                placeholder="Bấm nút 'Mở Finder Chọn File' bên phải hoặc dán/kéo thả file vào đây...",
                                 lines=2
                             )
                             quick_out_dir = gr.Textbox(
@@ -1581,10 +1609,17 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                                 label="💾 Thư Mục Lưu File Phụ Đề Tiếng Việt (.srt)",
                                 lines=1
                             )
+                        with gr.Column(scale=4):
+                            quick_choose_file_btn = gr.Button("📂 Mở Finder Chọn File", variant="primary", size="lg")
+                            with gr.Accordion("Hoặc Kéo Thả File Trực Tiếp Vào WebUI", open=False):
+                                quick_sub_file_upload = gr.File(
+                                    label="Kéo thả file video hoặc phụ đề (.mkv, .mp4, .ass, .srt)",
+                                    file_types=[".mkv", ".mp4", ".mov", ".ass", ".srt", ".vtt"]
+                                )
 
-                    quick_sub_file_upload.change(
-                        fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
-                        inputs=[quick_sub_file_upload],
+                    quick_choose_file_btn.click(
+                        fn=choose_sub_file_mac,
+                        inputs=[quick_sub_path],
                         outputs=[quick_sub_path]
                     )
 
