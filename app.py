@@ -1415,27 +1415,26 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                     5. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `~/Movies/Upscaled`!
                     """)
 
-                # 1. Ô CHỌN FILE HOẶC NHẬP ĐƯỜNG DẪN CỤC BỘ TRÊN MAC
+                # 1. CHỌN FILE VIDEO TRÊN MÁY TÍNH
                 with gr.Row():
-                    local_path_input = gr.Textbox(
-                        value="",
-                        label="📁 Đường Dẫn File Video Trên Máy Mac (hoặc Link Google Drive)",
-                        placeholder="Ví dụ: ~/Movies/Mushoku_Tensei_S02E14.mkv hoặc kéo thả file sang ô bên phải ➔",
-                        lines=2,
-                        scale=7
-                    )
                     file_uploader = gr.File(
-                        label="📂 Hoặc Kéo Thả / Chọn File Từ Finder",
+                        label="📂 Chọn File Video Trên Máy (Kéo thả từ Finder hoặc Click để chọn file)",
                         file_types=[".mkv", ".mp4", ".mov", ".avi", ".webm"],
-                        scale=5
+                        scale=6
                     )
-
-                output_folder_input = gr.Textbox(
-                    value="~/Movies/Upscaled",
-                    label="💾 Thư Mục Lưu Video 4K Kết Quả (Mặc định: ~/Movies/Upscaled)",
-                    placeholder="Mặc định: ~/Movies/Upscaled",
-                    lines=1
-                )
+                    with gr.Column(scale=6):
+                        local_path_input = gr.Textbox(
+                            value="",
+                            label="📁 Hoặc Nhập Trực Tiếp Đường Dẫn File Trên Máy Mac",
+                            placeholder="Ví dụ: ~/Movies/Mushoku_Tensei.mkv (tiện cho file dung lượng lớn)",
+                            lines=2
+                        )
+                        output_folder_input = gr.Textbox(
+                            value="~/Movies/Upscaled",
+                            label="💾 Thư Mục Lưu Video 4K Kết Quả (Mặc định: ~/Movies/Upscaled)",
+                            placeholder="Mặc định: ~/Movies/Upscaled",
+                            lines=1
+                        )
 
                 file_uploader.change(
                     fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
@@ -1565,24 +1564,23 @@ with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme
                     - **🎯 Chất lượng dịch**: Đối chiếu 3 ngôn ngữ (Anh + Nhật + Trung) để xưng hô chuẩn phong cách Anime.
                     """)
                     with gr.Row():
-                        quick_sub_path = gr.Textbox(
-                            value="",
-                            label="📁 Đường Dẫn File Video Hoặc Phụ Đề Trên Máy Mac",
-                            placeholder="Ví dụ: ~/Movies/ReZero_19.ass hoặc .mkv, hoặc kéo thả file sang ô bên phải ➔",
-                            lines=2,
-                            scale=7
-                        )
                         quick_sub_file_upload = gr.File(
-                            label="📂 Hoặc Kéo Thả File Từ Finder",
+                            label="📂 Chọn File Video Hoặc Phụ Đề Trên Máy (Finder)",
                             file_types=[".mkv", ".mp4", ".mov", ".ass", ".srt", ".vtt"],
-                            scale=5
+                            scale=6
                         )
-
-                    quick_out_dir = gr.Textbox(
-                        value="~/Movies/Upscaled",
-                        label="💾 Thư Mục Lưu File Phụ Đề Tiếng Việt (.srt)",
-                        lines=1
-                    )
+                        with gr.Column(scale=6):
+                            quick_sub_path = gr.Textbox(
+                                value="",
+                                label="📁 Hoặc Nhập Trực Tiếp Đường Dẫn File Trên Máy Mac",
+                                placeholder="Ví dụ: ~/Movies/ReZero_19.ass hoặc .mkv",
+                                lines=2
+                            )
+                            quick_out_dir = gr.Textbox(
+                                value="~/Movies/Upscaled",
+                                label="💾 Thư Mục Lưu File Phụ Đề Tiếng Việt (.srt)",
+                                lines=1
+                            )
 
                     quick_sub_file_upload.change(
                         fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
