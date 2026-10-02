@@ -1,0 +1,70 @@
+# AGENTS.md — AI Agent Guidelines & Architecture Compass
+
+> **Kim chỉ nam dành cho các AI Agent khi đọc, bảo trì và phát triển codebase này.**
+> **Quy tắc bắt buộc:** Ngắn gọn, chuẩn xác, không suy diễn; cập nhật file này sau mỗi lần tái cấu trúc hoặc thay đổi kiến trúc code.
+
+---
+
+## 1. Mục Tiêu & Ràng Buộc Cốt Lõi (Core Invariants)
+
+* **Thiết bị:** Apple Silicon MacBook Pro M3 Pro (11-core CPU, 14-core GPU, 18GB Unified Memory).
+* **Môi trường bắt buộc:** **100% CỤC BỘ trên macOS**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
+* **Tôn chỉ Pareto (Điểm ngọt kỹ thuật):** Chất lượng hình ảnh phải cân bằng với thời gian. Không hy sinh nét vẽ anime lấy tốc độ rẻ tiền, không lãng phí tài nguyên cho cải thiện vô hình.
+* **Mục tiêu thời gian:** **~4 giờ / tập 24 phút** (~17.000 unique frames sau deduplication @ 1.25 fps).
+
+---
+
+## 2. Kiến Trúc Thư Mục & Trách Nhiệm Module (`src/`)
+
+```text
+upscale/
+├── upscale.py              # CLI Entrypoint (Argparse, Error handling, Ctrl+C trap)
+├── upscale.sh              # Shell launcher (tự nhận virtualenv hoặc python3)
+├── src/
+│   ├── config.py           # Single source of truth: Hằng số, Paths, Model choices, VideoToolbox params
+│   ├── ramdisk.py          # RAMDisk Context Manager: mount/unmount HFS+ RAM Disk ảo (Zero SSD Wear)
+│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (BT.709 10-bit, Stream Copy gốc)
+│   ├── ai_engine.py        # NCNN Vulkan via MoltenVK (Metal API) suy luận mô hình anime
+│   ├── preflight.py        # CaffeinateContext (chống sleep), Check AC/Pin, Check đĩa trống, macOS Notifs
+│   ├── pipeline.py         # Orchestrator: Rolling Segments, Checkpoint Resume, Preview mode
+│   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
+├── bin/realesrgan/         # Universal Mach-O binary & NCNN models (.param / .bin)
+├── samples/                # Video mẫu test (sample_30s.mkv, sample_3min.mkv)
+├── tests/                  # Kiểm tra tự động, A/B test blind samples
+└── logs/                   # Log chi tiết có cấu trúc từng phiên chạy
+```
+
+---
+
+## 3. Những Bất Biến Kỹ Thuật Tuyệt Đối Không Được Phá Vỡ (Do NOT Break)
+
+1. **Bảo vệ 100% NVMe SSD (Zero SSD Wear):**
+   * Mọi frame trung gian (trích xuất và 4K AI) **bắt buộc phải ghi trên RAM Disk ảo**.
+   * Sau khi một chunk encode xong, phải `rmtree` dọn sạch RAM Disk ngay lập tức.
+2. **Bảo toàn 100% luồng gốc (Bit-exact Stream Copy):**
+   * Video 4K thành phẩm **bắt buộc Stream Copy nguyên bản**: Audio đa kênh, Phụ đề mềm (ASS/SRT), Font chữ nhúng (TTF/OTF) và Chapters (`-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy`).
+   * Tuyệt đối không re-encode âm thanh hay làm mất font phụ đề.
+3. **Chuỗi ma trận màu sắc chuẩn xác (BT.709 Two-way Matrix):**
+   * Trích xuất: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (YUV Limited ➔ RGB24 Full).
+   * Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full ➔ YUV Limited `p010le`).
+   * Metadata gắn cờ: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
+4. **Vòng đời an toàn (Process Lifecycle & Auto Cleanup):**
+   * `caffeinate` và `hdiutil` (RAM Disk) phải luôn nằm trong `try...finally` hoặc Context Manager với `atexit` để thu hồi sạch sẽ kể cả khi bị `Ctrl+C` (SIGINT).
+
+---
+
+## 4. Dữ Liệu Thực Nghiệm Chuẩn Đã Đo Đạc (Ground Truth Numbers)
+
+* **Tốc độ AI M3 Pro (GPU 14-core):** Duy trì ổn định **1.25 – 1.27 fps** với `realesr-animevideov3` (64nf16nc, ~2.5 TFLOPs/frame).
+* **Tốc độ VideoToolbox Encode 10-bit:** ~**40 – 46 fps** (chunk 8s encode mất ~4.1s).
+* **Tỷ lệ trùng lặp khung hình Anime (Frame Redundancy):** **~50.1%** trên anime 24fps (đo bằng `mpdecimate`).
+* **Số frame thực tế cần tính toán:** 1 tập 24 phút (~34.000 frames) $\rightarrow$ chỉ có **~17.000 unique frames**.
+* **Màn hình hiển thị MacBook Pro 14":** $3024 \times 1964$. Khung hình 16:9 full-width chiếm $3024 \times 1701$ (scale 1.575x từ 1080p). Giá trị của AI nằm ở **tái tạo nét vẽ & khử block nén H.264**, không phải độ phân giải không gian thuần túy.
+
+---
+
+## 5. Quy Chuẩn Khi Viết & Sửa Code Cho AI Agent
+
+* **Không dùng thư viện nặng không cần thiết:** Dự án giữ dependencies tối giản (FFmpeg CLI + NCNN binary + Python stdlib + Pillow). Không cài PyTorch / Torchvision / TensorFlow nếu không có yêu cầu đặc biệt.
+* **Bảo toàn khả năng Resume:** Thư mục `.temp_<basename>` lưu các phân đoạn `up_*.mp4` trên SSD cho phép dừng và chạy tiếp bất cứ lúc nào.
+* **Cập nhật tài liệu song hành:** Bất cứ khi nào thêm tham số CLI mới vào `upscale.py`, phải cập nhật `README.md` và `AGENTS.md` tương ứng.
