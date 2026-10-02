@@ -36,6 +36,8 @@ venv.bak/
 .temp_*
 logs/*.log
 !logs/.gitkeep
+tests/**/*.png
+tests/*.png
 
 # Model weights
 *.pth
