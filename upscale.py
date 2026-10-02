@@ -23,6 +23,8 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["TORCH_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TORCH_LOGS"] = "-inductor"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 # ==============================================================================
 # --- 1. KIẾN TRÚC MÔ HÌNH: SRVGGNetCompact (AnimeJaNai V3) & UpCunet2x (Real-CUGAN) ---
@@ -467,10 +469,12 @@ def is_valid_segment(seg_path, expected_frames, tolerance=2):
 def render_segment(
     seg_idx, s_frame, n_frames, video_input, seg_file,
     model, arch, is_pro, device, target_w, target_h, fps, src_w, src_h, encoder_flags, batch_size=1,
-    progress_queue=None, live_progress_cb=None
+    progress_queue=None, live_progress_cb=None,
+    enable_dedup=True, dedup_threshold=0.003
 ):
     """
     Xử lý render 1 phân đoạn video độc lập với độ chính xác khung hình byte-for-byte.
+    Tích hợp Smart Anime Deduplication tự động tái sử dụng kết quả khung hình tĩnh/trùng lặp.
     Ghi tạm vào file .part và chỉ đổi tên thành file chính thức khi toàn bộ phân đoạn hoàn tất.
     """
     seg_part = (seg_file[:-4] if seg_file.endswith(".mkv") else seg_file) + "_part.mkv"
@@ -560,6 +564,10 @@ def render_segment(
         t_gpu_infer = 0.0
         t_post_pcie = 0.0
         t_wait_write = 0.0
+        last_frame_np = None
+        last_out_bytes = None
+        dedup_skip_cnt = 0
+        latest_profiler_str = ""
 
         while processed_cnt < n_frames:
             t0 = time.perf_counter()
@@ -570,6 +578,39 @@ def render_segment(
             t1 = time.perf_counter()
 
             img_np_batch = np.frombuffer(chunk, dtype=np.uint8).reshape((current_b, src_h, src_w, 3))
+
+            # Smart Anime Deduplication: bỏ qua AI inference nếu frame trùng lặp hoặc tĩnh
+            if enable_dedup and current_b == 1 and last_frame_np is not None and last_out_bytes is not None:
+                curr_frame = img_np_batch[0]
+                is_dup = False
+                if np.array_equal(curr_frame, last_frame_np):
+                    is_dup = True
+                else:
+                    diff = np.mean(np.abs(curr_frame[::8, ::8].astype(np.int16) - last_frame_np[::8, ::8].astype(np.int16))) / 255.0
+                    if diff <= dedup_threshold:
+                        is_dup = True
+
+                if is_dup:
+                    output_queue.put(last_out_bytes)
+                    dedup_skip_cnt += 1
+                    processed_cnt += 1
+                    profile_cnt += 1
+                    if profile_cnt >= 20:
+                        dedup_pct = (dedup_skip_cnt / processed_cnt * 100) if processed_cnt > 0 else 0
+                        latest_profiler_str = f"Dedup: {dedup_pct:.1f}% ({dedup_skip_cnt}f trùng)"
+                        profile_cnt = 0
+                    if progress_queue:
+                        try: progress_queue.put((1, latest_profiler_str))
+                        except Exception: pass
+                    if live_progress_cb:
+                        try: live_progress_cb(1, latest_profiler_str)
+                        except Exception: pass
+                    continue
+
+            # Khung hình mới cần chạy model AI:
+            if enable_dedup and current_b == 1:
+                last_frame_np = img_np_batch[0].copy()
+
             img_t = torch.from_numpy(img_np_batch)
 
             if device.type == 'cuda':
@@ -621,6 +662,9 @@ def render_segment(
                 out_bytes = memoryview(output.cpu().numpy()).cast('B')
             t4 = time.perf_counter()
 
+            if enable_dedup and current_b == 1:
+                last_out_bytes = bytes(out_bytes)
+
             output_queue.put(out_bytes)
             t5 = time.perf_counter()
 
@@ -635,11 +679,12 @@ def render_segment(
                 post_ms = t_post_pcie / profile_cnt * 1000
                 read_ms = t_wait_read / profile_cnt * 1000
                 write_ms = t_wait_write / profile_cnt * 1000
-                latest_profiler_str = f"GPU: {gpu_ms:.0f}ms | Post: {post_ms:.0f}ms | Đọc: {read_ms:.0f}ms | Ghi: {write_ms:.0f}ms"
+                dedup_pct = (dedup_skip_cnt / processed_cnt * 100) if processed_cnt > 0 else 0
+                latest_profiler_str = f"GPU: {gpu_ms:.0f}ms | Bỏ qua trùng: {dedup_pct:.1f}% ({dedup_skip_cnt}f)"
                 print(f"\n📊 [Profiler] GPU Infer: {gpu_ms:.1f}ms/f | "
                       f"Post+PCIe: {post_ms:.1f}ms | "
                       f"Đọc: {read_ms:.1f}ms | "
-                      f"Ghi: {write_ms:.1f}ms | "
+                      f"Dedup: {dedup_pct:.1f}% ({dedup_skip_cnt} frames) | "
                       f"Buffers: in={input_queue.qsize()}/{queue_size}, out={output_queue.qsize()}/4", flush=True)
                 profile_cnt = 0
                 t_wait_read = t_gpu_infer = t_post_pcie = t_wait_write = 0.0
@@ -683,7 +728,7 @@ def render_segment(
 # --- 6. WORKER PHÂN ĐOẠN DUAL GPU (NVIDIA T4 x2 TRÊN KAGGLE) ---
 # ==============================================================================
 
-def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, encoder_flags, batch_size, return_dict, progress_queue):
+def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w, src_h, weights_path, model_key, gpu_id, encoder_flags, batch_size, return_dict, progress_queue, enable_dedup=True, dedup_threshold=0.003):
     try:
         device = torch.device(f'cuda:{gpu_id}')
         torch.cuda.set_device(device)
@@ -721,7 +766,9 @@ def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w,
                 src_h=src_h,
                 encoder_flags=encoder_flags,
                 batch_size=batch_size,
-                progress_queue=progress_queue
+                progress_queue=progress_queue,
+                enable_dedup=enable_dedup,
+                dedup_threshold=dedup_threshold
             )
             return_dict[f"seg_{seg_idx}"] = ok
 
@@ -731,7 +778,7 @@ def _gpu_segment_worker(task_queue, video_input, target_w, target_h, fps, src_w,
         return_dict[f"worker_{gpu_id}"] = False
 
 # ==============================================================================
-# --- 7. HÀM UPSCALE CHÍNH CHO GOOGLE COLAB & KAGGLE DUAL NVIDIA T4 ---
+# --- 7. HÀM UPSCALE CHÍNH (TỐI ƯU HÓA CHO APPLE SILICON MAC & MULTI-GPU) ---
 # ==============================================================================
 
 def upscale_video(
@@ -742,10 +789,14 @@ def upscale_video(
     translate_sub=False,
     sub_api_key=None,
     sub_api_type="gemini",
-    sub_model=None
+    sub_model=None,
+    enable_dedup=True,
+    dedup_threshold=0.003
 ):
-    if isinstance(video_input, str) and video_input.strip().startswith("magnet:?"):
-        raise ValueError("❌ Không hỗ trợ Magnet/Torrent nhằm tuân thủ chính sách của Google Colab và chống khoá tài khoản (P2P Ban). Vui lòng tải video về Google Drive hoặc upload trực tiếp!")
+    if isinstance(video_input, str):
+        video_input = os.path.expanduser(video_input.strip())
+        if video_input.startswith("magnet:?"):
+            raise ValueError("❌ Không hỗ trợ link Magnet/Torrent. Vui lòng tải video về máy hoặc Google Drive!")
 
     is_gdrive = isinstance(video_input, str) and ("drive.google.com" in video_input or "drive.usercontent.google.com" in video_input)
 
@@ -756,15 +807,17 @@ def upscale_video(
             output_dir = '/kaggle/working'
         else:
             output_dir = os.path.expanduser('~/Movies/Upscaled')
+    else:
+        output_dir = os.path.expanduser(str(output_dir).strip())
     os.makedirs(output_dir, exist_ok=True)
 
-    # Dùng ổ SSD cục bộ cho file tạm để ghi tốc độ 500+ MB/s, tránh độ trễ I/O Google Drive
+    # Thư mục tạm tốc độ cao (trên Mac dùng ổ NVMe SSD nội bộ)
     if os.path.exists('/content'):
         scratch_dir = '/content/temp_work'
     elif os.path.exists('/kaggle/working'):
         scratch_dir = '/kaggle/working/temp_work'
     else:
-        scratch_dir = os.path.join(tempfile.gettempdir(), 'ai_upscale_work')
+        scratch_dir = os.path.join(output_dir, '.temp_work')
     os.makedirs(scratch_dir, exist_ok=True)
 
     model_key = resolve_model_key(model_name)
@@ -942,7 +995,7 @@ def upscale_video(
         for g_id in range(num_cuda_gpus):
             p = mp.Process(
                 target=_gpu_segment_worker,
-                args=(task_queue, video_input, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, encoder_flags, batch_size, return_dict, progress_queue)
+                args=(task_queue, video_input, target_w, target_h, fps, src_w, src_h, weights_path, model_key, g_id, encoder_flags, batch_size, return_dict, progress_queue, enable_dedup, dedup_threshold)
             )
             p.start()
             processes.append(p)
@@ -1039,7 +1092,9 @@ def upscale_video(
                 src_h=src_h,
                 encoder_flags=encoder_flags,
                 batch_size=batch_size,
-                live_progress_cb=live_cb
+                live_progress_cb=live_cb,
+                enable_dedup=enable_dedup,
+                dedup_threshold=dedup_threshold
             )
             if not ok or not is_valid_segment(seg_file, n_frames):
                 raise RuntimeError(f"Lỗi khi xử lý phân đoạn {seg_idx} ({seg_file})!")

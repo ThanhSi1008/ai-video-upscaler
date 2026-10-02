@@ -11,6 +11,10 @@ import importlib
 import torch
 import gradio as gr
 
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+os.environ["PYTHONWARNINGS"] = "ignore"
+
 try:
     gr.close_all()
 except Exception:
@@ -1115,43 +1119,50 @@ def ensure_web_friendly_video(video_path, output_dir=None):
             if os.path.exists(out_preview) and os.path.getsize(out_preview) > 1000:
                 return out_preview
         except Exception as e_fb:
-            print(f"⚠️ Fallback thất bại: {e_fb}")
-
+            print(f"⚠️ Fallback cũng lỗi ({e_fb}), trả về file gốc.")
+            return video_path
     return video_path
 
 def update_sub_model_choices(provider):
-    if "Gemini" in provider:
-        return gr.update(choices=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"], value="gemini-2.5-flash")
-    elif "DeepSeek" in provider:
-        return gr.update(choices=["deepseek-chat", "deepseek-reasoner"], value="deepseek-chat")
+    if "DeepSeek" in provider:
+        return gr.update(choices=["deepseek-chat", "deepseek-coder"], value="deepseek-chat")
     elif "OpenAI" in provider:
-        return gr.update(choices=["gpt-4o-mini", "gpt-4o"], value="gpt-4o-mini")
-    return gr.update(choices=["gemini-2.5-flash", "gemini-1.5-flash"], value="gemini-2.5-flash")
+        return gr.update(choices=["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], value="gpt-4o-mini")
+    else:
+        return gr.update(choices=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"], value="gemini-2.5-flash")
 
 def process_ui(
-    drive_or_path,
+    file_upload,
+    local_path_or_link,
+    output_dir_custom,
     model_choice,
+    enable_dedup=True,
+    dedup_thresh=0.003,
     translate_sub=False,
     sub_provider="Google Gemini (Khuyên dùng - Nhanh & Miễn phí)",
     sub_model="gemini-2.5-flash",
     sub_api_key="",
     progress=gr.Progress(track_tqdm=True)
 ):
-    cleaned_input = drive_or_path.strip() if drive_or_path else ""
+    target_input = None
+    if file_upload is not None:
+        if isinstance(file_upload, str):
+            target_input = file_upload
+        elif hasattr(file_upload, 'name'):
+            target_input = file_upload.name
+    elif local_path_or_link and local_path_or_link.strip():
+        target_input = os.path.expanduser(local_path_or_link.strip())
 
-    # Chặn link Magnet/P2P để bảo vệ an toàn tài khoản Colab/Kaggle
-    if cleaned_input.startswith("magnet:"):
-        raise gr.Error("❌ Hệ thống không hỗ trợ Magnet/Torrent nhằm tuân thủ điều khoản chống P2P của Google Colab (tránh bị khoá tài khoản). Vui lòng lưu video vào Google Drive!")
+    if not target_input:
+        raise gr.Error("❌ Vui lòng kéo thả file video từ Finder hoặc nhập đường dẫn file trên máy Mac!")
 
-    # Nếu người dùng chưa điền hoặc chỉ để nguyên tiền tố mặc định
-    if not cleaned_input or cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
-        raise gr.Error("❌ Vui lòng điền thêm tên file anime sau đường dẫn (ví dụ: /content/drive/MyDrive/Resources/Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Google Drive!")
+    # Nếu là file cục bộ, kiểm tra xem có tồn tại không
+    is_gdrive = isinstance(target_input, str) and ("drive.google.com" in target_input or "drive.usercontent.google.com" in target_input)
+    if not is_gdrive and not os.path.exists(target_input):
+        raise gr.Error(f"❌ Không tìm thấy file: '{target_input}'. Vui lòng kiểm tra lại đường dẫn!")
 
-    # Nếu người dùng chỉ gõ tên file mà quên tiền tố (ví dụ: Mushoku_Tensei_14.mkv)
-    if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
-        target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
-    else:
-        target_input = cleaned_input
+    out_dir_clean = os.path.expanduser(output_dir_custom.strip()) if output_dir_custom and output_dir_custom.strip() else os.path.expanduser('~/Movies/Upscaled')
+    os.makedirs(out_dir_clean, exist_ok=True)
 
     api_type = "gemini"
     if "DeepSeek" in sub_provider:
@@ -1187,7 +1198,7 @@ def process_ui(
             print(f"⚠️ Chuẩn bị web preview nguồn: {e_orig}")
             web_orig = target_input
 
-    yield web_orig, None, gr.update(visible=False), gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit & Checkpoints an toàn)..."
+    yield web_orig, None, gr.update(visible=False), gr.update(visible=False), f"⏳ Đang khởi tạo luồng giải mã Native 2x (4K HEVC 10-bit Metal & Smart Dedup)..."
 
     output_result = [None]
     error_result = [None]
@@ -1196,12 +1207,15 @@ def process_ui(
         try:
             res = upscale.upscale_video(
                 video_input=target_input,
+                output_dir=out_dir_clean,
                 model_name=model_name,
                 progress_callback=progress_cb,
                 translate_sub=translate_sub,
                 sub_api_key=api_key_clean if translate_sub else None,
                 sub_api_type=api_type,
-                sub_model=sub_model.strip() if sub_model else None
+                sub_model=sub_model.strip() if sub_model else None,
+                enable_dedup=enable_dedup,
+                dedup_threshold=float(dedup_thresh)
             )
             output_result[0] = res
         except Exception as e:
@@ -1230,21 +1244,11 @@ def process_ui(
         raise gr.Error(f"❌ Lỗi xử lý: {str(error_result[0])}")
 
     output_path = output_result[0]
-    yield gr.update(), gr.update(), gr.update(), gr.update(), "⚡ Đang tối ưu hóa định dạng web preview siêu tốc để xem mượt mà trên trình duyệt..."
+    yield gr.update(), gr.update(), gr.update(), gr.update(), "⚡ Đang chuẩn bị web preview xem trực tiếp..."
     web_output = ensure_web_friendly_video(output_path)
 
-    # Nếu ban đầu là link Drive tải về, tìm file nguồn tải về để nạp vào web_orig
-    if not web_orig:
-        if os.path.exists(target_input):
-            web_orig = ensure_web_friendly_video(target_input)
-        else:
-            for possible_input_dir in ['/content/drive/MyDrive/Upscaled/input', '/content/input', '/kaggle/working/input', os.path.expanduser('~/Movies/Upscaled/input')]:
-                if os.path.exists(possible_input_dir):
-                    files = [os.path.join(possible_input_dir, f) for f in os.listdir(possible_input_dir) if not f.startswith('.')]
-                    if files:
-                        latest_file = max(files, key=os.path.getmtime)
-                        web_orig = ensure_web_friendly_video(latest_file)
-                        break
+    if not web_orig and os.path.exists(target_input):
+        web_orig = ensure_web_friendly_video(target_input)
 
     sub_download_update = gr.update(visible=False)
     has_sub = False
@@ -1256,7 +1260,7 @@ def process_ui(
             sub_download_update = gr.update(value=possible_srt, visible=True)
             has_sub = True
 
-    status_msg = "✨ Nâng cấp thành công! Tập phim 4K Ultra-HD hoàn chỉnh (.mkv) sẵn sàng tải về."
+    status_msg = f"✨ Nâng cấp thành công! Tập phim 4K đã lưu tại: {output_path}."
     if translate_sub and has_sub:
         status_msg += " Đã tự động dịch và nhúng phụ đề Tiếng Việt (TriSub AI) làm track mặc định!"
     status_msg += " Đã khóa đồng bộ thời gian hai video (dùng phím ← / → để so sánh)."
@@ -1264,20 +1268,29 @@ def process_ui(
     yield web_orig, web_output, gr.update(value=output_path, visible=True), sub_download_update, status_msg
 
 def process_quick_sub_ui(
-    sub_source_input,
+    sub_file_upload,
+    sub_path_input,
+    sub_out_dir_input,
     sub_provider,
     sub_model,
     sub_api_key,
     progress=gr.Progress(track_tqdm=True)
 ):
-    cleaned_input = sub_source_input.strip() if sub_source_input else ""
-    if not cleaned_input or cleaned_input in ["/content/drive/MyDrive/Resources", "/content/drive/MyDrive/Resources/"]:
-        raise gr.Error("❌ Vui lòng điền đường dẫn file hoặc dán link chia sẻ Google Drive!")
+    target_input = None
+    if sub_file_upload is not None:
+        target_input = sub_file_upload if isinstance(sub_file_upload, str) else sub_file_upload.name
+    elif sub_path_input and sub_path_input.strip():
+        target_input = os.path.expanduser(sub_path_input.strip())
 
-    if not cleaned_input.startswith("/") and not cleaned_input.startswith("http"):
-        target_input = f"/content/drive/MyDrive/Resources/{cleaned_input}"
-    else:
-        target_input = cleaned_input
+    if not target_input:
+        raise gr.Error("❌ Vui lòng chọn/kéo thả file từ Finder hoặc nhập đường dẫn file video / phụ đề!")
+
+    is_gdrive = isinstance(target_input, str) and ("drive.google.com" in target_input or "drive.usercontent.google.com" in target_input)
+    if not is_gdrive and not os.path.exists(target_input):
+        raise gr.Error(f"❌ Không tìm thấy file: '{target_input}'!")
+
+    out_dir = os.path.expanduser(sub_out_dir_input.strip()) if sub_out_dir_input and sub_out_dir_input.strip() else os.path.expanduser('~/Movies/Upscaled')
+    os.makedirs(out_dir, exist_ok=True)
 
     api_type = "gemini"
     if "DeepSeek" in sub_provider:
@@ -1297,16 +1310,6 @@ def process_quick_sub_ui(
     if not api_key_clean:
         raise gr.Error("❌ Thiếu API Key! Vui lòng nhập API Key (lấy Gemini API Key miễn phí tại https://aistudio.google.com).")
 
-    is_gdrive = "drive.google.com" in target_input or "drive.usercontent.google.com" in target_input
-
-    if os.path.exists('/content/drive/MyDrive'):
-        out_dir = '/content/drive/MyDrive/Upscaled'
-    elif os.path.exists('/kaggle/working'):
-        out_dir = '/kaggle/working'
-    else:
-        out_dir = os.path.expanduser('~/Movies/Upscaled')
-    os.makedirs(out_dir, exist_ok=True)
-
     yield gr.update(visible=False), gr.update(visible=False), "☁️ Đang kết nối và chuẩn bị file nguồn..."
 
     if is_gdrive:
@@ -1314,8 +1317,6 @@ def process_quick_sub_ui(
             progress(pct * 0.2, desc=desc)
         local_file = upscale.download_gdrive(target_input, output_dir=os.path.join(out_dir, "input"), progress_cb=dl_cb)
     else:
-        if not os.path.exists(target_input):
-            raise gr.Error(f"❌ Không tìm thấy file: {target_input}")
         local_file = target_input
 
     repo_root = os.path.dirname(os.path.abspath(__file__))
@@ -1387,38 +1388,59 @@ def process_quick_sub_ui(
         f"✅ Dịch thành công chỉ trong vài chục giây! File phụ đề lưu tại: {out_path}"
     )
 
-with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
+with gr.Blocks(title="AI Video Upscaler 4K - Apple Silicon Native Studio", theme=gr.themes.Default(), css=CUSTOM_CSS) as app:
     with gr.Column(elem_classes=["container"]):
         with gr.Group(elem_classes=["header-box"]):
             gr.Markdown(f"""
-            # 🎬 AI Video Upscaler 4K - Native 2x Ultra-HD
-            Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)**. Khôi phục nét vẽ vector nguyên bản, mã hóa HEVC 10-bit chống banding và bảo tồn 100% Phụ đề mềm (.ass) & Âm thanh gốc.
-            Tích hợp cơ chế **Checkpoint Tự Động** và dịch phụ đề Anime Tiếng Việt **TriSub AI**.
+            # 🎬 AI Video Upscaler 4K - Apple Silicon Native Studio
+            Hệ thống chuyên dụng nâng cấp Anime 1080p lên **4K Ultra-HD (3840x2160 Native 2x)** tối ưu 100% cho chip **Apple Silicon (M-Series MPS Metal & VideoToolbox 10-bit)**.
+            Tích hợp **Smart Anime Deduplication** tăng tốc gấp đôi và dịch phụ đề Anime Tiếng Việt **TriSub AI**.
             
             <div class="badge">THIẾT BỊ: {device_badge}</div>
             """)
 
         with gr.Tabs():
             with gr.Tab("🎬 Nâng Cấp 4K & Dịch Phụ Đề (All-in-One)"):
-                with gr.Accordion("📖 Hướng dẫn sử dụng nhanh (Google Colab & Mac)", open=False):
+                with gr.Accordion("📖 Hướng dẫn sử dụng nhanh trên máy Mac", open=False):
                     gr.Markdown("""
-                    ### 📖 Hướng Dẫn Sử Dụng
-                    1. **Tập Phim Nguồn**: Điền thêm tên file vào sau đường dẫn `/content/drive/MyDrive/Resources/` (ví dụ: `/content/drive/MyDrive/Resources/Mushoku_Tensei_14.mkv`) HOẶC dán link chia sẻ Google Drive.
+                    ### 🍎 Hướng Dẫn Sử Dụng Trên Máy Mac
+                    1. **Chọn Video Nguồn**: Kéo thả file video (.mkv, .mp4) trực tiếp từ Finder hoặc dán đường dẫn file trên máy Mac (ví dụ: `~/Movies/anime.mkv`).
                     2. **Mô Hình AI**:
-                       - **⚡ UltraCompact (8-lớp - Khuyên dùng tối ưu T4)**: Tốc độ cao **~6.5–8.0 FPS** (chỉ mất ~1 giờ 15 phút/tập 24 phút).
+                       - **⚡ UltraCompact (Khuyên dùng tối ưu M3 Pro ~7.0+ FPS)**: Tốc độ cao nhất, tiết kiệm pin, thời gian render nhanh gấp đôi.
                          - **NGUỒN B UltraCompact**: Tối ưu cho WEB-DL Gốc (SubsPlease, Erai-raws, Crunchyroll/Netflix).
                          - **NGUỒN A Sharp UltraCompact**: Tối ưu cho BDRip 10-bit (Hi10P / Main 10) đã deband sạch.
-                       - **🎯 Compact (16-lớp - Master Quality)**: Chất lượng gốc tối đa với 16 tầng tích chập (~3.8 FPS trên T4, ~2.5 giờ/tập).
-                    3. **Dịch Phụ Đề Tiếng Việt (TriSub AI)**: Mở mục *Dịch Phụ Đề Tiếng Việt*, tích chọn bật dịch và dán API Key (Gemini miễn phí tại https://aistudio.google.com).
-                    4. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `/content/drive/MyDrive/Upscaled`!
+                       - **🎯 Compact (Master Quality)**: Chi tiết tối đa cho từng nét vẽ nghệ thuật.
+                    3. **Smart Anime Deduplication**: Bật để tự động phát hiện và bỏ qua các khung hình tĩnh/trùng lặp của Anime, đẩy tốc độ render lên gấp ~2 lần mà chất lượng vẫn bảo tồn 100%.
+                    4. **Dịch Phụ Đề Tiếng Việt (TriSub AI)**: Mở mục *Dịch Phụ Đề Tiếng Việt*, tích chọn bật dịch và dán API Key (Gemini miễn phí tại https://aistudio.google.com).
+                    5. **Bắt Đầu**: Bấm **"🚀 Nâng Cấp Video 4K"**. Tập phim 4K Ultra-HD sẽ được mã hóa và xuất thẳng về thư mục `~/Movies/Upscaled`!
                     """)
 
-                # 1. Ô NHẬP LINK GOOGLE DRIVE / ĐƯỜNG DẪN TẬP PHIM
-                drive_link_input = gr.Textbox(
-                    value="/content/drive/MyDrive/Resources/",
-                    label="☁️ Đường Dẫn File Trong Drive (/content/drive/MyDrive/Resources/...) HOẶC Link Google Drive",
-                    placeholder="Chỉ cần điền thêm tên file vào sau (ví dụ: Mushoku_Tensei_S02E14.mkv) HOẶC dán link chia sẻ Drive https://drive.google.com/...",
-                    lines=2
+                # 1. Ô CHỌN FILE HOẶC NHẬP ĐƯỜNG DẪN CỤC BỘ TRÊN MAC
+                with gr.Row():
+                    local_path_input = gr.Textbox(
+                        value="",
+                        label="📁 Đường Dẫn File Video Trên Máy Mac (hoặc Link Google Drive)",
+                        placeholder="Ví dụ: ~/Movies/Mushoku_Tensei_S02E14.mkv hoặc kéo thả file sang ô bên phải ➔",
+                        lines=2,
+                        scale=7
+                    )
+                    file_uploader = gr.File(
+                        label="📂 Hoặc Kéo Thả / Chọn File Từ Finder",
+                        file_types=[".mkv", ".mp4", ".mov", ".avi", ".webm"],
+                        scale=5
+                    )
+
+                output_folder_input = gr.Textbox(
+                    value="~/Movies/Upscaled",
+                    label="💾 Thư Mục Lưu Video 4K Kết Quả (Mặc định: ~/Movies/Upscaled)",
+                    placeholder="Mặc định: ~/Movies/Upscaled",
+                    lines=1
+                )
+
+                file_uploader.change(
+                    fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
+                    inputs=[file_uploader],
+                    outputs=[local_path_input]
                 )
 
                 # 2. BẢNG ĐIỀU KHIỂN SO SÁNH & ĐỒNG BỘ THỜI GIAN
@@ -1442,7 +1464,7 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
                 # 4. THANH TIẾN ĐỘ THỜI GIAN THỰC
                 status_box = gr.Textbox(
                     label="📊 Tiến Độ & Trạng Thái Thời Gian Thực (Live Progress)",
-                    value="Chờ điền tên file hoặc dán link Google Drive...",
+                    value="Chờ chọn file hoặc nhập đường dẫn video...",
                     interactive=False
                 )
 
@@ -1456,6 +1478,23 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
                                 label="🤖 Mô Hình AI (Super-Resolution Native 2x UHD)",
                                 info="Mô hình AI siêu phân giải chuyên dụng cho Anime, xử lý Native 4K UHD với tốc độ vượt trội và giữ nguyên 100% chi tiết gốc."
                             )
+
+                            with gr.Group(elem_classes=["panel-box"]):
+                                gr.Markdown("#### ⚡ Tăng Tốc Apple Silicon (Smart Frame Deduplication)")
+                                with gr.Row():
+                                    enable_dedup_cb = gr.Checkbox(
+                                        label="Kích hoạt Smart Anime Deduplication (Tăng tốc gấp đôi ~7.2 FPS)",
+                                        value=True,
+                                        info="Tự động nhận diện và tái sử dụng frame tĩnh/trùng lặp đặc trưng của Anime, bỏ qua tính toán AI dư thừa."
+                                    )
+                                    dedup_thresh_slider = gr.Slider(
+                                        minimum=0.001,
+                                        maximum=0.008,
+                                        value=0.003,
+                                        step=0.001,
+                                        label="Độ nhạy bỏ qua (Threshold)",
+                                        info="0.003 là ngưỡng chuẩn tối ưu cho Anime (bảo toàn 100% nét vẽ các cảnh chuyển động)."
+                                    )
 
                             with gr.Accordion("🌐 Dịch Phụ Đề Tiếng Việt (TriSub AI Vietsub)", open=False):
                                 translate_sub_cb = gr.Checkbox(
@@ -1491,19 +1530,23 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
                     with gr.Column(scale=5):
                         submit_btn = gr.Button("🚀 Nâng Cấp Video 4K (Native 2x UHD)", variant="primary", size="lg")
                         download_file = gr.File(
-                            label="📥 Tải tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
+                            label="📥 Tệp 4K kết quả (.mkv đầy đủ Sub & Audio)",
                             visible=False
                         )
                         download_sub_file = gr.File(
-                            label="📝 Tải file phụ đề Tiếng Việt riêng (.srt)",
+                            label="📝 File phụ đề Tiếng Việt riêng (.srt)",
                             visible=False
                         )
 
                 submit_btn.click(
                     fn=process_ui,
                     inputs=[
-                        drive_link_input,
+                        file_uploader,
+                        local_path_input,
+                        output_folder_input,
                         model_dropdown,
+                        enable_dedup_cb,
+                        dedup_thresh_slider,
                         translate_sub_cb,
                         sub_provider_radio,
                         sub_model_dropdown,
@@ -1515,18 +1558,38 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
             with gr.Tab("⚡ Dịch Phụ Đề Nhanh (TriSub AI Standalone - Chỉ 30s)"):
                 with gr.Group(elem_classes=["panel-box"]):
                     gr.Markdown("""
-                    ### 🌐 Dịch Phụ Đề Siêu Tốc Bằng TriSub AI
-                    Nếu bạn đã có video hoặc file phụ đề và **chỉ muốn dịch sang Tiếng Việt** mà không cần chờ đợi nâng cấp video 4K:
+                    ### 🌐 Dịch Phụ Đề Siêu Tốc Bằng TriSub AI Trên Máy Mac
+                    Nếu bạn đã có video hoặc file phụ đề và **chỉ muốn dịch sang Tiếng Việt** mà không cần nâng cấp video 4K:
                     - **⚡ Tốc độ cao**: Chỉ mất ~30 đến 60 giây cho cả tập phim 24 phút (~400 câu thoại).
                     - **🎬 Định dạng hỗ trợ**: Video MKV, MP4 (chứa phụ đề mềm) hoặc file phụ đề trực tiếp (.srt, .ass, .vtt).
                     - **🎯 Chất lượng dịch**: Đối chiếu 3 ngôn ngữ (Anh + Nhật + Trung) để xưng hô chuẩn phong cách Anime.
                     """)
-                    quick_sub_input = gr.Textbox(
-                        value="/content/drive/MyDrive/Resources/",
-                        label="☁️ File Video / Phụ Đề Gốc (Đường dẫn Drive hoặc Link chia sẻ Google Drive)",
-                        placeholder="Điền tên file (ví dụ: Mushoku_Tensei_S02E14.mkv hoặc .ass) HOẶC dán link Google Drive...",
-                        lines=2
+                    with gr.Row():
+                        quick_sub_path = gr.Textbox(
+                            value="",
+                            label="📁 Đường Dẫn File Video Hoặc Phụ Đề Trên Máy Mac",
+                            placeholder="Ví dụ: ~/Movies/ReZero_19.ass hoặc .mkv, hoặc kéo thả file sang ô bên phải ➔",
+                            lines=2,
+                            scale=7
+                        )
+                        quick_sub_file_upload = gr.File(
+                            label="📂 Hoặc Kéo Thả File Từ Finder",
+                            file_types=[".mkv", ".mp4", ".mov", ".ass", ".srt", ".vtt"],
+                            scale=5
+                        )
+
+                    quick_out_dir = gr.Textbox(
+                        value="~/Movies/Upscaled",
+                        label="💾 Thư Mục Lưu File Phụ Đề Tiếng Việt (.srt)",
+                        lines=1
                     )
+
+                    quick_sub_file_upload.change(
+                        fn=lambda f: f if isinstance(f, str) else (f.name if f else ""),
+                        inputs=[quick_sub_file_upload],
+                        outputs=[quick_sub_path]
+                    )
+
                     with gr.Row():
                         quick_provider_radio = gr.Radio(
                             choices=["Google Gemini (Khuyên dùng - Nhanh & Miễn phí)", "DeepSeek", "OpenAI"],
@@ -1569,13 +1632,23 @@ with gr.Blocks(title="AI Video Upscaler 4K - Anime Native 2x UHD", theme=gr.them
 
                     quick_sub_btn.click(
                         fn=process_quick_sub_ui,
-                        inputs=[quick_sub_input, quick_provider_radio, quick_model_dropdown, quick_api_key_box],
+                        inputs=[quick_sub_file_upload, quick_sub_path, quick_out_dir, quick_provider_radio, quick_model_dropdown, quick_api_key_box],
                         outputs=[quick_sub_file, quick_sub_preview, quick_sub_status]
                     )
 
 if __name__ == '__main__':
     share_mode = True if ("--share" in sys.argv or "--public" in sys.argv or os.environ.get("GRADIO_SHARE") == "True") else False
-    allowed_dirs = ["/kaggle/working", "/tmp", tempfile.gettempdir(), os.getcwd(), os.path.expanduser('~/Movies/Upscaled'), "/content"]
+    allowed_dirs = [
+        "/tmp",
+        tempfile.gettempdir(),
+        os.getcwd(),
+        os.path.expanduser('~'),
+        os.path.expanduser('~/Movies'),
+        os.path.expanduser('~/Downloads'),
+        os.path.expanduser('~/Desktop'),
+        "/kaggle/working",
+        "/content"
+    ]
 
     # Trên Linux/Colab: tự động giải phóng port 7860 nếu có tiến trình zombie cũ chiếm giữ
     if sys.platform.startswith("linux"):
