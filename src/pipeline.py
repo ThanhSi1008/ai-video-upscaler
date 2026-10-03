@@ -18,6 +18,7 @@ import shutil
 import subprocess
 from glob import glob
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from src.config import (
     validate_environment,
@@ -226,133 +227,220 @@ def run_upscale_pipeline(
             total_enc_time = 0.0
             total_ext_time = 0.0
 
+            # Lọc các phân đoạn cần xử lý (bỏ qua những đoạn đã xong nếu bật resume)
+            chunks_to_process = []
             for idx, seg_file in enumerate(existing_segs):
                 seg_out_file = os.path.join(up_segs_dir, f"up_{idx:04d}.mp4")
-
-                # Checkpoint Resume: Bỏ qua phân đoạn đã hoàn thành trước đó
                 if resume and os.path.exists(seg_out_file) and os.path.getsize(seg_out_file) > 10000:
                     logger.info(f"Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
                     print(f"⏭️  Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
+                    total_frames_processed += dedup_plan["chunks"][idx]["total_frames"] if (dedup and dedup_plan) else 192
                     continue
+                chunks_to_process.append((idx, seg_file, seg_out_file))
 
-                seg_start_time = time.time()
-                os.makedirs(frames_in_dir, exist_ok=True)
-                os.makedirs(frames_out_dir, exist_ok=True)
+            if not chunks_to_process:
+                logger.info("Tất cả phân đoạn đã hoàn thành từ trước!", to_console=True)
+            else:
+                # Định nghĩa các worker function cho từng stage của kiến trúc Overlapped Double-Buffering
+                def worker_extract(item):
+                    """CPU Decode Worker: Trích xuất và lọc deduplication vào RAM Disk độc lập."""
+                    c_idx, c_seg_file, _ = item
+                    c_in_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_in")
+                    os.makedirs(c_in_dir, exist_ok=True)
+                    t0 = time.time()
+                    f_count = extract_frames(c_seg_file, c_in_dir, fmt=fmt)
+                    t_ext = time.time() - t0
 
-                try:
-                    # 2.1 Trích xuất khung hình vào RAM Disk
-                    t_ext_start = time.time()
-                    frame_count = extract_frames(seg_file, frames_in_dir, fmt=fmt)
-                    t_ext_elapsed = time.time() - t_ext_start
-                    if frame_count == 0:
-                        continue
-
-                    # Deduplication: Lọc bỏ khung hình trùng lặp trước khi suy luận AI
-                    chunk_plan = (
-                        dedup_plan["chunks"][idx]
-                        if (dedup and dedup_plan and idx < len(dedup_plan.get("chunks", [])))
+                    c_plan = (
+                        dedup_plan["chunks"][c_idx]
+                        if (dedup and dedup_plan and c_idx < len(dedup_plan.get("chunks", [])))
                         else None
                     )
-
-                    if chunk_plan:
-                        ai_frames_count = prune_redundant_frames(frames_in_dir, chunk_plan["kept_indices"], fmt=fmt)
-                        expected_frames = chunk_plan["total_frames"]
+                    if c_plan:
+                        ai_count = prune_redundant_frames(c_in_dir, c_plan["kept_indices"], fmt=fmt)
+                        exp_frames = c_plan["total_frames"]
                     else:
-                        ai_frames_count = frame_count
-                        expected_frames = frame_count
+                        ai_count = f_count
+                        exp_frames = f_count
 
-                    total_frames_processed += expected_frames
-                    total_ai_frames += ai_frames_count
+                    return {
+                        "idx": c_idx,
+                        "seg_file": c_seg_file,
+                        "in_dir": c_in_dir,
+                        "frame_count": f_count,
+                        "ai_frames": ai_count,
+                        "expected_frames": exp_frames,
+                        "ext_time": t_ext,
+                        "chunk_plan": c_plan
+                    }
 
-                    # 2.2 Suy luận AI bằng NCNN Vulkan trên GPU M3 Pro
-                    dedup_info = f" (Deduplication: {ai_frames_count}/{frame_count} frames)" if chunk_plan else ""
-                    render_progress(
-                        idx, total_segs,
-                        prefix=f"🚀 Đoạn {idx+1:02d}/{total_segs:02d}",
-                        suffix=f"AI Metal Inferencing{dedup_info}..."
-                    )
-                    ai_result = upscale_frames(
-                        input_dir=frames_in_dir,
-                        output_dir=frames_out_dir,
-                        model=model,
-                        scale=DEFAULT_SCALE,
-                        fmt=fmt,
-                        num_frames=ai_frames_count
-                    )
-                    total_ai_time += ai_result["elapsed_seconds"]
+                def worker_encode(item, ai_res):
+                    """Media Engine Encode Worker: Nén VideoToolbox 10-bit và dọn sạch RAM Disk ngay lập tức."""
+                    c_idx, _, c_seg_out = item["target"]
+                    c_in_dir = item["extracted"]["in_dir"]
+                    c_out_dir = item["out_dir"]
+                    c_plan = item["extracted"]["chunk_plan"]
+                    exp_frames = item["extracted"]["expected_frames"]
 
-                    # 2.3 Nén phần cứng 10-bit qua Apple VideoToolbox
-                    render_progress(
-                        idx, total_segs,
-                        prefix=f"🚀 Đoạn {idx+1:02d}/{total_segs:02d}",
-                        suffix="Hardware Encoding 10-bit..."
-                    )
-                    t_enc_start = time.time()
+                    t0 = time.time()
+                    try:
+                        if c_plan:
+                            concat_script = os.path.join(cache_root, f"concat_{c_idx:04d}.txt")
+                            generate_concat_demuxer_script(
+                                runs=c_plan["runs"],
+                                frames_out_dir=c_out_dir,
+                                concat_script_path=concat_script,
+                                fps_num=meta["fps_num"],
+                                fps_den=meta["fps_den"],
+                                fmt=fmt
+                            )
+                            encode_chunk_reexpanded(
+                                concat_script_path=concat_script,
+                                output_path=c_seg_out,
+                                expected_frames=exp_frames,
+                                fps_num=meta["fps_num"],
+                                fps_den=meta["fps_den"],
+                                bitrate=bitrate
+                            )
+                            if os.path.exists(concat_script):
+                                os.remove(concat_script)
+                        else:
+                            encode_chunk_hevc(
+                                frames_dir=c_out_dir,
+                                fps=meta["fps"],
+                                output_path=c_seg_out,
+                                bitrate=bitrate,
+                                fmt=fmt
+                            )
+                        return time.time() - t0
+                    finally:
+                        shutil.rmtree(c_in_dir, ignore_errors=True)
+                        shutil.rmtree(c_out_dir, ignore_errors=True)
 
-                    if chunk_plan:
-                        # Tái tạo 4K không tốn RAM bằng Concat Demuxer
-                        concat_script = os.path.join(cache_root, f"concat_{idx:04d}.txt")
-                        generate_concat_demuxer_script(
-                            runs=chunk_plan["runs"],
-                            frames_out_dir=frames_out_dir,
-                            concat_script_path=concat_script,
-                            fps_num=meta["fps_num"],
-                            fps_den=meta["fps_den"],
-                            fmt=fmt
+                # Thực thi gối đầu song song (Double-Buffering Bounded Queue <= 2 chunks trên RAM Disk)
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="DecodeWorker") as dec_exec, \
+                     ThreadPoolExecutor(max_workers=1, thread_name_prefix="EncodeWorker") as enc_exec:
+
+                    # Bắt đầu trích xuất chunk đầu tiên
+                    future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
+                    future_encode = None
+                    last_encode_item = None
+                    last_ai_result = None
+                    last_seg_start = 0.0
+
+                    for i, target_chunk in enumerate(chunks_to_process):
+                        c_idx, c_seg_file, c_seg_out = target_chunk
+                        seg_start_time = time.time()
+
+                        # Chờ giải mã CPU chunk hiện tại sẵn sàng (nếu chưa xong)
+                        extracted = future_extract.result()
+
+                        # Ngay lập tức khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
+                        if i + 1 < len(chunks_to_process):
+                            future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
+                        else:
+                            future_extract = None
+
+                        c_in_dir = extracted["in_dir"]
+                        c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
+                        os.makedirs(c_out_dir, exist_ok=True)
+
+                        total_frames_processed += extracted["expected_frames"]
+                        total_ai_frames += extracted["ai_frames"]
+                        total_ext_time += extracted["ext_time"]
+
+                        # 2.2 Độc quyền suy luận AI NCNN Vulkan trên GPU M3 Pro (Main thread)
+                        dedup_info = f" (Deduplication: {extracted['ai_frames']}/{extracted['frame_count']} frames)" if extracted["chunk_plan"] else ""
+                        render_progress(
+                            c_idx, total_segs,
+                            prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                            suffix=f"AI Metal Inferencing{dedup_info}..."
                         )
-                        encode_chunk_reexpanded(
-                            concat_script_path=concat_script,
-                            output_path=seg_out_file,
-                            expected_frames=expected_frames,
-                            fps_num=meta["fps_num"],
-                            fps_den=meta["fps_den"],
-                            bitrate=bitrate
+                        ai_result = upscale_frames(
+                            input_dir=c_in_dir,
+                            output_dir=c_out_dir,
+                            model=model,
+                            scale=DEFAULT_SCALE,
+                            fmt=fmt,
+                            num_frames=extracted["ai_frames"]
                         )
-                    else:
-                        encode_chunk_hevc(
-                            frames_dir=frames_out_dir,
-                            fps=meta["fps"],
-                            output_path=seg_out_file,
-                            bitrate=bitrate,
-                            fmt=fmt
+                        total_ai_time += ai_result["elapsed_seconds"]
+
+                        # Nếu phân đoạn trước đang mã hóa ở luồng nền, chờ hoàn tất và ghi log
+                        if future_encode is not None:
+                            prev_enc_elapsed = future_encode.result()
+                            total_enc_time += prev_enc_elapsed
+                            prev_c_idx = last_encode_item["target"][0]
+                            prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                            prev_seg_elapsed = time.time() - last_seg_start
+                            prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
+                            remaining_segs = total_segs - (prev_c_idx + 1)
+                            eta_seconds = remaining_segs * prev_seg_elapsed
+
+                            render_progress(
+                                prev_c_idx + 1, total_segs,
+                                prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                                suffix=f"[{prev_seg_fps:.2f} fps (AI: {last_ai_result['fps']:.2f}) | ETA: {format_time(eta_seconds)}]"
+                            )
+                            print()
+                            logger.log_chunk_done(
+                                chunk_idx=prev_c_idx,
+                                total_chunks=total_segs,
+                                frames=prev_exp_frames,
+                                ai_time=last_ai_result["elapsed_seconds"],
+                                ai_fps=last_ai_result["fps"],
+                                enc_time=prev_enc_elapsed,
+                                total_chunk_time=prev_seg_elapsed,
+                                output_seg=last_encode_item["target"][2],
+                                t0_seconds=last_ai_result.get("t0_seconds"),
+                                steady_fps=last_ai_result.get("steady_fps"),
+                                rss_mb=last_ai_result.get("peak_rss_mb")
+                            )
+
+                        # Khởi động mã hóa VideoToolbox cho chunk hiện tại ở luồng nền (Media Engine)
+                        encode_item = {
+                            "target": target_chunk,
+                            "extracted": extracted,
+                            "out_dir": c_out_dir
+                        }
+                        last_encode_item = encode_item
+                        last_ai_result = ai_result
+                        last_seg_start = seg_start_time
+                        render_progress(
+                            c_idx, total_segs,
+                            prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                            suffix="Hardware Encoding 10-bit (Pipelined)..."
                         )
-                    t_enc_elapsed = time.time() - t_enc_start
+                        future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
 
-                    total_ext_time += t_ext_elapsed
-                    total_enc_time += t_enc_elapsed
+                    # Sau khi hoàn tất toàn bộ loop: Chờ chunk cuối cùng mã hóa xong
+                    if future_encode is not None:
+                        prev_enc_elapsed = future_encode.result()
+                        total_enc_time += prev_enc_elapsed
+                        prev_c_idx = last_encode_item["target"][0]
+                        prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                        prev_seg_elapsed = time.time() - last_seg_start
+                        prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
 
-                    # 2.4 Cập nhật thống kê và ETA thực tế
-                    seg_elapsed = time.time() - seg_start_time
-                    seg_fps = (expected_frames / seg_elapsed) if seg_elapsed > 0 else 0.0
-                    remaining_segs = total_segs - (idx + 1)
-                    eta_seconds = remaining_segs * seg_elapsed
-
-                    render_progress(
-                        idx + 1, total_segs,
-                        prefix=f"✨ Đoạn {idx+1:02d}/{total_segs:02d}",
-                        suffix=f"[{seg_fps:.2f} fps (AI: {ai_result['fps']:.2f}) | ETA: {format_time(eta_seconds)}]"
-                    )
-                    print()
-
-                    # Ghi log phân đoạn
-                    logger.log_chunk_done(
-                        chunk_idx=idx,
-                        total_chunks=total_segs,
-                        frames=expected_frames,
-                        ai_time=ai_result["elapsed_seconds"],
-                        ai_fps=ai_result["fps"],
-                        enc_time=t_enc_elapsed,
-                        total_chunk_time=seg_elapsed,
-                        output_seg=seg_out_file,
-                        t0_seconds=ai_result.get("t0_seconds"),
-                        steady_fps=ai_result.get("steady_fps"),
-                        rss_mb=ai_result.get("peak_rss_mb")
-                    )
-
-                finally:
-                    # Xóa toàn bộ ảnh đệm trong RAM Disk ngay lập tức
-                    shutil.rmtree(frames_in_dir, ignore_errors=True)
-                    shutil.rmtree(frames_out_dir, ignore_errors=True)
+                        render_progress(
+                            prev_c_idx + 1, total_segs,
+                            prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                            suffix=f"[{prev_seg_fps:.2f} fps (AI: {last_ai_result['fps']:.2f}) | Hoàn tất]"
+                        )
+                        print()
+                        logger.log_chunk_done(
+                            chunk_idx=prev_c_idx,
+                            total_chunks=total_segs,
+                            frames=prev_exp_frames,
+                            ai_time=last_ai_result["elapsed_seconds"],
+                            ai_fps=last_ai_result["fps"],
+                            enc_time=prev_enc_elapsed,
+                            total_chunk_time=prev_seg_elapsed,
+                            output_seg=last_encode_item["target"][2],
+                            t0_seconds=last_ai_result.get("t0_seconds"),
+                            steady_fps=last_ai_result.get("steady_fps"),
+                            rss_mb=last_ai_result.get("peak_rss_mb")
+                        )
 
             logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
 

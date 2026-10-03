@@ -88,6 +88,8 @@ class TranslationPipeline:
         trans_cfg = self.cfg.get("translation", {})
         self.batch_size = trans_cfg.get("batch_size", 50)
         self.local_batch_size = trans_cfg.get("local_batch_size", 20)
+        self.allow_silent_fallback = trans_cfg.get("allow_silent_fallback", False)
+        self.validate_batch_pronouns = trans_cfg.get("validate_batch_pronouns", True)
 
         # Cache & Rate Limiter
         self.cache = TranslationCache()
@@ -323,11 +325,22 @@ class TranslationPipeline:
                                 reason = "high demand / service unavailable (503)"
                             else:
                                 reason = str(e)
+
+                            # If transient rate limit (429) or temporary demand spike (503),
+                            # and silent fallback is prohibited (default), pause and wait instead of downgrading!
+                            if (is_quota or is_unavailable) and not self.allow_silent_fallback:
+                                wait_time = 30.0 if is_quota else 12.0
+                                console.print(f"\n[yellow]⏳ Model '{target_model}' hit {reason}. "
+                                              f"Pausing {wait_time:.0f}s to maintain episode pronoun continuity...[/yellow]")
+                                time.sleep(wait_time)
+                                # Retry on same model
+                                continue
+
                             console.print(f"\n[yellow]⚠️  Model '{target_model}' error: {reason}.[/yellow]")
                             curr_gemini_idx += 1
                             if curr_gemini_idx < len(candidate_gemini_models):
                                 next_model = candidate_gemini_models[curr_gemini_idx]
-                                console.print(f"[bold cyan]🔄 Falling back to next configured model: '{next_model}'...[/bold cyan]")
+                                console.print(f"[bold cyan]🔄 Falling back to next configured model: '{next_model}' (Warning: Verify pronoun continuity!)...[/bold cyan]")
                             else:
                                 console.print("[bold yellow]🔄 All configured Gemini models exhausted. Permanently switching to local Ollama fallback...[/bold yellow]")
                                 active_backend_mode = "local"

@@ -23,6 +23,8 @@ translation:
   en_overlap_threshold: 0.5
   en_match_warning_pct: 0.8
   line_max_chars: 42
+  allow_silent_fallback: false  # Do NOT silently switch models mid-episode on 429 quota; pause and wait instead
+  validate_batch_pronouns: true # Assert pronoun consistency across batches
 
 privacy:
   mode: "allow_cloud"  # "allow_cloud" or "local_only"

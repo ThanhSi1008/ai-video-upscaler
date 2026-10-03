@@ -92,13 +92,14 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
             relevant_terms.append(item)
 
     relevant_characters = []
+    # Always include all episode cast characters to preserve pronoun continuity across batches,
+    # as Japanese anime dialogues frequently omit subject names (zero-pronouns).
     for char in glossary.characters:
-        if (char.name_ja and char.name_ja in batch_ja_text) or (char.name_vi and char.name_vi.lower() in batch_en_text):
-            relevant_characters.append({
-                "name_ja": char.name_ja,
-                "name_vi": char.name_vi,
-                "speaks_to": [s.model_dump() for s in char.speaks_to]
-            })
+        relevant_characters.append({
+            "name_ja": char.name_ja,
+            "name_vi": char.name_vi,
+            "speaks_to": [s.model_dump() for s in char.speaks_to]
+        })
 
     res: Dict[str, Any] = {}
     if relevant_terms:
