@@ -38,6 +38,12 @@ from src.ffmpeg_ops import (
     concat_segments,
     mux_final_container
 )
+from src.dedup import (
+    load_or_create_plan,
+    prune_redundant_frames,
+    generate_concat_demuxer_script,
+    encode_chunk_reexpanded
+)
 from src.ai_engine import upscale_frames
 from src.logger import (
     format_time,
@@ -61,7 +67,8 @@ def run_upscale_pipeline(
     use_ramdisk: bool = True,
     resume: bool = True,
     caffeinate: bool = True,
-    preview_seconds: Optional[int] = None
+    preview_seconds: Optional[int] = None,
+    dedup: bool = True
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên Apple Silicon M3 Pro"""
     validate_environment()
@@ -170,8 +177,26 @@ def run_upscale_pipeline(
             logger.print_banner(banner_info)
 
             # -----------------------------------------------------------------
-            # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ (LOSSLESS STREAM COPY)
+            # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
             # -----------------------------------------------------------------
+            dedup_plan = None
+            if dedup:
+                plan_file = os.path.join(work_dir, "plan.json")
+                logger.info("Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập (plan.json)...", to_console=True)
+                dedup_plan = load_or_create_plan(
+                    input_path=input_path,
+                    plan_path=plan_file,
+                    segment_seconds=segment_time,
+                    fps_num=meta["fps_num"],
+                    fps_den=meta["fps_den"],
+                    resume=resume
+                )
+                logger.info(
+                    f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
+                    f"({dedup_plan['dedup_ratio_percent']}% trùng lặp được loại bỏ - Tối ưu ~50% thời gian GPU)",
+                    to_console=True
+                )
+
             existing_segs = sorted(glob(os.path.join(segs_dir, "seg_*.mp4")))
             if not existing_segs or not resume:
                 logger.info(f"Đang phân đoạn video thành các block {segment_time}s (Stream Copy)...", to_console=True)
@@ -186,6 +211,7 @@ def run_upscale_pipeline(
             # -----------------------------------------------------------------
             start_total_time = time.time()
             total_frames_processed = 0
+            total_ai_frames = 0
             total_ai_time = 0.0
 
             for idx, seg_file in enumerate(existing_segs):
@@ -209,13 +235,29 @@ def run_upscale_pipeline(
                     if frame_count == 0:
                         continue
 
-                    total_frames_processed += frame_count
+                    # Deduplication: Lọc bỏ khung hình trùng lặp trước khi suy luận AI
+                    chunk_plan = (
+                        dedup_plan["chunks"][idx]
+                        if (dedup and dedup_plan and idx < len(dedup_plan.get("chunks", [])))
+                        else None
+                    )
+
+                    if chunk_plan:
+                        ai_frames_count = prune_redundant_frames(frames_in_dir, chunk_plan["kept_indices"], fmt=fmt)
+                        expected_frames = chunk_plan["total_frames"]
+                    else:
+                        ai_frames_count = frame_count
+                        expected_frames = frame_count
+
+                    total_frames_processed += expected_frames
+                    total_ai_frames += ai_frames_count
 
                     # 2.2 Suy luận AI bằng NCNN Vulkan trên GPU M3 Pro
+                    dedup_info = f" (Deduplication: {ai_frames_count}/{frame_count} frames)" if chunk_plan else ""
                     render_progress(
                         idx, total_segs,
                         prefix=f"🚀 Đoạn {idx+1:02d}/{total_segs:02d}",
-                        suffix="AI Metal Inferencing..."
+                        suffix=f"AI Metal Inferencing{dedup_info}..."
                     )
                     ai_result = upscale_frames(
                         input_dir=frames_in_dir,
@@ -223,7 +265,7 @@ def run_upscale_pipeline(
                         model=model,
                         scale=DEFAULT_SCALE,
                         fmt=fmt,
-                        num_frames=frame_count
+                        num_frames=ai_frames_count
                     )
                     total_ai_time += ai_result["elapsed_seconds"]
 
@@ -234,18 +276,39 @@ def run_upscale_pipeline(
                         suffix="Hardware Encoding 10-bit..."
                     )
                     t_enc_start = time.time()
-                    encode_chunk_hevc(
-                        frames_dir=frames_out_dir,
-                        fps=meta["fps"],
-                        output_path=seg_out_file,
-                        bitrate=bitrate,
-                        fmt=fmt
-                    )
+
+                    if chunk_plan:
+                        # Tái tạo 4K không tốn RAM bằng Concat Demuxer
+                        concat_script = os.path.join(cache_root, f"concat_{idx:04d}.txt")
+                        generate_concat_demuxer_script(
+                            runs=chunk_plan["runs"],
+                            frames_out_dir=frames_out_dir,
+                            concat_script_path=concat_script,
+                            fps_num=meta["fps_num"],
+                            fps_den=meta["fps_den"],
+                            fmt=fmt
+                        )
+                        encode_chunk_reexpanded(
+                            concat_script_path=concat_script,
+                            output_path=seg_out_file,
+                            expected_frames=expected_frames,
+                            fps_num=meta["fps_num"],
+                            fps_den=meta["fps_den"],
+                            bitrate=bitrate
+                        )
+                    else:
+                        encode_chunk_hevc(
+                            frames_dir=frames_out_dir,
+                            fps=meta["fps"],
+                            output_path=seg_out_file,
+                            bitrate=bitrate,
+                            fmt=fmt
+                        )
                     t_enc_elapsed = time.time() - t_enc_start
 
                     # 2.4 Cập nhật thống kê và ETA thực tế
                     seg_elapsed = time.time() - seg_start_time
-                    seg_fps = (frame_count / seg_elapsed) if seg_elapsed > 0 else 0.0
+                    seg_fps = (expected_frames / seg_elapsed) if seg_elapsed > 0 else 0.0
                     remaining_segs = total_segs - (idx + 1)
                     eta_seconds = remaining_segs * seg_elapsed
 
@@ -260,7 +323,7 @@ def run_upscale_pipeline(
                     logger.log_chunk_done(
                         chunk_idx=idx,
                         total_chunks=total_segs,
-                        frames=frame_count,
+                        frames=expected_frames,
                         ai_time=ai_result["elapsed_seconds"],
                         ai_fps=ai_result["fps"],
                         enc_time=t_enc_elapsed,
@@ -297,7 +360,14 @@ def run_upscale_pipeline(
             total_elapsed = time.time() - start_total_time
             final_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
             avg_fps = (total_frames_processed / total_elapsed) if total_elapsed > 0 and total_frames_processed > 0 else 0.0
-            ai_fps = (total_frames_processed / total_ai_time) if total_ai_time > 0 and total_frames_processed > 0 else 0.0
+            computed_frames = total_ai_frames if (dedup and total_ai_frames > 0) else total_frames_processed
+            ai_fps = (computed_frames / total_ai_time) if total_ai_time > 0 and computed_frames > 0 else 0.0
+
+            if dedup and dedup_plan and total_frames_processed > 0:
+                saved_pct = (1.0 - (computed_frames / total_frames_processed)) * 100.0
+                dedup_desc = f"Bật (Tiết kiệm {saved_pct:.1f}% tải GPU | {computed_frames}/{total_frames_processed} frames unique)"
+            else:
+                dedup_desc = "Tắt (Tính toán 100% khung hình)"
 
             summary_stats = {
                 "output_path": output_path,
@@ -306,6 +376,7 @@ def run_upscale_pipeline(
                 "total_frames": total_frames_processed,
                 "avg_fps": avg_fps,
                 "ai_fps": ai_fps,
+                "dedup_info": dedup_desc,
                 "ssd_protection": "100% An toàn (Frame trung gian chỉ chạy trên RAM Disk)"
                 if use_ramdisk else "Ghi tạm trên SSD"
             }

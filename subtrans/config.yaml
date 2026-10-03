@@ -1,0 +1,25 @@
+# subtrans/config.yaml
+# Configuration for anime subtitle translation
+
+gemini:
+  model: "gemini-2.5-flash"
+  max_rpm: 15
+  max_rpd: 1500
+
+ollama:
+  endpoint: "http://localhost:11434"
+  model: "translategemma:12b"
+  review_model: "gemma3:12b"
+  num_ctx: 4096
+
+translation:
+  batch_size: 50
+  local_batch_size: 20
+  skip_styles: "(?i)(op|ed|sign|song|karaoke|title|credit)"
+  en_overlap_threshold: 0.5
+  en_match_warning_pct: 0.8
+  line_max_chars: 42
+
+privacy:
+  mode: "allow_cloud"  # "allow_cloud" or "local_only"
+  consent_given: false

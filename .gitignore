@@ -63,3 +63,5 @@ tests/*.png
 .cache/
 subtrans/.env
 subtrans/.cache/
+out/
+scratch/

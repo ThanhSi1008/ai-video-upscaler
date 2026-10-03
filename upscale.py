@@ -74,6 +74,11 @@ def parse_args():
         help="Không tự động kích hoạt caffeinate để chống sleep máy trong khi chạy"
     )
     parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Không sử dụng bộ lọc frame trùng (Deduplication) mà tính toán 100%% tất cả các khung hình"
+    )
+    parser.add_argument(
         "--preview",
         type=int,
         nargs="?",
@@ -100,7 +105,8 @@ def main():
             use_ramdisk=not args.no_ramdisk,
             resume=not args.no_resume,
             caffeinate=not args.no_caffeinate,
-            preview_seconds=args.preview
+            preview_seconds=args.preview,
+            dedup=not args.no_dedup
         )
     except KeyboardInterrupt:
         print("\n\n⚠️ Đã tạm dừng quá trình theo yêu cầu (Ctrl+C).")

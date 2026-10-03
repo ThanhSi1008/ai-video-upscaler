@@ -1,0 +1,387 @@
+# =====================================================================
+# glossary.yaml - Bo thuat ngu NEN (base) cho subtrans, dich Nhat/Anh -> Viet
+# Schema v2. Dung chung cho MOI the loai anime.
+#
+# CACH DUNG
+#  - File nay la lop nen. Moi bo anime cu the nen co them mot file rieng
+#    glossary.<ten-bo>.yaml (cung schema); file rieng DUOC UU TIEN hon file nen.
+#  - style_rules va address_rules luon duoc gui kem moi lo dich (giu ngan).
+#  - terms chi duoc gui kem khi ja / en / zh / aliases XUAT HIEN trong lo dich.
+#  - `vi` la cach dich mac dinh; `alt` la cac cach hop le khac tuy ngu canh;
+#    `note` giai thich khi nao dung cai nao. `genre` de loc bang --genres.
+#  - Ten nhan vat, ky nang, dia danh RIENG cua tung bo: dat o `characters`
+#    hoac trong file glossary.<ten-bo>.yaml (dung `subtrans glossary-seed`
+#    de lay danh sach ung vien, sau do tu duyet).
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Base glossary for general anime (all genres). Per-series files override it."
+  genres: [common, titles, school, romcom, isekai, battle, supernatural, scifi, military, sports, idol, culture, food, xianxia]
+
+# ---------------------------------------------------------------------
+# style_rules: luon duoc gui kem. Viet bang tieng Anh de model hieu chinh xac.
+# ---------------------------------------------------------------------
+style_rules:
+  - "Japanese is the source of truth; the English line is only an aid for disambiguation (speaker, addressee, omitted subjects, idioms)."
+  - "Write natural, concise spoken Vietnamese suitable for subtitles. Never translate word for word."
+  - "Choose Vietnamese pronouns from the speaker-to-listener relationship (age, rank, intimacy, gender, setting) and keep each character's pronouns consistent across the whole series."
+  - "Do not translate Japanese honorifics literally. Follow address_rules and the terms table. Do not leave -san/-kun/-chan/-sama in the Vietnamese unless a term entry says so."
+  - "Character names: use the spelling in the glossary. If absent, use the Romaji spelling exactly as it appears in the English track, consistently. Never invent Vietnamese renderings of names."
+  - "Place names, organizations, and named techniques not in the glossary: keep the English-track romanization and translate only descriptive parts."
+  - "Do not translate or add sound effects, laughs, or breaths. Keep only short interjections that carry meaning (Hả?, Ừ, Ơ?, Hừ)."
+  - "Keep each cue's content inside that cue: never merge, split, reorder, or drop cues. Maximum 2 lines, about 42 characters per line."
+  - "No translator notes or explanations in parentheses unless a term entry's note requires it."
+  - "Match register: keep rude, polite, archaic, childish, or dialect speech recognizable in Vietnamese, without censoring or toning down."
+  - "Use '...' for trailing off. Never stack more than two '!' or '?'."
+  - "When a term has an entry in terms, use its vi (or one of its alt, as the note directs). Do not mix variants for the same term."
+
+# ---------------------------------------------------------------------
+# address_rules: xung ho. Luon duoc gui kem.
+# ---------------------------------------------------------------------
+address_rules:
+  principle: "Decide pronouns per speaker-listener pair, not per sentence. Prefer the pair already established for those two characters in the series glossary or earlier cues."
+
+  first_person:
+    - {ja: "私 / わたし", vi: "tôi", alt: ["em", "tớ", "mình"], note: "Neutral/polite adults: tôi. Female or junior speaking politely to a senior: em. Friendly teenage girls: tớ/mình."}
+    - {ja: "あたし", vi: "tớ", alt: ["em", "mình"], note: "Casual feminine speech."}
+    - {ja: "僕 / ぼく", vi: "tớ", alt: ["tôi", "em", "mình"], note: "Boys and gentle men. Polite adult: tôi. To an elder or senior: em."}
+    - {ja: "俺 / オレ", vi: "tôi", alt: ["tao", "tớ", "anh"], note: "Default neutral male: tôi. Rough, hostile, or very close male friends: tao (pair with mày). Casual friends: tớ. Older male to a younger person or girlfriend: anh."}
+    - {ja: "自分", vi: "tôi", note: "Military and sports register: tôi."}
+    - {ja: "儂 / わし", vi: "ta", alt: ["lão", "ông đây"], note: "Elderly male speech."}
+    - {ja: "我 / 吾 / われ", vi: "ta", note: "Archaic or arrogant speech."}
+    - {ja: "拙者", vi: "tại hạ", note: "Samurai/period setting."}
+    - {ja: "余", vi: "ta", alt: ["trẫm"], note: "Arrogant rulers: ta. Emperors: trẫm."}
+    - {ja: "朕", vi: "trẫm", note: "Emperor."}
+    - {ja: "うち", vi: "tớ", alt: ["em", "mình"], note: "Often Kansai-dialect female speech."}
+    - {ja: "(self-naming by own name)", vi: "dùng tên riêng", alt: ["em"], note: "Childish or cutesy characters who refer to themselves by name: keep the name or use em."}
+
+  second_person:
+    - {ja: "あなた", vi: "anh", alt: ["chị", "cô", "ông", "bà", "ngài", "bạn", "mình"], note: "Choose by age and politeness. Wife to husband or lovers: anh/mình."}
+    - {ja: "君 / きみ", vi: "cậu", alt: ["em", "bạn", "anh"], note: "Male speaker to peers: cậu. To a younger girl: em. Formal and gentle: bạn."}
+    - {ja: "お前 / おまえ", vi: "cậu", alt: ["mày", "ngươi", "anh"], note: "Rough: mày. Close male friends: cậu. Arrogant, period, or villain speech: ngươi."}
+    - {ja: "あんた", vi: "anh", alt: ["bà", "ông", "cô", "mày"], note: "Rude or very familiar; choose by age and gender."}
+    - {ja: "てめえ / 貴様 / きさま", vi: "mày", alt: ["ngươi", "tên khốn"], note: "Hostile. Archaic or military: ngươi."}
+    - {ja: "君たち / お前ら / あんたたち", vi: "các cậu", alt: ["chúng mày", "các ngươi"], note: "Match the singular register."}
+    - {ja: "(calling by name)", vi: "giữ nguyên tên", note: "Add kinship/title (anh/chị/em/cô/thầy) only when the relationship needs it."}
+
+  honorifics:
+    - {ja: "〜さん", vi: "(bỏ)", alt: ["anh + tên", "chị + tên", "cô + tên", "chú + tên", "bác + tên", "ông + tên", "bà + tên"], note: "Drop the suffix or convert to a kinship/title term by age. Do not leave -san."}
+    - {ja: "〜くん", vi: "(bỏ)", alt: ["cậu + tên", "em + tên"], note: "Boys and juniors. Use em + tên when speaking to a younger person."}
+    - {ja: "〜ちゃん", vi: "(bỏ)", alt: ["em + tên", "bé + tên"], note: "Affectionate; use em/bé for children and younger girls."}
+    - {ja: "〜様 / さま", vi: "ngài", alt: ["quý", "chủ nhân", "(bỏ)"], note: "Customers: quý khách. Maid/servant to master: chủ nhân. Otherwise ngài or drop."}
+    - {ja: "〜殿 / どの", vi: "ngài", alt: ["các hạ"], note: "Period/samurai setting."}
+    - {ja: "先輩 / senpai", vi: "anh + tên", alt: ["chị + tên", "tiền bối", "senpai"], note: "Use anh/chị by gender in school settings. Use tiền bối in formal, work, martial, or military settings. Keep senpai only if the scene plays on the word."}
+    - {ja: "後輩 / kouhai", vi: "đàn em", alt: ["hậu bối"], note: "As a noun. Address the person as em."}
+    - {ja: "先生 / sensei", vi: "thầy", alt: ["cô", "bác sĩ", "sensei"], note: "Teacher/mentor: thầy or cô by gender. Doctor: bác sĩ. Authors, lawyers, and others: ngài/thầy or keep sensei."}
+    - {ja: "お兄ちゃん / お兄さん / 兄さん", vi: "anh", alt: ["anh hai"], note: "Younger sibling or kid addressing an older brother."}
+    - {ja: "お姉ちゃん / お姉さん / 姉さん", vi: "chị", alt: ["chị hai"], note: "Younger sibling or kid addressing an older sister."}
+    - {ja: "兄貴 / あにき", vi: "đại ca", alt: ["anh cả"], note: "Gang or rough male bonds: đại ca. Family: anh cả."}
+    - {ja: "姐さん / 姐御", vi: "chị đại", alt: ["đại tỷ"], note: "Gang or tough female leader."}
+    - {ja: "おじさん / おばさん", vi: "chú", alt: ["bác", "cô", "dì"], note: "Pick by age and gender; do not translate literally as uncle/aunt unless family."}
+    - {ja: "おじいさん / おばあさん", vi: "ông", alt: ["bà", "cụ"], note: "Elderly people; grandparents."}
+    - {ja: "お父さん / 父上 / 親父", vi: "bố", alt: ["cha", "ba"], note: "Child to father: bố. Archaic: cha. Rude: ông già."}
+    - {ja: "お母さん / 母上 / おふくろ", vi: "mẹ", alt: ["má", "mẫu thân"], note: "Archaic: mẫu thân. Rude: bà già."}
+
+  relations:
+    - {case: "classmates / friends of similar age (casual)", self: "tớ", other: "cậu", note: "Default for teen friends. Polite or distant: mình - bạn, or tôi - cậu."}
+    - {case: "hostile / rough male peers", self: "tao", other: "mày", note: "Only with real aggression or very rough closeness."}
+    - {case: "junior to senior (school, club, workplace)", self: "em", other: "anh / chị", note: "Add tên or chức danh when needed."}
+    - {case: "senior to junior", self: "anh / chị", other: "em", note: "Cold or stern senior: tôi - cậu / cô."}
+    - {case: "teacher to student", self: "thầy / cô", other: "em", note: "Strict teacher may use tôi - các em."}
+    - {case: "student to teacher", self: "em", other: "thầy / cô"}
+    - {case: "boss to subordinate", self: "tôi", other: "cậu / anh / cô", note: "Chức danh as address is fine."}
+    - {case: "subordinate to boss", self: "tôi / em / cháu", other: "sếp / giám đốc / ngài", note: "Match formality of the office."}
+    - {case: "parent to child", self: "bố / mẹ", other: "con"}
+    - {case: "child to parent", self: "con", other: "bố / mẹ"}
+    - {case: "older sibling to younger", self: "anh / chị", other: "em"}
+    - {case: "younger sibling to older", self: "em", other: "anh / chị"}
+    - {case: "grandparent to grandchild", self: "ông / bà", other: "cháu"}
+    - {case: "lovers / spouses", self: "anh / em", other: "em / anh", note: "Or mình - cậu for same-age teens."}
+    - {case: "nobles, royalty, samurai, period drama", self: "ta / thần / tại hạ", other: "ngươi / ngài / bệ hạ / điện hạ", note: "Subject to the speaker's rank."}
+    - {case: "gods, demons, powerful elders, arrogant villains", self: "ta", other: "ngươi"}
+    - {case: "xianxia / cultivation (donghua)", self: "ta / tại hạ / vãn bối", other: "ngươi / các hạ / đạo hữu / tiền bối", note: "Use the xianxia genre terms for sect titles."}
+    - {case: "inner monologue / narration", self: "tôi / tớ", other: "-", note: "Use the pronoun that fits the narrator's gender, age, and voice."}
+
+# ---------------------------------------------------------------------
+# terms: thuat ngu. Dinh dang: ja, en, (zh), aliases, vi, alt, note, genre.
+# ---------------------------------------------------------------------
+terms:
+  # ----- common: loi chao, thanh ngu, cam than -----
+  - {ja: "いただきます", en: "itadakimasu", vi: "Xin phép ăn nhé", alt: ["Mời cả nhà ăn cơm", "Con xin phép ăn", "Tôi xin phép ăn"], note: "Said before eating; choose by speaker and audience.", genre: common}
+  - {ja: "ごちそうさま", en: "gochisousama", aliases: ["ごちそうさまでした"], vi: "Cảm ơn vì bữa ăn", alt: ["Con ăn xong rồi", "Ngon quá"], note: "After eating.", genre: common}
+  - {ja: "ただいま", en: "I'm home", vi: "Tôi về rồi", alt: ["Con về rồi", "Anh về rồi", "Em về rồi"], note: "Pick the subject by the relationship.", genre: common}
+  - {ja: "おかえり", en: "welcome back", aliases: ["おかえりなさい"], vi: "Về rồi à", alt: ["Mừng con về", "Mừng anh về", "Mừng em về"], genre: common}
+  - {ja: "いってきます", en: "I'm off", aliases: ["行ってきます"], vi: "Tôi đi đây", alt: ["Con đi đây", "Anh đi đây", "Em đi đây"], genre: common}
+  - {ja: "いってらっしゃい", en: "have a safe trip", aliases: ["行ってらっしゃい"], vi: "Đi nhé", alt: ["Đi cẩn thận nhé", "Con đi nhé"], genre: common}
+  - {ja: "よろしくお願いします", en: "nice to meet you", aliases: ["よろしく"], vi: "Mong được giúp đỡ", alt: ["Rất vui được gặp", "Nhờ cậu giúp nhé", "Mong anh chiếu cố"], note: "Context decides: introduction, request, or farewell.", genre: common}
+  - {ja: "お疲れ様", en: "good work", aliases: ["お疲れさま", "お疲れ"], vi: "Vất vả rồi", alt: ["Hôm nay vất vả rồi", "Cảm ơn vì đã vất vả"], note: "Greeting among colleagues and club mates. Avoid the literal 'you are tired'.", genre: common}
+  - {ja: "すみません", en: "excuse me", aliases: ["sorry", "すいません"], vi: "Xin lỗi", alt: ["Cảm ơn", "Xin hỏi một chút", "Làm phiền rồi"], note: "Decide by context: apology, gratitude, or getting attention.", genre: common}
+  - {ja: "頑張って", en: "do your best", aliases: ["がんばって", "頑張れ", "がんばれ"], vi: "Cố lên!", alt: ["Cố gắng nhé", "Cố hết sức nhé"], genre: common}
+  - {ja: "大丈夫", en: "it's okay", aliases: ["I'm fine", "だいじょうぶ"], vi: "Không sao", alt: ["Ổn mà", "Không sao đâu", "Đừng lo"], genre: common}
+  - {ja: "お邪魔します", en: "excuse the intrusion", vi: "Xin phép làm phiền", alt: ["Cháu xin phép vào ạ", "Em xin phép vào"], note: "When entering someone's home.", genre: common}
+  - {ja: "失礼します", en: "excuse me", aliases: ["失礼しました"], vi: "Xin phép", alt: ["Em xin phép vào ạ", "Tôi xin phép đi trước", "Thất lễ rồi"], note: "Entering, leaving, or apologizing for rudeness.", genre: common}
+  - {ja: "くそ", en: "damn", aliases: ["クソ", "ちくしょう"], vi: "Chết tiệt", alt: ["Khốn kiếp", "Mẹ kiếp"], note: "Match the intensity of the scene.", genre: common}
+  - {ja: "まさか", en: "no way", vi: "Không lẽ nào", alt: ["Không thể nào", "Sao có thể chứ"], genre: common}
+  - {ja: "なるほど", en: "I see", vi: "Ra là vậy", alt: ["Hiểu rồi", "À, ra thế"], genre: common}
+  - {ja: "やれやれ", en: "good grief", vi: "Thật là...", alt: ["Hầy"], genre: common}
+  - {ja: "ふざけるな", en: "don't mess with me", aliases: ["ふざけんな"], vi: "Đừng có đùa", alt: ["Đừng giỡn mặt", "Đừng đùa với tôi"], genre: common}
+  - {ja: "バカ", en: "idiot", aliases: ["馬鹿", "ばか"], vi: "Đồ ngốc", alt: ["Đồ ngu", "Ngốc ạ", "Đồ khờ"], note: "Affectionate teasing: ngốc/khờ. Insult: đồ ngu.", genre: common}
+  - {ja: "気をつけて", en: "be careful", vi: "Cẩn thận nhé", genre: common}
+  - {ja: "約束", en: "promise", vi: "lời hứa", alt: ["hẹn", "giao kèo"], genre: common}
+
+  # ----- titles: chuc danh, cap bac, xa hoi -----
+  - {ja: "社長", en: "president", aliases: ["CEO", "shachou"], vi: "giám đốc", alt: ["chủ tịch", "sếp"], note: "Large companies: chủ tịch.", genre: titles}
+  - {ja: "部長", en: "department head", aliases: ["buchou", "club president"], vi: "trưởng phòng", alt: ["trưởng ban", "trưởng câu lạc bộ"], note: "School club leader: trưởng câu lạc bộ. Company: trưởng phòng.", genre: titles}
+  - {ja: "課長", en: "section chief", aliases: ["kachou"], vi: "trưởng bộ phận", alt: ["tổ trưởng"], genre: titles}
+  - {ja: "会長", en: "chairman", aliases: ["kaichou", "student council president"], vi: "chủ tịch", alt: ["hội trưởng"], note: "Student council: hội trưởng.", genre: titles}
+  - {ja: "隊長", en: "captain", aliases: ["taichou", "squad leader"], vi: "đội trưởng", genre: titles}
+  - {ja: "団長", en: "commander", aliases: ["danchou", "troupe leader"], vi: "đoàn trưởng", genre: titles}
+  - {ja: "船長", en: "ship captain", vi: "thuyền trưởng", genre: titles}
+  - {ja: "艦長", en: "ship's captain", vi: "hạm trưởng", genre: titles}
+  - {ja: "校長", en: "principal", vi: "hiệu trưởng", genre: titles}
+  - {ja: "組長", en: "boss", aliases: ["clan boss"], vi: "trùm", alt: ["tổ trưởng"], note: "Yakuza context: trùm.", genre: titles}
+  - {ja: "親分", en: "boss", vi: "đại ca", genre: titles}
+  - {ja: "将軍", en: "shogun", vi: "tướng quân", alt: ["shogun"], genre: titles}
+  - {ja: "大名", en: "daimyo", vi: "daimyo", note: "Keep as is.", genre: titles}
+  - {ja: "侍", en: "samurai", vi: "samurai", note: "Keep as is.", genre: titles}
+  - {ja: "忍者", en: "ninja", vi: "ninja", note: "Keep as is.", genre: titles}
+  - {ja: "陛下", en: "your majesty", vi: "bệ hạ", genre: titles}
+  - {ja: "殿下", en: "your highness", vi: "điện hạ", genre: titles}
+  - {ja: "王様", en: "king", aliases: ["王"], vi: "nhà vua", alt: ["đức vua"], genre: titles}
+  - {ja: "女王", en: "queen", vi: "nữ hoàng", genre: titles}
+  - {ja: "皇帝", en: "emperor", vi: "hoàng đế", genre: titles}
+  - {ja: "姫", en: "princess", aliases: ["姫様", "王女"], vi: "công chúa", genre: titles}
+  - {ja: "王子", en: "prince", vi: "hoàng tử", genre: titles}
+  - {ja: "御主人様", en: "master", aliases: ["ご主人様"], vi: "chủ nhân", note: "Maid and servant context.", genre: titles}
+
+  # ----- school -----
+  - {ja: "生徒会", en: "student council", vi: "hội học sinh", genre: school}
+  - {ja: "部活", en: "club activities", aliases: ["club"], vi: "câu lạc bộ", alt: ["hoạt động câu lạc bộ"], genre: school}
+  - {ja: "部室", en: "clubroom", vi: "phòng câu lạc bộ", genre: school}
+  - {ja: "放課後", en: "after school", vi: "sau giờ học", genre: school}
+  - {ja: "文化祭", en: "cultural festival", vi: "lễ hội văn hóa", genre: school}
+  - {ja: "体育祭", en: "sports festival", vi: "đại hội thể thao", genre: school}
+  - {ja: "期末試験", en: "final exams", aliases: ["期末テスト"], vi: "kỳ thi cuối kỳ", genre: school}
+  - {ja: "中間試験", en: "midterm exams", aliases: ["中間テスト"], vi: "kỳ thi giữa kỳ", genre: school}
+  - {ja: "担任", en: "homeroom teacher", vi: "giáo viên chủ nhiệm", genre: school}
+  - {ja: "転校生", en: "transfer student", vi: "học sinh chuyển trường", genre: school}
+  - {ja: "幼なじみ", en: "childhood friend", aliases: ["幼馴染"], vi: "bạn thuở nhỏ", alt: ["bạn từ nhỏ"], genre: school}
+  - {ja: "屋上", en: "rooftop", vi: "sân thượng", genre: school}
+  - {ja: "修学旅行", en: "school trip", vi: "chuyến tham quan của trường", alt: ["chuyến dã ngoại"], genre: school}
+  - {ja: "制服", en: "school uniform", vi: "đồng phục", genre: school}
+  - {ja: "高校", en: "high school", vi: "trường cấp ba", alt: ["trường THPT"], genre: school}
+  - {ja: "中学", en: "middle school", aliases: ["中学校"], vi: "trường cấp hai", genre: school}
+  - {ja: "小学校", en: "elementary school", vi: "trường tiểu học", genre: school}
+
+  # ----- romcom -----
+  - {ja: "告白", en: "confession", aliases: ["confess"], vi: "tỏ tình", note: "Love confession context.", genre: romcom}
+  - {ja: "片思い", en: "unrequited love", vi: "yêu đơn phương", genre: romcom}
+  - {ja: "付き合う", en: "go out", aliases: ["dating"], vi: "hẹn hò", alt: ["quen nhau", "yêu nhau"], genre: romcom}
+  - {ja: "彼氏", en: "boyfriend", vi: "bạn trai", genre: romcom}
+  - {ja: "彼女", en: "girlfriend", vi: "bạn gái", note: "彼女 also means 'she'; decide by context.", genre: romcom}
+  - {ja: "恋人", en: "lover", vi: "người yêu", genre: romcom}
+  - {ja: "初恋", en: "first love", vi: "mối tình đầu", genre: romcom}
+  - {ja: "一目惚れ", en: "love at first sight", vi: "yêu từ cái nhìn đầu tiên", genre: romcom}
+  - {ja: "好き", en: "I like you", aliases: ["suki"], vi: "thích", alt: ["yêu"], note: "Light feelings: thích. Serious declaration: yêu.", genre: romcom}
+  - {ja: "婚約者", en: "fiance", aliases: ["fiancee"], vi: "vị hôn phu", alt: ["vị hôn thê"], note: "Pick by gender.", genre: romcom}
+  - {ja: "ツンデレ", en: "tsundere", vi: "tsundere", note: "Keep as is.", genre: romcom}
+  - {ja: "ヤンデレ", en: "yandere", vi: "yandere", note: "Keep as is.", genre: romcom}
+  - {ja: "義理チョコ", en: "obligation chocolate", vi: "sô-cô-la xã giao", genre: romcom}
+  - {ja: "本命チョコ", en: "true-love chocolate", vi: "sô-cô-la tình yêu", genre: romcom}
+
+  # ----- isekai / fantasy -----
+  - {ja: "異世界", en: "another world", aliases: ["isekai"], vi: "thế giới khác", alt: ["dị giới"], genre: isekai}
+  - {ja: "転生", en: "reincarnation", aliases: ["reincarnated"], vi: "chuyển sinh", genre: isekai}
+  - {ja: "召喚", en: "summon", vi: "triệu hồi", genre: isekai}
+  - {ja: "転移", en: "teleport", vi: "dịch chuyển", genre: isekai}
+  - {ja: "勇者", en: "hero", aliases: ["brave"], vi: "Dũng giả", alt: ["dũng sĩ", "anh hùng"], note: "Title of the chosen hero; keep one variant per series.", genre: isekai}
+  - {ja: "魔王", en: "demon lord", aliases: ["demon king"], vi: "Ma Vương", genre: isekai}
+  - {ja: "魔族", en: "demon race", aliases: ["demons"], vi: "ma tộc", genre: isekai}
+  - {ja: "魔物", en: "monster", aliases: ["モンスター"], vi: "quái vật", alt: ["ma vật"], genre: isekai}
+  - {ja: "冒険者", en: "adventurer", vi: "mạo hiểm giả", genre: isekai}
+  - {ja: "ギルド", en: "guild", vi: "Guild", alt: ["Hội mạo hiểm giả"], note: "Keep 'Guild' for the adventurers' guild.", genre: isekai}
+  - {ja: "騎士", en: "knight", vi: "hiệp sĩ", genre: isekai}
+  - {ja: "魔法", en: "magic", vi: "ma pháp", alt: ["phép thuật"], genre: isekai}
+  - {ja: "魔術", en: "sorcery", vi: "ma thuật", genre: isekai}
+  - {ja: "魔法使い", en: "mage", aliases: ["magician", "wizard"], vi: "pháp sư", alt: ["ma pháp sư"], genre: isekai}
+  - {ja: "賢者", en: "sage", vi: "Hiền giả", genre: isekai}
+  - {ja: "聖女", en: "saintess", aliases: ["saint"], vi: "Thánh nữ", genre: isekai}
+  - {ja: "ダンジョン", en: "dungeon", vi: "hầm ngục", alt: ["dungeon"], genre: isekai}
+  - {ja: "スキル", en: "skill", vi: "kỹ năng", genre: isekai}
+  - {ja: "ステータス", en: "status", vi: "chỉ số", alt: ["bảng trạng thái"], genre: isekai}
+  - {ja: "レベル", en: "level", vi: "cấp độ", alt: ["level"], genre: isekai}
+  - {ja: "経験値", en: "experience points", aliases: ["EXP"], vi: "điểm kinh nghiệm", genre: isekai}
+  - {ja: "加護", en: "divine protection", aliases: ["blessing"], vi: "ân sủng", alt: ["sự bảo hộ"], genre: isekai}
+  - {ja: "王国", en: "kingdom", vi: "vương quốc", genre: isekai}
+  - {ja: "帝国", en: "empire", vi: "đế quốc", genre: isekai}
+  - {ja: "公爵", en: "duke", vi: "công tước", genre: isekai}
+  - {ja: "侯爵", en: "marquis", vi: "hầu tước", genre: isekai}
+  - {ja: "伯爵", en: "count", vi: "bá tước", genre: isekai}
+  - {ja: "子爵", en: "viscount", vi: "tử tước", genre: isekai}
+  - {ja: "男爵", en: "baron", vi: "nam tước", genre: isekai}
+  - {ja: "令嬢", en: "young lady", vi: "tiểu thư", genre: isekai}
+  - {ja: "悪役令嬢", en: "villainess", vi: "ác nữ", alt: ["tiểu thư phản diện"], genre: isekai}
+  - {ja: "獣人", en: "beastfolk", aliases: ["beastman", "demi-human"], vi: "thú nhân", genre: isekai}
+  - {ja: "ドラゴン", en: "dragon", aliases: ["竜", "龍"], vi: "rồng", genre: isekai}
+
+  # ----- battle / shounen -----
+  - {ja: "必殺技", en: "special move", aliases: ["finishing move"], vi: "tuyệt chiêu", genre: battle}
+  - {ja: "奥義", en: "ultimate technique", aliases: ["secret technique"], vi: "tuyệt kỹ", alt: ["bí kỹ"], genre: battle}
+  - {ja: "能力", en: "ability", aliases: ["power"], vi: "năng lực", genre: battle}
+  - {ja: "霊力", en: "spiritual power", vi: "linh lực", genre: battle}
+  - {ja: "魔力", en: "magic power", aliases: ["mana"], vi: "ma lực", genre: battle}
+  - {ja: "気", en: "ki", aliases: ["qi"], vi: "khí", note: "Only for the energy sense of ki/qi.", genre: battle}
+  - {ja: "覚醒", en: "awakening", aliases: ["awaken"], vi: "thức tỉnh", genre: battle}
+  - {ja: "変身", en: "transformation", aliases: ["transform"], vi: "biến hình", alt: ["biến thân"], genre: battle}
+  - {ja: "修行", en: "training", vi: "tu luyện", alt: ["rèn luyện"], genre: battle}
+  - {ja: "師匠", en: "master", aliases: ["shishou"], vi: "sư phụ", genre: battle}
+  - {ja: "ライバル", en: "rival", vi: "đối thủ", alt: ["địch thủ"], genre: battle}
+  - {ja: "仲間", en: "comrades", aliases: ["companions", "nakama"], vi: "đồng đội", alt: ["bạn bè"], genre: battle}
+  - {ja: "結界", en: "barrier", vi: "kết giới", genre: battle}
+  - {ja: "封印", en: "seal", aliases: ["sealed"], vi: "phong ấn", genre: battle}
+  - {ja: "呪い", en: "curse", vi: "lời nguyền", alt: ["nguyền rủa"], genre: battle}
+  - {ja: "呪術", en: "jujutsu", aliases: ["cursed technique"], vi: "chú thuật", genre: battle}
+  - {ja: "呪霊", en: "cursed spirit", vi: "chú linh", genre: battle}
+  - {ja: "式神", en: "shikigami", vi: "thức thần", genre: battle}
+
+  # ----- supernatural -----
+  - {ja: "妖怪", en: "yokai", aliases: ["youkai"], vi: "yêu quái", genre: supernatural}
+  - {ja: "悪魔", en: "devil", aliases: ["demon"], vi: "ác ma", alt: ["quỷ"], genre: supernatural}
+  - {ja: "鬼", en: "oni", vi: "quỷ", alt: ["oni"], genre: supernatural}
+  - {ja: "幽霊", en: "ghost", vi: "hồn ma", alt: ["u linh", "bóng ma"], genre: supernatural}
+  - {ja: "神", en: "god", aliases: ["神様", "kami"], vi: "thần", alt: ["vị thần"], genre: supernatural}
+  - {ja: "天使", en: "angel", vi: "thiên sứ", alt: ["thiên thần"], genre: supernatural}
+  - {ja: "死神", en: "grim reaper", aliases: ["shinigami"], vi: "tử thần", alt: ["thần chết"], genre: supernatural}
+  - {ja: "陰陽師", en: "onmyoji", vi: "Âm Dương sư", genre: supernatural}
+  - {ja: "巫女", en: "shrine maiden", aliases: ["miko"], vi: "vu nữ", alt: ["miko"], genre: supernatural}
+  - {ja: "神社", en: "shrine", vi: "đền thờ", alt: ["đền"], genre: supernatural}
+  - {ja: "お札", en: "talisman", aliases: ["ofuda"], vi: "bùa", genre: supernatural}
+  - {ja: "お守り", en: "charm", aliases: ["omamori", "amulet"], vi: "bùa hộ mệnh", genre: supernatural}
+  - {ja: "除霊", en: "exorcism", aliases: ["exorcise"], vi: "trừ tà", genre: supernatural}
+
+  # ----- sci-fi / mecha -----
+  - {ja: "ロボット", en: "robot", vi: "robot", genre: scifi}
+  - {ja: "パイロット", en: "pilot", vi: "phi công", genre: scifi}
+  - {ja: "機体", en: "unit", aliases: ["machine", "mech"], vi: "cỗ máy", note: "Piloted machine; keep 'mech' if the show uses it.", genre: scifi}
+  - {ja: "宇宙船", en: "spaceship", vi: "tàu vũ trụ", genre: scifi}
+  - {ja: "艦隊", en: "fleet", vi: "hạm đội", genre: scifi}
+  - {ja: "母艦", en: "mothership", vi: "mẫu hạm", genre: scifi}
+  - {ja: "人工知能", en: "artificial intelligence", aliases: ["AI"], vi: "AI", alt: ["trí tuệ nhân tạo"], genre: scifi}
+  - {ja: "タイムマシン", en: "time machine", vi: "cỗ máy thời gian", genre: scifi}
+
+  # ----- military -----
+  - {ja: "元帥", en: "marshal", vi: "nguyên soái", genre: military}
+  - {ja: "大佐", en: "colonel", vi: "đại tá", genre: military}
+  - {ja: "中佐", en: "lieutenant colonel", vi: "trung tá", genre: military}
+  - {ja: "少佐", en: "major", vi: "thiếu tá", genre: military}
+  - {ja: "大尉", en: "captain", vi: "đại úy", note: "As a military rank only.", genre: military}
+  - {ja: "中尉", en: "first lieutenant", vi: "trung úy", genre: military}
+  - {ja: "少尉", en: "second lieutenant", vi: "thiếu úy", genre: military}
+  - {ja: "軍曹", en: "sergeant", vi: "trung sĩ", genre: military}
+  - {ja: "曹長", en: "sergeant major", vi: "thượng sĩ", genre: military}
+  - {ja: "司令官", en: "commander", vi: "tư lệnh", genre: military}
+  - {ja: "分隊", en: "squad", vi: "tiểu đội", genre: military}
+  - {ja: "小隊", en: "platoon", vi: "trung đội", genre: military}
+  - {ja: "中隊", en: "company", vi: "đại đội", genre: military}
+
+  # ----- sports -----
+  - {ja: "試合", en: "match", aliases: ["game"], vi: "trận đấu", genre: sports}
+  - {ja: "大会", en: "tournament", vi: "giải đấu", genre: sports}
+  - {ja: "全国大会", en: "nationals", vi: "giải toàn quốc", genre: sports}
+  - {ja: "予選", en: "preliminaries", vi: "vòng loại", genre: sports}
+  - {ja: "決勝", en: "finals", vi: "trận chung kết", genre: sports}
+  - {ja: "監督", en: "coach", aliases: ["manager"], vi: "huấn luyện viên", alt: ["HLV"], genre: sports}
+  - {ja: "主将", en: "team captain", aliases: ["キャプテン"], vi: "đội trưởng", genre: sports}
+  - {ja: "甲子園", en: "Koshien", vi: "Koshien", note: "Keep as is.", genre: sports}
+
+  # ----- idol / entertainment -----
+  - {ja: "アイドル", en: "idol", vi: "idol", genre: idol}
+  - {ja: "ライブ", en: "live", aliases: ["concert"], vi: "buổi diễn live", alt: ["concert"], genre: idol}
+  - {ja: "センター", en: "center", vi: "vị trí trung tâm", alt: ["center"], genre: idol}
+  - {ja: "握手会", en: "handshake event", vi: "buổi bắt tay fan", genre: idol}
+  - {ja: "事務所", en: "agency", aliases: ["talent agency"], vi: "công ty quản lý", alt: ["công ty"], genre: idol}
+  - {ja: "デビュー", en: "debut", vi: "ra mắt", genre: idol}
+  - {ja: "オーディション", en: "audition", vi: "buổi thử giọng", alt: ["audition"], genre: idol}
+  - {ja: "声優", en: "voice actor", aliases: ["seiyuu"], vi: "diễn viên lồng tiếng", alt: ["seiyuu"], genre: idol}
+  - {ja: "配信", en: "livestream", aliases: ["stream"], vi: "livestream", genre: idol}
+
+  # ----- culture / places -----
+  - {ja: "居酒屋", en: "izakaya", vi: "quán izakaya", genre: culture}
+  - {ja: "銭湯", en: "public bath", aliases: ["sento"], vi: "nhà tắm công cộng", genre: culture}
+  - {ja: "温泉", en: "hot spring", aliases: ["onsen"], vi: "suối nước nóng", alt: ["onsen"], genre: culture}
+  - {ja: "旅館", en: "ryokan", aliases: ["inn"], vi: "lữ quán", alt: ["ryokan"], genre: culture}
+  - {ja: "コンビニ", en: "convenience store", aliases: ["konbini"], vi: "cửa hàng tiện lợi", genre: culture}
+  - {ja: "自動販売機", en: "vending machine", vi: "máy bán hàng tự động", genre: culture}
+  - {ja: "浴衣", en: "yukata", vi: "yukata", genre: culture}
+  - {ja: "着物", en: "kimono", vi: "kimono", genre: culture}
+  - {ja: "畳", en: "tatami", vi: "chiếu tatami", genre: culture}
+  - {ja: "こたつ", en: "kotatsu", vi: "kotatsu", genre: culture}
+  - {ja: "花見", en: "hanami", aliases: ["cherry blossom viewing"], vi: "ngắm hoa anh đào", genre: culture}
+  - {ja: "花火", en: "fireworks", vi: "pháo hoa", genre: culture}
+  - {ja: "祭り", en: "festival", aliases: ["matsuri"], vi: "lễ hội", genre: culture}
+  - {ja: "お盆", en: "Obon", vi: "lễ Obon", genre: culture}
+  - {ja: "お正月", en: "New Year", aliases: ["oshougatsu"], vi: "Năm Mới", genre: culture}
+  - {ja: "初詣", en: "first shrine visit", aliases: ["hatsumoude"], vi: "đi lễ đền đầu năm", genre: culture}
+  - {ja: "七夕", en: "Tanabata", vi: "lễ Thất tịch", genre: culture}
+  - {ja: "節分", en: "Setsubun", vi: "lễ Setsubun", genre: culture}
+
+  # ----- food -----
+  - {ja: "おにぎり", en: "onigiri", aliases: ["rice ball"], vi: "cơm nắm", alt: ["onigiri"], genre: food}
+  - {ja: "弁当", en: "bento", aliases: ["lunch box"], vi: "hộp cơm bento", genre: food}
+  - {ja: "味噌汁", en: "miso soup", vi: "canh miso", genre: food}
+  - {ja: "ラーメン", en: "ramen", vi: "mì ramen", genre: food}
+  - {ja: "うどん", en: "udon", vi: "mì udon", genre: food}
+  - {ja: "そば", en: "soba", vi: "mì soba", genre: food}
+  - {ja: "寿司", en: "sushi", vi: "sushi", genre: food}
+  - {ja: "刺身", en: "sashimi", vi: "sashimi", genre: food}
+  - {ja: "天ぷら", en: "tempura", vi: "tempura", genre: food}
+  - {ja: "たこ焼き", en: "takoyaki", vi: "bánh takoyaki", genre: food}
+  - {ja: "お好み焼き", en: "okonomiyaki", vi: "bánh okonomiyaki", genre: food}
+  - {ja: "団子", en: "dango", vi: "bánh dango", genre: food}
+  - {ja: "餅", en: "mochi", vi: "bánh mochi", genre: food}
+  - {ja: "焼き鳥", en: "yakitori", vi: "yakitori", genre: food}
+  - {ja: "鍋", en: "hot pot", aliases: ["nabe"], vi: "lẩu nabe", alt: ["lẩu"], genre: food}
+  - {ja: "カレー", en: "curry", vi: "cà ri", genre: food}
+  - {ja: "抹茶", en: "matcha", vi: "trà matcha", genre: food}
+  - {ja: "日本酒", en: "sake", vi: "rượu sake", genre: food}
+
+  # ----- xianxia / donghua (zh = Gian the) -----
+  - {ja: "修仙", en: "cultivation", zh: "修仙", aliases: ["修真", "cultivator"], vi: "tu tiên", genre: xianxia}
+  - {ja: "仙人", en: "immortal", zh: "仙人", vi: "tiên nhân", genre: xianxia}
+  - {ja: "宗門", en: "sect", zh: "宗门", vi: "tông môn", genre: xianxia}
+  - {ja: "師兄", en: "senior brother", zh: "师兄", vi: "sư huynh", genre: xianxia}
+  - {ja: "師弟", en: "junior brother", zh: "师弟", vi: "sư đệ", genre: xianxia}
+  - {ja: "師姉", en: "senior sister", zh: "师姐", aliases: ["師姐"], vi: "sư tỷ", genre: xianxia}
+  - {ja: "師妹", en: "junior sister", zh: "师妹", vi: "sư muội", genre: xianxia}
+  - {ja: "師父", en: "master", zh: "师父", vi: "sư phụ", genre: xianxia}
+  - {ja: "丹薬", en: "pill", zh: "丹药", aliases: ["丹藥", "elixir"], vi: "đan dược", genre: xianxia}
+  - {ja: "金丹", en: "golden core", zh: "金丹", vi: "kim đan", genre: xianxia}
+  - {ja: "元嬰", en: "nascent soul", zh: "元婴", vi: "nguyên anh", genre: xianxia}
+  - {ja: "霊根", en: "spiritual root", zh: "灵根", vi: "linh căn", genre: xianxia}
+  - {ja: "境界", en: "realm", zh: "境界", vi: "cảnh giới", genre: xianxia}
+  - {ja: "霊気", en: "spiritual energy", zh: "灵气", aliases: ["qi"], vi: "linh khí", genre: xianxia}
+  - {ja: "道友", en: "fellow daoist", zh: "道友", vi: "đạo hữu", genre: xianxia}
+  - {ja: "前輩", en: "senior", zh: "前辈", vi: "tiền bối", note: "Address to an older/more powerful cultivator.", genre: xianxia}
+  - {ja: "晩輩", en: "junior", zh: "晚辈", vi: "vãn bối", note: "Humble self-reference to a senior.", genre: xianxia}
+  - {ja: "在下", en: "this humble one", zh: "在下", vi: "tại hạ", genre: xianxia}
+
+# ---------------------------------------------------------------------
+# characters: ten nhan vat + cap xung ho. De trong o file nen.
+# Dien trong glossary.<ten-bo>.yaml cho tung bo anime.
+# ---------------------------------------------------------------------
+characters: []
+# Vi du (bo comment va chinh sua):
+# characters:
+#   - name_ja: "田中 蓮"
+#     name_vi: "Tanaka Ren"
+#     gender: "male"
+#     speaks_to:
+#       - listener: "Sato Mei"
+#         self: "tớ"
+#         other: "cậu"
+#         note: "Bạn cùng lớp, thân thiết."
+#       - listener: "Nakamura-sensei"
+#         self: "em"
+#         other: "thầy"

@@ -53,13 +53,24 @@ def probe_video(video_path: str) -> Dict[str, Any]:
     height = int(video_stream.get("height", 1080))
     codec = video_stream.get("codec_name", "unknown")
 
-    # Tính toán chính xác FPS
     r_fps = video_stream.get("r_frame_rate", "24/1")
+    fps_num = 24000
+    fps_den = 1001
     if "/" in r_fps:
-        num, den = r_fps.split("/")
-        fps = float(num) / float(den) if float(den) > 0 else 23.976
+        parts = r_fps.split("/")
+        try:
+            fps_num = int(parts[0])
+            fps_den = int(parts[1]) if int(parts[1]) > 0 else 1
+            fps = fps_num / fps_den
+        except ValueError:
+            fps = 23.976
     else:
-        fps = float(r_fps)
+        try:
+            fps = float(r_fps)
+            fps_num = int(round(fps * 1000))
+            fps_den = 1000
+        except ValueError:
+            fps = 23.976
 
     duration = float(video_stream.get("duration") or fmt.get("duration") or 0)
     size_bytes = int(fmt.get("size") or os.path.getsize(video_path))
@@ -69,6 +80,8 @@ def probe_video(video_path: str) -> Dict[str, Any]:
         "width": width,
         "height": height,
         "fps": fps,
+        "fps_num": fps_num,
+        "fps_den": fps_den,
         "duration": duration,
         "size_bytes": size_bytes,
         "codec": codec,

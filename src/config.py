@@ -33,6 +33,14 @@ DEFAULT_FRAME_FORMAT = "png"  # Mặc định PNG Lossless (RGB24, không nén s
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/Documents/Upscaled")
 
 # -----------------------------------------------------------------------------
+# CẤU HÌNH DEDUPLICATION (PREFLIGHT SCAN & CONCAT RE-EXPANSION - MỤC TIÊU 4 GIỜ)
+# -----------------------------------------------------------------------------
+DEFAULT_DEDUP_HI = 768
+DEFAULT_DEDUP_LO = 320
+DEFAULT_DEDUP_FRAC = 0.33
+DEFAULT_DEDUP_ENABLED = True
+
+# -----------------------------------------------------------------------------
 # CẤU HÌNH RAM DISK (ZERO NVME SSD WEAR)
 # -----------------------------------------------------------------------------
 DEFAULT_RAMDISK_SIZE_MB = 4096  # 4 GB RAM Disk ảo trong Unified Memory

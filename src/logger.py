@@ -150,6 +150,7 @@ class RunLogger:
             f"🎞️  Tổng số khung hình:   {stats['total_frames']} frames",
             f"🚀 Tốc độ trung bình:    {stats['avg_fps']:.2f} fps",
             f"⚡ Tốc độ suy luận AI:   {stats['ai_fps']:.2f} fps (Apple M3 Pro GPU Metal)",
+            f"🎯 Tối ưu Deduplication: {stats.get('dedup_info', 'Không kích hoạt')}",
             f"🛡️  Độ bền ổ cứng SSD:   {stats['ssd_protection']}",
             f"📝 Nhật ký chi tiết:     logs/{self.log_filename}",
             "=" * 72
