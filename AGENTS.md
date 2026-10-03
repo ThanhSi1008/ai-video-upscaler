@@ -175,5 +175,26 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
   - Điểm Regex Rules: `gemini-3.8-flash` đạt **10.0/10** (13/13 pass, 0 lỗi); `gemini-3.5-flash-lite` đạt **6.15/10** (5 lỗi suồng sã "tớ-cậu"); `translategemma_12b` đạt **6.92/10** (4 lỗi: gọi Eris là "Anh", xưng "chị-em", "đòn của anh", "Cháu đi đây").
   - Đã bổ sung chặn trên Pause-and-retry: tối đa 5 lần (chờ ~2.5m) trước khi ngắt an toàn để bảo toàn trạng thái khi cạn quota ngày.
 * **Kết quả True Blind Test (Người dùng chấm mù 3/3 trên Liquid Retina XDR):** `realesr-animevideov3` đạt vị trí 1st tuyệt đối ở cả 3 cảnh, loại bỏ hoàn toàn ArtCNN và AnimeJaNai. Bỏ các lập luận MAD 0.52 phẳng.
+* **Truy Nguyên Gốc Rễ 108 Frames Bị Bỏ (`vf_mpdecimate.c` C-loop Verification):**
+  - Đối soát độc lập trên mặt phẳng 8-bit Y gốc (Luma): **0 / 108 frame vượt ngưỡng hi=768** (Min SAD: 658, Mean: 718.8, Median: 725.0, Max: 768).
+  - Khám phá nguyên nhân sai số cũ: Script audit trước chuyển đổi YUV420p sang BGR24 rồi tính Gray float làm sai số nội suy Chroma upsampling đội lên thêm +110 đến +125 điểm SAD tại các viền màu. Thuật toán của FFmpeg 8.1.2 hoạt động hoàn toàn chính xác.
+  - Đã xuất 108 contact sheets đa khung hình (`out/dedup_audit_8x8/`) sẵn sàng cho người dùng thẩm định trực quan.
+* **Đo Đạc Preflight 4 Ngưỡng (`hi` ∈ {768, 640, 512, 384}):**
+  - Mẫu 3 phút (4.360 frames): `hi=768` (2.186 frames, 28.7m), `hi=640` (2.301 frames, +1.5m), `hi=512` (2.458 frames, +3.6m), `hi=384` (2.679 frames, +6.5m).
+  - Toàn tập 24 phút (34.046 frames): `hi=768` (13.324 frames, 2h 55m), `hi=640` (14.095 frames, **3h 05m, +10.1m**), `hi=512` (15.398 frames, 3h 22m), `hi=384` (17.557 frames, 3h 50m). `hi=640` là điểm ngọt kỹ thuật giữ thêm 771 frames an toàn.
+* **Thiết Lập Baseline NCNN Tiling Mới (`tests/benchmark_ncnn_tiles.py`):**
+  - Cấu hình tối ưu `-t 540 -j 1:2:2` đạt **1.427 fps (+18.9%)** với PSNR 66.39 dB so với auto-tile `-t 0` (1.200 fps). Triệt tiêu ~19.5% chi phí prepadding dư thừa.
+* **Độ Khớp và Hiệu Suất PyTorch MPS:**
+  - Vùng trung tâm (Interior) khớp NCNN đạt **60.02 dB** PSNR. Toàn bộ điểm lệch cực đại 44/255 nằm trọn trong dải viền 10px ngoài cùng do cơ chế reflection padding của tiling khác biệt.
+  - FP16 vs FP32 đạt **61.74 dB** PSNR (0 NaN/Inf). Mức nén PNG 1 đạt **310 ms / frame** (nhanh gấp ~9 lần mức 6 cũ: 2.826 ms) với dung lượng 9.1 MB.
+  - Đã xuất 5 cặp ảnh chấm mù A/B tại `out/mps_blind_ab/` và khóa giải mã `secret_key.json`.
+* **Phòng Vệ RAM Disk 2 Lớp & Kiểm Thử Hỗn Loạn (Chaos Test):**
+  - Pre-allocation gate: `need = n_unique * size_est * 1.3` chặn trước nguy cơ chạm trần 4GB; Runtime gate dừng sạch khi dung lượng < 50MB (Unit test `test_ramdisk_worst_case.py` đạt 4/4).
+  - Chaos test (`tests/chaos_test_resume.py`): Kịch bản `kill -9` giữa chunk & Resume đạt **PASS** (kế thừa chunk 1 nguyên vẹn, số frame thành phẩm khớp chính xác 767/767 frames qua `ffprobe -count_frames`); kịch bản ENOSPC đạt **PASS**.
+  - Tự động xuất `audit.json` cuối tập và cảnh báo sụt giảm fps GPU > 8% cho 10 chunk liên tiếp.
+* **Chuẩn Hóa Phụ Đề & Khóa Cache (P3):**
+  - Bảng quy chuẩn xưng hô mở rộng 4 thể loại (Thư từ lãng mạn, Chiến đấu & Bảo hộ, Thầy trò & Tôn kính, Triều đình & Cận vệ) trong `out/golden_pronouns_specification.json`.
+  - Hỗ trợ cờ `--require-approved-cast` dừng duyệt Cast Sheet và khóa cache SQLite theo `(model, cast_sheet_hash, prompt_version)`.
+
 
 

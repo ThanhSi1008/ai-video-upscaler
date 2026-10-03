@@ -9,6 +9,7 @@ import os
 import time
 import subprocess
 import psutil
+import shutil
 from typing import Dict, Any
 
 from src.config import REALESRGAN_BIN, MODELS_DIR
@@ -67,6 +68,24 @@ def upscale_frames(
                     peak_rss = rss
             except Exception:
                 pass
+
+        # Giám sát dung lượng ổ đĩa (RAM Disk) trong lúc AI đang xuất frames:
+        # Nếu đĩa còn dưới 50 MB, lập tức dừng tiến trình NCNN để tránh crash/hỏng đĩa
+        if os.path.exists(output_dir):
+            try:
+                free_bytes = shutil.disk_usage(output_dir).free
+                if free_bytes < 50 * 1024 * 1024:  # < 50 MB
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+                    raise OSError(28, f"RAM Disk cạn kiệt dung lượng khi xuất frame 4K (còn {free_bytes / (1024*1024):.1f} MB < 50 MB). Dừng khẩn cấp ENOSPC.")
+            except OSError:
+                raise
+            except Exception:
+                pass
+
         time.sleep(0.02)
 
     proc.wait()

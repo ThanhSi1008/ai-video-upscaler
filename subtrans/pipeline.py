@@ -248,6 +248,18 @@ class TranslationPipeline:
         candidate_gemini_models = [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
         curr_gemini_idx = 0
 
+        # Compute cast sheet hash for cache keying
+        cast_sheet_hash = ""
+        if cast_file.exists():
+            try:
+                cast_sheet_hash = hashlib.sha256(cast_file.read_bytes()).hexdigest()[:16]
+            except Exception:
+                pass
+        elif glossary and glossary.characters:
+            canonical_chars = json.dumps([c.model_dump() for c in glossary.characters], sort_keys=True)
+            cast_sheet_hash = hashlib.sha256(canonical_chars.encode("utf-8")).hexdigest()[:16]
+        prompt_version = "v2.0"
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -269,6 +281,8 @@ class TranslationPipeline:
                         ja=cue.ja,
                         en=cue.en,
                         glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
+                        cast_sheet_hash=cast_sheet_hash,
+                        prompt_version=prompt_version
                     )
                     cached_val = self.cache.get_cue(ckey)
                     if cached_val:
@@ -380,6 +394,8 @@ class TranslationPipeline:
                         ja=cue.ja,
                         en=cue.en,
                         glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
+                        cast_sheet_hash=cast_sheet_hash,
+                        prompt_version=prompt_version
                     )
                     self.cache.set_cue(ckey, backend_used, model_used, vi)
                     progress.advance(task, 1)

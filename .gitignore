@@ -34,7 +34,7 @@ venv.bak/
 *.avi
 *.tmp
 .temp_*
-logs/*.log
+logs/*
 !logs/.gitkeep
 tests/**/*.png
 tests/*.png

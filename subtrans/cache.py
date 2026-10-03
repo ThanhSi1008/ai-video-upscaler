@@ -16,13 +16,22 @@ CACHE_DIR = Path(__file__).parent / ".cache"
 DB_PATH = CACHE_DIR / "translations.db"
 
 
-def compute_cue_cache_key(model: str, ja: str, en: Optional[str] = None, glossary_hash: str = "") -> str:
-    """Generates a SHA-256 cache key for an individual dialogue cue."""
+def compute_cue_cache_key(
+    model: str,
+    ja: str,
+    en: Optional[str] = None,
+    glossary_hash: str = "",
+    cast_sheet_hash: str = "",
+    prompt_version: str = "v2.0"
+) -> str:
+    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, and prompt."""
     canonical = json.dumps({
         "model": model,
         "ja": ja.strip(),
         "en": (en or "").strip(),
         "glossary": glossary_hash,
+        "cast_sheet": cast_sheet_hash,
+        "prompt_version": prompt_version
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
