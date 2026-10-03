@@ -47,6 +47,26 @@ def render_progress(current: int, total: int, prefix: str = "", suffix: str = ""
     sys.stdout.flush()
 
 
+import subprocess
+
+def get_swap_usage() -> str:
+    """Lấy thông số swap memory hiện tại từ macOS kernel"""
+    try:
+        res = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+    except Exception:
+        return "vm.swapusage: N/A"
+
+def get_thermal_state() -> str:
+    """Lấy trạng thái nhiệt và throttle từ pmset"""
+    try:
+        res = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, check=True)
+        lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip() and not line.startswith("Note:")]
+        return " | ".join(lines) if lines else "Nominal (Bình thường - Không nghẽn nhiệt)"
+    except Exception:
+        return "Nominal"
+
+
 class RunLogger:
     """
     Quản lý luồng log song song ra Console và File log có cấu trúc.
@@ -128,12 +148,34 @@ class RunLogger:
         with open(self.log_filepath, "a", encoding="utf-8") as f:
             f.write("\n".join(banner_lines) + "\n\n")
 
-    def log_chunk_done(self, chunk_idx: int, total_chunks: int, frames: int, ai_time: float, ai_fps: float, enc_time: float, total_chunk_time: float, output_seg: str):
+    def log_chunk_done(
+        self,
+        chunk_idx: int,
+        total_chunks: int,
+        frames: int,
+        ai_time: float,
+        ai_fps: float,
+        enc_time: float,
+        total_chunk_time: float,
+        output_seg: str,
+        t0_seconds: Optional[float] = None,
+        steady_fps: Optional[float] = None,
+        rss_mb: Optional[float] = None
+    ):
         """Ghi lại chi tiết viễn trắc của từng phân đoạn hoàn thành"""
         seg_size = os.path.getsize(output_seg) if os.path.exists(output_seg) else 0
+        extra_info = []
+        if t0_seconds is not None:
+            extra_info.append(f"T0: {t0_seconds:.2f}s")
+        if steady_fps is not None and steady_fps > 0:
+            extra_info.append(f"Steady: {steady_fps:.2f} fps")
+        if rss_mb is not None and rss_mb > 0:
+            extra_info.append(f"Peak RSS: {rss_mb:.1f} MB")
+        
+        extra_str = f" | {', '.join(extra_info)}" if extra_info else ""
         log_entry = (
             f"[CHUNK {chunk_idx + 1:02d}/{total_chunks:02d}] Hoàn tất {frames} frames "
-            f"(AI Metal: {ai_time:.2f}s @ {ai_fps:.2f} fps | Encode: {enc_time:.2f}s | "
+            f"(AI Metal: {ai_time:.2f}s @ {ai_fps:.2f} fps{extra_str} | Encode: {enc_time:.2f}s | "
             f"Tổng: {total_chunk_time:.2f}s | File: {os.path.basename(output_seg)} {format_bytes(seg_size)})"
         )
         self._write_file(log_entry)
@@ -152,9 +194,20 @@ class RunLogger:
             f"⚡ Tốc độ suy luận AI:   {stats['ai_fps']:.2f} fps (Apple M3 Pro GPU Metal)",
             f"🎯 Tối ưu Deduplication: {stats.get('dedup_info', 'Không kích hoạt')}",
             f"🛡️  Độ bền ổ cứng SSD:   {stats['ssd_protection']}",
+        ]
+        if "swap_info" in stats:
+            summary_lines.append(f"📊 macOS Swap:           {stats['swap_info']}")
+        if "thermal_info" in stats:
+            summary_lines.append(f"🌡️  Nhiệt độ / Throttle:  {stats['thermal_info']}")
+        if "stage_timings" in stats:
+            summary_lines.append("⏱️  Thời gian theo Stage:")
+            for s_name, s_sec in stats["stage_timings"].items():
+                summary_lines.append(f"   • {s_name}: {s_sec:.2f}s")
+                
+        summary_lines.extend([
             f"📝 Nhật ký chi tiết:     logs/{self.log_filename}",
             "=" * 72
-        ]
+        ])
 
         print("\n" + "\n".join(summary_lines))
         print(f"\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")

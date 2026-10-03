@@ -65,3 +65,5 @@ subtrans/.env
 subtrans/.cache/
 out/
 scratch/
+models_bench/
+test_frames/

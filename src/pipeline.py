@@ -48,7 +48,9 @@ from src.ai_engine import upscale_frames
 from src.logger import (
     format_time,
     render_progress,
-    RunLogger
+    RunLogger,
+    get_swap_usage,
+    get_thermal_state
 )
 from src.preflight import (
     CaffeinateContext,
@@ -176,6 +178,10 @@ def run_upscale_pipeline(
             }
             logger.print_banner(banner_info)
 
+            stage_timings = {}
+            swap_before = get_swap_usage()
+            logger.info(f"📊 Trạng thái Swap macOS ban đầu: {swap_before}")
+
             # -----------------------------------------------------------------
             # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
             # -----------------------------------------------------------------
@@ -183,6 +189,7 @@ def run_upscale_pipeline(
             if dedup:
                 plan_file = os.path.join(work_dir, "plan.json")
                 logger.info("Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập (plan.json)...", to_console=True)
+                t_pref_start = time.time()
                 dedup_plan = load_or_create_plan(
                     input_path=input_path,
                     plan_path=plan_file,
@@ -191,6 +198,7 @@ def run_upscale_pipeline(
                     fps_den=meta["fps_den"],
                     resume=resume
                 )
+                stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
                 logger.info(
                     f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
                     f"({dedup_plan['dedup_ratio_percent']}% trùng lặp được loại bỏ - Tối ưu ~50% thời gian GPU)",
@@ -200,7 +208,9 @@ def run_upscale_pipeline(
             existing_segs = sorted(glob(os.path.join(segs_dir, "seg_*.mp4")))
             if not existing_segs or not resume:
                 logger.info(f"Đang phân đoạn video thành các block {segment_time}s (Stream Copy)...", to_console=True)
+                t_split_start = time.time()
                 existing_segs = split_video_segments(input_path, segs_dir, segment_time)
+                stage_timings["Segment Split (Stream Copy)"] = time.time() - t_split_start
 
             total_segs = len(existing_segs)
             logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU Metal...", to_console=True)
@@ -213,6 +223,8 @@ def run_upscale_pipeline(
             total_frames_processed = 0
             total_ai_frames = 0
             total_ai_time = 0.0
+            total_enc_time = 0.0
+            total_ext_time = 0.0
 
             for idx, seg_file in enumerate(existing_segs):
                 seg_out_file = os.path.join(up_segs_dir, f"up_{idx:04d}.mp4")
@@ -306,6 +318,9 @@ def run_upscale_pipeline(
                         )
                     t_enc_elapsed = time.time() - t_enc_start
 
+                    total_ext_time += t_ext_elapsed
+                    total_enc_time += t_enc_elapsed
+
                     # 2.4 Cập nhật thống kê và ETA thực tế
                     seg_elapsed = time.time() - seg_start_time
                     seg_fps = (expected_frames / seg_elapsed) if seg_elapsed > 0 else 0.0
@@ -328,7 +343,10 @@ def run_upscale_pipeline(
                         ai_fps=ai_result["fps"],
                         enc_time=t_enc_elapsed,
                         total_chunk_time=seg_elapsed,
-                        output_seg=seg_out_file
+                        output_seg=seg_out_file,
+                        t0_seconds=ai_result.get("t0_seconds"),
+                        steady_fps=ai_result.get("steady_fps"),
+                        rss_mb=ai_result.get("peak_rss_mb")
                     )
 
                 finally:
@@ -344,13 +362,17 @@ def run_upscale_pipeline(
             logger.info("Đang ghép nối các phân đoạn 4K...", to_console=True)
             all_upscaled_segs = sorted(glob(os.path.join(up_segs_dir, "up_*.mp4")))
             merged_video = os.path.join(work_dir, "merged_4k.mp4")
+            t_concat_start = time.time()
             concat_segments(all_upscaled_segs, work_dir, merged_video)
+            stage_timings["Ghép nối 4K (Concat Demuxer)"] = time.time() - t_concat_start
 
             # -----------------------------------------------------------------
             # BƯỚC 4: MUXING ĐÓNG GÓI NGUYÊN BẢN AUDIO, SUBTITLES & CHAPTERS
             # -----------------------------------------------------------------
             logger.info("Đang đóng gói lại Audio, Subtitles, Fonts và Chapters gốc vào file 4K hoàn chỉnh...", to_console=True)
+            t_mux_start = time.time()
             mux_final_container(merged_video, input_path, output_path)
+            stage_timings["Đóng gói Container gốc (Muxing)"] = time.time() - t_mux_start
 
             # Dọn dẹp thư mục trung gian trên SSD
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -369,6 +391,13 @@ def run_upscale_pipeline(
             else:
                 dedup_desc = "Tắt (Tính toán 100% khung hình)"
 
+            stage_timings["Trích xuất ảnh đệm (Extract)"] = total_ext_time
+            stage_timings["Suy luận AI Metal (NCNN Vulkan)"] = total_ai_time
+            stage_timings["Nén HEVC 10-bit VideoToolbox"] = total_enc_time
+
+            swap_after = get_swap_usage()
+            thermal_info = get_thermal_state()
+
             summary_stats = {
                 "output_path": output_path,
                 "final_size_bytes": final_size,
@@ -378,7 +407,10 @@ def run_upscale_pipeline(
                 "ai_fps": ai_fps,
                 "dedup_info": dedup_desc,
                 "ssd_protection": "100% An toàn (Frame trung gian chỉ chạy trên RAM Disk)"
-                if use_ramdisk else "Ghi tạm trên SSD"
+                if use_ramdisk else "Ghi tạm trên SSD",
+                "swap_info": f"{swap_before} ➔ {swap_after}",
+                "thermal_info": thermal_info,
+                "stage_timings": stage_timings
             }
             logger.print_benchmark_summary(summary_stats)
 
