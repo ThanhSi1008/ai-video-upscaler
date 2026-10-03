@@ -39,6 +39,7 @@ def generate_qa_report(
     stats: Dict[str, Any],
     glossary: Optional[Glossary] = None,
     review_file: bool = False,
+    stage_times: Optional[Dict[str, float]] = None,
 ) -> Path:
     """
     Generates a structured Markdown audit report (out/<name>.audit.md)
@@ -118,11 +119,42 @@ def generate_qa_report(
         f"| **Lines > 107 chars (Hard threshold)** | {len(lines_over_107)} | {len(lines_over_107)/max(1, len(dialogue_cues))*100:.1f}% |",
         f"| **Cache Hits (Zero Latency)** | {cache_hits} | {cache_hits/max(1, len(dialogue_cues))*100:.1f}% |",
         "",
+    ]
+
+    if stage_times:
+        lines.extend([
+            "### Stage Timing Breakdown",
+            "",
+            "| Stage | Duration (s) | Overhead / Share |",
+            "| :--- | :--- | :--- |",
+            f"| Stage 1: Parse & Align | {stage_times.get('stage_1_parse', 0):.2f}s | {stage_times.get('stage_1_parse', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| Stage A: Cast Sheet Analysis | {stage_times.get('stage_a_cast', 0):.2f}s | {stage_times.get('stage_a_cast', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| Stage 2: Translation Batches | {stage_times.get('stage_2_translate', 0):.2f}s | {stage_times.get('stage_2_translate', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| Stage Review (Optional) | {stage_times.get('stage_review', 0):.2f}s | {stage_times.get('stage_review', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| Stage 4: Subtitle Write | {stage_times.get('stage_4_write', 0):.2f}s | {stage_times.get('stage_4_write', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| Stage C: Audit Generation | {stage_times.get('stage_c_report', 0):.2f}s | {stage_times.get('stage_c_report', 0)/max(0.1, elapsed_time_sec)*100:.1f}% |",
+            f"| **Total Pipeline** | **{elapsed_time_sec:.2f}s** | 100.0% |",
+            "",
+        ])
+
+    model_counts = stats.get("model_counts", {})
+    if model_counts:
+        lines.extend([
+            "### Model Usage Breakdown",
+            "",
+            "| Model / Source | Cues Translated | Share |",
+            "| :--- | :--- | :--- |",
+        ])
+        for mod, cnt in model_counts.items():
+            lines.append(f"| `{mod}` | {cnt} | {cnt/max(1, len(dialogue_cues))*100:.1f}% |")
+        lines.append("")
+
+    lines.extend([
         "---",
         "",
         "## 2. Quality Assurance Audit",
         "",
-    ]
+    ])
 
     # Section: Uncertain Cues
     if uncertain_cues:

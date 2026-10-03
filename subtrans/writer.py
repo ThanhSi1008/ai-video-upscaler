@@ -81,6 +81,10 @@ def clean_and_normalize_vietnamese(text: str) -> str:
     text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     text = re.sub(r"\s+", " ", text).strip()
 
+    # 8. Strip enclosing quotation marks around dialogue lines (SRT standard)
+    text = re.sub(r'^\s*["\'“„«]+', '', text)
+    text = re.sub(r'["\'”»]+\s*$', '', text).strip()
+
     return text
 
 

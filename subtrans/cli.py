@@ -75,19 +75,24 @@ def check():
 
 @app.command()
 def models():
-    """Lists available Gemini models and locally installed Ollama models."""
-    console.print("\n[bold cyan]📋 Available Translation Models[/bold cyan]\n")
+    """Lists available Gemini models and locally installed Ollama models, verifying configured models."""
+    console.print("\n[bold cyan]📋 Subtrans Translation Models Status[/bold cyan]\n")
 
-    # Ollama Models
     cfg = load_config()
+    gemini_cfg = cfg.get("gemini", {})
+    configured_primary = gemini_cfg.get("model", "gemini-3.8-flash")
+    configured_fallbacks = gemini_cfg.get("fallback_models", ["gemini-3.7-flash", "gemini-3.6-flash"])
+    configured_lite = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
+
+    # 1. Ollama Models
     ollama_url = cfg.get("ollama", {}).get("endpoint", "http://localhost:11434")
-    console.print(f"[bold]Ollama Models ({ollama_url}):[/bold]")
+    console.print(f"[bold]Local Ollama Models ({ollama_url}):[/bold]")
     try:
         r = requests.get(f"{ollama_url}/api/tags", timeout=3)
         if r.status_code == 200:
-            models = r.json().get("models", [])
-            if models:
-                for m in models:
+            local_models = r.json().get("models", [])
+            if local_models:
+                for m in local_models:
                     size_gb = m.get("size", 0) / (1024 ** 3)
                     console.print(f"  • [green]{m.get('name')}[/green] ({size_gb:.1f} GB)")
             else:
@@ -99,25 +104,55 @@ def models():
 
     console.print("")
 
-    # Gemini Models
+    # 2. Gemini Models
     api_key = get_gemini_api_key()
-    console.print("[bold]Gemini Cloud Models (Google GenAI):[/bold]")
+    console.print("[bold]Configured Gemini Models Status (Google GenAI):[/bold]")
+    available_api_models = set()
     if api_key:
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
-            count = 0
             for m in client.models.list():
-                if "gemini" in m.name.lower() and ("flash" in m.name.lower() or "pro" in m.name.lower()):
-                    console.print(f"  • [cyan]{m.name}[/cyan] ({m.display_name or 'Gemini'})")
-                    count += 1
-            if count == 0:
-                console.print("  No flash/pro models listed.")
+                raw_name = m.name.replace("models/", "")
+                available_api_models.add(raw_name)
+
+            # Check Primary
+            if configured_primary in available_api_models:
+                console.print(f"  • Primary: [bold green]AVAILABLE[/bold green] - [cyan]{configured_primary}[/cyan]")
+            else:
+                console.print(f"  • Primary: [bold red]MISSING (404/NOT FOUND)[/bold red] - [yellow]{configured_primary}[/yellow] ⚠️ Check deprecations!")
+
+            # Check Fallbacks
+            for fb in configured_fallbacks:
+                if fb in available_api_models:
+                    console.print(f"  • Fallback: [bold green]AVAILABLE[/bold green] - [cyan]{fb}[/cyan]")
+                else:
+                    console.print(f"  • Fallback: [bold red]MISSING[/bold red] - [yellow]{fb}[/yellow]")
+
+            # Check Lite
+            if configured_lite in available_api_models:
+                console.print(f"  • Lite: [bold green]AVAILABLE[/bold green] - [cyan]{configured_lite}[/cyan]")
+            else:
+                console.print(f"  • Lite: [bold red]MISSING[/bold red] - [yellow]{configured_lite}[/yellow]")
+
+            # Other active flash/pro models on this key
+            other_models = sorted([
+                m for m in available_api_models
+                if ("flash" in m or "pro" in m) and m not in {configured_primary, configured_lite, *configured_fallbacks}
+            ])
+            if other_models:
+                console.print("\n[bold dim]Other active Flash/Pro models on your API key:[/bold dim]")
+                for om in other_models:
+                    console.print(f"  - [dim]{om}[/dim]")
+
         except Exception as e:
             console.print(f"  [red]Failed to query Gemini API: {e}[/red]")
     else:
         console.print("  [yellow]GEMINI_API_KEY not configured. Set GEMINI_API_KEY in .env[/yellow]")
 
+    console.print("\n[bold]Official Google Gemini Documentation & Reference:[/bold]")
+    console.print("  • Latest Models: [link=https://ai.google.dev/gemini-api/docs/models/gemini]https://ai.google.dev/gemini-api/docs/models/gemini[/link]")
+    console.print("  • Deprecations Schedule: [link=https://ai.google.dev/gemini-api/docs/deprecations]https://ai.google.dev/gemini-api/docs/deprecations[/link]")
     console.print("")
 
 
@@ -129,6 +164,7 @@ def run(
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Path to glossary YAML/JSON file"),
     local_only: bool = typer.Option(False, "--local", "-l", help="Force 100% local translation using Ollama"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
+    allow_latest_alias: bool = typer.Option(False, "--allow-latest-alias", help="Allow using mutable model alias like gemini-flash-latest"),
     on_quota: str = typer.Option("local", "--on-quota", help="Action when Gemini quota exhausted ('local' or 'stop')"),
     review: bool = typer.Option(False, "--review", "-r", help="Run local post-editing review pass using gemma3:12b"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Limit translation to first N dialogue cues"),
@@ -158,6 +194,7 @@ def run(
     pipeline = TranslationPipeline(
         local_only=local_only,
         model_override=model,
+        allow_latest_alias=allow_latest_alias,
         on_quota=on_quota,
         enable_review=review,
         limit_cues=limit,

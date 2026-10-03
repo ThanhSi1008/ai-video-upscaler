@@ -17,6 +17,7 @@ from google.genai import types
 
 from subtrans.models import Cue, Character, CharacterSpeaksTo, Glossary
 from subtrans.config import get_gemini_api_key
+from subtrans.gemini_backend import get_thinking_config
 
 logger = logging.getLogger("subtrans.cast_sheet")
 
@@ -56,7 +57,7 @@ Dialogue samples from the episode:
 def generate_cast_sheet(
     cues: List[Cue],
     output_path: Path,
-    gemini_model: str = "gemini-2.5-flash",
+    gemini_model: str = "gemini-3.8-flash",
 ) -> Optional[Glossary]:
     """
     Stage A: Discovers characters and pronoun tables across the episode.
@@ -81,13 +82,18 @@ def generate_cast_sheet(
 
     try:
         client = genai.Client(api_key=api_key)
+        cfg_args = {
+            "response_mime_type": "application/json",
+            "temperature": 0.1,
+        }
+        thinking_cfg = get_thinking_config(gemini_model)
+        if thinking_cfg:
+            cfg_args["thinking_config"] = thinking_cfg
+
         res = client.models.generate_content(
             model=gemini_model,
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
+            config=types.GenerateContentConfig(**cfg_args),
         )
 
         data = json.loads(res.text.strip())

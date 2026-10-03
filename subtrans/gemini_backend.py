@@ -123,15 +123,30 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
     return res
 
 
+def get_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
+    """
+    Configures lowest reasonable thinking setting for translation per ADDENDUM 8:
+    - Minimizes latency and quota usage (thinking tokens count towards output token limit).
+    - For flash-lite: uses ThinkingLevel.MINIMAL.
+    - For standard 3.x/2.5 models: sets thinking_budget=0 to disable thinking.
+    """
+    m = model_name.lower()
+    if "flash-lite" in m:
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
+    else:
+        return types.ThinkingConfig(thinking_budget=0)
+
+
 class GeminiTranslator(BaseTranslator):
     """Google Gemini translation backend with structured schema output and automatic split-retry."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.8-flash",
         temperature: float = 0.0,
         gloss_skill_names: bool = False,
+        allow_latest_alias: bool = False,
     ):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
@@ -140,18 +155,31 @@ class GeminiTranslator(BaseTranslator):
         self.model = model
         self.temperature = temperature
         self.gloss_skill_names = gloss_skill_names
+        self.allow_latest_alias = allow_latest_alias
+
+        # Protection against mutable alias 'gemini-flash-latest' per ADDENDUM 8
+        if "latest" in self.model.lower() and not self.allow_latest_alias:
+            raise ValueError(
+                f"Model alias '{self.model}' is prohibited by default because its underlying version can change silently. "
+                f"Please specify an explicit versioned model (e.g. gemini-3.8-flash) or set allow_latest_alias=True."
+            )
 
     def _call_api(self, prompt_text: str, system_prompt: str = SYSTEM_INSTRUCTION) -> List[Dict[str, Any]]:
-        """Invokes Gemini API requesting structured JSON array."""
+        """Invokes Gemini API requesting structured JSON array with minimal thinking overhead."""
+        config_kwargs = {
+            "system_instruction": system_prompt,
+            "response_mime_type": "application/json",
+            "response_schema": list[SubtitleOutputItem],
+            "temperature": self.temperature,
+        }
+        thinking_cfg = get_thinking_config(self.model)
+        if thinking_cfg:
+            config_kwargs["thinking_config"] = thinking_cfg
+
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=list[SubtitleOutputItem],
-                temperature=self.temperature
-            )
+            config=types.GenerateContentConfig(**config_kwargs)
         )
         raw_text = response.text.strip()
         data = json.loads(raw_text)

@@ -86,6 +86,18 @@ class OllamaTranslator(BaseTranslator):
         batch_en = " ".join(c.en for c in cues if c.en).lower()
 
         lines = []
+        if glossary.characters:
+            char_lines = []
+            for c in glossary.characters:
+                speaks_info = ""
+                if c.speaks_to:
+                    speaks = [f"to {s.listener}: xưng '{s.self}', gọi đối phương '{s.other}'" for s in c.speaks_to]
+                    speaks_info = f" -> [{', '.join(speaks)}]"
+                char_lines.append(f"- {c.name_vi} ({c.name_ja or 'Anime'}) [{c.gender}]{speaks_info}")
+            if char_lines:
+                lines.append("Characters & Pronouns Guidance (Xưng hô nhân vật bắt buộc):")
+                lines.extend(char_lines)
+
         if glossary.terms:
             matched = []
             for t in glossary.terms:
@@ -100,31 +112,31 @@ class OllamaTranslator(BaseTranslator):
                             hit = True
                             break
                 if hit:
-                    alt_str = f" (or: {', '.join(t.alt)})" if t.alt else ""
+                    alt_str = f" (hoặc: {', '.join(t.alt)})" if t.alt else ""
                     note_str = f" [{t.note}]" if t.note else ""
                     matched.append(f"- {t.ja} -> {t.vi}{alt_str}{note_str}")
 
             if matched:
-                lines.append("Glossary:")
+                lines.append("\nGlossary (Thuật ngữ dịch):")
                 lines.extend(matched)
-
-        if glossary.characters:
-            matched_chars = []
-            for c in glossary.characters:
-                if (c.name_ja and c.name_ja in batch_ja) or (c.name_vi and c.name_vi.lower() in batch_en):
-                    matched_chars.append(f"- {c.name_ja} -> {c.name_vi}")
-            if matched_chars:
-                lines.append("Characters:")
-                lines.extend(matched_chars)
 
         return "\n".join(lines)
 
-    def _translate_single(self, cue: Cue, glossary: Optional[Glossary]) -> str:
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Strips surrounding quotes and unwanted chatter from local translation."""
+        clean = text.strip()
+        clean = re.sub(r'^["\'“„«]+', '', clean)
+        clean = re.sub(r'["\'”»]+$', '', clean).strip()
+        clean = CHATTER_REGEX.sub("", clean).strip()
+        return clean
+
+    def _translate_single(self, cue: Cue, context: List[Cue], glossary: Optional[Glossary]) -> str:
         """Fallback to translating a single cue if batching fails."""
         sys_msg = (
-            "You are a professional anime subtitle translator from Japanese to Vietnamese. "
-            "Translate the given line faithfully and naturally into Vietnamese. "
-            "Output ONLY the translated line. Do not include notes, quotes, or markdown."
+            "You are an expert anime subtitle translator from Japanese to natural Vietnamese. "
+            "Translate the given line faithfully, keeping correct character pronouns and register. "
+            "Output ONLY the translated line without quotation marks or notes."
         )
         glossary_txt = self._format_glossary(glossary, [cue])
         user_content = f"Japanese: {cue.ja}"
@@ -138,9 +150,7 @@ class OllamaTranslator(BaseTranslator):
             {"role": "user", "content": user_content},
         ]
         raw = self._call_chat(messages)
-        # Clean quotes and chatter
-        clean = re.sub(r'^["\']|["\']$', "", raw.strip())
-        clean = CHATTER_REGEX.sub("", clean).strip()
+        clean = self._clean_text(raw)
         return clean or cue.ja
 
     def translate_batch(
@@ -155,15 +165,25 @@ class OllamaTranslator(BaseTranslator):
 
         # Build numbered prompt
         prompt_lines = [
-            "Translate each of the following numbered Japanese anime subtitle lines into natural Vietnamese.",
-            "Use the exact format: [number] Vietnamese translation",
-            "Do not merge or omit lines. Output nothing else.",
+            "Translate each of the following numbered Japanese anime subtitle lines into natural, spoken Vietnamese.",
+            "Rules:\n- Output format strictly: [number] Vietnamese translation",
+            "- Follow Character pronouns and relationships strictly (Do NOT default to 'tôi - cô' for lovers/family).",
+            "- Do NOT add quotation marks around the translated lines.",
+            "- Do not merge or omit lines. Output nothing else."
         ]
+
         glossary_txt = self._format_glossary(glossary, cues)
         if glossary_txt:
             prompt_lines.append("\n" + glossary_txt)
 
-        prompt_lines.append("\nLines to translate:")
+        if context:
+            ctx_lines = ["\nSurrounding Context (Ngữ cảnh tham chiếu, KHÔNG DỊCH các câu này):"]
+            for c in context[:6]:
+                en_ctx = f" (EN: {c.en})" if c.en else ""
+                ctx_lines.append(f"- [{c.id}] {c.ja}{en_ctx}")
+            prompt_lines.append("\n".join(ctx_lines))
+
+        prompt_lines.append("\nLines to translate (Bắt buộc dịch từng dòng theo format [id] Bản dịch):")
         for cue in cues:
             en_part = f" (EN: {cue.en})" if cue.en else ""
             prompt_lines.append(f"[{cue.id}] {cue.ja}{en_part}")
@@ -182,7 +202,7 @@ class OllamaTranslator(BaseTranslator):
                 m = LINE_PATTERN.match(line)
                 if m:
                     cid = int(m.group(1))
-                    text = m.group(2).strip()
+                    text = self._clean_text(m.group(2))
                     parsed_map[cid] = text
 
             expected_ids = [c.id for c in cues]
@@ -205,7 +225,7 @@ class OllamaTranslator(BaseTranslator):
         results = []
         for cue in cues:
             try:
-                res = self._translate_single(cue, glossary)
+                res = self._translate_single(cue, context, glossary)
                 results.append(res)
             except Exception as ex:
                 logger.error(f"Single cue translation failed for cue {cue.id}: {ex}")

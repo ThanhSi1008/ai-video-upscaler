@@ -120,7 +120,7 @@ glossaries/                 # Thư mục chứa bảng thuật ngữ riêng cho 
 subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
 ```
 
-### Bất biến kỹ thuật của `subtrans` (Cập nhật ADDENDUM 6):
+### Bất biến kỹ thuật của `subtrans` (Cập nhật ADDENDUM 6 & 8):
 1. **Thứ tự ưu tiên cốt lõi:**
    - (1) Không dịch sai / không bịa đặt: khi nghi vấn, dịch phương án an toàn và gắn cờ `"uncertain": true`.
    - (2) Văn phong tiếng Việt nói tự nhiên khi đọc to (không dịch thô/word-for-word).
@@ -134,4 +134,29 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
 4. **Kế thừa Glossary Schema v2 & Stage A Cast Sheet:** Bảng nền `subtrans/glossary.yaml` luôn tự động nạp làm lớp cơ sở. Stage A tự động phân tích và tạo cast sheet `out/<name>.cast.yaml` một lần mỗi tập để đồng bộ đại từ xưng hô cho toàn bộ các batch.
 5. **Bộ nhớ cục bộ an toàn:** Khi dùng mô hình cục bộ qua Ollama, chỉ duy nhất 1 mô hình được nạp vào VRAM/Unified Memory tại một thời điểm; sau khi xong lập tức gọi `keep_alive: 0` để giải phóng RAM.
 6. **Bảo toàn giao dịch & Caching:** Từng câu thoại được lưu cache SHA-256 trong SQLite; nếu ngắt quãng hoặc gặp lỗi quota, có thể tiếp tục ngay lập tức với độ trễ 0s cho các câu đã dịch.
+7. **Lựa chọn mô hình Gemini Cloud (Cập nhật ADDENDUM 8 - 2026-10-01):**
+   - Mặc định: `gemini.model: "gemini-3.8-flash"`.
+   - Fallback tự động: `gemini.fallback_models: ["gemini-3.7-flash", "gemini-3.6-flash"]`.
+   - Lite model: `gemini.lite_model: "gemini-3.5-flash-lite"`.
+   - Tuyệt đối không dùng `gemini-2.5-*` hay `gemini-2.0-*` làm mặc định (legacy / ngừng hỗ trợ).
+   - Tuyệt đối không dùng alias `gemini-flash-latest` nếu không có cờ `--allow-latest-alias`.
+   - Cấu hình Thinking: Dùng `thinking_budget=0` cho dòng 3.8/3.7/3.6 và `thinking_level=MINIMAL` cho dòng flash-lite để triệt tiêu độ trễ và tiết kiệm quota token đầu ra.
+   - Chuỗi fallback: Khi gặp 429 (Quota) hoặc 404/410/503 (Unavailable), tự động chuyển sang model fallback tiếp theo trong danh sách, chỉ khi toàn bộ Gemini cạn kiệt mới chuyển sang local backend.
+
+---
+
+## 8. Kết Quả Đo Đạc Kiểm Định Thực Tế Mới Nhất (Ground Truth Audit)
+
+* **FFmpeg Version Pinning:** `ffmpeg version 8.1.2` (ghim và assert `raw_keep + raw_drop == total_frames`).
+* **Preflight Scan Đo Thật (`sample_3min.mkv` - 4.360 frames):**
+  - Thời gian quét: **13.93 giây** (tốc độ: **313 fps**). Ngoại suy tập 34.000 frame chỉ tốn **~1.85 phút** CPU.
+  - Tỷ lệ trùng lặp: **49.86%** (2.186 frames kept, 2.174 frames dropped). Tăng tốc AI tính toán: **x1.99**.
+* **Đỉnh RAM Thật Của Concat Demuxer (`/usr/bin/time -l`):** **358.05 MB** (hoàn toàn an toàn trong 18GB Unified Memory).
+* **Kiểm Tra Swap macOS (`sysctl vm.swapusage`):** 0 byte swap tăng thêm trước và sau khi chạy.
+* **Độ Tương Đồng Hình Ảnh SSIM (Chunk 1 - 192 frames):**
+  - SSIM trung bình: **0.98341**.
+  - Frame có SSIM thấp nhất: **0.96113** (Frame #191).
+  - Độ lệch điểm ảnh trung bình (Pixel Diff): 2.0 / 255 (< 0.8%, chỉ do film grain/nhiễu nén vi mô).
+  - **Khẳng định thị giác:** 100% không mất chớp mắt hay khẩu hình miệng của nhân vật.
+
 

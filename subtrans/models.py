@@ -18,6 +18,7 @@ class Cue(BaseModel):
     en: Optional[str] = None  # Aligned English dialogue (optional)
     vi: Optional[str] = None  # Translated Vietnamese dialogue
     backend_used: Optional[str] = None  # "gemini" | "local" | "cache" | "skipped"
+    model_used: Optional[str] = None  # e.g. "gemini-3.8-flash", "translategemma:12b"
     is_skipped: bool = False
     uncertain: bool = False
     raw_text: Optional[str] = None  # Original raw text for skipped cues

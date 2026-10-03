@@ -1,9 +1,13 @@
 # subtrans/config.yaml
-# Configuration for anime subtitle translation
+# Configuration for anime subtitle translation (Verified against Google official docs 2026-10-01)
 
 gemini:
-  model: "gemini-2.5-flash"
-  max_rpm: 15
+  model: "gemini-3.8-flash"  # Primary cloud model (Stable 3.x Flash)
+  fallback_models:
+    - "gemini-3.7-flash"
+    - "gemini-3.6-flash"
+  lite_model: "gemini-3.5-flash-lite"
+  max_rpm: 5  # Free Tier limit per model
   max_rpd: 1500
 
 ollama:

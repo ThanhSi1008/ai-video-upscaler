@@ -44,6 +44,24 @@ def scan_dedup_plan(
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
     Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
     """
+    # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
+    ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    ffmpeg_ver = ver_proc.stdout.splitlines()[0] if ver_proc.stdout else "unknown"
+
+    # 2. Đếm tổng số packet/frame chính xác từ luồng video bằng ffprobe
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-count_packets",
+        "-show_entries", "stream=nb_read_packets",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        input_path
+    ]
+    probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    expected_frames: Optional[int] = None
+    if probe_res.returncode == 0 and probe_res.stdout.strip().isdigit():
+        expected_frames = int(probe_res.stdout.strip())
+
     cmd = [
         "ffmpeg", "-i", input_path,
         "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
@@ -76,6 +94,17 @@ def scan_dedup_plan(
     total_frames = len(frame_actions)
     if total_frames == 0:
         raise ValueError("Không quét được frame nào từ file video.")
+
+    # 3. Assertions bất biến: tổng keep + drop phải bằng len(frame_actions) và khớp ffprobe
+    raw_keep = sum(1 for a in frame_actions if a == "keep")
+    raw_drop = sum(1 for a in frame_actions if a == "drop")
+    assert raw_keep + raw_drop == total_frames, (
+        f"Parse log debug không khớp: keep ({raw_keep}) + drop ({raw_drop}) != tổng actions ({total_frames})"
+    )
+    if expected_frames is not None:
+        assert total_frames == expected_frames, (
+            f"Số frame quét từ debug log ({total_frames}) không khớp số frame ffprobe đếm được ({expected_frames})!"
+        )
 
     # Số frame lý tưởng mỗi chunk 8s
     fps_val = fps_num / fps_den
@@ -134,6 +163,7 @@ def scan_dedup_plan(
 
     plan_data = {
         "source_file": os.path.basename(input_path),
+        "ffmpeg_version": ffmpeg_ver,
         "total_frames": total_frames,
         "fps_num": fps_num,
         "fps_den": fps_den,
