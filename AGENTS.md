@@ -188,6 +188,7 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
   - Vùng trung tâm (Interior) khớp NCNN đạt **60.02 dB** PSNR. Toàn bộ điểm lệch cực đại 44/255 nằm trọn trong dải viền 10px ngoài cùng do cơ chế reflection padding của tiling khác biệt.
   - FP16 vs FP32 đạt **61.74 dB** PSNR (0 NaN/Inf). Mức nén PNG 1 đạt **310 ms / frame** (nhanh gấp ~9 lần mức 6 cũ: 2.826 ms) với dung lượng 9.1 MB.
   - Đã xuất 5 cặp ảnh chấm mù A/B tại `out/mps_blind_ab/` và khóa giải mã `secret_key.json`.
+  - **Soak Test 2.000 frame liên tục trên MPS (`out/mps_soak_2000_report.json`):** Hoàn tất trong **1.120,17 giây (18,67 phút)**. Tốc độ trung bình đạt **1.785 fps** (vượt chỉ tiêu $\ge 1.7\text{ fps}$). Bộ nhớ MPS duy trì phẳng tuyệt đối ở **61.19 MB**, Process RSS ổn định ở **36.0 MB** (hoàn toàn không rò rỉ bộ nhớ).
 * **Phòng Vệ RAM Disk 2 Lớp & Kiểm Thử Hỗn Loạn (Chaos Test):**
   - Pre-allocation gate: `need = n_unique * size_est * 1.3` chặn trước nguy cơ chạm trần 4GB; Runtime gate dừng sạch khi dung lượng < 50MB (Unit test `test_ramdisk_worst_case.py` đạt 4/4).
   - Chaos test (`tests/chaos_test_resume.py`): Kịch bản `kill -9` giữa chunk & Resume đạt **PASS** (kế thừa chunk 1 nguyên vẹn, số frame thành phẩm khớp chính xác 767/767 frames qua `ffprobe -count_frames`); kịch bản ENOSPC đạt **PASS**.
