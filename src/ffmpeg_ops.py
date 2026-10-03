@@ -112,7 +112,11 @@ def split_video_segments(input_path: str, segs_dir: str, segment_time: int) -> L
         seg_pattern
     ]
     subprocess.run(seg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return sorted(glob(os.path.join(segs_dir, "seg_*.mp4")))
+    return sorted([
+        os.path.join(segs_dir, f)
+        for f in os.listdir(segs_dir)
+        if f.startswith("seg_") and f.endswith(".mp4")
+    ])
 
 
 def _build_balanced_select_expr(indices: List[int]) -> str:
@@ -178,7 +182,7 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
             ])
 
         subprocess.run(extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return len(glob(os.path.join(frames_dir, f"*.{ext}")))
+        return len([f for f in os.listdir(frames_dir) if f.lower().endswith(f".{ext}")])
 
 
 def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: str = "28M", fmt: str = "png"):

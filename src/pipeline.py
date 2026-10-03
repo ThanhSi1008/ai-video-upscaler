@@ -276,7 +276,11 @@ def run_upscale_pipeline(
                     to_console=True
                 )
 
-            existing_segs = sorted(glob(os.path.join(segs_dir, "seg_*.mp4")))
+            existing_segs = sorted([
+                os.path.join(segs_dir, f)
+                for f in os.listdir(segs_dir)
+                if f.startswith("seg_") and f.endswith(".mp4")
+            ]) if os.path.exists(segs_dir) else []
             if not existing_segs or not resume:
                 logger.info(f"Đang phân đoạn video thành các block {segment_time}s (Stream Copy)...", to_console=True)
                 t_split_start = time.time()
@@ -587,7 +591,11 @@ def run_upscale_pipeline(
             # BƯỚC 3: GHÉP NỐI KHÔNG MẤT DỮ LIỆU CÁC PHÂN ĐOẠN 4K
             # -----------------------------------------------------------------
             logger.info("Đang ghép nối các phân đoạn 4K...", to_console=True)
-            all_upscaled_segs = sorted(glob(os.path.join(up_segs_dir, "up_*.mp4")))
+            all_upscaled_segs = sorted([
+                os.path.join(up_segs_dir, f)
+                for f in os.listdir(up_segs_dir)
+                if f.startswith("up_") and f.endswith(".mp4")
+            ]) if os.path.exists(up_segs_dir) else []
             merged_video = os.path.join(work_dir, "merged_4k.mp4")
             t_concat_start = time.time()
             concat_segments(all_upscaled_segs, work_dir, merged_video)

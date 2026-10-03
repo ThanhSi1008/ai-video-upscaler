@@ -173,7 +173,11 @@ class MPSPersistentWorker:
         Đo đạc tốc độ, đỉnh bộ nhớ và phát hiện NaN/Inf.
         """
         os.makedirs(output_dir, exist_ok=True)
-        img_files = sorted(glob.glob(os.path.join(input_dir, f"*.{fmt}")))
+        img_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if f.lower().endswith(f".{fmt}")
+        ]) if os.path.exists(input_dir) else []
         if not img_files:
             return {"elapsed_seconds": 0.0, "fps": 0.0, "steady_fps": 0.0, "num_frames": 0}
 
