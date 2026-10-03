@@ -179,6 +179,7 @@ def run_upscale_pipeline(
             }
             logger.print_banner(banner_info)
 
+            start_total_time = time.time()
             stage_timings = {}
             swap_before = get_swap_usage()
             logger.info(f"📊 Trạng thái Swap macOS ban đầu: {swap_before}")
@@ -220,7 +221,7 @@ def run_upscale_pipeline(
             # -----------------------------------------------------------------
             # BƯỚC 2: XỬ LÝ UPSCALE & MÃ HÓA PHÂN ĐOẠN CUỐN CHIẾU
             # -----------------------------------------------------------------
-            start_total_time = time.time()
+            t_chunks_start = time.time()
             total_frames_processed = 0
             total_ai_frames = 0
             total_ai_time = 0.0
@@ -349,6 +350,37 @@ def run_upscale_pipeline(
                         total_ai_frames += extracted["ai_frames"]
                         total_ext_time += extracted["ext_time"]
 
+                        # Kiểm tra dung lượng RAM Disk thực tế trước khi AI xuất frame 4K (chống tràn 4GB khi PNG lớn ~12MB)
+                        if future_encode is not None:
+                            free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
+                            if free_mb < 1200:
+                                logger.info(f"⚠️ RAM Disk trống {free_mb:.0f} MB (< 1.2 GB), đồng bộ đợi Media Engine giải phóng...")
+                                prev_enc_elapsed = future_encode.result()
+                                total_enc_time += prev_enc_elapsed
+                                prev_c_idx = last_encode_item["target"][0]
+                                prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                prev_seg_elapsed = time.time() - last_seg_start
+                                prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
+                                render_progress(
+                                    prev_c_idx + 1, total_segs,
+                                    prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                                    suffix=f"[{prev_seg_fps:.2f} fps | Đã giải phóng RAM Disk]"
+                                )
+                                logger.log_chunk_done(
+                                    chunk_idx=prev_c_idx,
+                                    total_chunks=total_segs,
+                                    frames=prev_exp_frames,
+                                    ai_time=last_ai_result["elapsed_seconds"],
+                                    ai_fps=last_ai_result["fps"],
+                                    enc_time=prev_enc_elapsed,
+                                    total_chunk_time=prev_seg_elapsed,
+                                    output_seg=last_encode_item["target"][2],
+                                    t0_seconds=last_ai_result.get("t0_seconds"),
+                                    steady_fps=last_ai_result.get("steady_fps"),
+                                    rss_mb=last_ai_result.get("peak_rss_mb")
+                                )
+                                future_encode = None
+
                         # 2.2 Độc quyền suy luận AI NCNN Vulkan trên GPU M3 Pro (Main thread)
                         dedup_info = f" (Deduplication: {extracted['ai_frames']}/{extracted['frame_count']} frames)" if extracted["chunk_plan"] else ""
                         render_progress(
@@ -442,6 +474,7 @@ def run_upscale_pipeline(
                             rss_mb=last_ai_result.get("peak_rss_mb")
                         )
 
+            stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
             logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
 
             # -----------------------------------------------------------------

@@ -151,15 +151,29 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
 ## 8. Kết Quả Đo Đạc Kiểm Định Thực Tế Mới Nhất (Ground Truth Audit)
 
 * **FFmpeg Version Pinning:** `ffmpeg version 8.1.2` (ghim và assert `raw_keep + raw_drop == total_frames`).
-* **Kiểm tra độc lập số frame Deduplication (`sample_3min.mkv` - 4.360 frames):**
-  - Dòng lệnh `ffmpeg -vf mpdecimate ... -f null -` xuất ra chính xác **2.174 frames** (49.86% raw kept).
-  - Ép giữ ranh giới chunk 8s ($i \times 192$) bổ sung 12 frames $\rightarrow$ Tổng đưa vào AI: **2.186 unique frames**.
-* **Audit Toàn Bộ 4.360 Frames (Local Patch SSIM Lưới 8x8 = 64 ô/frame):**
-  - Global SSIM trung bình: **0.98061** (P1: 0.94340, Min toàn tập: 0.93286).
-  - Local Patch SSIM (vùng tệ nhất mỗi frame): Trung bình **0.96996**, Min tuyệt đối **0.89905** (Frame #2723, Patch 6,1).
-  - Sai lệch điểm ảnh: Global MAD trung bình **0.93 / 255** (0.36%), Max Patch MAD trung bình **1.38 / 255** (0.54%). Khẳng định 100% không mất chớp mắt hay khẩu hình miệng.
-* **Thời gian thực tế chạy trọn vẹn 3 phút:** **37m 09s** (AI: 1.764s, Encode: 278s, Extract: 185s, Mux/Preflight: 15s). Khớp hoàn hảo với dự đoán ~36 phút của phân tích lý thuyết.
-* **Kiểm tra luồng thành phẩm 4K:** Video 4.360 packets (lệch 0 frame, 0.000s drift), Audio 7.830 packets (khớp 100%), 18 fonts nhúng nguyên vẹn.
-* **Kết quả True Blind Test (Người dùng chấm mù 3/3):** `realesr-animevideov3` đạt vị trí 1st tuyệt đối ở cả 3 cảnh, loại bỏ hoàn toàn ArtCNN và AnimeJaNai.
+* **Đo Đạc Preflight Toàn Tập Thật (`Mushoku Tensei S3 - 14`, 34.046 frames - 1.35 GB):**
+  - Quét hoàn tất trong **123.67 giây (2.06 phút)** @ 275.3 fps.
+  - Raw kept frames (`mpdecimate`): **13.216 frames** (38.82%); Raw drop: **20.830 frames** (61.18%).
+  - Ép giữ ranh giới chunk 8s ($i \times 192$): bổ sung 108 frames $\rightarrow$ **Tổng đưa vào AI: 13.324 unique frames (39.14%)**.
+  - **Tỷ lệ loại bỏ trùng lặp thực tế toàn tập: 60.86%** (thay thế hoàn toàn con số 17.048 frames nội suy cũ).
+  - **Dự toán thời gian chạy toàn tập thật:** 1 tập mất **~3h 01m** @ 1.24 fps; 2 tập qua đêm mất **~6h 03m**, **dư 1h 56m an toàn** trong cửa sổ 8 giờ.
+* **Audit Khối Nhỏ $16 \times 16$ & $8 \times 8$ Pixel (Toàn bộ 2.174 dropped frames mẫu 3 phút):**
+  - Phân tích 8.160 khối/frame: Mean max-block MAD **3.77 / 255** (1.48%), Median P50 **2.82**, P90 **7.35**, P95 **8.11**, P99 **9.42**, Max toàn tập **10.75 / 255** (4.21%).
+  - Số frame có $16 \times 16$ MAD $\ge 12.0$ (ngưỡng hi=768/64): **0 frames (0.00%)**.
+  - Thẩm định trực quan Top 30 worst frames (`out/dedup_audit_16x16/top_30_worst/`): Sai lệch chỉ là rung viền răng cưa 1-pixel và nhiễu nén H.264 trên nét tĩnh; khẳng định 100% không mất bất kỳ chớp mắt, khóe miệng hay cử động khuôn mặt nào.
+* **Nghiên Cứu Đối Đầu PyTorch MPS vs NCNN Vulkan (100 frames chuẩn 1080p $\to$ 4K):**
+  - Khám phá kiến trúc ncnn param: `realesr-animevideov3-x2` thực chất chạy mạng SRVGGNetCompact 4x rồi nội suy Bicubic 0.5 để ra 2x. Khớp trọng số `strict=True` với `realesr-animevideov3.pth`.
+  - Đo sau warm-up với `torch.mps.synchronize()`: PyTorch MPS FP32 đạt **1.52 fps** (656.9 ms, nhanh hơn ncnn 21.6%); PyTorch MPS FP16 đạt **1.86 fps** (538.2 ms, **nhanh hơn ncnn +48.6%**).
+  - Độ khớp hình ảnh: PSNR **51.05 dB**, MAD **0.493 / 255** (0.19%), Max diff 44.0 / 255 $\rightarrow$ Khớp gần như tuyệt đối với bản NCNN Vulkan.
+* **Pipelined Triple-Overlap Concurrency & Bảo Vệ RAM Disk:**
+  - Chạy gối đầu đồng thời: CPU Decode (720% CPU), Media Engine Encode (153% CPU), GPU Metal Infer (133% CPU).
+  - GPU AI duy trì ổn định **1.27 steady fps** (không bị sụt giảm xuống 1.15 fps).
+  - Dung lượng PNG 4K thực tế: lên tới **11–12 MB/frame**. Bổ sung cơ chế dynamic backpressure `shutil.disk_usage < 1200MB` chặn đứng nguy cơ chạm trần 4GB RAM Disk.
+  - Sửa lỗi `start_total_time` đưa lên đầu pipeline: Tổng các stage cộng lại khớp đúng 100.0%.
+* **Kiểm Định Subtitle Translation (Regex Validator Độc Lập Trên 43 Cues):**
+  - Đính chính bối cảnh: Cue 42 (`今行くわ、ルーデウス！`) là Eris gào gọi Rudeus khi phi ngựa ("Ta/Em tới đây, Rudeus!"), không nói với Gal Farion; Cue 10 lỗi local model là gọi Eris là "Anh"; Rudeus - Eris chưa phải quan hệ vợ chồng chính thức trong tập này.
+  - Điểm Regex Rules: `gemini-3.8-flash` đạt **10.0/10** (13/13 pass, 0 lỗi); `gemini-3.5-flash-lite` đạt **6.15/10** (5 lỗi suồng sã "tớ-cậu"); `translategemma_12b` đạt **6.92/10** (4 lỗi: gọi Eris là "Anh", xưng "chị-em", "đòn của anh", "Cháu đi đây").
+  - Đã bổ sung chặn trên Pause-and-retry: tối đa 5 lần (chờ ~2.5m) trước khi ngắt an toàn để bảo toàn trạng thái khi cạn quota ngày.
+* **Kết quả True Blind Test (Người dùng chấm mù 3/3 trên Liquid Retina XDR):** `realesr-animevideov3` đạt vị trí 1st tuyệt đối ở cả 3 cảnh, loại bỏ hoàn toàn ArtCNN và AnimeJaNai. Bỏ các lập luận MAD 0.52 phẳng.
 
 

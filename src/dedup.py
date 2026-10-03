@@ -165,6 +165,8 @@ def scan_dedup_plan(
         "source_file": os.path.basename(input_path),
         "ffmpeg_version": ffmpeg_ver,
         "total_frames": total_frames,
+        "raw_kept_frames": raw_keep,
+        "raw_dropped_frames": raw_drop,
         "fps_num": fps_num,
         "fps_den": fps_den,
         "fps": round(fps_val, 3),

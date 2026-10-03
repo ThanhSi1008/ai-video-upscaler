@@ -98,18 +98,18 @@ GOLDEN_SET = [
     },
     {
         "id": 42,
-        "ja": "行ってきます。",
-        "en": "I'm going.",
+        "ja": "今行くわ、ルーデウス！",
+        "en": "I'm coming now, Rudeus!",
         "speaker": "Eris",
-        "listener": "Gal Farion",
-        "expected_role": "Eris nói với Kiếm Thần (Con đi đây / Ta đi đây, không xưng cháu)"
+        "listener": "Rudeus",
+        "expected_role": "Eris phi ngựa gào gọi Rudeus (Em tới đây, Rudeus! / Ta tới đây, Rudeus!)"
     }
 ]
 
 SYSTEM_PROMPT = """You are a master anime subtitle translator specializing in Japanese to Vietnamese.
 CRITICAL ADDRESS RULES:
-- Rudeus (male, husband/fiance) speaks to Eris (female, wife/fiancee): Rudeus addresses himself as 'tôi' or 'anh', and addresses Eris as 'em'. NEVER address Eris as 'anh' or 'chị'. NEVER use casual 'tớ - cậu'.
-- Eris speaks to Gal Farion (Sword God / master): Eris addresses herself as 'con' or 'ta', never 'cháu'.
+- Rudeus (male) writes letter to Eris (female, fiancee/lover, NOT yet formally married): Rudeus addresses himself as 'tôi' or 'anh', and addresses Eris as 'em'. NEVER address Eris as 'anh' or 'chị'. NEVER use casual 'tớ - cậu'.
+- Eris gallops and shouts out loud across the land to Rudeus: 'Em tới đây, Rudeus!' or 'Ta tới đây, Rudeus!' (Addressing Rudeus, NOT Gal Farion).
 - Format: Return a JSON array of objects with fields: id, vi, uncertain."""
 
 class SubtitleItem(BaseModel):

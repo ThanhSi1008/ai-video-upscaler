@@ -328,13 +328,23 @@ class TranslationPipeline:
 
                             # If transient rate limit (429) or temporary demand spike (503),
                             # and silent fallback is prohibited (default), pause and wait instead of downgrading!
+                            # ADDENDUM: Add upper bound (max 5 pauses) to prevent infinite loops on daily quota exhaustion.
                             if (is_quota or is_unavailable) and not self.allow_silent_fallback:
+                                quota_retries = getattr(self, "_batch_quota_retries", 0) + 1
+                                self._batch_quota_retries = quota_retries
+                                max_quota_retries = 5
+                                if quota_retries > max_quota_retries:
+                                    console.print(f"\n[bold red]🛑 Quota ngày hoặc lỗi tài nguyên kéo dài sau {max_quota_retries} lần tạm dừng ({reason}). "
+                                                  f"Dừng tiến trình an toàn để bảo toàn trạng thái (tất cả câu trước đã được lưu cache). "
+                                                  f"Có thể chạy tiếp bất cứ lúc nào với resume.[/bold red]")
+                                    raise QuotaExhaustedError(f"Persistent quota exhaustion ({reason}) after {max_quota_retries} pause-and-retries.")
                                 wait_time = 30.0 if is_quota else 12.0
-                                console.print(f"\n[yellow]⏳ Model '{target_model}' hit {reason}. "
-                                              f"Pausing {wait_time:.0f}s to maintain episode pronoun continuity...[/yellow]")
+                                console.print(f"\n[yellow]⏳ Model '{target_model}' hit {reason} (Lần {quota_retries}/{max_quota_retries}). "
+                                              f"Tạm dừng {wait_time:.0f}s để bảo toàn tính đồng nhất đại từ toàn tập...[/yellow]")
                                 time.sleep(wait_time)
                                 # Retry on same model
                                 continue
+                            self._batch_quota_retries = 0
 
                             console.print(f"\n[yellow]⚠️  Model '{target_model}' error: {reason}.[/yellow]")
                             curr_gemini_idx += 1
