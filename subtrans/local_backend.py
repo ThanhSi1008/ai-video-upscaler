@@ -4,6 +4,7 @@ subtrans/local_backend.py
 Stage 2b: Local fallback translation backend using Ollama (translategemma:12b).
 """
 
+import os
 import re
 import json
 import logging
@@ -49,8 +50,20 @@ class OllamaTranslator(BaseTranslator):
             return False
         return False
 
+    def is_upscale_running(self) -> bool:
+        """Kiểm tra có tiến trình upscale nào đang chạy trên GPU Metal hay không (B3)."""
+        import psutil
+        for p in psutil.process_iter(["name", "cmdline"]):
+            try:
+                cmdline = " ".join(p.info["cmdline"] or [])
+                if "upscale.py" in cmdline and p.pid != os.getpid():
+                    return True
+            except Exception:
+                pass
+        return False
+
     def unload(self):
-        """Unloads the model from unified memory (keep_alive: 0)."""
+        """Unloads the model from unified memory (keep_alive: 0) and verifies empty VRAM (B3)."""
         try:
             requests.post(
                 f"{self.endpoint}/api/generate",
@@ -58,6 +71,14 @@ class OllamaTranslator(BaseTranslator):
                 timeout=5,
             )
             logger.info(f"Unloaded model {self.model} from memory.")
+            # Kiểm tra ollama ps
+            r = requests.get(f"{self.endpoint}/api/ps", timeout=5)
+            if r.status_code == 200:
+                running = r.json().get("models", [])
+                if not running:
+                    logger.info("Xác minh thành công: Unified Memory hoàn toàn giải phóng (ollama ps rỗng).")
+                else:
+                    logger.warning(f"Vẫn còn model trong VRAM: {running}")
         except Exception as e:
             logger.debug(f"Failed to unload {self.model}: {e}")
 
@@ -162,6 +183,12 @@ class OllamaTranslator(BaseTranslator):
         """Translates a batch of cues with fallback to single-cue on parsing failure."""
         if not cues:
             return []
+
+        if self.is_upscale_running():
+            raise RuntimeError(
+                "Không thể khởi động Ollama: Phát hiện tiến trình upscale đang chạy trên GPU Metal! "
+                "Chờ toàn bộ hàng đợi upscale hoàn tất trước khi chạy phụ đề (B3)."
+            )
 
         # Build numbered prompt
         prompt_lines = [

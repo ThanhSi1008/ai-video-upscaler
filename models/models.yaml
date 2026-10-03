@@ -1,0 +1,33 @@
+# models/models.yaml - Registry danh mục mô hình Super-Resolution
+# Chuẩn hóa theo quy định D1 (AGENTS.md)
+
+models:
+  animevideov3:
+    id: "animevideov3"
+    name: "RealESR-AnimeVideoV3 (Mặc định)"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 64
+      num_conv: 16
+      upscale: 4
+    downsample: "bicubic_0.5"
+    weights_path: "models_bench/realesr-animevideov3.pth"
+    sha256: "b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d71363008000a18b75d"
+    source_url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
+    license: "BSD-3-Clause"
+    default: true
+
+  animejanai-hd-v3-compact:
+    id: "animejanai-hd-v3-compact"
+    name: "AnimeJaNai HD V3 Compact"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 64
+      num_conv: 16
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3_Compact.pth"
+    sha256: "af7307eee19e5982a8014dd0e4650d3bde2e25aa78d2105a4bdfd947636e4c8f"
+    source_url: "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/tag/3.0.0"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false

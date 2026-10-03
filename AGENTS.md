@@ -193,9 +193,30 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
   - Pre-allocation gate: `need = n_unique * size_est * 1.3` chặn trước nguy cơ chạm trần 4GB; Runtime gate dừng sạch khi dung lượng < 50MB (Unit test `test_ramdisk_worst_case.py` đạt 4/4).
   - Chaos test (`tests/chaos_test_resume.py`): Kịch bản `kill -9` giữa chunk & Resume đạt **PASS** (kế thừa chunk 1 nguyên vẹn, số frame thành phẩm khớp chính xác 767/767 frames qua `ffprobe -count_frames`); kịch bản ENOSPC đạt **PASS**.
   - Tự động xuất `audit.json` cuối tập và cảnh báo sụt giảm fps GPU > 8% cho 10 chunk liên tiếp.
-* **Chuẩn Hóa Phụ Đề & Khóa Cache (P3):**
-  - Bảng quy chuẩn xưng hô mở rộng 4 thể loại (Thư từ lãng mạn, Chiến đấu & Bảo hộ, Thầy trò & Tôn kính, Triều đình & Cận vệ) trong `out/golden_pronouns_specification.json`.
-  - Hỗ trợ cờ `--require-approved-cast` dừng duyệt Cast Sheet và khóa cache SQLite theo `(model, cast_sheet_hash, prompt_version)`.
+* **Đo Đạc Lặp NCNN Tiling (`tests/benchmark_ncnn_repeats.py`):**
+  - Cấu hình `-t 540 -j 1:2:2`: **1.417 ± 0.020 steady fps** (72.68s wall time, 720.2 MB peak RSS).
+  - Cấu hình `-t 1080 -j 1:2:2`: **1.389 ± 0.016 steady fps** (73.92s wall time, 666.5 MB peak RSS). Đã ghim `-t 540 -j 1:2:2` làm mặc định cho NCNN fallback.
+* **Soak Test End-to-End 6.000 Frame Trên PyTorch MPS FP16 (`out/mps_soak_6000_report.json`):**
+  - Tổng thời gian: **3.570,27 giây (59,50 phút)**.
+  - Tốc độ Trung vị (Median): **1.683 fps**, Phân vị P5 (Worst 5%): **1.677 fps**, Phân vị P95: **1.684 fps**, Mean: **1.681 fps** (độ lệch cực đại $\pm 0.005$ fps xuyên suốt 1 giờ chạy liên tục).
+  - Đỉnh Driver Allocated: **2.090,81 MB**, Đỉnh Footprint tiến trình: **674,42 MB**.
+  - Tăng trưởng Pageouts: **+133** (hoàn toàn không swap, an toàn cho SSD). Trạng thái nhiệt duy trì **Nominal** (không nghẽn nhiệt).
+* **Chạy Trọn Vẹn `sample_3min` Bản Pipelined Với Engine MPS (`out/sample_3min_mps_pipelined.audit.json`):**
+  - Wall-clock time hoàn tất: **23 phút 59 giây (1.439,63s)**.
+  - So sánh: Nhanh hơn bản tuần tự (37:09) **13 phút 10 giây (-35,4%)**, nhanh hơn dự đoán NCNN pipelined (~30 phút) **6 phút 01 giây (-20,1%)**.
+  - Tỷ lệ hoạt động GPU: **90,96%** (1.309,57s AI infer / 1.439,63s tổng thời gian; GPU idle chỉ **9,04%** bao gồm preflight scan, split và mux).
+  - Kiểm định khớp khung hình: **4.360 / 4.360 frames** (đối soát độc lập qua `ffprobe -count_frames`, độ lệch thời lượng **0,001s = 0,024 frames**).
+* **Đo Đạc & Tích Hợp Mô Hình AnimeJaNai HD V3 Compact (D1–D10):**
+  - Đăng ký Registry `models/models.yaml` (CC-BY-NC-SA 4.0, sha256 `af7307eee19e5982a8014dd0e4650d3bde2e25aa78d2105a4bdfd947636e4c8f`).
+  - Kiểm định FP16 vs FP32 trên 25 frame đa dạng (`out/animejanai_fp16_vs_fp32_report.json`): PSNR trung bình **74,38 dB** (min 72,82, max 78,02), **0 NaN, 0 Inf**, Max pixel diff 1/255 $\rightarrow$ FP16 an toàn.
+  - Soak Test End-to-End 500 frame (`out/animejanai_soak_500_report.json`): Hoàn tất trong **279,06 giây (4,65 phút)** @ **1,794 median fps** (P5: 1,794 fps).
+  - Đỉnh Driver Allocated của AnimeJaNai: **1.066,81 MB** (giảm 51% so với 2.090,8 MB của animevideov3 do là 2x native, không sinh buffer 8K trung gian).
+  - Dự toán ETA toàn tập 24 phút (13.324 unique frames) cho AnimeJaNai: **~2 giờ 08 phút**.
+  - Kiểm thử D10 (`tests/test_model_selection_and_safety.py`): Đạt 4/4 PASS (Mặc định animevideov3, Tensor 3840x2160, Từ chối resume khác model nếu thiếu `--force`, Lỗi MPS không nhảy sang animevideov3 mà rơi về MPS FP32).
+* **Giai Đoạn Phụ Đề Chạy Sau Upscale (Stage B):**
+  - Cờ `--subs-after-upscale` (mặc định Bật): Toàn bộ hàng đợi upscale hoàn tất mới chuyển sang stage subtitle.
+  - Kiểm tra an toàn bộ nhớ B3: `is_upscale_running()` từ chối nạp Ollama nếu phát hiện tiến trình upscale đang chạy; tự động gọi `keep_alive: 0` và xác minh `ollama ps` rỗng sau khi hoàn thành.
+
 
 
 

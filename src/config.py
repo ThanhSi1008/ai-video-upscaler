@@ -24,6 +24,9 @@ LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 # THAM SỐ UPSCALE MẶC ĐỊNH CHO ANIME & APPLE SILICON (M3 PRO)
 # -----------------------------------------------------------------------------
 DEFAULT_MODEL = "realesr-animevideov3"
+DEFAULT_ENGINE = "mps"  # Mặc định: PyTorch MPS FP16 (A1)
+DEFAULT_PRECISION = "fp16"
+DEFAULT_MPS_RESTART_CHUNKS = 10  # Khởi động lại worker mỗi N chunks để giải phóng driver pool (A2)
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"
 # Phân đoạn 8s (~192 frames) là kích thước lý tưởng cho PNG Lossless:

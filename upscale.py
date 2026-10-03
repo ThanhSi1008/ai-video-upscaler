@@ -13,20 +13,27 @@ import os
 import sys
 import json
 import argparse
+import subprocess
 from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Tuple
 
 from src.config import (
     DEFAULT_MODEL,
+    DEFAULT_ENGINE,
+    DEFAULT_PRECISION,
     DEFAULT_BITRATE,
     DEFAULT_SEGMENT_TIME,
     DEFAULT_FRAME_FORMAT
 )
 from src.pipeline import run_upscale_pipeline
 from src.ffmpeg_ops import probe_video
+from src.dedup import spawn_background_preflight
+from src.models_resolver import list_models_formatted
+from pathlib import Path
 
 
-def check_deadline_and_eta(video_path: str, deadline_str: str) -> bool:
-    """Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline."""
+def check_deadline_and_eta(video_path: str, deadline_str: str, last_measured_fps: float = 1.75) -> bool:
+    """Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline (A6)."""
     now = datetime.now()
     try:
         dh, dm = map(int, deadline_str.split(":"))
@@ -67,23 +74,24 @@ def check_deadline_and_eta(video_path: str, deadline_str: str) -> bool:
         except Exception:
             n_unique = 13500
 
-    # Tính toán ETA: @ 1.25 fps + 300s overhead (preflight, decode, encode, mux)
-    eta_seconds = (n_unique / 1.25) + 300.0
+    # Tính toán ETA: n_unique / fps đo gần nhất + 300s overhead (A6)
+    fps_to_use = max(0.5, last_measured_fps)
+    eta_seconds = (n_unique / fps_to_use) + 300.0
 
     if eta_seconds > seconds_left:
         print(f"\n⏰ [DEADLINE SKIP] Tập '{os.path.basename(video_path)}':")
-        print(f"   • Dự toán cần: {eta_seconds/60:.1f} phút ({eta_seconds/3600:.2f}h cho ~{n_unique} unique frames)")
+        print(f"   • Dự toán cần: {eta_seconds/60:.1f} phút ({eta_seconds/3600:.2f}h cho ~{n_unique} unique frames @ {fps_to_use:.2f} fps)")
         print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
         print(f"   -> Bỏ qua tập này để không bị dở dang ca qua đêm!\n")
         return False
 
-    print(f"⏳ [DEADLINE OK] Tập '{os.path.basename(video_path)}' cần ~{eta_seconds/60:.1f}m, còn {seconds_left/60:.1f}m trước hạn chót {deadline_str}.")
+    print(f"⏳ [DEADLINE OK] Tập '{os.path.basename(video_path)}' cần ~{eta_seconds/60:.1f}m (@ {fps_to_use:.2f} fps), còn {seconds_left/60:.1f}m trước hạn chót {deadline_str}.")
     return True
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="🎬 AI Video Upscaler 4K - Tối ưu hóa cho Apple Silicon M3 Pro (Vulkan / Metal + VideoToolbox 10-bit)",
+        description="🎬 AI Video Upscaler 4K - Tối ưu hóa cho Apple Silicon M3 Pro (PyTorch MPS / NCNN Metal + VideoToolbox 10-bit)",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
@@ -111,9 +119,30 @@ def parse_args():
     )
     parser.add_argument(
         "-m", "--model",
-        default=DEFAULT_MODEL,
-        choices=["realesr-animevideov3", "realesrgan-x4plus-anime", "realesrgan-x4plus"],
-        help=f"Mô hình AI upscale (Mặc định: {DEFAULT_MODEL})"
+        default=None,
+        help=f"Mô hình AI upscale (Mặc định: tự động chọn qua shows.yaml hoặc mặc định animevideov3)"
+    )
+    parser.add_argument(
+        "--engine",
+        default=DEFAULT_ENGINE,
+        choices=["mps", "ncnn"],
+        help=f"Động cơ suy luận AI (Mặc định: {DEFAULT_ENGINE} - PyTorch MPS FP16)"
+    )
+    parser.add_argument(
+        "--precision",
+        default=DEFAULT_PRECISION,
+        choices=["fp16", "fp32"],
+        help=f"Độ chính xác suy luận (Mặc định: {DEFAULT_PRECISION})"
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="Liệt kê danh sách các mô hình Super-Resolution đã đăng ký trong models/models.yaml (D1, D2)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bắt buộc chạy và xóa phân đoạn cũ nếu phát hiện xung đột mô hình (D7)"
     )
     parser.add_argument(
         "-b", "--bitrate",
@@ -161,12 +190,81 @@ def parse_args():
         metavar="SECONDS",
         help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng IINA"
     )
+    parser.add_argument(
+        "--subs-after-upscale",
+        action="store_true",
+        default=True,
+        help="Tự động chạy dịch phụ đề (subtrans) sau khi toàn bộ hàng đợi upscale hoàn tất (Mặc định: Bật)"
+    )
+    parser.add_argument(
+        "--no-subs", "--no-subs-after-upscale",
+        dest="subs_after_upscale",
+        action="store_false",
+        help="Tắt bước dịch phụ đề sau upscale"
+    )
 
     return parser.parse_args()
 
 
+def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[str]]:
+    """Tìm hoặc trích xuất phụ đề tiếng Nhật (ja) và tiếng Anh (en) cho video."""
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    vid_dir = os.path.dirname(os.path.abspath(video_path))
+
+    ja_sub = None
+    en_sub = None
+
+    # 1. Tìm các file phụ đề sẵn có cùng thư mục
+    candidates_ja = [
+        os.path.join(vid_dir, f"{base_name}.ja.ass"),
+        os.path.join(vid_dir, f"{base_name}_ja.ass"),
+        os.path.join(vid_dir, f"{base_name}_jpn.ass"),
+        os.path.join(vid_dir, f"{base_name}.ass"),
+        f"subtrans/samples/{base_name}_jpn.ass",
+        f"subtrans/samples/{base_name}.ass",
+    ]
+    for c in candidates_ja:
+        if os.path.exists(c):
+            ja_sub = c
+            break
+
+    candidates_en = [
+        os.path.join(vid_dir, f"{base_name}.en.ass"),
+        os.path.join(vid_dir, f"{base_name}_en.ass"),
+        os.path.join(vid_dir, f"{base_name}_eng.ass"),
+        f"subtrans/samples/{base_name}_eng.ass",
+    ]
+    for c in candidates_en:
+        if os.path.exists(c):
+            en_sub = c
+            break
+
+    # 2. Nếu chưa có ja_sub, thử trích xuất từ container video qua ffmpeg
+    if not ja_sub:
+        try:
+            meta = probe_video(video_path)
+            if meta.get("subtitle_count", 0) > 0:
+                tmp_dir = os.path.join(vid_dir, f".temp_{base_name}")
+                os.makedirs(tmp_dir, exist_ok=True)
+                extracted_ja = os.path.join(tmp_dir, "extracted_ja.ass")
+                # Trích xuất stream subtitle đầu tiên
+                cmd = ["ffmpeg", "-y", "-i", video_path, "-map", "0:s:0", "-c:s", "copy", extracted_ja]
+                r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if r.returncode == 0 and os.path.exists(extracted_ja) and os.path.getsize(extracted_ja) > 100:
+                    ja_sub = extracted_ja
+        except Exception:
+            pass
+
+    return ja_sub, en_sub
+
+
 def main():
     args = parse_args()
+
+    # Kiểm tra cờ liệt kê mô hình (--list-models)
+    if args.list_models:
+        print(list_models_formatted())
+        sys.exit(0)
 
     # Xác định danh sách video cần xử lý
     videos = []
@@ -180,24 +278,37 @@ def main():
         sys.exit(1)
 
     print(f"🎬 Hàng đợi xử lý gồm {len(videos)} tập video.")
+    last_measured_fps = 1.75 if args.engine == "mps" else 1.35
+    completed_videos = []
 
     for idx, vid in enumerate(videos):
         print(f"\n{'='*75}")
         print(f"▶ [{idx+1}/{len(videos)}] Bắt đầu xử lý: {os.path.basename(vid)}")
         print(f"{'='*75}")
 
-        # Kiểm tra deadline nếu có
+        # Kiểm tra deadline nếu có (A6)
         if args.deadline:
-            can_finish = check_deadline_and_eta(vid, args.deadline)
+            can_finish = check_deadline_and_eta(vid, args.deadline, last_measured_fps)
             if not can_finish:
                 print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
                 break
 
+        # Kích hoạt preflight nền cho tập tiếp theo nếu có (nice -n 10) (A6)
+        if idx + 1 < len(videos) and not args.no_dedup:
+            spawn_background_preflight(
+                video_path=videos[idx + 1],
+                output_dir=args.output,
+                segment_seconds=args.segment
+            )
+
         try:
-            run_upscale_pipeline(
+            out_file = run_upscale_pipeline(
                 input_path=vid,
                 output_path=args.output,
                 model=args.model,
+                engine=args.engine,
+                precision=args.precision,
+                force=args.force,
                 bitrate=args.bitrate,
                 segment_time=args.segment,
                 fmt=args.format,
@@ -207,6 +318,20 @@ def main():
                 preview_seconds=args.preview,
                 dedup=not args.no_dedup
             )
+            completed_videos.append((vid, out_file))
+
+            # Cập nhật last_measured_fps từ audit.json nếu có
+            audit_path = os.path.splitext(out_file)[0] + ".audit.json"
+            if os.path.exists(audit_path):
+                try:
+                    with open(audit_path, "r", encoding="utf-8") as f:
+                        adata = json.load(f)
+                    measured_fps = adata.get("ai_steady_fps")
+                    if measured_fps and measured_fps > 0:
+                        last_measured_fps = float(measured_fps)
+                except Exception:
+                    pass
+
         except KeyboardInterrupt:
             print("\n\n⚠️ Đã tạm dừng quá trình theo yêu cầu (Ctrl+C).")
             print("🛡️  RAM Disk và các file đệm đã được tự động giải phóng an toàn.")
@@ -219,6 +344,45 @@ def main():
                 continue
             else:
                 sys.exit(1)
+
+    # -------------------------------------------------------------------------
+    # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY SAU KHI CẢ HÀNG ĐỢI UPSCALE XONG - B1, B3)
+    # -------------------------------------------------------------------------
+    if args.subs_after_upscale and completed_videos:
+        print(f"\n{'='*75}")
+        print("📝 [STAGE B] BẮT ĐẦU DỊCH PHỤ ĐỀ CHO CÁC TẬP ĐÃ HOÀN TẤT UPSCALE")
+        print(f"{'='*75}")
+        from subtrans.pipeline import TranslationPipeline
+
+        for src_vid, out_vid in completed_videos:
+            ja_sub, en_sub = find_or_extract_subtitles(src_vid)
+            if not ja_sub:
+                print(f"ℹ️ Không tìm thấy phụ đề tiếng Nhật cho '{os.path.basename(src_vid)}', bỏ qua bước dịch phụ đề.")
+                continue
+
+            print(f"\n🌐 Bắt đầu dịch phụ đề cho tập: {os.path.basename(src_vid)}")
+            print(f"   • File gốc JA: {ja_sub}")
+            if en_sub:
+                print(f"   • File tham chiếu EN: {en_sub}")
+
+            try:
+                sub_out_dir = Path(os.path.dirname(out_vid))
+                sub_pipeline = TranslationPipeline(
+                    local_only=False,
+                    output_dir=sub_out_dir,
+                    output_format="srt",
+                    require_approved_cast=False,
+                    allow_latest_alias=False
+                )
+                sub_pipeline.run(
+                    ja_path=Path(ja_sub),
+                    en_path=Path(en_sub) if en_sub else None
+                )
+                print(f"✅ Hoàn tất dịch phụ đề cho tập '{os.path.basename(src_vid)}'.")
+            except Exception as se:
+                print(f"⚠️ Lỗi trong quá trình dịch phụ đề tập '{os.path.basename(src_vid)}': {se}")
+
+    print("\n🎉 Toàn bộ công việc trong hàng đợi đã hoàn tất thành công!")
 
 
 if __name__ == "__main__":

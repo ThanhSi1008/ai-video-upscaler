@@ -32,7 +32,15 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 **Các tham số tùy chọn:**
 * `-o`, `--output`: Đường dẫn file hoặc thư mục xuất (Mặc định: `~/Documents/Upscaled/<tên>_4K.mkv`).
-* `-m`, `--model`: Mô hình AI (`realesr-animevideov3`, `realesrgan-x4plus-anime`, `realesrgan-x4plus`).
+* `-m`, `--model`: Mô hình AI (Mặc định: tự động chọn qua `shows.yaml` hoặc mặc định `animevideov3`).
+* `--engine`: Động cơ suy luận (`mps` cho PyTorch MPS FP16 hoặc `ncnn` cho NCNN Vulkan, mặc định: `mps`).
+* `--precision`: Độ chính xác suy luận (`fp16` hoặc `fp32`, mặc định: `fp16`).
+* `--list-models`: Liệt kê các mô hình đã đăng ký trong `models/models.yaml`.
+* `--force`: Bắt buộc chạy và ghi đè/xóa phân đoạn cũ nếu phát hiện xung đột mô hình.
+* `--subs-after-upscale`: Tự động chạy dịch phụ đề sau khi toàn bộ hàng đợi upscale hoàn tất (Mặc định: Bật).
+* `--no-subs`: Tắt giai đoạn dịch phụ đề sau upscale.
+* `--queue`: Danh sách nhiều tập video cần chạy tuần tự trong ca qua đêm.
+* `--deadline HH:MM`: Mốc hạn chót dừng hàng đợi an toàn nếu tập kế tiếp dự kiến không kịp.
 * `-b`, `--bitrate`: Bitrate video 4K (Mặc định: `28M`).
 * `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `8` giây - tối ưu vừa vặn trong RAM Disk).
 * `-f`, `--format`: Định dạng khung hình trung gian (`png` lossless BT.709 hoặc `jpg`).
@@ -45,10 +53,10 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 ## 📊 2. Số Liệu Đo Đạc Thực Tế Trên Apple Silicon M3 Pro
 
-* **Tốc độ suy luận AI (1080p ➔ 4K):** ~**1.1 – 1.2 fps** trên GPU Metal / MoltenVK (đáp ứng đúng giới hạn phần cứng tính toán TFLOPS thực tế của M3 Pro).
-* **Thời gian xử lý video 30 giây (~720 frames):** ~10 – 11 phút.
-* **Thời gian xử lý video 3 phút (~4.360 frames):** ~60 – 65 phút.
-* **Thời gian xử lý tập phim 24 phút (~34.000 frames):** ~7.5 – 8 giờ (chạy qua đêm với Checkpoint Resume & Caffeinate an toàn).
+* **Tốc độ suy luận AI (1080p ➔ 4K):** Đạt ổn định **1.68 – 1.70 fps** trên GPU Metal với PyTorch MPS FP16 (`realesr-animevideov3`) và **1.79 fps** với `AnimeJaNai HD V3 Compact`.
+* **Soak Test 6.000 frame liên tục (1 giờ):** Median **1.683 fps**, P5 **1.677 fps**, Đỉnh driver VRAM **2.090,8 MB**, Footprint RSS **674,4 MB**, Pageouts: **+133**.
+* **Thời gian xử lý video 3 phút (~4.360 frames, 2.186 unique frames):** Hoàn tất toàn bộ trong **23 phút 59 giây** (Pipelined Double-Buffering trên MPS), nhanh hơn bản tuần tự 13 phút 10 giây (-35,4%).
+* **Dự toán thời gian tập phim 24 phút (~34.000 frames, 13.324 unique frames):** ~**2 giờ 12 phút** (an toàn cho 2-3 tập trong ca qua đêm 8 tiếng).
 * **Mức độ tiêu thụ ổ cứng:** **0 GB ghi frame trung gian vào SSD** khi bật RAM Disk ảo.
 
 ---

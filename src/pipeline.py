@@ -26,6 +26,8 @@ import numpy as np
 from src.config import (
     validate_environment,
     DEFAULT_MODEL,
+    DEFAULT_ENGINE,
+    DEFAULT_PRECISION,
     DEFAULT_SCALE,
     DEFAULT_BITRATE,
     DEFAULT_SEGMENT_TIME,
@@ -49,6 +51,8 @@ from src.dedup import (
     encode_chunk_reexpanded
 )
 from src.ai_engine import upscale_frames
+from src.models_resolver import resolve_model_for_video
+from src.mps_engine import upscale_frames_with_fallback
 from src.logger import (
     format_time,
     render_progress,
@@ -66,7 +70,10 @@ from src.preflight import (
 def run_upscale_pipeline(
     input_path: str,
     output_path: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
+    engine: str = DEFAULT_ENGINE,
+    precision: str = DEFAULT_PRECISION,
+    force: bool = False,
     bitrate: str = DEFAULT_BITRATE,
     segment_time: int = DEFAULT_SEGMENT_TIME,
     fmt: str = DEFAULT_FRAME_FORMAT,
@@ -84,6 +91,9 @@ def run_upscale_pipeline(
     if not os.path.exists(input_path):
         print(f"❌ Không tìm thấy file video nguồn: '{input_path}'")
         sys.exit(1)
+
+    # Phân giải mô hình SR theo thứ tự ưu tiên: CLI > shows.yaml > default (D2)
+    model_info = resolve_model_for_video(input_path, model)
 
     # 1. Thu thập thông số kỹ thuật chi tiết
     meta = probe_video(input_path)
@@ -113,14 +123,17 @@ def run_upscale_pipeline(
     # Khởi tạo logger cho phiên chạy
     logger = RunLogger(base_name)
 
+    # Xác định hậu tố tên file đầu ra theo model (D7)
+    out_suffix = "_4K_animejanai.mkv" if model_info["id"] == "animejanai-hd-v3-compact" else "_4K.mkv"
+
     # Xác định đường dẫn file thành phẩm
     if not output_path:
         os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
-        output_path = os.path.join(DEFAULT_OUTPUT_DIR, f"{base_name}_4K.mkv")
+        output_path = os.path.join(DEFAULT_OUTPUT_DIR, f"{base_name}{out_suffix}")
     else:
         output_path = os.path.abspath(os.path.expanduser(output_path))
         if os.path.isdir(output_path):
-            output_path = os.path.join(output_path, f"{base_name}_4K.mkv")
+            output_path = os.path.join(output_path, f"{base_name}{out_suffix}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # 2. Thực thi kiểm tra an toàn trước khi chạy (Pre-flight checks)
@@ -146,6 +159,49 @@ def run_upscale_pipeline(
         os.makedirs(segs_dir, exist_ok=True)
         os.makedirs(up_segs_dir, exist_ok=True)
 
+        # Kiểm tra tính đồng nhất của model qua manifest.json (D7)
+        manifest_path = os.path.join(work_dir, "manifest.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest_data = json.load(f)
+                prev_model_id = manifest_data.get("model_id")
+                prev_sha256 = manifest_data.get("sha256")
+                if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_info["sha256"]):
+                    if not force:
+                        raise ValueError(
+                            f"❌ Xung đột mô hình: Thư mục tạm '{work_dir}' chứa phân đoạn của mô hình '{prev_model_id}' "
+                            f"(sha256: {prev_sha256[:8] if prev_sha256 else 'N/A'}), nhưng phiên hiện tại yêu cầu '{model_info['id']}' "
+                            f"(sha256: {model_info['sha256'][:8]}).\n"
+                            f"Từ chối trộn lẫn mô hình trong cùng một tập (D7)! "
+                            f"Sử dụng cờ --force để xóa sạch phân đoạn cũ và chạy lại từ đầu."
+                        )
+                    else:
+                        logger.warn("⚠️ Cờ --force được kích hoạt: Xóa phân đoạn cũ khác mô hình và chạy lại...", to_console=True)
+                        shutil.rmtree(segs_dir, ignore_errors=True)
+                        shutil.rmtree(up_segs_dir, ignore_errors=True)
+                        plan_file_del = os.path.join(work_dir, "plan.json")
+                        if os.path.exists(plan_file_del):
+                            os.remove(plan_file_del)
+                        os.makedirs(segs_dir, exist_ok=True)
+                        os.makedirs(up_segs_dir, exist_ok=True)
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.warn(f"Không thể đọc manifest.json cũ: {e}")
+
+        # Ghi nhận manifest mới
+        manifest_data = {
+            "model_id": model_info["id"],
+            "model_name": model_info["name"],
+            "sha256": model_info["sha256"],
+            "engine": engine,
+            "precision": precision,
+            "resolution_source": model_info.get("resolution_source", "")
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+
         # Kích thước RAM Disk (ước lượng dựa theo độ dài phân đoạn và định dạng)
         multiplier = 11.0 if fmt == "png" else 4.5
         ramdisk_size = max(DEFAULT_RAMDISK_SIZE_MB, int(segment_time * 24 * multiplier / 1024) + 1024)
@@ -170,7 +226,7 @@ def run_upscale_pipeline(
                 "target_h": target_h,
                 "duration": meta["duration"],
                 "fps": meta["fps"],
-                "model": model,
+                "model": f"{model_info['name']} ({model_info['id']}) [{engine.upper()} {precision.upper()}] - {model_info.get('resolution_source', '')}",
                 "frame_format": fmt,
                 "storage_info": storage_desc,
                 "bitrate": bitrate,
@@ -203,6 +259,16 @@ def run_upscale_pipeline(
                     fps_den=meta["fps_den"],
                     resume=resume
                 )
+                if dedup_plan:
+                    dedup_plan["model_id"] = model_info["id"]
+                    dedup_plan["model_sha256"] = model_info["sha256"]
+                    dedup_plan["engine"] = engine
+                    dedup_plan["precision"] = precision
+                    try:
+                        with open(plan_file, "w", encoding="utf-8") as f:
+                            json.dump(dedup_plan, f, indent=2)
+                    except Exception:
+                        pass
                 stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
                 logger.info(
                     f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
@@ -251,21 +317,19 @@ def run_upscale_pipeline(
                     c_idx, c_seg_file, _ = item
                     c_in_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_in")
                     os.makedirs(c_in_dir, exist_ok=True)
-                    t0 = time.time()
-                    f_count = extract_frames(c_seg_file, c_in_dir, fmt=fmt)
-                    t_ext = time.time() - t0
-
                     c_plan = (
                         dedup_plan["chunks"][c_idx]
                         if (dedup and dedup_plan and c_idx < len(dedup_plan.get("chunks", [])))
                         else None
                     )
-                    if c_plan:
-                        ai_count = prune_redundant_frames(c_in_dir, c_plan["kept_indices"], fmt=fmt)
-                        exp_frames = c_plan["total_frames"]
-                    else:
-                        ai_count = f_count
-                        exp_frames = f_count
+                    kept_indices = c_plan["kept_indices"] if c_plan else None
+
+                    t0 = time.time()
+                    f_count = extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=kept_indices)
+                    t_ext = time.time() - t0
+
+                    ai_count = f_count
+                    exp_frames = c_plan["total_frames"] if c_plan else f_count
 
                     return {
                         "idx": c_idx,
@@ -413,13 +477,14 @@ def run_upscale_pipeline(
                             prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
                             suffix=f"AI Metal Inferencing{dedup_info}..."
                         )
-                        ai_result = upscale_frames(
+                        ai_result = upscale_frames_with_fallback(
                             input_dir=c_in_dir,
                             output_dir=c_out_dir,
-                            model=model,
-                            scale=DEFAULT_SCALE,
+                            model_info=model_info,
+                            engine=engine,
+                            precision=precision,
                             fmt=fmt,
-                            num_frames=extracted["ai_frames"]
+                            logger=logger
                         )
                         total_ai_time += ai_result["elapsed_seconds"]
                         curr_fps = ai_result.get("fps", 0.0)
@@ -588,6 +653,12 @@ def run_upscale_pipeline(
                 audit_data = {
                     "source_file": os.path.abspath(input_path),
                     "output_file": os.path.abspath(output_path),
+                    "model_id": model_info["id"],
+                    "model_name": model_info["name"],
+                    "model_sha256": model_info["sha256"],
+                    "engine": engine,
+                    "precision": precision,
+                    "resolution_source": model_info.get("resolution_source", ""),
                     "source_frames": src_frames,
                     "output_frames": final_frames,
                     "frames_matched": (src_frames == final_frames) if (src_frames and final_frames) else True,

@@ -1,0 +1,9 @@
+# shows.yaml - Ánh xạ mô hình SR theo từng bộ anime (do người dùng cấu hình thủ công)
+# Cú pháp:
+#   pattern: glob hoặc substring khớp với tên file hoặc thư mục anime
+#   model: id mô hình đã đăng ký trong models/models.yaml (animevideov3 | animejanai-hd-v3-compact)
+
+shows:
+  # Ví dụ cấu hình mẫu (người dùng tự thêm tay):
+  # - pattern: "*Watanare*"
+  #   model: "animejanai-hd-v3-compact"

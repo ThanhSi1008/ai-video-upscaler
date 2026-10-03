@@ -6,6 +6,7 @@ gemini:
   fallback_models:
     - "gemini-3.7-flash"
     - "gemini-3.6-flash"
+    - "gemini-3.5-flash-lite"
   lite_model: "gemini-3.5-flash-lite"
   max_rpm: 5  # Free Tier limit per model
   max_rpd: 1500

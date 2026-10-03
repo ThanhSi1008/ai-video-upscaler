@@ -353,3 +353,43 @@ def encode_chunk_reexpanded(
 
     # Di chuyển nguyên tử sang file hoàn tất
     shutil.move(tmp_output, output_path)
+
+
+def spawn_background_preflight(
+    video_path: str,
+    output_dir: Optional[str] = None,
+    segment_seconds: int = 8,
+    logger=None
+) -> Optional[subprocess.Popen]:
+    """
+    Kích hoạt tiến trình quét mpdecimate lập plan.json trước cho tập kế tiếp.
+    Chạy với độ ưu tiên thấp (nice -n 10) trong nền lúc GPU đang bận xử lý tập trước.
+    """
+    import sys
+    try:
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        out_dir = output_dir or "out"
+        work_dir = os.path.join(out_dir, f".temp_{base_name}")
+        os.makedirs(work_dir, exist_ok=True)
+        plan_file = os.path.join(work_dir, "plan.json")
+        if os.path.exists(plan_file) and os.path.getsize(plan_file) > 100:
+            return None
+
+        # Gọi python chạy preflight với nice -n 10
+        cmd = [
+            "nice", "-n", "10",
+            sys.executable, "-c",
+            f"import sys; from src.dedup import load_or_create_plan; from src.ffmpeg_ops import probe_video; "
+            f"meta = probe_video('{video_path}'); "
+            f"load_or_create_plan('{video_path}', '{plan_file}', {segment_seconds}, meta['fps_num'], meta['fps_den'])"
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        msg = f"⚡ [Multi-Episode Queue] Đã kích hoạt Preflight nền (nice -n 10) cho tập kế tiếp: {os.path.basename(video_path)}"
+        if logger:
+            logger.info(msg, to_console=True)
+        else:
+            print(msg)
+        return proc
+    except Exception:
+        return None
+
