@@ -616,9 +616,14 @@ def run_upscale_pipeline(
 
                     if partial_paused:
                         logger.info(
-                            f"⏸️ [PARTIAL RUN PAUSED] Đã dừng sạch tại ranh giới phân đoạn {prev_c_idx+1}/{total_segs} theo --allow-partial. "
-                            f"Toàn bộ các phân đoạn up_*.mp4 đã được lưu trữ an toàn trong '{up_segs_dir}'. "
-                            f"Lần chạy kế tiếp (--resume) sẽ tự động tiếp tục từ phân đoạn {prev_c_idx+2} mà không cần chạy lại!",
+                            f"\n{'='*75}\n"
+                            f"⏸️ [PARTIAL RUN PAUSED] ĐÃ DỪNG SẠCH TẠI RANH GIỚI PHÂN ĐOẠN {prev_c_idx+1}/{total_segs} THEO --allow-partial.\n"
+                            f"• File nguồn: {input_path}\n"
+                            f"• Thư mục lưu phân đoạn: '{up_segs_dir}' (đã giữ an toàn {prev_c_idx+1} file up_*.mp4)\n"
+                            f"• Phân đoạn tiếp theo: {prev_c_idx+2}/{total_segs}\n"
+                            f"💡 CÁCH TIẾP TỤC: Chạy lại lệnh sau (hệ thống sẽ tự động resume từ đoạn {prev_c_idx+2}):\n"
+                            f"   ./upscale.sh \"{input_path}\" -o \"{output_path}\"\n"
+                            f"{'='*75}\n",
                             to_console=True
                         )
                         return up_segs_dir

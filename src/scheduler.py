@@ -109,7 +109,8 @@ class BackgroundQueuePreflightManager:
         segment_seconds: int = 8,
         skip_first: bool = True,
         logger=None,
-        benchmark_mode: bool = False
+        benchmark_mode: bool = False,
+        on_plan_ready=None
     ):
         self.queue = queue
         self.output_dir = output_dir or "out"
@@ -117,6 +118,7 @@ class BackgroundQueuePreflightManager:
         self.skip_first = skip_first
         self.logger = logger
         self.benchmark_mode = benchmark_mode or (os.environ.get("BENCHMARK_MODE") == "1")
+        self.on_plan_ready = on_plan_ready
         self.thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self.results: Dict[str, Dict[str, Any]] = {}
@@ -176,7 +178,24 @@ class BackgroundQueuePreflightManager:
                 proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if proc.returncode == 0 and os.path.exists(plan_file):
                     with open(plan_file, "r", encoding="utf-8") as f:
-                        self.results[vid] = json.load(f)
+                        plan_data = json.load(f)
+                    self.results[vid] = plan_data
+                    n_k = plan_data.get("total_kept_frames", 0)
+                    dedup_p = plan_data.get("dedup_ratio_percent", 0.0)
+                    msg_done = (
+                        f"📊 [Background Preflight] Đã quét xong '{os.path.basename(vid)}': "
+                        f"n_unique đo được = {n_k} frames (Dedup: {dedup_p:.1f}%)."
+                    )
+                    if self.logger:
+                        self.logger.info(msg_done, to_console=True)
+                    else:
+                        print(f"\n{msg_done}")
+
+                    if self.on_plan_ready:
+                        try:
+                            self.on_plan_ready(vid, plan_data)
+                        except Exception as e_cb:
+                            pass
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Lỗi khi quét preflight nền cho {os.path.basename(vid)}: {e}")
@@ -228,7 +247,8 @@ def compute_overnight_schedule(
     fps_conservative = max(0.5, float(fps_p5))
 
     episodes_meta = []
-    current_simulated_time = now
+    sim_time_median = now
+    sim_time_conservative = now
     total_scheduled_seconds = 0.0
 
     for idx, vid in enumerate(queue):
@@ -276,9 +296,9 @@ def compute_overnight_schedule(
             can_run = False
             is_partial = False
             is_already_completed = True
-            ep_start_time = current_simulated_time
-            ep_finish_time = current_simulated_time
-            ep_decision_finish_time = current_simulated_time
+            ep_start_time = sim_time_median
+            ep_finish_time = sim_time_median
+            ep_decision_finish_time = sim_time_conservative
         else:
             is_already_completed = False
             ai_seconds_median = n_unique / fps_med
@@ -288,21 +308,29 @@ def compute_overnight_schedule(
             eta_p5_seconds = ai_seconds_p5 + total_overhead
             decision_eta_seconds = eta_p5_seconds * (1.0 + eta_margin_pct)
 
-            ep_start_time = current_simulated_time
-            ep_finish_time = ep_start_time + timedelta(seconds=eta_median_seconds)
-            ep_decision_finish_time = ep_start_time + timedelta(seconds=decision_eta_seconds)
+            ep_start_time = sim_time_median
+            ep_finish_time = sim_time_median + timedelta(seconds=eta_median_seconds)
+            ep_decision_finish_time = sim_time_conservative + timedelta(seconds=decision_eta_seconds)
 
-            # 3. Đối chiếu deadline theo P5 + 7% margin
+            # 3. Đối chiếu deadline theo P5 + 7% margin cộng dồn
             decision = "KỊP"
             can_run = True
             is_partial = False
 
             if deadline_dt:
-                if ep_decision_finish_time <= deadline_dt:
+                # Dành thời gian cho giai đoạn phụ đề của các tập đã xong trước đó
+                prior_completed_count = sum(
+                    1 for ep in episodes_meta
+                    if ep["can_run"] and not ep.get("is_partial") and not ep.get("is_already_completed")
+                )
+                reserved_subs_sec = prior_completed_count * float(subtitles_overhead_seconds)
+                effective_deadline_dt = deadline_dt - timedelta(seconds=reserved_subs_sec)
+
+                if ep_decision_finish_time <= effective_deadline_dt:
                     decision = "KỊP"
                     can_run = True
                 else:
-                    if allow_partial:
+                    if allow_partial and effective_deadline_dt > sim_time_conservative:
                         decision = "CHẠY 1 PHẦN (ĐẾN HẠN CHÓT)"
                         can_run = True
                         is_partial = True
@@ -312,12 +340,14 @@ def compute_overnight_schedule(
 
         if can_run:
             if is_partial and deadline_dt:
-                # Chạy dở dang đến hạn chót
-                partial_run_sec = max(0.0, (deadline_dt - current_simulated_time).total_seconds())
-                current_simulated_time = deadline_dt
+                # Chạy dở dang đến hạn chót (đã trừ thời gian phụ đề dành riêng)
+                partial_run_sec = max(0.0, (effective_deadline_dt - sim_time_conservative).total_seconds())
+                sim_time_conservative = effective_deadline_dt
+                sim_time_median += timedelta(seconds=partial_run_sec)
                 total_scheduled_seconds += partial_run_sec
             else:
-                current_simulated_time = ep_finish_time
+                sim_time_conservative = ep_decision_finish_time
+                sim_time_median = ep_finish_time
                 total_scheduled_seconds += eta_median_seconds
 
         episodes_meta.append({

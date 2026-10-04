@@ -255,6 +255,12 @@ def build_arg_parser():
         action="store_true",
         help="Dịch nâng cấp lại các câu thoại trước đó được dịch bằng Lite/Local bằng model chất lượng cao hơn khi còn hạn mức"
     )
+    parser.add_argument(
+        "--sub-offset-ms",
+        type=int,
+        default=0,
+        help="Độ lệch thời gian dịch chuyển phụ đề tiếng Nhật / tiếng Việt (mili-giây, ví dụ: -11154 cho bản Crunchyroll lệch intro)"
+    )
 
     return parser
  
@@ -362,6 +368,7 @@ def main():
             en_path=Path(en_sub) if en_sub else None,
             output_basename=f"{base_vid_name}_4K",
             subs_upgrade=args.subs_upgrade,
+            sub_offset_ms=args.sub_offset_ms,
         )
         srt_path = res.get('subtitle_path') or res.get('output_path')
         print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
@@ -446,12 +453,32 @@ def main():
         # Kích hoạt preflight nền cho toàn bộ các tập tiếp theo trong hàng đợi (nice -n 10)
         bg_preflight = None
         if len(videos) > 1 and not args.no_dedup:
+            def _on_bg_plan_ready(scanned_vid, pdata):
+                try:
+                    updated_sched = compute_overnight_schedule(
+                        queue=videos,
+                        deadline_str=args.deadline,
+                        fps_median=fps_median,
+                        fps_p5=fps_p5,
+                        video_overhead_seconds=video_overhead,
+                        subtitles_overhead_seconds=subtitles_overhead,
+                        allow_partial=args.allow_partial,
+                        output_dir=args.output,
+                        segment_seconds=args.segment,
+                        preflight_now=False
+                    )
+                    print(f"\n🔄 [BẢNG LẬP LỊCH CẬP NHẬT] Đã nạp số đo n_unique thật cho '{os.path.basename(scanned_vid)}':")
+                    print(format_schedule_decision_table(updated_sched))
+                except Exception as e_bg:
+                    pass
+
             bg_preflight = BackgroundQueuePreflightManager(
                 queue=videos,
                 output_dir=args.output,
                 segment_seconds=args.segment,
                 skip_first=True,
-                benchmark_mode=args.benchmark_mode
+                benchmark_mode=args.benchmark_mode,
+                on_plan_ready=_on_bg_plan_ready
             )
             bg_preflight.start()
 
@@ -465,7 +492,7 @@ def main():
         # Kiểm tra deadline nếu có (A6)
         deadline_dt = None
         if args.deadline:
-            can_finish, is_partial, deadline_dt = check_deadline_and_eta(
+            can_finish, is_partial, raw_deadline_dt = check_deadline_and_eta(
                 vid,
                 args.deadline,
                 fps_median=fps_median,
@@ -478,6 +505,11 @@ def main():
             if not can_finish:
                 print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
                 break
+
+            # (a) Dành thời gian cho giai đoạn phụ đề của các tập đã xong:
+            # Trừ đi thời gian phụ đề cần thiết cho các tập đã hoàn tất trước đó trong queue
+            subs_reserved_sec = (len(completed_videos) * subtitles_overhead) if args.subs_after_upscale else 0.0
+            deadline_dt = (raw_deadline_dt - timedelta(seconds=subs_reserved_sec)) if raw_deadline_dt else None
 
         try:
             out_file = run_upscale_pipeline(
@@ -498,7 +530,11 @@ def main():
                 allow_partial=args.allow_partial,
                 deadline_dt=deadline_dt
             )
-            completed_videos.append((vid, out_file))
+            # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
+            if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
+                completed_videos.append((vid, out_file))
+            else:
+                print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
 
             # Cập nhật fps từ audit.json nếu có
             audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
@@ -546,6 +582,8 @@ def main():
             ]
             if args.subs_upgrade:
                 sub_cmd.append("--subs-upgrade")
+            if args.sub_offset_ms:
+                sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
             print(f"\n🚀 Khởi chạy tiến trình con dịch phụ đề cho tập '{os.path.basename(src_vid)}'...")
             try:
                 proc = subprocess.run(sub_cmd, timeout=sub_timeout, check=False)

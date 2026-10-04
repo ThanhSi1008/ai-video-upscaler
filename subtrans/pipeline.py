@@ -169,6 +169,7 @@ class TranslationPipeline:
         en_path: Optional[Path] = None,
         glossary_path: Optional[Path] = None,
         en_offset_ms: int = 0,
+        sub_offset_ms: int = 0,
         output_basename: Optional[str] = None,
         subs_upgrade: bool = False,
     ) -> Dict[str, Any]:
@@ -177,7 +178,7 @@ class TranslationPipeline:
         self._init_primary_backend()
 
         console.print(f"\n[bold green]🚀 Subtrans Pipeline Starting (Standard Quality Mode)[/bold green]")
-        console.print(f"  • Source (JA): [cyan]{ja_path}[/cyan]")
+        console.print(f"  • Source (JA): [cyan]{ja_path}[/cyan]{f' (Offset: {sub_offset_ms}ms)' if sub_offset_ms != 0 else ''}")
         if en_path:
             console.print(f"  • Reference (EN): [cyan]{en_path}[/cyan] (Offset: {en_offset_ms}ms)")
         console.print(f"  • Mode: [bold]{'100% Local (Ollama)' if self.local_only else f'Primary: Gemini ({self.gemini_model}) -> Local Fallback'}[/bold]")
@@ -213,6 +214,7 @@ class TranslationPipeline:
                 ja_path=str(ja_path),
                 en_path=str(en_path) if en_path else None,
                 en_offset_ms=en_offset_ms,
+                ja_offset_ms=sub_offset_ms,
             )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
 

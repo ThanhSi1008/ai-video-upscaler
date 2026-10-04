@@ -167,6 +167,7 @@ def run(
     ja_file: Path = typer.Argument(..., help="Path to Japanese subtitle file (.ass or .srt)", exists=True),
     en_file: Optional[Path] = typer.Option(None, "--en", "-e", help="Path to English subtitle file (.ass or .srt)"),
     en_offset_ms: int = typer.Option(0, "--en-offset-ms", help="Offset applied to English timing in milliseconds"),
+    sub_offset_ms: int = typer.Option(0, "--sub-offset-ms", help="Offset applied to Japanese/Output subtitle timing in milliseconds (e.g. -11154)"),
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Path to glossary YAML/JSON file"),
     local_only: bool = typer.Option(False, "--local", "-l", help="Force 100% local translation using Ollama"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
@@ -222,6 +223,7 @@ def run(
             en_path=en_file,
             glossary_path=glossary,
             en_offset_ms=en_offset_ms,
+            sub_offset_ms=sub_offset_ms,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Process cancelled by user. Partial cache preserved in SQLite.[/yellow]")

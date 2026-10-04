@@ -47,6 +47,7 @@ def parse_and_align_subtitles(
     ja_path: str,
     en_path: Optional[str] = None,
     en_offset_ms: int = 0,
+    ja_offset_ms: int = 0,
     skip_styles_regex: str = DEFAULT_SKIP_STYLES,
     overlap_threshold: float = 0.5,
     match_warning_pct: float = 0.8
@@ -57,6 +58,9 @@ def parse_and_align_subtitles(
         (cues, original_ja_ssa, original_en_ssa)
     """
     ja_ssa = pysubs2.load(ja_path)
+    if ja_offset_ms != 0:
+        ja_ssa.shift(ms=ja_offset_ms)
+        logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
     en_ssa = pysubs2.load(en_path) if en_path else None
 
     # Pre-process EN cues if available
