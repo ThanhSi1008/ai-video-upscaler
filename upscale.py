@@ -421,7 +421,7 @@ def main():
             allow_partial=args.allow_partial,
             output_dir=args.output,
             segment_seconds=args.segment,
-            preflight_now=True
+            preflight_now=False
         )
         print(format_schedule_decision_table(sched))
         sys.exit(0)
