@@ -21,4 +21,9 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-"$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+# Bọc toàn bộ phiên chạy bằng caffeinate (-ims) để chống sleep máy trong suốt ca qua đêm
+if command -v caffeinate >/dev/null 2>&1; then
+    exec caffeinate -ims "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+else
+    exec "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+fi
