@@ -277,8 +277,14 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
         os.path.join(vid_dir, f"{base_name}_ja.ass"),
         os.path.join(vid_dir, f"{base_name}_jpn.ass"),
         os.path.join(vid_dir, f"{base_name}.ass"),
+        os.path.join(vid_dir, f"{base_name}.ja.srt"),
+        os.path.join(vid_dir, f"{base_name}.ja[cc].srt"),
+        os.path.join(vid_dir, f"{base_name}_ja.srt"),
+        os.path.join(vid_dir, f"{base_name}_jpn.srt"),
+        os.path.join(vid_dir, f"{base_name}.srt"),
         f"subtrans/samples/{base_name}_jpn.ass",
         f"subtrans/samples/{base_name}.ass",
+        f"subtrans/samples/{base_name}.ja[cc].srt",
     ]
     for c in candidates_ja:
         if os.path.exists(c):
@@ -289,7 +295,11 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
         os.path.join(vid_dir, f"{base_name}.en.ass"),
         os.path.join(vid_dir, f"{base_name}_en.ass"),
         os.path.join(vid_dir, f"{base_name}_eng.ass"),
+        os.path.join(vid_dir, f"{base_name}.en.srt"),
+        os.path.join(vid_dir, f"{base_name}_en.srt"),
+        os.path.join(vid_dir, f"{base_name}_eng.srt"),
         f"subtrans/samples/{base_name}_eng.ass",
+        f"subtrans/samples/{base_name}.en.ass",
     ]
     for c in candidates_en:
         if os.path.exists(c):
