@@ -4,14 +4,14 @@ models:
     rpd: 20
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   gemini-3.7-flash:
     tier: free_tier
     rpd: 20
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active_with_spikes
     note: Thường xuyên gặp 503 UNAVAILABLE (high demand spike)
   gemini-3.6-flash:
@@ -19,28 +19,28 @@ models:
     rpd: 20
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   gemini-3.5-flash:
     tier: free_tier
     rpd: 20
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   gemini-3.5-flash-lite:
     tier: free_tier
     rpd: 500
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   gemini-3.1-flash-lite:
     tier: free_tier
     rpd: 500
     rpm: chưa biết (cần đo)
     tpm: chưa xác minh
-    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   translategemma:12b:
     tier: local_ollama

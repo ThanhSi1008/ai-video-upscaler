@@ -255,7 +255,7 @@ def generate_qa_report(
         f"| **SỐ ĐO (MEASURED)** | Thời gian chạy pipeline: `{elapsed_time_sec:.1f}s` | Đo đạc chính xác qua `time.monotonic()` |",
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Số request cho tập 300 cues (~3 requests) | Tính toán lý thuyết: 300 ÷ 100 cues/batch = 3 |",
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Thời điểm reset quota: `{next_vn.strftime('%H:%M %d/%m')}` | Tính toán qua `zoneinfo` (PDT 14:00 / PST 15:00) |",
-        f"| **CHƯA XÁC MINH (UNVERIFIED)** | Hạn mức RPD = 20 (Flash) / 500 (Lite) | Mặc định tạm do người dùng cung cấp (chờ trang AI Studio) |",
+        f"| **CHƯA XÁC MINH (UNVERIFIED)** | Hạn mức RPD = 20 (Flash) / 500 (Lite) | Chưa xác minh (nguồn bên thứ ba, chờ đối soát AI Studio) |",
         f"| **CHƯA XÁC MINH (UNVERIFIED)** | Giới hạn RPM/TPM của từng model | Đang để trống (chưa có số liệu chính thức từ dashboard) |",
         "",
     ])

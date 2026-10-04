@@ -18,8 +18,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.pipeline import run_upscale_pipeline
 from src.logger import get_swap_usage, get_thermal_state
+import pytest
 
+@pytest.mark.gpu
 def test_overlap_fps():
+    if os.environ.get("RUN_GPU_TESTS") != "1":
+        pytest.skip("Test GPU benchmark dài (~5 phút), chỉ chạy riêng qua: RUN_GPU_TESTS=1 pytest -m gpu hoặc python tests/test_gpu_throttling_overlap.py")
+
     print("=" * 75)
     print("⚡ KIỂM TRA ĐỘ ỔN ĐỊNH FPS GPU KHI CHẠY CHỒNG DECODE & ENCODE")
     print("=" * 75)

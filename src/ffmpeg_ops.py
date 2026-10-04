@@ -234,7 +234,7 @@ def concat_segments(segment_files: List[str], work_dir: str, output_path: str):
 def mux_final_container(upscaled_video: str, original_video: str, final_output: str):
     """
     Đóng gói lại toàn bộ Audio, Subtitles, Phông chữ nhúng và Chapters gốc từ video nguồn.
-    Sử dụng Bit-exact Stream Copy 100% (không re-encode bất kỳ luồng âm thanh hay phụ đề nào).
+    Sử dụng Bit-exact Stream Copy nguyên bản (không re-encode bất kỳ luồng âm thanh hay phụ đề nào).
     Bắt buộc thêm cờ -max_interleave_delta 0 để ép FFmpeg đan xen chặt chẽ từng packet Video/Audio theo DTS,
     triệt tiêu hoàn toàn hiện tượng dồn toàn bộ audio lên đầu file gây mất âm thanh trong trình phát.
     """
@@ -263,7 +263,7 @@ def embed_subtitle_track(
 ) -> bool:
     """
     Nhúng luồng phụ đề SRT đã dịch vào container MKV 4K thành phẩm dưới dạng soft subtitle.
-    Đồng thời bảo toàn 100% video 4K, audio gốc, phụ đề cũ, font chữ và chapters.
+    Đồng thời bảo toàn nguyên bản video 4K, audio gốc, phụ đề cũ, font chữ và chapters.
     """
     if not os.path.exists(mkv_path) or not os.path.exists(srt_path):
         return False

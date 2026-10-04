@@ -114,7 +114,7 @@ def check_deadline_and_eta(
     return True, False, deadline_dt
 
 
-def parse_args():
+def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="🎬 AI Video Upscaler 4K - Tối ưu hóa cho Apple Silicon M3 Pro (PyTorch MPS / NCNN Metal + VideoToolbox 10-bit)",
         formatter_class=argparse.RawTextHelpFormatter
@@ -256,7 +256,11 @@ def parse_args():
         help="Dịch nâng cấp lại các câu thoại trước đó được dịch bằng Lite/Local bằng model chất lượng cao hơn khi còn hạn mức"
     )
 
-    return parser.parse_args()
+    return parser
+ 
+ 
+def parse_args(args=None):
+    return build_arg_parser().parse_args(args)
 
 
 def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[str]]:
