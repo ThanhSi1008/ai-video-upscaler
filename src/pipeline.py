@@ -55,6 +55,7 @@ from src.models_resolver import resolve_model_for_video
 from src.mps_engine import upscale_frames_with_fallback
 from src.logger import (
     format_time,
+    format_bytes,
     render_progress,
     RunLogger,
     get_swap_usage,

@@ -33,10 +33,13 @@ def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optio
 
     candidate_paths = [
         os.path.join(out_dir, f".temp_{base_name}", "plan.json"),
+        os.path.join("out", f".temp_{base_name}", "plan.json"),
         os.path.join(vid_dir, f".temp_{base_name}", "plan.json"),
         os.path.join(out_dir, f"{base_name}.plan.json"),
+        os.path.join("out", f"{base_name}.plan.json"),
         os.path.splitext(video_path)[0] + ".plan.json",
         os.path.join(out_dir, "full_ep_plan.json"),
+        os.path.join("out", "full_ep_plan.json"),
     ]
 
     for p in candidate_paths:
