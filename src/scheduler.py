@@ -260,35 +260,55 @@ def compute_overnight_schedule(
                 dedup_ratio = 60.88
             n_unique_source = "ước lượng"
 
+        # Kiểm tra nếu file 4K thành phẩm đã tồn tại
+        out_target_dir = output_dir or "out"
+        out_4k_path = os.path.join(out_target_dir, f"{base_name}_4K.mkv")
+        already_completed = os.path.exists(out_4k_path) and os.path.getsize(out_4k_path) > 1024 * 1024
+
         # 2. Tính ETA trung vị (thời gian kỳ vọng) và ETA P5 (+7% biên an toàn cho quyết định)
-        ai_seconds_median = n_unique / fps_med
-        eta_median_seconds = ai_seconds_median + total_overhead
+        if already_completed:
+            ai_seconds_median = 0.0
+            eta_median_seconds = 0.0
+            ai_seconds_p5 = 0.0
+            eta_p5_seconds = 0.0
+            decision_eta_seconds = 0.0
+            decision = "⏩ ĐÃ XONG (BỎ QUA)"
+            can_run = False
+            is_partial = False
+            is_already_completed = True
+            ep_start_time = current_simulated_time
+            ep_finish_time = current_simulated_time
+            ep_decision_finish_time = current_simulated_time
+        else:
+            is_already_completed = False
+            ai_seconds_median = n_unique / fps_med
+            eta_median_seconds = ai_seconds_median + total_overhead
 
-        ai_seconds_p5 = n_unique / fps_conservative
-        eta_p5_seconds = ai_seconds_p5 + total_overhead
-        decision_eta_seconds = eta_p5_seconds * (1.0 + eta_margin_pct)
+            ai_seconds_p5 = n_unique / fps_conservative
+            eta_p5_seconds = ai_seconds_p5 + total_overhead
+            decision_eta_seconds = eta_p5_seconds * (1.0 + eta_margin_pct)
 
-        ep_start_time = current_simulated_time
-        ep_finish_time = ep_start_time + timedelta(seconds=eta_median_seconds)
-        ep_decision_finish_time = ep_start_time + timedelta(seconds=decision_eta_seconds)
+            ep_start_time = current_simulated_time
+            ep_finish_time = ep_start_time + timedelta(seconds=eta_median_seconds)
+            ep_decision_finish_time = ep_start_time + timedelta(seconds=decision_eta_seconds)
 
-        # 3. Đối chiếu deadline theo P5 + 7% margin
-        decision = "KỊP"
-        can_run = True
-        is_partial = False
+            # 3. Đối chiếu deadline theo P5 + 7% margin
+            decision = "KỊP"
+            can_run = True
+            is_partial = False
 
-        if deadline_dt:
-            if ep_decision_finish_time <= deadline_dt:
-                decision = "KỊP"
-                can_run = True
-            else:
-                if allow_partial:
-                    decision = "CHẠY 1 PHẦN (ĐẾN HẠN CHÓT)"
+            if deadline_dt:
+                if ep_decision_finish_time <= deadline_dt:
+                    decision = "KỊP"
                     can_run = True
-                    is_partial = True
                 else:
-                    decision = "BỎ QUA (QUÁ DEADLINE)"
-                    can_run = False
+                    if allow_partial:
+                        decision = "CHẠY 1 PHẦN (ĐẾN HẠN CHÓT)"
+                        can_run = True
+                        is_partial = True
+                    else:
+                        decision = "BỎ QUA (QUÁ DEADLINE)"
+                        can_run = False
 
         if can_run:
             if is_partial and deadline_dt:
@@ -321,6 +341,7 @@ def compute_overnight_schedule(
             "decision_finish_time": ep_decision_finish_time.strftime("%H:%M:%S"),
             "can_run": can_run,
             "is_partial": is_partial,
+            "is_already_completed": is_already_completed,
             "decision": decision
         })
 
@@ -341,7 +362,8 @@ def compute_overnight_schedule(
         "total_scheduled_seconds": total_scheduled_seconds,
         "total_scheduled_formatted": str(timedelta(seconds=int(round(total_scheduled_seconds)))),
         "accepted_count": sum(1 for ep in episodes_meta if ep["can_run"]),
-        "skipped_count": sum(1 for ep in episodes_meta if not ep["can_run"]),
+        "already_completed_count": sum(1 for ep in episodes_meta if ep.get("is_already_completed")),
+        "skipped_count": sum(1 for ep in episodes_meta if (not ep["can_run"] and not ep.get("is_already_completed"))),
         "partial_count": sum(1 for ep in episodes_meta if ep.get("is_partial")),
         "total_episodes": len(episodes_meta),
         "episodes": episodes_meta
@@ -444,7 +466,9 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
         if len(name_display) > 32:
             name_display = name_display[:29] + "..."
 
-        if ep.get("is_partial"):
+        if ep.get("is_already_completed"):
+            dec_symbol = "⏩ ĐÃ CÓ (BỎ QUA)"
+        elif ep.get("is_partial"):
             dec_symbol = "⏸️ CHẠY 1 PHẦN (HẠN CHÓT)"
         elif ep["can_run"]:
             dec_symbol = "✅ KỊP"
@@ -462,7 +486,8 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
     lines.append("Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế từ plan.json và số ước lượng từ metadata (~39.1% kept).")
     lines.append("         Quyết định hạn chót dựa trên P5 (1.62 fps) + 5 phút subtitles + biên an toàn 7% ETA.")
     partial_note = f" (gồm {sched['partial_count']} tập chạy 1 phần)" if sched.get("partial_count") else ""
-    lines.append(f"🎯 TỔNG KẾT: Duyệt thực thi {sched['accepted_count']}/{sched['total_episodes']} tập{partial_note} "
+    already_note = f", {sched['already_completed_count']} tập đã có kết quả bỏ qua" if sched.get("already_completed_count") else ""
+    lines.append(f"🎯 TỔNG KẾT: Duyệt thực thi {sched['accepted_count']}/{sched['total_episodes']} tập{partial_note}{already_note} "
                  f"| Tổng thời lượng chạy dự kiến: {sched['total_scheduled_formatted']}.")
 
     # Hiển thị cảnh báo hạn mức API Gemini nếu có
