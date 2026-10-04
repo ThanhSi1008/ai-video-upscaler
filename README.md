@@ -11,7 +11,7 @@ Sử dụng trực tiếp nhân **Apple Silicon GPU Metal / Vulkan** kết hợp
 * **Mô hình AI:** `realesr-animevideov3` chuyên dụng cho video anime 2x (khử nhiễu nén, giữ nét tự nhiên).
 * **Mã hóa phần cứng 10-bit:** `hevc_videotoolbox` Main 10 Profile (`p010le`, BT.709 Limited Range TV, Tag `hvc1`, Spatial AQ).
 * **Bảo vệ tuyệt đối NVMe SSD:** Sử dụng **RAM Disk ảo HFS+ trên macOS** để đệm khung hình trung gian. Khung hình thô và 4K chỉ sinh ra trong RAM và xóa ngay lập tức khi chunk được encode xong ➔ **0 byte ảnh tĩnh ghi xuống SSD!**
-* **Bảo toàn 100% dữ liệu gốc:** Tự động **Stream Copy** toàn bộ audio đa kênh, phụ đề mềm đa ngôn ngữ (ASS/SRT), font chữ nhúng (TrueType) và chapters từ file gốc.
+* **Bảo toàn nguyên bản dữ liệu gốc:** Tự động **Stream Copy** toàn bộ audio đa kênh, phụ đề mềm đa ngôn ngữ (ASS/SRT), font chữ nhúng (TrueType) và chapters từ file gốc.
 * **Checkpoint Resume:** Hỗ trợ tiếp tục chạy ngay từ phân đoạn đang dở nếu bị tạm dừng (Ctrl+C hoặc tắt máy).
 * **Cơ chế chống ngủ máy (caffeinate):** Tự động gọi `caffeinate -dims` gắn chặt với PID của phiên chạy; tự động dọn dẹp khi kết thúc hoặc bị gián đoạn.
 * **Kiểm tra an toàn trước khi chạy (Pre-flight Checks):** Cảnh báo sạc AC vs Pin (chống sập nguồn giữa chừng), kiểm tra dung lượng ổ cứng trống tối thiểu an toàn.
@@ -41,6 +41,9 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 * `--no-subs`: Tắt giai đoạn dịch phụ đề sau upscale.
 * `--queue`: Danh sách nhiều tập video cần chạy tuần tự trong ca qua đêm.
 * `--deadline HH:MM`: Mốc hạn chót dừng hàng đợi an toàn nếu tập kế tiếp dự kiến không kịp.
+* `--allow-partial`: Cho phép tập không kịp deadline chạy đến hạn chót, dừng sạch ở ranh giới chunk và bảo toàn segment để chạy tiếp lần sau.
+* `--dry-run`: Chạy thử nghiệm mô phỏng toàn bộ tiến trình lập lịch hoặc dịch phụ đề mà không suy luận GPU hay gọi API thật.
+* `--benchmark-mode`: Bật chế độ đo đạc thuần túy (Scheduler và Preflight nền tự động từ chối chạy để tránh làm bẩn dữ liệu).
 * `-b`, `--bitrate`: Bitrate video 4K (Mặc định: `28M`).
 * `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `8` giây - tối ưu vừa vặn trong RAM Disk).
 * `-f`, `--format`: Định dạng khung hình trung gian (`png` lossless BT.709 hoặc `jpg`).

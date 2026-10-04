@@ -366,6 +366,10 @@ def spawn_background_preflight(
     Chạy với độ ưu tiên thấp (nice -n 10) trong nền lúc GPU đang bận xử lý tập trước.
     """
     import sys
+    if os.environ.get("BENCHMARK_MODE") == "1":
+        if logger:
+            logger.warning("⚡ [BENCHMARK MODE] Từ chối kích hoạt spawn_background_preflight.", to_console=True)
+        return None
     try:
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         out_dir = output_dir or "out"

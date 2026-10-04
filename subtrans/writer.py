@@ -43,6 +43,9 @@ def clean_and_normalize_vietnamese(text: str) -> str:
     if not text:
         return ""
 
+    if text.strip() in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
+        return "[Chưa dịch]"
+
     # 1. Strip HTML tags like <i>, </i>, <b>, <font color="...">, etc.
     text = re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", text)
 

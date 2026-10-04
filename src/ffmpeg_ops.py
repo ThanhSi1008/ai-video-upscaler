@@ -235,6 +235,8 @@ def mux_final_container(upscaled_video: str, original_video: str, final_output: 
     """
     Đóng gói lại toàn bộ Audio, Subtitles, Phông chữ nhúng và Chapters gốc từ video nguồn.
     Sử dụng Bit-exact Stream Copy 100% (không re-encode bất kỳ luồng âm thanh hay phụ đề nào).
+    Bắt buộc thêm cờ -max_interleave_delta 0 để ép FFmpeg đan xen chặt chẽ từng packet Video/Audio theo DTS,
+    triệt tiêu hoàn toàn hiện tượng dồn toàn bộ audio lên đầu file gây mất âm thanh trong trình phát.
     """
     mux_cmd = [
         "ffmpeg", "-y",
@@ -246,6 +248,57 @@ def mux_final_container(upscaled_video: str, original_video: str, final_output: 
         "-map", "1:t?",
         "-map_chapters", "1",
         "-c", "copy",
+        "-max_interleave_delta", "0",
         final_output
     ]
     subprocess.run(mux_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def embed_subtitle_track(
+    mkv_path: str,
+    srt_path: str,
+    language: str = "vie",
+    title: str = "Tiếng Việt (AI Vietsub)",
+    is_default: bool = True
+) -> bool:
+    """
+    Nhúng luồng phụ đề SRT đã dịch vào container MKV 4K thành phẩm dưới dạng soft subtitle.
+    Đồng thời bảo toàn 100% video 4K, audio gốc, phụ đề cũ, font chữ và chapters.
+    """
+    if not os.path.exists(mkv_path) or not os.path.exists(srt_path):
+        return False
+
+    tmp_out = mkv_path + ".embed_sub.tmp.mkv"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", mkv_path,
+        "-sub_charenc", "UTF-8",
+        "-i", srt_path,
+        "-map", "0:v:0",
+        "-map", "0:a:0",
+        "-map", "1:0",       # Luồng phụ đề tiếng Việt mới
+        "-map", "0:s?",      # Toàn bộ phụ đề cũ nếu có
+        "-map", "0:t?",      # Font chữ đính kèm
+        "-map_chapters", "0",
+        "-c", "copy",
+        "-metadata:s:s:0", f"language={language}",
+        "-metadata:s:s:0", f"title={title}",
+        "-disposition:s:0", "default" if is_default else "0",
+        "-disposition:s:1", "0",
+        "-max_interleave_delta", "0",
+        tmp_out
+    ]
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1000:
+            shutil.move(tmp_out, mkv_path)
+            return True
+        else:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            return False
+    except Exception:
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+        return False
+

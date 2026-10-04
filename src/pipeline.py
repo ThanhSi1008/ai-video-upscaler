@@ -81,7 +81,9 @@ def run_upscale_pipeline(
     resume: bool = True,
     caffeinate: bool = True,
     preview_seconds: Optional[int] = None,
-    dedup: bool = True
+    dedup: bool = True,
+    allow_partial: bool = False,
+    deadline_dt: Optional[datetime] = None
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên Apple Silicon M3 Pro"""
     validate_environment()
@@ -402,6 +404,7 @@ def run_upscale_pipeline(
                     ai_fps_history = []
                     initial_baseline_fps = None
                     throttling_warned = False
+                    partial_paused = False
 
                     for i, target_chunk in enumerate(chunks_to_process):
                         c_idx, c_seg_file, c_seg_out = target_chunk
@@ -555,6 +558,23 @@ def run_upscale_pipeline(
                         )
                         future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
 
+                        # Kiểm tra mốc hạn chót nếu bật --allow-partial
+                        if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
+                            logger.info(
+                                f"⏰ [ALLOW-PARTIAL DEADLINE] Đã chạm mốc hạn chót ({deadline_dt.strftime('%H:%M:%S')}). "
+                                f"Dừng sạch tại ranh giới phân đoạn {c_idx+1}/{total_segs}.",
+                                to_console=True
+                            )
+                            partial_paused = True
+                            if future_extract is not None:
+                                try:
+                                    res_ext = future_extract.result()
+                                    shutil.rmtree(res_ext.get("in_dir", ""), ignore_errors=True)
+                                except Exception:
+                                    pass
+                                future_extract = None
+                            break
+
                     # Sau khi hoàn tất toàn bộ loop: Chờ chunk cuối cùng mã hóa xong
                     if future_encode is not None:
                         prev_enc_elapsed = future_encode.result()
@@ -583,6 +603,15 @@ def run_upscale_pipeline(
                             steady_fps=last_ai_result.get("steady_fps"),
                             rss_mb=last_ai_result.get("peak_rss_mb")
                         )
+
+                    if partial_paused:
+                        logger.info(
+                            f"⏸️ [PARTIAL RUN PAUSED] Đã dừng sạch tại ranh giới phân đoạn {prev_c_idx+1}/{total_segs} theo --allow-partial. "
+                            f"Toàn bộ các phân đoạn up_*.mp4 đã được lưu trữ an toàn trong '{up_segs_dir}'. "
+                            f"Lần chạy kế tiếp (--resume) sẽ tự động tiếp tục từ phân đoạn {prev_c_idx+2} mà không cần chạy lại!",
+                            to_console=True
+                        )
+                        return up_segs_dir
 
             stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
             logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
@@ -650,6 +679,9 @@ def run_upscale_pipeline(
             # Ghi báo cáo kiểm định tập (audit.json)
             audit_file = os.path.splitext(output_path)[0] + ".audit.json"
             try:
+                from src.mux_audit import verify_mux_integrity
+                mux_res = verify_mux_integrity(input_path, output_path)
+
                 probe_final = probe_video(output_path)
                 probe_src = probe_video(input_path)
                 final_frames = probe_final.get("nb_frames")
@@ -659,6 +691,7 @@ def run_upscale_pipeline(
                 drift_s = abs(final_dur - src_dur)
 
                 audit_data = {
+                    "status": mux_res.get("status", "PASS"),
                     "source_file": os.path.abspath(input_path),
                     "output_file": os.path.abspath(output_path),
                     "model_id": model_info["id"],
@@ -674,20 +707,27 @@ def run_upscale_pipeline(
                     "duration_drift_seconds": round(drift_s, 4),
                     "av_drift_frames": round(drift_s * meta.get("fps", 23.976), 3),
                     "audio_tracks_count": probe_final.get("audio_count", 0),
-                    "subtitle_tracks_count": probe_final.get("sub_count", 0),
-                    "fonts_count": probe_final.get("attach_count", 0),
-                    "chapters_count": probe_final.get("chap_count", 0),
+                    "subtitle_tracks_count": probe_final.get("subtitle_count", 0),
+                    "fonts_count": probe_final.get("attachment_count", 0),
+                    "chapters_count": probe_final.get("chapter_count", 0),
                     "output_file_size_mb": round(final_size / (1024 * 1024), 2),
                     "total_processing_seconds": round(total_elapsed, 2),
                     "average_pipeline_fps": round(avg_fps, 2),
                     "ai_steady_fps": round(ai_fps, 2),
-                    "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "mux_audit": mux_res
                 }
                 with open(audit_file, "w", encoding="utf-8") as f:
                     json.dump(audit_data, f, indent=2, ensure_ascii=False)
-                logger.info(f"Đã xuất báo cáo kiểm định tập: {audit_file}", to_console=True)
+                logger.info(f"Đã xuất báo cáo kiểm định tập: {audit_file} (Mux Audit: {mux_res.get('status')})", to_console=True)
+
+                if mux_res.get("status") == "FAIL":
+                    logger.error(f"❌ MUX AUDIT THẤT BẠI: {mux_res.get('failure_reasons')}", to_console=True)
+                    raise RuntimeError(f"Mux audit container thất bại: {mux_res.get('failure_reasons')}")
             except Exception as e:
-                logger.warn(f"Không thể xuất audit.json: {e}")
+                logger.warn(f"Lỗi kiểm định audit.json: {e}")
+                if "Mux audit container thất bại" in str(e):
+                    raise
 
             # Gửi thông báo hệ thống macOS khi hoàn thành
             send_macos_notification(

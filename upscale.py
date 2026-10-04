@@ -32,8 +32,21 @@ from src.models_resolver import list_models_formatted
 from pathlib import Path
 
 
-def check_deadline_and_eta(video_path: str, deadline_str: str, last_measured_fps: float = 1.75) -> bool:
-    """Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline (A6)."""
+def check_deadline_and_eta(
+    video_path: str,
+    deadline_str: str,
+    fps_median: float = 1.66,
+    fps_p5: float = 1.62,
+    video_overhead: float = 360.0,
+    subtitles_overhead: float = 300.0,
+    eta_margin_pct: float = 0.07,
+    allow_partial: bool = False
+) -> Tuple[bool, bool, Optional[datetime]]:
+    """
+    Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
+    Quyết định dựa trên P5 (1.62 fps) + ~5m subtitles (300s) + 7% ETA margin.
+    Returns: (can_run, is_partial, deadline_dt)
+    """
     now = datetime.now()
     try:
         dh, dm = map(int, deadline_str.split(":"))
@@ -42,7 +55,7 @@ def check_deadline_and_eta(video_path: str, deadline_str: str, last_measured_fps
             deadline_dt += timedelta(days=1)
     except Exception as e:
         print(f"⚠️ Định dạng deadline không hợp lệ '{deadline_str}' (cần HH:MM): {e}")
-        return True
+        return True, False, None
 
     seconds_left = (deadline_dt - now).total_seconds()
 
@@ -54,6 +67,7 @@ def check_deadline_and_eta(video_path: str, deadline_str: str, last_measured_fps
         f"out/.temp_{base_name}/plan.json"
     ]
     n_unique = None
+    is_measured = False
     for p in candidate_plans:
         if os.path.exists(p):
             try:
@@ -61,32 +75,43 @@ def check_deadline_and_eta(video_path: str, deadline_str: str, last_measured_fps
                     pdata = json.load(f)
                     n_unique = pdata.get("total_kept_frames")
                     if n_unique:
+                        is_measured = True
                         break
             except Exception:
                 pass
 
     if n_unique is None:
-        # Ước lượng 40% của tổng số frames nếu chưa có plan.json
+        # Ước lượng ~39.14% của tổng số frames nếu chưa có plan.json
         try:
             meta = probe_video(video_path)
             total_f = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
-            n_unique = int(total_f * 0.40)
+            n_unique = int(total_f * 0.3914)
         except Exception:
-            n_unique = 13500
+            n_unique = 13300
 
-    # Tính toán ETA: n_unique / fps đo gần nhất + 300s overhead (A6)
-    fps_to_use = max(0.5, last_measured_fps)
-    eta_seconds = (n_unique / fps_to_use) + 300.0
+    total_overhead = video_overhead + subtitles_overhead
+    eta_p5 = (n_unique / max(0.5, fps_p5)) + total_overhead
+    decision_eta = eta_p5 * (1.0 + eta_margin_pct)
+    eta_med = (n_unique / max(0.5, fps_median)) + total_overhead
 
-    if eta_seconds > seconds_left:
-        print(f"\n⏰ [DEADLINE SKIP] Tập '{os.path.basename(video_path)}':")
-        print(f"   • Dự toán cần: {eta_seconds/60:.1f} phút ({eta_seconds/3600:.2f}h cho ~{n_unique} unique frames @ {fps_to_use:.2f} fps)")
-        print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
-        print(f"   -> Bỏ qua tập này để không bị dở dang ca qua đêm!\n")
-        return False
+    source_tag = "đo (plan.json)" if is_measured else "ước lượng"
 
-    print(f"⏳ [DEADLINE OK] Tập '{os.path.basename(video_path)}' cần ~{eta_seconds/60:.1f}m (@ {fps_to_use:.2f} fps), còn {seconds_left/60:.1f}m trước hạn chót {deadline_str}.")
-    return True
+    if decision_eta > seconds_left:
+        if allow_partial:
+            print(f"\n⏳ [ALLOW PARTIAL] Tập '{os.path.basename(video_path)}':")
+            print(f"   • Cần: ~{eta_med/60:.1f}m (kỳ vọng trung vị) | Quyết định hạn chót: {decision_eta/60:.1f}m (P5 1.62 fps + 5m subs + 7% margin) cho {n_unique} unique frames [{source_tag}]")
+            print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
+            print(f"   -> Chế độ --allow-partial đang BẬT: Sẽ chạy đến hạn chót {deadline_str}, dừng sạch ở ranh giới chunk và giữ segment!\n")
+            return True, True, deadline_dt
+        else:
+            print(f"\n⏰ [DEADLINE SKIP] Tập '{os.path.basename(video_path)}':")
+            print(f"   • Dự toán cần: {decision_eta/60:.1f} phút (P5 1.62 fps + 5m subs + 7% margin) cho ~{n_unique} unique frames [{source_tag}]")
+            print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
+            print(f"   -> Bỏ qua tập này để không bị dở dang ca qua đêm! (Dùng --allow-partial nếu muốn chạy một phần)\n")
+            return False, False, deadline_dt
+
+    print(f"⏳ [DEADLINE OK] Tập '{os.path.basename(video_path)}' ({n_unique} unique frames [{source_tag}]): Cần ~{eta_med/60:.1f}m (Quyết định P5+7%: {decision_eta/60:.1f}m), còn {seconds_left/60:.1f}m trước hạn chót {deadline_str}.")
+    return True, False, deadline_dt
 
 
 def parse_args():
@@ -96,9 +121,9 @@ def parse_args():
     )
     parser.add_argument(
         "input",
-        nargs="?",
-        default=None,
-        help="Đường dẫn đến file video nguồn (.mkv, .mp4, .webm)"
+        nargs="*",
+        default=[],
+        help="Đường dẫn đến một hoặc nhiều file video nguồn (.mkv, .mp4, .webm)"
     )
     parser.add_argument(
         "--queue",
@@ -111,6 +136,16 @@ def parse_args():
         default=None,
         metavar="HH:MM",
         help="Mốc hạn chót dừng hàng đợi (ví dụ: 07:00). Nếu tập tiếp theo dự kiến không kịp thì không bắt đầu."
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Nếu tập tiếp theo không kịp hạn chót --deadline, vẫn cho phép chạy đến hạn chót, dừng sạch ở ranh giới chunk, giữ các phân đoạn up_*.mp4 để tiếp tục lần sau."
+    )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help="Chế độ benchmark thuần túy: Bộ lập lịch và preflight nền từ chối chạy để tránh gây nhiễu tài nguyên hệ thống."
     )
     parser.add_argument(
         "-o", "--output",
@@ -191,6 +226,11 @@ def parse_args():
         help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng IINA"
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Chế độ chạy thử lập lịch (Dry Run): Quét preflight hàng đợi, tính toán ETA từng tập và xuất bảng quyết định theo --deadline mà không chạy GPU."
+    )
+    parser.add_argument(
         "--subs-after-upscale",
         action="store_true",
         default=True,
@@ -201,6 +241,19 @@ def parse_args():
         dest="subs_after_upscale",
         action="store_false",
         help="Tắt bước dịch phụ đề sau upscale"
+    )
+    parser.add_argument(
+        "--subs-only",
+        nargs="?",
+        const="__INPUT__",
+        default=None,
+        metavar="VIDEO",
+        help="Chỉ chạy riêng bước dịch phụ đề (subtrans) cho tập video chỉ định trong tiến trình riêng (không chạy AI upscale)"
+    )
+    parser.add_argument(
+        "--subs-upgrade",
+        action="store_true",
+        help="Dịch nâng cấp lại các câu thoại trước đó được dịch bằng Lite/Local bằng model chất lượng cao hơn khi còn hạn mức"
     )
 
     return parser.parse_args()
@@ -261,6 +314,58 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
 def main():
     args = parse_args()
 
+    # Xử lý cờ --subs-only (Chạy riêng phụ đề trong tiến trình con độc lập)
+    if args.subs_only:
+        target_subs_vid = args.input if args.subs_only == "__INPUT__" else args.subs_only
+        if not target_subs_vid:
+            print("❌ Lỗi: Cần cung cấp đường dẫn video khi dùng cờ --subs-only (ví dụ: ./upscale.py --subs-only <tập.mkv>)")
+            sys.exit(1)
+
+        print(f"\n{'='*75}")
+        print(f"📝 [SUBS-ONLY] BẮT ĐẦU DỊCH PHỤ ĐỀ ĐỘC LẬP CHO: {os.path.basename(target_subs_vid)}")
+        print(f"{'='*75}")
+        ja_sub, en_sub = find_or_extract_subtitles(target_subs_vid)
+        if not ja_sub:
+            print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
+            sys.exit(1)
+
+        print(f"   • File gốc JA: {ja_sub}")
+        if en_sub:
+            print(f"   • File tham chiếu EN: {en_sub}")
+
+        from subtrans.pipeline import TranslationPipeline
+        sub_out_dir = Path(args.output) if args.output and os.path.isdir(args.output) else Path(os.path.dirname(os.path.abspath(target_subs_vid)))
+        sub_pipeline = TranslationPipeline(
+            local_only=False,
+            output_dir=sub_out_dir,
+            output_format="srt",
+            require_approved_cast=False,
+            allow_latest_alias=False,
+        )
+        base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
+        res = sub_pipeline.run(
+            ja_path=Path(ja_sub),
+            en_path=Path(en_sub) if en_sub else None,
+            output_basename=f"{base_vid_name}_4K",
+            subs_upgrade=args.subs_upgrade,
+        )
+        srt_path = res.get('subtitle_path') or res.get('output_path')
+        print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
+
+        # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K
+        if srt_path and os.path.exists(srt_path):
+            from src.ffmpeg_ops import embed_subtitle_track
+            target_4k = os.path.join(sub_out_dir, f"{base_vid_name}_4K.mkv")
+            if os.path.exists(target_4k):
+                print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_4k)}...")
+                ok = embed_subtitle_track(target_4k, str(srt_path))
+                if ok:
+                    print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container 4K MKV!")
+                else:
+                    print("⚠️ Không thể nhúng phụ đề vào container 4K, file phụ đề ngoài vẫn sẵn sàng.")
+
+        sys.exit(0)
+
     # Kiểm tra cờ liệt kê mô hình (--list-models)
     if args.list_models:
         print(list_models_formatted())
@@ -270,15 +375,72 @@ def main():
     videos = []
     if args.queue:
         videos.extend(args.queue)
-    if args.input:
+    if isinstance(args.input, list):
+        videos.extend(args.input)
+    elif args.input:
         videos.append(args.input)
 
     if not videos:
         print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào hoặc dùng cờ --queue.")
         sys.exit(1)
 
-    print(f"🎬 Hàng đợi xử lý gồm {len(videos)} tập video.")
-    last_measured_fps = 1.75 if args.engine == "mps" else 1.35
+    fps_median = 1.66 if args.engine == "mps" else 1.35
+    fps_p5 = 1.62 if args.engine == "mps" else 1.25
+    video_overhead = 360.0
+    subtitles_overhead = 300.0
+
+    if args.benchmark_mode:
+        os.environ["BENCHMARK_MODE"] = "1"
+        print("\n⚡ [BENCHMARK MODE] Đã kích hoạt chế độ benchmark thuần túy: Bộ lập lịch và preflight nền từ chối chạy để bảo toàn môi trường đo đạc!")
+
+    # 1. Chế độ Dry Run (--dry-run): Preflight toàn bộ hàng đợi và in bảng quyết định, không chạy GPU
+    if args.dry_run:
+        from src.scheduler import compute_overnight_schedule, format_schedule_decision_table
+        print(f"\n🔍 [DRY RUN] BẮT ĐẦU KIỂM TRA LẬP LỊCH CHO {len(videos)} TẬP TRONG HÀNG ĐỢI...")
+        sched = compute_overnight_schedule(
+            queue=videos,
+            deadline_str=args.deadline,
+            fps_median=fps_median,
+            fps_p5=fps_p5,
+            video_overhead_seconds=video_overhead,
+            subtitles_overhead_seconds=subtitles_overhead,
+            allow_partial=args.allow_partial,
+            output_dir=args.output,
+            segment_seconds=args.segment,
+            preflight_now=True
+        )
+        print(format_schedule_decision_table(sched))
+        sys.exit(0)
+
+    # 2. Phiên chạy thật: Lập lịch và in bảng quyết định ngay đầu phiên (nếu không ở benchmark mode)
+    if not args.benchmark_mode:
+        from src.scheduler import compute_overnight_schedule, format_schedule_decision_table, BackgroundQueuePreflightManager
+        sched = compute_overnight_schedule(
+            queue=videos,
+            deadline_str=args.deadline,
+            fps_median=fps_median,
+            fps_p5=fps_p5,
+            video_overhead_seconds=video_overhead,
+            subtitles_overhead_seconds=subtitles_overhead,
+            allow_partial=args.allow_partial,
+            output_dir=args.output,
+            segment_seconds=args.segment,
+            preflight_now=False
+        )
+        print(format_schedule_decision_table(sched))
+
+        # Kích hoạt preflight nền cho toàn bộ các tập tiếp theo trong hàng đợi (nice -n 10)
+        bg_preflight = None
+        if len(videos) > 1 and not args.no_dedup:
+            bg_preflight = BackgroundQueuePreflightManager(
+                queue=videos,
+                output_dir=args.output,
+                segment_seconds=args.segment,
+                skip_first=True,
+                benchmark_mode=args.benchmark_mode
+            )
+            bg_preflight.start()
+
     completed_videos = []
 
     for idx, vid in enumerate(videos):
@@ -287,19 +449,21 @@ def main():
         print(f"{'='*75}")
 
         # Kiểm tra deadline nếu có (A6)
+        deadline_dt = None
         if args.deadline:
-            can_finish = check_deadline_and_eta(vid, args.deadline, last_measured_fps)
+            can_finish, is_partial, deadline_dt = check_deadline_and_eta(
+                vid,
+                args.deadline,
+                fps_median=fps_median,
+                fps_p5=fps_p5,
+                video_overhead=video_overhead,
+                subtitles_overhead=subtitles_overhead,
+                eta_margin_pct=0.07,
+                allow_partial=args.allow_partial
+            )
             if not can_finish:
                 print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
                 break
-
-        # Kích hoạt preflight nền cho tập tiếp theo nếu có (nice -n 10) (A6)
-        if idx + 1 < len(videos) and not args.no_dedup:
-            spawn_background_preflight(
-                video_path=videos[idx + 1],
-                output_dir=args.output,
-                segment_seconds=args.segment
-            )
 
         try:
             out_file = run_upscale_pipeline(
@@ -316,19 +480,21 @@ def main():
                 resume=not args.no_resume,
                 caffeinate=not args.no_caffeinate,
                 preview_seconds=args.preview,
-                dedup=not args.no_dedup
+                dedup=not args.no_dedup,
+                allow_partial=args.allow_partial,
+                deadline_dt=deadline_dt
             )
             completed_videos.append((vid, out_file))
 
-            # Cập nhật last_measured_fps từ audit.json nếu có
-            audit_path = os.path.splitext(out_file)[0] + ".audit.json"
-            if os.path.exists(audit_path):
+            # Cập nhật fps từ audit.json nếu có
+            audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
+            if audit_path and os.path.exists(audit_path):
                 try:
                     with open(audit_path, "r", encoding="utf-8") as f:
                         adata = json.load(f)
                     measured_fps = adata.get("ai_steady_fps")
                     if measured_fps and measured_fps > 0:
-                        last_measured_fps = float(measured_fps)
+                        fps_median = float(measured_fps)
                 except Exception:
                     pass
 
@@ -347,40 +513,36 @@ def main():
 
     # -------------------------------------------------------------------------
     # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY SAU KHI CẢ HÀNG ĐỢI UPSCALE XONG - B1, B3)
+    # CHẠY TRONG TIẾN TRÌNH CON ĐỘC LẬP (SUBPROCESS), KHÔNG CHẶN HAY HỎNG VIDEO 4K
     # -------------------------------------------------------------------------
     if args.subs_after_upscale and completed_videos:
         print(f"\n{'='*75}")
-        print("📝 [STAGE B] BẮT ĐẦU DỊCH PHỤ ĐỀ CHO CÁC TẬP ĐÃ HOÀN TẤT UPSCALE")
+        print("📝 [STAGE B] BẮT ĐẦU DỊCH PHỤ ĐỀ TRONG TIẾN TRÌNH CON ĐỘC LẬP (SAU KHI CẢ HÀNG ĐỢI XONG)")
         print(f"{'='*75}")
-        from subtrans.pipeline import TranslationPipeline
 
+        sub_timeout = 1560  # Watchdog 25 phút + 60s buffer
         for src_vid, out_vid in completed_videos:
-            ja_sub, en_sub = find_or_extract_subtitles(src_vid)
-            if not ja_sub:
-                print(f"ℹ️ Không tìm thấy phụ đề tiếng Nhật cho '{os.path.basename(src_vid)}', bỏ qua bước dịch phụ đề.")
-                continue
-
-            print(f"\n🌐 Bắt đầu dịch phụ đề cho tập: {os.path.basename(src_vid)}")
-            print(f"   • File gốc JA: {ja_sub}")
-            if en_sub:
-                print(f"   • File tham chiếu EN: {en_sub}")
-
+            sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
+            sub_cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--subs-only",
+                src_vid,
+                "-o", sub_out_dir,
+            ]
+            if args.subs_upgrade:
+                sub_cmd.append("--subs-upgrade")
+            print(f"\n🚀 Khởi chạy tiến trình con dịch phụ đề cho tập '{os.path.basename(src_vid)}'...")
             try:
-                sub_out_dir = Path(os.path.dirname(out_vid))
-                sub_pipeline = TranslationPipeline(
-                    local_only=False,
-                    output_dir=sub_out_dir,
-                    output_format="srt",
-                    require_approved_cast=False,
-                    allow_latest_alias=False
-                )
-                sub_pipeline.run(
-                    ja_path=Path(ja_sub),
-                    en_path=Path(en_sub) if en_sub else None
-                )
-                print(f"✅ Hoàn tất dịch phụ đề cho tập '{os.path.basename(src_vid)}'.")
+                proc = subprocess.run(sub_cmd, timeout=sub_timeout, check=False)
+                if proc.returncode == 0:
+                    print(f"✅ Tiến trình con phụ đề hoàn tất thành công cho '{os.path.basename(src_vid)}'.")
+                else:
+                    print(f"⚠️ Tiến trình con phụ đề thoát với mã lỗi {proc.returncode}. Video 4K và audit.json vẫn được bảo toàn nguyên vẹn!")
+            except subprocess.TimeoutExpired:
+                print(f"⏱️ Tiến trình con phụ đề vượt quá thời gian tối đa ({sub_timeout}s) và đã bị ngắt an toàn. Video 4K không bị ảnh hưởng!")
             except Exception as se:
-                print(f"⚠️ Lỗi trong quá trình dịch phụ đề tập '{os.path.basename(src_vid)}': {se}")
+                print(f"⚠️ Lỗi khởi chạy tiến trình con phụ đề: {se}")
 
     print("\n🎉 Toàn bộ công việc trong hàng đợi đã hoàn tất thành công!")
 

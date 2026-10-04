@@ -46,9 +46,15 @@ def check():
         masked_key = f"{api_key[:6]}...{api_key[-4:]}"
         try:
             from google import genai
-            client = genai.Client(api_key=api_key)
-            # Simple ping
-            _ = list(client.models.list(config={"page_size": 5}))
+            from subtrans.cache import execute_and_log_api_request
+            # Simple ping logged via unified wrapper
+            _ = execute_and_log_api_request(
+                lambda: list(client.models.list(config={"page_size": 5})),
+                model="gemini-3.8-flash",
+                backend="gemini",
+                cues_count=0,
+                request_type="ping_check"
+            )
             table.add_row("Gemini API", "[green]READY[/green]", f"Key active ({masked_key})")
         except Exception as e:
             table.add_row("Gemini API", "[yellow]KEY ERROR[/yellow]", f"Invalid key or network failure: {e}")
@@ -174,13 +180,15 @@ def run(
     gloss_skill_names: bool = typer.Option(False, "--gloss-skill-names", help="Append English skill/attack name in parentheses"),
     require_approved_cast: bool = typer.Option(False, "--require-approved-cast", help="Pause to inspect Stage A cast sheet before continuing"),
     review_file: bool = typer.Option(False, "--review-file", help="Generate out/<name>.review.srt containing uncertain lines"),
+    batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
     cfg = load_config()
 
     # Privacy check
-    if not local_only and not yes:
+    if not local_only and not yes and not dry_run:
         consent_given = cfg.get("privacy", {}).get("consent_given", False)
         if not consent_given:
             console.print("\n[bold yellow]⚠️  Privacy Notice[/bold yellow]")
@@ -204,6 +212,8 @@ def run(
         gloss_skill_names=gloss_skill_names,
         require_approved_cast=require_approved_cast,
         review_file=review_file,
+        dry_run=dry_run,
+        batch_size=batch_size,
     )
 
     try:
@@ -259,6 +269,8 @@ def batch(
     out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Glossary file"),
     local_only: bool = typer.Option(False, "--local", "-l", help="Force local mode"),
+    batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm mà không gọi API"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto confirm consent"),
 ):
     """Batch translates all Japanese subtitle files in a directory."""
@@ -279,6 +291,8 @@ def batch(
         pipeline = TranslationPipeline(
             local_only=local_only,
             output_dir=out_dir,
+            dry_run=dry_run,
+            batch_size=batch_size,
         )
         pipeline.run(ja_path=f, en_path=en_f, glossary_path=glossary)
 

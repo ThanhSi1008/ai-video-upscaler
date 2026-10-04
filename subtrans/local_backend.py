@@ -53,10 +53,15 @@ class OllamaTranslator(BaseTranslator):
     def is_upscale_running(self) -> bool:
         """Kiểm tra có tiến trình upscale nào đang chạy trên GPU Metal hay không (B3)."""
         import psutil
-        for p in psutil.process_iter(["name", "cmdline"]):
+        curr_pid = os.getpid()
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
+                if p.info["pid"] == curr_pid:
+                    continue
                 cmdline = " ".join(p.info["cmdline"] or [])
-                if "upscale.py" in cmdline and p.pid != os.getpid():
+                if "upscale.py" in cmdline and "--subs-only" not in cmdline:
+                    return True
+                if "realesr-animevideov3" in cmdline:
                     return True
             except Exception:
                 pass

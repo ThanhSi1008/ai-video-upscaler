@@ -21,6 +21,7 @@ from google.genai import types
 from subtrans.models import Cue, Glossary
 from subtrans.translator import BaseTranslator
 from subtrans.validation import validate_translations
+from subtrans.cache import execute_and_log_api_request
 
 logger = logging.getLogger("subtrans.gemini")
 
@@ -148,15 +149,31 @@ class GeminiTranslator(BaseTranslator):
         temperature: float = 0.0,
         gloss_skill_names: bool = False,
         allow_latest_alias: bool = False,
+        timeout_ms: int = 45000,
+        http_options: Optional[types.HttpOptions] = None,
+        dry_run: bool = False,
     ):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if not self.api_key:
+        if not self.api_key and not dry_run:
             raise ValueError("GEMINI_API_KEY is required for GeminiTranslator.")
-        self.client = genai.Client(api_key=self.api_key)
+        self.timeout_ms = timeout_ms
+        self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
+        if self.api_key:
+            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+        else:
+            self.client = None
         self.model = model
         self.temperature = temperature
         self.gloss_skill_names = gloss_skill_names
         self.allow_latest_alias = allow_latest_alias
+        self.dry_run = dry_run
+
+        # Batch & request statistics
+        self.stats = {
+            "total_batches": 0,
+            "split_batches": 0,
+            "api_requests": 0,
+        }
 
         # Protection against mutable alias 'gemini-flash-latest' per ADDENDUM 8
         if "latest" in self.model.lower() and not self.allow_latest_alias:
@@ -167,20 +184,33 @@ class GeminiTranslator(BaseTranslator):
 
     def _call_api(self, prompt_text: str, system_prompt: str = SYSTEM_INSTRUCTION) -> List[Dict[str, Any]]:
         """Invokes Gemini API requesting structured JSON array with minimal thinking overhead."""
+        if self.dry_run:
+            return []
+
         config_kwargs = {
             "system_instruction": system_prompt,
             "response_mime_type": "application/json",
             "response_schema": list[SubtitleOutputItem],
             "temperature": self.temperature,
+            "http_options": self.http_options,
         }
         thinking_cfg = get_thinking_config(self.model)
         if thinking_cfg:
             config_kwargs["thinking_config"] = thinking_cfg
 
-        response = self.client.models.generate_content(
+        def _send():
+            return self.client.models.generate_content(
+                model=self.model,
+                contents=prompt_text,
+                config=types.GenerateContentConfig(**config_kwargs)
+            )
+
+        response = execute_and_log_api_request(
+            _send,
             model=self.model,
-            contents=prompt_text,
-            config=types.GenerateContentConfig(**config_kwargs)
+            backend="gemini",
+            cues_count=0,
+            request_type="translation"
         )
         raw_text = response.text.strip()
         data = json.loads(raw_text)
@@ -192,9 +222,18 @@ class GeminiTranslator(BaseTranslator):
         context: List[Cue],
         glossary: Optional[Glossary] = None
     ) -> List[str]:
-        """Translates batch of cues with retries and recursive halving on validation failure."""
+        """Translates batch of cues (100–150 cues) with immediate bisecting (split in half) on cue/ID mismatch."""
         if not cues:
             return []
+
+        self.stats["total_batches"] += 1
+
+        # Chế độ Dry-Run: Không bao giờ gọi Gemini API (bảo toàn 100% quota đêm)
+        if self.dry_run:
+            self.stats["api_requests"] += 1
+            for c in cues:
+                c.uncertain = False
+            return [f"[DRY-RUN VI] {c.en or c.ja}" for c in cues]
 
         expected_ids = [c.id for c in cues]
         payload = {
@@ -234,41 +273,45 @@ class GeminiTranslator(BaseTranslator):
         if glossary and glossary.style_rules:
             system_prompt = "\n".join(glossary.style_rules) + "\nOutput must be a valid JSON array matching the provided schema."
 
-        # Attempt 1: Standard call
+        # Attempt 1: Call API
         try:
+            self.stats["api_requests"] += 1
             items = self._call_api(prompt_str, system_prompt=system_prompt)
             is_valid, err_msg = validate_translations(expected_ids, items)
             if is_valid:
                 for c, it in zip(cues, items):
                     c.uncertain = bool(it.get("uncertain", False))
                 return [it["vi"] for it in items]
-            logger.warning(f"Validation failed on attempt 1 ({err_msg}). Retrying with stricter reminder...")
+            logger.warning(f"Batch validation failed on attempt 1 ({err_msg}).")
         except Exception as e:
-            logger.warning(f"API call failed on attempt 1 ({e}). Retrying...")
+            err_str = str(e).lower()
+            if any(k in err_str for k in ["503", "429", "timeout", "timed out", "quota", "resource_exhausted", "unavailable", "500", "502", "504", "deadline"]):
+                raise
+            logger.warning(f"API call failed on attempt 1 ({e}).")
 
-        # Attempt 2: Stricter retry
-        strict_prompt = (
-            "CRITICAL: Your previous response failed validation. "
-            "You MUST output exactly one JSON item for each input cue ID in numerical order. "
-            "No empty strings, no leftover Japanese characters.\n"
-            + prompt_str
-        )
-        try:
-            items = self._call_api(strict_prompt, system_prompt=system_prompt)
-            is_valid, err_msg = validate_translations(expected_ids, items)
-            if is_valid:
-                for c, it in zip(cues, items):
-                    c.uncertain = bool(it.get("uncertain", False))
-                return [it["vi"] for it in items]
-            logger.warning(f"Validation failed on attempt 2 ({err_msg}). Splitting batch in half...")
-        except Exception as e:
-            logger.warning(f"API call failed on attempt 2 ({e}). Splitting batch in half...")
-
-        # Attempt 3: Split batch in half and translate recursively
+        # Tách đôi batch (Bisect): Khi số lượng cue > 1 và có lỗi validation hoặc API lỗi cục bộ
         if len(cues) > 1:
+            self.stats["split_batches"] += 1
             mid = len(cues) // 2
+            logger.warning(
+                f"🔀 Tách đôi batch ({len(cues)} cues -> {mid} + {len(cues)-mid} cues) để đảm bảo độ tin cậy và khớp ID..."
+            )
             left_half = self.translate_batch(cues[:mid], context, glossary)
             right_half = self.translate_batch(cues[mid:], context, glossary)
             return left_half + right_half
+
+        # Nếu chỉ có 1 cue duy nhất mà thất bại, thử lại lần cuối với prompt nghiêm ngặt
+        strict_prompt = (
+            "CRITICAL: Output exactly one JSON item for the given cue ID. "
+            "No empty strings, no leftover Japanese characters.\n"
+            + prompt_str
+        )
+        self.stats["api_requests"] += 1
+        items = self._call_api(strict_prompt, system_prompt=system_prompt)
+        is_valid, err_msg = validate_translations(expected_ids, items)
+        if is_valid:
+            for c, it in zip(cues, items):
+                c.uncertain = bool(it.get("uncertain", False))
+            return [it["vi"] for it in items]
 
         raise RuntimeError(f"Failed to translate cue ID {cues[0].id} with Gemini backend after retries and split.")

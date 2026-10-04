@@ -216,6 +216,65 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
 * **Giai Đoạn Phụ Đề Chạy Sau Upscale (Stage B):**
   - Cờ `--subs-after-upscale` (mặc định Bật): Toàn bộ hàng đợi upscale hoàn tất mới chuyển sang stage subtitle.
   - Kiểm tra an toàn bộ nhớ B3: `is_upscale_running()` từ chối nạp Ollama nếu phát hiện tiến trình upscale đang chạy; tự động gọi `keep_alive: 0` và xác minh `ollama ps` rỗng sau khi hoàn thành.
+* **Nghiệm Thu Toàn Diện Đợt 3 (Mux Audit Tự Động, Quota Gemini PT & Tinh Chỉnh SSD):**
+  - **Kiểm Tra Mux Tự Động Nhẹ Trong `audit.json` (`src/mux_audit.py`):** Mỗi file MKV sau khi mux bắt buộc vượt qua 4 tiêu chuẩn kỹ thuật trong < 2 giây: (1) Đan xen gói tin 10s (Window Interleaving) trên 11 cửa sổ trải đều; (2) Seek test 7 mốc bằng `volumedetect`, lệch $\le 0.5$ dB (thực tế 0.00 dB); (3) MD5 luồng audio gốc trùng khớp từng bit (`1c943b02a84fa0b9bd5b7fb13dacbd15`); (4) Số stream, font chữ đính kèm (18 font TTF) và chapters trùng khớp nguyên bản. Nếu fail $\rightarrow$ `audit.json` ghi status `FAIL` và raise `RuntimeError` không báo hoàn tất. Test hồi quy `tests/test_mux_audit_regression.py` đạt PASS (bắt được file lỗi audio dồn khối).
+  - **Định Lượng Quota Gemini Theo Giờ Thái Bình Dương (PT / UTC-7):**
+    - Áp dụng hạn mức do người dùng cung cấp từ AI Studio rate-limit: `gemini-3.8-flash`, `3.7-flash`, `3.6-flash`, `3.5-flash` = **20 RPD**; `gemini-3.5-flash-lite`, `3.1-flash-lite` = **500 RPD**; Local (Ollama) = Unlimited.
+    - Toàn bộ thông số RPM và TPM ghi rõ "chưa biết (cần đo)" hoặc "chưa xác minh" theo yêu cầu, loại bỏ triệt để các số 1.500 RPD và 15 RPM không rõ nguồn gốc.
+    - Phân loại lỗi 429: Nếu `quotaId` chứa `PerDay` $\to$ chuyển sang model kế tiếp ngay lập tức, không sleep/pause; nếu `PerMinute` $\to$ chờ theo `retryDelay`.
+    - Bộ đếm request theo ngày Thái Bình Dương (PT) dùng chuẩn `zoneinfo.ZoneInfo("America/Los_Angeles")`, triệt tiêu hoàn toàn logic trừ 7 giờ thủ công.
+    - Mọi request (kể cả ping check, cast sheet discovery, batch translation) bắt buộc đi qua hàm bọc duy nhất `execute_and_log_api_request()` để ghi nhận vào SQLite `api_requests`.
+    - Nguyên nhân `gemini-3.7-flash` không có cue ở tập 14: model liên tục trả về `503 UNAVAILABLE (High demand spike)` nên pipeline tự động chuyển sang `3.6-flash` và `3.5-flash-lite`.
+  - **Củng Cố Quy Chuẩn Phụ Đề:** File phụ đề luôn được đặt tên đồng bộ `<tên file 4K không đuôi>.vi.srt` cùng thư mục với video 4K, không bị ghi đè khi chạy hàng đợi; SQLite cache cấm lưu chuỗi `[Chưa dịch]` để `--subs-only` luôn cố gắng dịch lại; bổ sung tùy chọn `--subs-upgrade` dịch nâng cấp các câu Lite/Local bằng model cao hơn khi còn quota.
+  - **Giả Thuyết Về Hiện Tượng Sụt Tốc (A4) & Thực Nghiệm Bác Bỏ:**
+    - *Giả thuyết cũ:* Cho rằng hiện tượng tụt fps ở frames 101–400 (xuống 1.45–1.55 fps) trong bài test soak trước do macOS thu hồi bộ nhớ Metal (RSS giảm từ 173.8 MB xuống 41.4 MB).
+    - *Thực nghiệm kiểm chứng độc lập (`tests/run_mps_soak_600.py`):* Chạy lại soak 600 frames trên PyTorch MPS FP16 trong môi trường biệt lập (bật `--benchmark-mode`, không có tác vụ nào khác chạy đồng thời). Kết quả đo lường thực tế:
+      - Batch 1 (1–100): 1.866 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - Batch 2 (101–200): 1.871 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - Batch 3 (201–300): 1.872 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - Batch 4 (301–400): 1.870 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - Batch 5 (401–500): 1.870 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - Batch 6 (501–600): 1.868 fps | RSS: 338.66 MB | MPS Alloc: 61.19 MB
+      - **Tổng kết 600 frames:** Thời gian 320.94s, Overall 1.870 fps, Median 1.870 fps, P5 1.867 fps, Min 1.866 fps, Max 1.872 fps.
+      $\rightarrow$ Hiện tượng sụt tốc hoàn toàn không tái hiện. Bộ nhớ MPS và RSS phẳng tuyệt đối. Khẳng định hiện tượng sụt tốc trước đó chỉ là giả thuyết chưa đủ căn cứ; nguyên nhân thực tế là do tải ngoại lai (các tiến trình chạy nền đồng thời).
+    - *Đo đạc AnimeJaNai:* Tách biệt 17 batch sạch (frames 1–1.700) đạt Trung vị **1.728 fps**, P5 **1.689 fps**, P95 **1.766 fps**, Mean **1.729 fps**, Min **1.689 fps**, Max **1.768 fps**. Báo cáo riêng 3 batch bẩn (batches 18–20, frames 1.701–2.000) bị ảnh hưởng bởi tiến trình nền quét preflight: Trung vị **1.474 fps**, P5 **1.459 fps**, Mean **1.471 fps**, Min **1.457 fps**, Max **1.482 fps**.
+    - *Bổ sung cờ `--benchmark-mode`:* Khi bật, Scheduler và Preflight nền tự động từ chối chạy để bảo vệ môi trường đo lường thuần túy.
+  - **Đo Đạc Độ Trễ Preflight Chạy Nền (`tests/measure_background_preflight_latency.py`):**
+    - Đo trên 4 chunks (24s video `samples/sample_3min.mkv`):
+      - Khi KHÔNG có preflight nền: Chunk 1: 1.540 fps, Chunk 2: 1.620 fps, Chunk 3: 1.630 fps, Chunk 4: 1.600 fps. Tổng wall-time: 391.84s.
+      - Khi CÓ preflight nền (`nice -n 10 mpdecimate` quét full tập 14): Chunk 1: 1.560 fps, Chunk 2: 1.600 fps, Chunk 3: 1.610 fps, Chunk 4: 1.600 fps. Tổng wall-time: 396.42s.
+      - Overhead: Chỉ +4.58s (+1.17%) cho 24s video; độ biến thiên FPS chỉ $\pm 0.020$ fps (~1.2%).
+  - **Kiểm Kê Dung Lượng SSD & Phân Tích Máy Rảnh:**
+    - *Đo lường máy rảnh:* Qua lệnh `iostat -Id disk0` trong 20 phút ngay sau khi tập 14 hoàn tất (01:42:32 đến 02:01:33), tốc độ ghi nền của hệ điều hành macOS (daemons `mds`, `mds_stores`, `logd`, APFS snapshots) đạt **290.07 MB/phút (~17.00 GB/giờ)**.
+    - *Kiểm kê file pipeline ghi trên SSD:*
+      - Dung lượng lưu trữ lâu dài: **1.862,59 MB (~1.82 GB)** gồm MKV 4K (1.861,13 MB), phụ đề `.vi.srt` (0.03 MB), `audit.json` (2.7 KB), `plan.json` (1.07 MB), cache SQLite `translations.db` (0.21 MB), logs (0.15 MB).
+      - Đỉnh file tạm thời trong quá trình chạy: ~7.12 GB (178 source segments 1.41 GB + 178 upscaled segments 1.81 GB + intermediate merged MKV 1.81 GB + final mux 1.82 GB + temp audio WAV 0.27 GB). Toàn bộ frame PNG trung gian (~147.9 GB) được sinh và giải phóng trên RAM Disk ảo.
+      - *Phân tích sai lệch:* Delta ghi disk0 đo được là 40.12 GB trong 2.72 giờ chạy tập 14. Trong đó nền macOS ước tính chiếm ~46.24 GB (theo baseline 17 GB/h). Bỏ hoàn toàn các khẳng định "khớp 100%"; các phần sai số giữa mức đo và hoạt động nội tại của hệ thống tập tin APFS được ghi nhận là "chưa giải thích".
+  - **Bộ Lập Lịch Hàng Đợi Qua Đêm & Quyết Định Deadline (`src/scheduler.py`):**
+    - Sử dụng tốc độ AI đo đạc từ pipeline thực tế: Trung vị **1.66 fps**, P5 **1.62 fps** (lấy từ `audit.json` tập 14 C1), loại bỏ giả định 1.75 fps.
+    - Tổng overhead: 660s (~11.0 phút: 360s video decode/encode/mux + 300s stage phụ đề và audit).
+    - Quyết định deadline dựa trên P5 + overhead 660s + biên an toàn 7% ETA ($\text{decision\_eta} = (\text{n\_unique} / 1.62 + 660) \times 1.07$).
+    - Bảng lập lịch hiển thị rõ ràng cột `Nguồn n_unique` ("đo (plan.json)" vs "ước lượng") cho từng tập.
+    - Bổ sung cờ `--allow-partial`: Cho phép tập không kịp hạn chót chạy đến thời điểm deadline, dừng sạch sẽ tại ranh giới chunk, giữ lại các segment đã xử lý và tiếp tục chạy tiếp qua Checkpoint Resume ở phiên sau.
+* **Nghiệm Thu Kiến Trúc Hạn Mức Gemini API & Tối Ưu Hóa Số Lượng Request (`subtrans/`):**
+  - **Cấu hình `subtrans/models.yaml` (Single Source of Truth):**
+    - Mặc định tạm do người dùng cung cấp: RPD cho `gemini-3.8-flash`, `3.7-flash`, `3.6-flash`, `3.5-flash` = **20 RPD**; `gemini-3.5-flash-lite`, `3.1-flash-lite` = **500 RPD**; `translategemma:12b` (local) = Unlimited.
+    - Chuỗi ưu tiên nghiêm ngặt (tuyệt đối KHÔNG chứa model preview): `gemini-3.8-flash` $\to$ `3.7-flash` $\to$ `3.6-flash` $\to$ `3.5-flash` $\to$ `3.5-flash-lite` $\to$ `local`.
+  - **Phân Loại Lỗi 429 Theo Trường Chi Tiết (`quotaId`, `quotaValue`, `retryDelay`):**
+    - Nếu `quotaId` chứa `PerDay` $\to$ Đánh dấu model cạn hạn mức đến 00:00 giờ Thái Bình Dương (PT, 14:00 giờ VN trước 1/11, 15:00 giờ VN sau 1/11), tự động cập nhật `quotaValue` vào `models.yaml`, lưu trạng thái khóa vào bảng SQLite `model_exhaustion`, và **CHUYỂN MODEL KẾ TIẾP NGAY LẬP TỨC** (không sleep, không pause, không retry).
+    - Nếu `quotaId` chứa `PerMinute` $\to$ Chờ đúng `retryDelay` (từ `RetryInfo`) rồi thử lại trên cùng model.
+  - **Bộ Đếm Request Theo Ngày Thái Bình Dương Trong SQLite (`api_requests`):**
+    - Tính toán mốc reset chính xác bằng `zoneinfo.ZoneInfo("America/Los_Angeles")`, tự động thích ứng với Daylight Saving Time.
+    - Hiển thị bảng hạn mức và cảnh báo trực tiếp trong `audit.md` mỗi tập và trong bảng kế hoạch của `scheduler.py`.
+  - **Tối Thiểu Hóa Số Request (Mục tiêu $\le 5$ requests/tập):**
+    - Kích thước batch mở rộng lên **100–150 cues** (mặc định: 100 cues). Tập anime ~300 dialogue cues chỉ tốn đúng 3 batch requests.
+    - Kiểm tra tính toàn vẹn (cue count & ID alignment): Nếu sai lệch số lượng hoặc thứ tự ID, cơ chế **Bisect** tự động tách đôi batch ($N \to N/2 + N/2$) và theo dõi `split_rate_pct`.
+    - **Series Cast Sheet (`<series>.cast.yaml`):** Lưu trữ nhân vật theo tên bộ phim (tự động tách bằng regex bỏ release group/số tập). Các tập tiếp theo tự động kiểm tra delta nhân vật; nếu không có nhân vật mới $\to$ Tái sử dụng trực tiếp với **0 request API**, đưa tổng request mỗi tập về mức lý tưởng 3 requests.
+  - **Bảo Vệ Hạn Mức Qua Đêm & Cờ `--dry-run`:**
+    - Tuyệt đối cấm chạy dịch thử nghiệm gọi API thật trong khoảng từ 14:00 đến đêm chạy.
+    - Cờ `--dry-run` trên CLI và Pipeline mô phỏng toàn bộ logic dịch, parse, kiểm tra ID, tách batch và xuất file mà không tốn bất kỳ lượt gọi API nào.
+  - **Báo Cáo Minh Bạch 3 Lớp:** Mọi số liệu trong `audit.md` và console bắt buộc phân loại rõ ràng: **SỐ ĐO (MEASURED)** (log SQLite, `quotaValue` lỗi), **ƯỚC LƯỢNG (ESTIMATED)** (dự toán ETA/requests theo công thức), **CHƯA XÁC MINH (UNVERIFIED)** (hạn mức tạm thời chờ trang AI Studio rate-limit).
+
 
 
 

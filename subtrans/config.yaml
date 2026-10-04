@@ -6,20 +6,32 @@ gemini:
   fallback_models:
     - "gemini-3.7-flash"
     - "gemini-3.6-flash"
+    - "gemini-3.5-flash"
     - "gemini-3.5-flash-lite"
   lite_model: "gemini-3.5-flash-lite"
-  max_rpm: 5  # Free Tier limit per model
-  max_rpd: 1500
+  max_rpm: "chưa biết (cần đo)"  # RPM chưa biết, cần đo thực tế
+  max_rpd: 20  # Số người dùng cung cấp từ AI Studio rate-limit
+  model_rpd_limits:
+    gemini-3.8-flash: 20       # 20 RPD (người dùng cung cấp từ AI Studio)
+    gemini-3.7-flash: 20       # 20 RPD (người dùng cung cấp từ AI Studio)
+    gemini-3.6-flash: 20       # 20 RPD (người dùng cung cấp từ AI Studio)
+    gemini-3.5-flash: 20       # 20 RPD (người dùng cung cấp từ AI Studio)
+    gemini-3.5-flash-lite: 500 # 500 RPD (người dùng cung cấp từ AI Studio)
+    gemini-3.1-flash-lite: 500 # 500 RPD (người dùng cung cấp từ AI Studio)
+  request_timeout_ms: 45000  # Timeout per request in MILLISECONDS (45s) per google.genai types.HttpOptions
 
 ollama:
   endpoint: "http://localhost:11434"
   model: "translategemma:12b"
   review_model: "gemma3:12b"
   num_ctx: 4096
+  request_timeout: 60  # Timeout per request in SECONDS for requests.post (60s)
 
 translation:
-  batch_size: 50
+  batch_size: 100            # Cấu hình được từ 100–150 cue
   local_batch_size: 20
+  stage_watchdog_seconds: 1500  # Watchdog timeout for whole stage (25 mins per episode)
+  max_retries_per_model: 3
   skip_styles: "(?i)(op|ed|sign|song|karaoke|title|credit)"
   en_overlap_threshold: 0.5
   en_match_warning_pct: 0.8

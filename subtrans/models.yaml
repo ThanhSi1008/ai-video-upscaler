@@ -1,0 +1,64 @@
+models:
+  gemini-3.8-flash:
+    tier: free_tier
+    rpd: 20
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active
+  gemini-3.7-flash:
+    tier: free_tier
+    rpd: 20
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active_with_spikes
+    note: Thường xuyên gặp 503 UNAVAILABLE (high demand spike)
+  gemini-3.6-flash:
+    tier: free_tier
+    rpd: 20
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active
+  gemini-3.5-flash:
+    tier: free_tier
+    rpd: 20
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active
+  gemini-3.5-flash-lite:
+    tier: free_tier
+    rpd: 500
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active
+  gemini-3.1-flash-lite:
+    tier: free_tier
+    rpd: 500
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: người dùng cung cấp từ AI Studio rate-limit
+    status: active
+  translategemma:12b:
+    tier: local_ollama
+    rpd: unlimited
+    rpm: unlimited
+    tpm: unlimited
+    rpd_source: mô hình cục bộ
+    status: active
+  unit-test-model:
+    tier: test
+    rpd: 20
+    rpm: chưa biết (cần đo)
+    tpm: chưa xác minh
+    rpd_source: đọc từ lỗi 429 (GenerateContentRequestsPerDayPerProjectPerModel) (GenerateContentRequestsPerDayPerProjectPerModel)
+chain:
+- gemini-3.8-flash
+- gemini-3.7-flash
+- gemini-3.6-flash
+- gemini-3.5-flash
+- gemini-3.5-flash-lite
+- local
