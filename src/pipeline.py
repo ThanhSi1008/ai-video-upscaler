@@ -138,6 +138,15 @@ def run_upscale_pipeline(
             output_path = os.path.join(output_path, f"{base_name}{out_suffix}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    # Kiểm tra nếu file 4K thành phẩm đã tồn tại (không ghi đè trừ khi có cờ --force)
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024 and not force:
+        logger.info(
+            f"⏩ [BỎ QUA - ĐÃ CÓ KẾT QUẢ] File 4K đã hoàn tất trước đó: '{os.path.basename(output_path)}' "
+            f"({format_bytes(os.path.getsize(output_path))}). Bỏ qua không xử lý lại (dùng --force để ghi đè).",
+            to_console=True
+        )
+        return output_path
+
     # 2. Thực thi kiểm tra an toàn trước khi chạy (Pre-flight checks)
     run_preflight_checks(
         output_dir=os.path.dirname(output_path),
