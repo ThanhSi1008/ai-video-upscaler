@@ -230,7 +230,12 @@ def call_with_retry(
             return fn()
         except Exception as e:
             err_str = str(e).lower()
-            is_429 = "429" in err_str or "too many requests" in err_str or "resource_exhausted" in err_str
+            is_429 = (
+                "429" in err_str or
+                "too many requests" in err_str or
+                "resource_exhausted" in err_str or
+                "resource has been exhausted" in err_str
+            )
 
             if is_429:
                 quota_id, quota_value, retry_delay = parse_429_details(e)
