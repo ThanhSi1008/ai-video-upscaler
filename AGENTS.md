@@ -18,20 +18,30 @@
 
 ```text
 upscale/
-├── upscale.py              # CLI Entrypoint (Argparse, Error handling, Ctrl+C trap)
+├── upscale.py              # CLI Entrypoint (Argparse, Queue orchestrator, Ctrl+C trap)
 ├── upscale.sh              # Shell launcher (tự nhận virtualenv hoặc python3)
+├── subtrans.py             # Subtitle Translation CLI Runner
+├── shows.yaml              # Ánh xạ mô hình SR theo từng bộ anime
 ├── src/
 │   ├── config.py           # Single source of truth: Hằng số, Paths, Model choices, VideoToolbox params
 │   ├── ramdisk.py          # RAMDisk Context Manager: mount/unmount HFS+ RAM Disk ảo (Zero SSD Wear)
-│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (BT.709 10-bit, Stream Copy gốc)
+│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (BT.709 10-bit, Stream Copy gốc, Embed Subtitles)
 │   ├── ai_engine.py        # NCNN Vulkan via MoltenVK (Metal API) suy luận mô hình anime
+│   ├── mps_engine.py       # PyTorch MPS FP16 Native Apple Silicon inference worker
+│   ├── models_resolver.py  # SR Models Registry resolver & weights loader
+│   ├── mux_audit.py        # Stream copy integrity audit & font count verifier
 │   ├── dedup.py            # Deduplication Engine: Preflight mpdecimate scan & Concat Re-expansion
 │   ├── preflight.py        # CaffeinateContext (chống sleep), Check AC/Pin, Check đĩa trống, macOS Notifs
-│   ├── pipeline.py         # Orchestrator: Rolling Segments, Checkpoint Resume, Preview mode
+│   ├── pipeline.py         # Orchestrator: Triple-buffering, Rolling Segments, Checkpoint Resume
+│   ├── scheduler.py        # Dynamic overnight queue scheduler & ETA predictor
+│   ├── night_report.py     # Báo cáo viễn trắc tổng kết phiên chạy qua đêm Markdown
 │   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
+├── subtrans/               # Subtitle translation engine (Stage A Cast Sheet -> Stage B Gemini/Local -> Stage C Audit)
 ├── bin/realesrgan/         # Universal Mach-O binary & NCNN models (.param / .bin)
+├── models/                 # Super-Resolution registry (models.yaml)
+├── glossaries/             # Per-series translation glossaries
 ├── samples/                # Video mẫu test (sample_30s.mkv, sample_3min.mkv)
-├── tests/                  # Kiểm tra tự động, A/B test blind samples
+├── tests/                  # Kiểm tra tự động, A/B test blind samples, benchmarks
 └── logs/                   # Log chi tiết có cấu trúc từng phiên chạy
 ```
 
