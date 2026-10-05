@@ -6,7 +6,9 @@ Stage 1: Parse, clean, and align Japanese and English subtitles.
 
 import re
 import logging
-from typing import List, Tuple, Optional
+import statistics
+from collections import Counter
+from typing import List, Tuple, Optional, Any
 import pysubs2
 from subtrans.models import Cue
 
@@ -135,3 +137,157 @@ def parse_and_align_subtitles(
             )
 
     return cues, ja_ssa, en_ssa
+
+
+def compute_alignment_match_rate(
+    ja_events: List[Any],
+    en_events: List[Any],
+    offset_ms: int = 0,
+    overlap_threshold: float = 0.5,
+) -> float:
+    """Calculates dialogue match rate (percentage of JA events having overlapping EN cue)."""
+    matched = 0
+    dialogue = 0
+    for j in ja_events:
+        dur_j = j.end - j.start
+        if dur_j <= 0:
+            continue
+        dialogue += 1
+        j_start = j.start + offset_ms
+        j_end = j.end + offset_ms
+        for e in en_events:
+            dur_e = max(1, e.end - e.start)
+            overlap = max(0, min(j_end, e.end) - max(j_start, e.start))
+            if overlap >= overlap_threshold * dur_e:
+                matched += 1
+                break
+    return matched / dialogue if dialogue > 0 else 0.0
+
+
+def detect_auto_offset(
+    ja_path: str,
+    en_path: Optional[str],
+    skip_styles_regex: str = DEFAULT_SKIP_STYLES,
+) -> Tuple[int, bool, str, dict]:
+    """
+    Detects timing offset between Japanese and English subtitles.
+
+    offset is defined as median shift needed to align JA with EN (in ms).
+    Criteria to apply:
+      1. |offset| >= 1.0s (1000 ms)
+      2. >= 30 candidate pairs in main cluster
+      3. quintile drift <= 0.5s (max diff among medians of 5 chronological quintiles)
+      4. match rate improvement >= 15.0 percentage points
+
+    Returns:
+      (offset_ms, is_applied, reason_str, stats_dict)
+    """
+    if not en_path:
+        return 0, False, "Không có file phụ đề tiếng Anh tham chiếu", {}
+
+    try:
+        ja_ssa = pysubs2.load(ja_path)
+        en_ssa = pysubs2.load(en_path)
+    except Exception as e:
+        return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
+
+    ja_events = [e for e in ja_ssa if clean_subtitle_text(e.text) and not should_skip_cue(e.style, e.text, skip_styles_regex)]
+    en_events = [e for e in en_ssa if clean_subtitle_text(e.text) and not should_skip_cue(e.style, e.text, skip_styles_regex)]
+
+    if not ja_events or not en_events:
+        return 0, False, "Không tìm thấy thoại hợp lệ trong file JA hoặc EN", {}
+
+    candidate_diffs = []
+    candidate_pairs = []
+
+    for j in ja_events:
+        dur_j = j.end - j.start
+        if dur_j <= 0:
+            continue
+        for e in en_events:
+            dur_e = e.end - e.start
+            if dur_e <= 0:
+                continue
+            # Filter pairs with low duration similarity
+            if min(dur_j, dur_e) / max(dur_j, dur_e) < 0.25:
+                continue
+            # Filter mismatched sentence types (e.g. question vs statement)
+            if ('?' in j.text or '？' in j.text) != ('?' in e.text):
+                continue
+            d = (e.start - j.start) / 1000.0  # seconds
+            if -60.0 <= d <= 60.0:
+                candidate_diffs.append(d)
+                candidate_pairs.append((j.start, d))
+
+    if not candidate_diffs:
+        return 0, False, "Không tìm thấy cặp thoại tương đồng trong cửa sổ ±60s", {}
+
+    # Cluster differences by 0.1s histogram bins
+    bins = [round(d, 1) for d in candidate_diffs]
+    mode_bin, _ = Counter(bins).most_common(1)[0]
+    cluster_pairs = [p for p in candidate_pairs if abs(p[1] - mode_bin) <= 0.5]
+    cluster_diffs = [p[1] for p in cluster_pairs]
+
+    if not cluster_diffs:
+        return 0, False, "Không xác định được cụm lệch thời gian chính", {}
+
+    med_sec = statistics.median(cluster_diffs)
+    med_ms = round(med_sec * 1000)
+
+    # 1. Check |offset| >= 1.0s
+    cond_mag = abs(med_sec) >= 1.0
+
+    # 2. Check pairs >= 30
+    cond_pairs = len(cluster_diffs) >= 30
+
+    # 3. Check quintile drift <= 0.5s
+    cluster_pairs.sort(key=lambda p: p[0])
+    n = len(cluster_pairs)
+    q_size = n // 5
+    q_medians = []
+    if q_size > 0:
+        for i in range(5):
+            chunk = cluster_pairs[i * q_size : (i + 1) * q_size if i < 4 else n]
+            if chunk:
+                q_medians.append(statistics.median([p[1] for p in chunk]))
+    q_drift = (max(q_medians) - min(q_medians)) if q_medians else 0.0
+    cond_drift = q_drift <= 0.5
+
+    # 4. Check match rate improvement >= 15 points
+    rate_before = compute_alignment_match_rate(ja_events, en_events, offset_ms=0)
+    rate_after = compute_alignment_match_rate(ja_events, en_events, offset_ms=med_ms)
+    rate_diff_points = (rate_after - rate_before) * 100.0
+    cond_rate = rate_diff_points >= 15.0
+
+    stats = {
+        "offset_ms": med_ms,
+        "offset_sec": med_sec,
+        "pairs_count": len(cluster_diffs),
+        "quintile_drift_sec": q_drift,
+        "rate_before": rate_before,
+        "rate_after": rate_after,
+        "rate_diff_points": rate_diff_points,
+    }
+
+    failed_reasons = []
+    if not cond_mag:
+        failed_reasons.append(f"|offset| ({abs(med_sec):.3f}s) < 1.0s")
+    if not cond_pairs:
+        failed_reasons.append(f"số cặp ghép ({len(cluster_diffs)}) < 30")
+    if not cond_drift:
+        failed_reasons.append(f"độ chênh 5 phần ({q_drift:.3f}s) > 0.5s")
+    if not cond_rate:
+        failed_reasons.append(f"tỷ lệ khớp tăng ({rate_diff_points:.1f} điểm) < 15 điểm")
+
+    if not failed_reasons:
+        is_applied = True
+        reason_str = (
+            f"Thỏa mãn toàn bộ điều kiện: offset={med_ms}ms, {len(cluster_diffs)} cặp, "
+            f"độ chênh 5 phần={q_drift:.3f}s, tỷ lệ khớp {rate_before*100:.1f}% -> {rate_after*100:.1f}% (+{rate_diff_points:.1f} điểm)"
+        )
+    else:
+        is_applied = False
+        reason_str = f"Không áp dụng do: {', '.join(failed_reasons)} (offset đo được: {med_ms}ms)"
+
+    return med_ms, is_applied, reason_str, stats
+

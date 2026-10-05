@@ -243,6 +243,21 @@ def generate_qa_report(
             ""
         ])
 
+    # Section: Subtitle Offset & Timing (ADDENDUM / Vòng sửa 2)
+    offset_info = stats.get("offset_info", {})
+    if offset_info:
+        app_off = offset_info.get("applied_offset_ms", 0)
+        det_off = offset_info.get("detected_offset_ms", 0)
+        off_reas = offset_info.get("reason", "N/A")
+        lines.extend([
+            "### ⏰ Căn Chỉnh Thời Gian Phụ Đề (Subtitle Offset & Timing)",
+            "",
+            f"- **Offset đã áp dụng**: `{app_off:+d} ms` (`{app_off / 1000.0:+.3f} s`)",
+            f"- **Offset đo được từ thuật toán (JA vs EN)**: `{det_off:+d} ms`",
+            f"- **Cơ chế & Lý do**: {off_reas}",
+            "",
+        ])
+
     # Section: Phân loại dữ liệu minh bạch
     lines.extend([
         "### 3. Phân Loại Dữ Liệu Báo Cáo (Data Transparency Breakdown)",
@@ -253,6 +268,10 @@ def generate_qa_report(
         f"| **SỐ ĐO (MEASURED)** | Số request hôm nay theo giờ PT | Bộ đếm theo ngày Thái Bình Dương trong DB |",
         f"| **SỐ ĐO (MEASURED)** | Tỷ lệ batch phải tách: `{split_rate:.1f}%` | Đo lường thực tế qua bộ kiểm tra ID & số cue |",
         f"| **SỐ ĐO (MEASURED)** | Thời gian chạy pipeline: `{elapsed_time_sec:.1f}s` | Đo đạc chính xác qua `time.monotonic()` |",
+    ])
+    if offset_info:
+        lines.append(f"| **SỐ ĐO (MEASURED)** | Offset phụ đề áp dụng: `{app_off:+d} ms` | {off_reas} |")
+    lines.extend([
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Số request cho tập 300 cues (~3 requests) | Tính toán lý thuyết: 300 ÷ 100 cues/batch = 3 |",
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Thời điểm reset quota: `{next_vn.strftime('%H:%M %d/%m')}` | Tính toán qua `zoneinfo` (PDT 14:00 / PST 15:00) |",
         f"| **CHƯA XÁC MINH (UNVERIFIED)** | Hạn mức RPD = 20 (Flash) / 500 (Lite) | Chưa xác minh (nguồn bên thứ ba, chờ đối soát AI Studio) |",

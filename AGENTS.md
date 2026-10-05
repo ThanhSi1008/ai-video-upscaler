@@ -277,6 +277,28 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
     - Tuyệt đối cấm chạy dịch thử nghiệm gọi API thật trong khoảng từ 14:00 đến đêm chạy.
     - Cờ `--dry-run` trên CLI và Pipeline mô phỏng toàn bộ logic dịch, parse, kiểm tra ID, tách batch và xuất file mà không tốn bất kỳ lượt gọi API nào.
   - **Báo Cáo Minh Bạch 3 Lớp:** Mọi số liệu trong `audit.md` và console bắt buộc phân loại rõ ràng: **SỐ ĐO (MEASURED)** (log SQLite, `quotaValue` lỗi), **ƯỚC LƯỢNG (ESTIMATED)** (dự toán ETA/requests theo công thức), **CHƯA XÁC MINH (UNVERIFIED)** (hạn mức tạm thời chờ trang AI Studio rate-limit).
+* **Nghiệm Thu Toàn Diện Vòng Sửa Sau Đêm 1 (Scheduler, Auto-Offset & Night Report):**
+  - **Hiệu Chỉnh Overhead & Ước Lượng Lập Lịch (`src/scheduler.py`, `upscale.py`):**
+    - Overhead video chuẩn hóa: **930,0s (~15,5 phút)** (hiệu chỉnh theo 2 tập đêm 1 [691s–1166s], cỡ mẫu n=2) + 300s phụ đề = 1230s (~20,5 phút).
+    - Ước lượng kept frames cho tập chưa quét preflight: Bỏ mức 39,1% cũ, áp dụng **60,0% kept frames** làm giá trị thận trọng (dựa trên 4 tập đo đạc thực tế: 39,1%, 46,0%, 54,4%, 61,3%; trung bình ~50,0%). Bảng quyết định deadline hiển thị nhãn `"ước lượng thận trọng (n=4)"` và tự động cập nhật số đo thực tế khi preflight nền hoàn tất.
+    - Sức chứa thực tế cập nhật trong README: **~2 tập mỗi đêm** (~3 giờ/tập ở $n_{unique} \approx 17.200$). 3 tập chỉ hoàn tất trọn vẹn khi tổng $n_{unique}$ đủ nhỏ.
+  - **Cơ Chế Tự Động Nhận Diện Lệch Thời Gian Phụ Đề (`--auto-offset`):**
+    - Mặc định: **TẮT** (chỉ log). `--sub-offset-ms` thủ công luôn luôn ưu tiên.
+    - Điều kiện áp dụng khắt khe 4 lớp: (1) $|offset| \ge 1,0$s; (2) Số cặp ghép hợp lệ $\ge 30$; (3) Độ chênh cực đại giữa 5 phần thời gian $\le 0,5$s (chống trôi dạt lũy tiến); (4) Tỷ lệ khớp tăng $\ge 15$ điểm phần trăm sau bù.
+    - Kiểm định thực tế 3 tập: Tập 1 (|offset| 0.148s < 1.0s) ➔ Không áp dụng; Tập 2 (|offset| 0.098s < 1.0s) ➔ Không áp dụng; Tập 3 (offset -11141 ms $\approx -11154$ ms, 285 cặp, drift 0.029s $\le 0.5$s, khớp 55.9% ➔ 85.3%, +29.4 điểm) ➔ Tự động áp dụng thành công.
+  - **Lệnh Sinh Báo Cáo Ca Chạy Đêm (`./upscale.sh --night-report [phiên]`):**
+    - Chế độ chỉ đọc, tuyệt đối không gọi GPU hay API. Tự động phân tích CSV telemetry TRONG cửa sổ ca, log chi tiết từng chunk, `plan.json`, `audit.json` và SQLite `api_requests`.
+    - Xuất đầy đủ: GPU active ratio theo công thức chuẩn (`total_ai_time / episode_wall_time`), so sánh tốc độ giờ đầu vs giờ cuối, top 10 chunk chậm nhất, phân bổ cue theo model, thống kê 503/thành công theo giờ PT và danh sách việc cần làm bằng tay.
+  - **Tự Động Bật/Tắt Giám Sát Telemetry Trong `upscale.sh --queue`:**
+    - Tự động chạy `scripts/soak_monitor.sh` nền khi phát hiện cờ `--queue`, ghi nhận mốc `[SESSION START]` và `[SESSION END]`.
+    - Cơ chế `trap` trong bash đảm bảo thu hồi sạch tiến trình monitor khi hàng đợi hoàn tất hoặc bị ngắt (`Ctrl+C`, `SIGTERM`), không để lại tiến trình mồ côi.
+  - **Nghiệm Thu Vòng Sửa 2 (Queue Auto-Offset, Subtitle Embedding & Timezone PT):**
+    - **Queue Auto-Offset Mặc Định:** Trong chế độ hàng đợi (`--queue`), `--auto-offset` được **BẬT MẶC ĐỊNH** (thêm `--no-auto-offset` để tắt). Từng tập được tính toán bù lệch độc lập (Tập 1, 2 không áp dụng; Tập 3 tự động bù -11.141ms). Offset đã dùng và lý do kỹ thuật được tự động ghi vào `audit.md` của từng tập.
+    - **Bảo Vệ Cờ Offset Thủ Công (`--sub-offset-ms` & `--sub-offset-target`):** Cờ `--sub-offset-ms` trong `--queue` được bảo vệ: nếu không có `--sub-offset-target`, hệ thống in cảnh báo và bỏ qua áp dụng toàn cục để tránh làm hỏng timeline của các tập khác; khi có `--sub-offset-target`, chỉ áp dụng cho đúng tập chỉ định.
+    - **Khắc Phục Lỗi Nhúng Phụ Đề MKV (`src/ffmpeg_ops.py`):** Bổ sung `import shutil` bị thiếu. Lệnh nhúng phụ đề `.vi.srt` vào container 4K MKV qua stream copy giờ đây thành công 100%, bảo toàn trọn vẹn HEVC 10-bit, audio gốc, phụ đề cũ, font chữ và chapters.
+    - **Chuẩn Hóa Thống Kê Giờ PT (`src/night_report.py`):** SQLite lưu `created_at` theo giờ UTC; hệ thống sử dụng `zoneinfo.ZoneInfo("America/Los_Angeles")` để chuyển đổi chuẩn xác sang PDT/PST (khung 17:00–18:00 PDT ngày 2026-10-04, chiều tối Chủ Nhật). Bỏ nhận định phỏng đoán "giờ cao điểm Bắc Mỹ", phản ánh trung thực dữ liệu đo đạc.
+
+
 
 
 

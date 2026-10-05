@@ -19,7 +19,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRe
 
 from subtrans.config import load_config, load_models_config, get_gemini_api_key
 from subtrans.models import Cue, Glossary
-from subtrans.parser import parse_and_align_subtitles
+from subtrans.parser import parse_and_align_subtitles, detect_auto_offset
 from subtrans.cache import TranslationCache, compute_cue_cache_key
 from subtrans.gemini_backend import GeminiTranslator
 from subtrans.local_backend import OllamaTranslator
@@ -172,10 +172,37 @@ class TranslationPipeline:
         sub_offset_ms: int = 0,
         output_basename: Optional[str] = None,
         subs_upgrade: bool = False,
+        auto_offset: bool = False,
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
         self._init_primary_backend()
+
+        # Kiểm tra tự động phát hiện lệch thời gian (--auto-offset)
+        auto_offset_applied = False
+        offset_reason = "Không có phụ đề EN tham chiếu để so sánh"
+        det_offset = 0
+        if en_path:
+            det_offset, can_apply, reason_str, off_stats = detect_auto_offset(str(ja_path), str(en_path))
+            if sub_offset_ms != 0:
+                offset_reason = f"Đo được {det_offset}ms, nhưng ưu tiên cờ thủ công --sub-offset-ms={sub_offset_ms}ms"
+                console.print(f"  • [cyan]Auto-offset:[/cyan] {offset_reason}.")
+            elif auto_offset:
+                if can_apply:
+                    sub_offset_ms = det_offset
+                    auto_offset_applied = True
+                    offset_reason = f"Tự động áp dụng {det_offset}ms ({reason_str})"
+                    console.print(f"  • [bold green]Auto-offset ĐƯỢC ÁP DỤNG:[/bold green] {det_offset}ms ({reason_str})")
+                else:
+                    offset_reason = f"Không áp dụng ({reason_str})"
+                    console.print(f"  • [yellow]Auto-offset KHÔNG ÁP DỤNG:[/yellow] {reason_str}")
+            else:
+                offset_reason = f"Cờ --auto-offset tắt (Đo được: {det_offset}ms, {reason_str})"
+                logger.debug(f"Auto-offset scan (flag OFF): {det_offset}ms (can_apply={can_apply}: {reason_str})")
+        elif sub_offset_ms != 0:
+            offset_reason = f"Áp dụng cờ thủ công --sub-offset-ms={sub_offset_ms}ms"
+        else:
+            offset_reason = "Mặc định 0ms (Không có cờ offset hay file EN tham chiếu)"
 
         console.print(f"\n[bold green]🚀 Subtrans Pipeline Starting (Standard Quality Mode)[/bold green]")
         console.print(f"  • Source (JA): [cyan]{ja_path}[/cyan]{f' (Offset: {sub_offset_ms}ms)' if sub_offset_ms != 0 else ''}")
@@ -538,6 +565,13 @@ class TranslationPipeline:
         stats["dry_run"] = self.dry_run
         stats["pacific_time_cues"] = self.cache.get_cues_today_pt()
         stats["pacific_time_requests"] = self.cache.get_requests_today_pt()
+        stats["offset_info"] = {
+            "applied_offset_ms": sub_offset_ms,
+            "detected_offset_ms": det_offset,
+            "auto_offset_enabled": auto_offset,
+            "auto_offset_applied": auto_offset_applied,
+            "reason": offset_reason,
+        }
         audit_file = self.output_dir / f"{base_name}.audit.md"
         with console.status(f"[bold blue]Stage C: Generating QA audit report at {audit_file}...[/bold blue]"):
             generate_qa_report(

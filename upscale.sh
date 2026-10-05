@@ -21,9 +21,48 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-# Bọc toàn bộ phiên chạy bằng caffeinate (-ims) để chống sleep máy trong suốt ca qua đêm
-if command -v caffeinate >/dev/null 2>&1; then
-    exec caffeinate -ims "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+# Kiểm tra nếu có cờ --queue để tự động bật soak_monitor.sh và ghi mốc SESSION
+HAS_QUEUE=0
+for arg in "$@"; do
+    if [ "$arg" = "--queue" ]; then
+        HAS_QUEUE=1
+        break
+    fi
+done
+
+if [ "$HAS_QUEUE" -eq 1 ]; then
+    SESSION_NAME="queue_$(date +%Y%m%d_%H%M%S)"
+    TELEMETRY_CSV="logs/soak_telemetry_${SESSION_NAME}.csv"
+    mkdir -p logs
+
+    echo "[SESSION START] $(date +'%Y-%m-%d %H:%M:%S') (epoch $(date +%s)) - Session: ${SESSION_NAME}"
+
+    # Khởi động scripts/soak_monitor.sh nền
+    ./scripts/soak_monitor.sh "$TELEMETRY_CSV" 60 >/dev/null 2>&1 &
+    MONITOR_PID=$!
+
+    cleanup() {
+        echo "[SESSION END] $(date +'%Y-%m-%d %H:%M:%S') (epoch $(date +%s))"
+        if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+            kill "$MONITOR_PID" 2>/dev/null || true
+            wait "$MONITOR_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
+    if command -v caffeinate >/dev/null 2>&1; then
+        caffeinate -ims "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+        EXIT_CODE=$?
+    else
+        "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+        EXIT_CODE=$?
+    fi
+    exit $EXIT_CODE
 else
-    exec "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+    # Bọc toàn bộ phiên chạy bằng caffeinate (-ims) để chống sleep máy trong suốt ca qua đêm
+    if command -v caffeinate >/dev/null 2>&1; then
+        exec caffeinate -ims "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+    else
+        exec "$PYTHON_EXEC" "$DIR/upscale.py" "$@"
+    fi
 fi

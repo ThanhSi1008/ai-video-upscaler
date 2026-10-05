@@ -37,14 +37,14 @@ def check_deadline_and_eta(
     deadline_str: str,
     fps_median: float = 1.66,
     fps_p5: float = 1.62,
-    video_overhead: float = 360.0,
+    video_overhead: float = 930.0,
     subtitles_overhead: float = 300.0,
     eta_margin_pct: float = 0.07,
     allow_partial: bool = False
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
-    Quyết định dựa trên P5 (1.62 fps) + ~5m subtitles (300s) + 7% ETA margin.
+    Quyết định dựa trên P5 (1.62 fps) + overhead (video ~930s [n=2] + 300s subs) + 7% ETA margin.
     Returns: (can_run, is_partial, deadline_dt)
     """
     now = datetime.now()
@@ -81,20 +81,20 @@ def check_deadline_and_eta(
                 pass
 
     if n_unique is None:
-        # Ước lượng ~39.14% của tổng số frames nếu chưa có plan.json
+        # Ước lượng thận trọng 60.0% frame giữ nếu chưa quét (thay thế 39.1% cũ, đo n=4: 39.1%, 46.0%, 54.4%, 61.3%)
         try:
             meta = probe_video(video_path)
             total_f = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
-            n_unique = int(total_f * 0.3914)
+            n_unique = int(total_f * 0.60)
         except Exception:
-            n_unique = 13300
+            n_unique = int(34000 * 0.60)
 
     total_overhead = video_overhead + subtitles_overhead
     eta_p5 = (n_unique / max(0.5, fps_p5)) + total_overhead
     decision_eta = eta_p5 * (1.0 + eta_margin_pct)
     eta_med = (n_unique / max(0.5, fps_median)) + total_overhead
 
-    source_tag = "đo (plan.json)" if is_measured else "ước lượng"
+    source_tag = "đo (plan.json)" if is_measured else "ước lượng thận trọng (n=4)"
 
     if decision_eta > seconds_left:
         if allow_partial:
@@ -261,6 +261,32 @@ def build_arg_parser():
         default=0,
         help="Độ lệch thời gian dịch chuyển phụ đề tiếng Nhật / tiếng Việt (mili-giây, ví dụ: -11154 cho bản Crunchyroll lệch intro)"
     )
+    parser.add_argument(
+        "--sub-offset-target",
+        type=str,
+        default="",
+        help="Tên file hoặc chuỗi nhận diện tập cụ thể áp dụng cờ --sub-offset-ms trong hàng đợi"
+    )
+    parser.add_argument(
+        "--auto-offset",
+        action="store_true",
+        default=None,
+        help="Tự động phát hiện và áp dụng bù lệch thời gian JA-EN cho phụ đề (Mặc định: Bật trong hàng đợi, Tắt khi chạy 1 tập đơn lẻ)"
+    )
+    parser.add_argument(
+        "--no-auto-offset",
+        action="store_true",
+        default=False,
+        help="Tắt cơ chế tự động bù lệch thời gian phụ đề trong hàng đợi"
+    )
+    parser.add_argument(
+        "--night-report",
+        nargs="?",
+        const="night1",
+        default=None,
+        metavar="SESSION",
+        help="Sinh báo cáo tổng kết phiên chạy đêm từ log, telemetry CSV, audit.json và api_requests (Chỉ đọc, không gọi GPU/API)"
+    )
 
     return parser
  
@@ -334,6 +360,13 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
 def main():
     args = parse_args()
 
+    # Xử lý cờ --night-report (Sinh báo cáo tổng kết phiên đêm, chỉ đọc)
+    if args.night_report:
+        from src.night_report import generate_night_report_text
+        report = generate_night_report_text(args.night_report)
+        print(report)
+        sys.exit(0)
+
     # Xử lý cờ --subs-only (Chạy riêng phụ đề trong tiến trình con độc lập)
     if args.subs_only:
         target_subs_vid = args.input if args.subs_only == "__INPUT__" else args.subs_only
@@ -363,12 +396,14 @@ def main():
             allow_latest_alias=False,
         )
         base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
+        use_auto_offset = bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False
         res = sub_pipeline.run(
             ja_path=Path(ja_sub),
             en_path=Path(en_sub) if en_sub else None,
             output_basename=f"{base_vid_name}_4K",
             subs_upgrade=args.subs_upgrade,
             sub_offset_ms=args.sub_offset_ms,
+            auto_offset=use_auto_offset,
         )
         srt_path = res.get('subtitle_path') or res.get('output_path')
         print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
@@ -407,7 +442,7 @@ def main():
 
     fps_median = 1.66 if args.engine == "mps" else 1.35
     fps_p5 = 1.62 if args.engine == "mps" else 1.25
-    video_overhead = 360.0
+    video_overhead = 930.0  # Hiệu chỉnh theo 2 tập đêm 1 [691s, 1166s], cỡ mẫu n=2
     subtitles_overhead = 300.0
 
     if args.benchmark_mode:
@@ -571,6 +606,9 @@ def main():
         print(f"{'='*75}")
 
         sub_timeout = 1560  # Watchdog 25 phút + 60s buffer
+        # Quyết định cờ auto-offset: MẶC ĐỊNH BẬT trong hàng đợi (trừ khi người dùng truyền --no-auto-offset)
+        queue_auto_offset = not getattr(args, "no_auto_offset", False)
+
         for src_vid, out_vid in completed_videos:
             sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
             sub_cmd = [
@@ -582,8 +620,20 @@ def main():
             ]
             if args.subs_upgrade:
                 sub_cmd.append("--subs-upgrade")
+
+            # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi:
+            manual_offset_applied = False
             if args.sub_offset_ms:
-                sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
+                if args.sub_offset_target and args.sub_offset_target.lower() in os.path.basename(src_vid).lower():
+                    manual_offset_applied = True
+                    print(f"  • [QUEUE OFFSET] Áp dụng cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms cho tập chỉ định: '{os.path.basename(src_vid)}'")
+                    sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
+                elif not args.sub_offset_target:
+                    print(f"  ⚠️ [QUEUE OFFSET WARNING] Cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms được truyền nhưng KHÔNG có --sub-offset-target. Để bảo toàn đồng bộ của các tập khác, offset thủ công KHÔNG áp dụng toàn cục cho '{os.path.basename(src_vid)}' (dùng --auto-offset tính riêng).")
+
+            # Nếu không áp dụng offset thủ công cho tập này, dùng auto_offset nếu được bật
+            if not manual_offset_applied and queue_auto_offset:
+                sub_cmd.append("--auto-offset")
             print(f"\n🚀 Khởi chạy tiến trình con dịch phụ đề cho tập '{os.path.basename(src_vid)}'...")
             try:
                 proc = subprocess.run(sub_cmd, timeout=sub_timeout, check=False)

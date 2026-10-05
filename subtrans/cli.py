@@ -182,6 +182,7 @@ def run(
     require_approved_cast: bool = typer.Option(False, "--require-approved-cast", help="Pause to inspect Stage A cast sheet before continuing"),
     review_file: bool = typer.Option(False, "--review-file", help="Generate out/<name>.review.srt containing uncertain lines"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
+    auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
@@ -224,6 +225,7 @@ def run(
             glossary_path=glossary,
             en_offset_ms=en_offset_ms,
             sub_offset_ms=sub_offset_ms,
+            auto_offset=auto_offset,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Process cancelled by user. Partial cache preserved in SQLite.[/yellow]")

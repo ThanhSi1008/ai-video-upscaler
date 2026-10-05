@@ -11,6 +11,7 @@ Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
 
 import os
 import json
+import shutil
 import subprocess
 from glob import glob
 from typing import Dict, Any, List
@@ -289,15 +290,19 @@ def embed_subtitle_track(
         tmp_out
     ]
     try:
-        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1000:
             shutil.move(tmp_out, mkv_path)
             return True
         else:
+            if r.returncode != 0 and r.stderr:
+                err_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
+                print(f"⚠️ [FFMPEG SUB EMBED] Mã lỗi {r.returncode}: {err_line}")
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
             return False
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ [FFMPEG SUB EMBED] Ngoại lệ: {e}")
         if os.path.exists(tmp_out):
             os.remove(tmp_out)
         return False

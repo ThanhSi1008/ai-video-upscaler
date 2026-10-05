@@ -211,7 +211,7 @@ def compute_overnight_schedule(
     deadline_str: Optional[str] = None,
     fps_median: float = 1.66,
     fps_p5: float = 1.62,
-    video_overhead_seconds: float = 360.0,
+    video_overhead_seconds: float = 930.0,
     subtitles_overhead_seconds: float = 300.0,
     eta_margin_pct: float = 0.07,
     allow_partial: bool = False,
@@ -225,7 +225,7 @@ def compute_overnight_schedule(
 
     Quy chuẩn:
       - Tốc độ AI: trung vị 1.66 fps, P5 1.62 fps (đo đạc thực tế trong pipeline M3 Pro C1).
-      - Overhead: video ~360s (decode/encode/mux) + subtitles ~300s (Stage A + B2 100-cues + audit) = 660s.
+      - Overhead: video ~930s (hiệu chỉnh theo 2 tập đêm 1 [691s–1166s], n=2) + subtitles ~300s (Stage A + B2 100-cues + audit) = 1230s (~20.5m).
       - Quyết định deadline: dựa trên ETA P5 + biên an toàn 7% ETA (decision_eta = eta_p5 * 1.07).
       - Nếu không kịp và có --allow-partial: cho phép chạy đến hạn chót, dừng sạch ở ranh giới chunk.
     """
@@ -268,17 +268,17 @@ def compute_overnight_schedule(
             dedup_ratio = plan.get("dedup_ratio_percent", 0.0)
             n_unique_source = "đo (plan.json)"
         else:
-            # Dự toán nếu chưa quét: dựa trên metadata probe_video và tỷ lệ trung bình ~39.14% kept
+            # Dự toán nếu chưa quét: dùng 60.0% kept frames làm giá trị thận trọng (thay cho 39.1% cũ, đo n=4: 39.1%, 46.0%, 54.4%, 61.3%)
             try:
                 meta = probe_video(vid)
                 total_frames = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
-                n_unique = int(total_frames * 0.3914)
-                dedup_ratio = (1.0 - (n_unique / total_frames)) * 100.0 if total_frames > 0 else 60.86
+                n_unique = int(total_frames * 0.60)
+                dedup_ratio = (1.0 - (n_unique / total_frames)) * 100.0 if total_frames > 0 else 40.0
             except Exception:
                 total_frames = 34000
-                n_unique = 13300
-                dedup_ratio = 60.88
-            n_unique_source = "ước lượng"
+                n_unique = int(34000 * 0.60)
+                dedup_ratio = 40.0
+            n_unique_source = "ước lượng thận trọng (n=4)"
 
         # Kiểm tra nếu file 4K thành phẩm đã tồn tại
         out_target_dir = output_dir or "out"
@@ -478,14 +478,14 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
     lines.append(f"• Mốc hạn chót          : {sched['deadline_str'] or 'Không đặt'} ({sched['deadline_time'] or 'N/A'})")
     lines.append(f"• Quỹ thời gian có sẵn : {sched['available_time_formatted']}")
     lines.append(f"• Tốc độ AI cơ sở       : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (đo thực tế trong pipeline M3 Pro C1)")
-    lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
+    lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video [đo đêm 1: 691s–1166s, n=2] + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
     lines.append(f"• Biên an toàn ETA      : +{sched['eta_margin_pct']*100:.1f}% trên ETA P5 để ra quyết định hạn chót")
     lines.append(f"• Cho phép dở dang      : --allow-partial = {'BẬT' if sched.get('allow_partial') else 'TẮT'}")
     lines.append("-" * 126)
 
     header = (
         f"{'STT':<4} | {'Tập Video':<34} | {'Tổng Frames':<11} | "
-        f"{'n_unique':<9} | {'Nguồn n_unique':<16} | {'Dedup %':<7} | {'ETA (Med)':<9} | "
+        f"{'n_unique':<9} | {'Nguồn n_unique':<25} | {'Dedup %':<7} | {'ETA (Med)':<9} | "
         f"{'ETA P5 (+7%)':<12} | {'Kết Thúc':<8} | {'Quyết Định'}"
     )
     lines.append(header)
@@ -507,14 +507,14 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
 
         row = (
             f"[{ep['index']:02d}] | {name_display:<34} | {ep['total_frames']:<11} | "
-            f"{ep['n_unique']:<9} | {ep['n_unique_source']:<16} | {ep['dedup_ratio_percent']:<6.1f}% | "
+            f"{ep['n_unique']:<9} | {ep['n_unique_source']:<25} | {ep['dedup_ratio_percent']:<6.1f}% | "
             f"{ep['eta_formatted']:<9} | {ep['decision_eta_formatted']:<12} | {ep['finish_time']:<8} | {dec_symbol}"
         )
         lines.append(row)
 
     lines.append("-" * 126)
-    lines.append("Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế từ plan.json và số ước lượng từ metadata (~39.1% kept).")
-    lines.append("         Quyết định hạn chót dựa trên P5 (1.62 fps) + 5 phút subtitles + biên an toàn 7% ETA.")
+    lines.append("Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế từ plan.json và số ước lượng thận trọng (~60.0% kept, n=4).")
+    lines.append("         Quyết định hạn chót dựa trên P5 (1.62 fps) + overhead (video ~930s [n=2] + 300s phụ đề) + biên an toàn 7% ETA.")
     partial_note = f" (gồm {sched['partial_count']} tập chạy 1 phần)" if sched.get("partial_count") else ""
     already_note = f", {sched['already_completed_count']} tập đã có kết quả bỏ qua" if sched.get("already_completed_count") else ""
     lines.append(f"🎯 TỔNG KẾT: Duyệt thực thi {sched['accepted_count']}/{sched['total_episodes']} tập{partial_note}{already_note} "
