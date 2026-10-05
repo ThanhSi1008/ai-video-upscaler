@@ -297,6 +297,12 @@ subtrans.py                 # Root CLI runner executable (./subtrans.py ...)
     - **Bảo Vệ Cờ Offset Thủ Công (`--sub-offset-ms` & `--sub-offset-target`):** Cờ `--sub-offset-ms` trong `--queue` được bảo vệ: nếu không có `--sub-offset-target`, hệ thống in cảnh báo và bỏ qua áp dụng toàn cục để tránh làm hỏng timeline của các tập khác; khi có `--sub-offset-target`, chỉ áp dụng cho đúng tập chỉ định.
     - **Khắc Phục Lỗi Nhúng Phụ Đề MKV (`src/ffmpeg_ops.py`):** Bổ sung `import shutil` bị thiếu. Lệnh nhúng phụ đề `.vi.srt` vào container 4K MKV qua stream copy giờ đây thành công 100%, bảo toàn trọn vẹn HEVC 10-bit, audio gốc, phụ đề cũ, font chữ và chapters.
     - **Chuẩn Hóa Thống Kê Giờ PT (`src/night_report.py`):** SQLite lưu `created_at` theo giờ UTC; hệ thống sử dụng `zoneinfo.ZoneInfo("America/Los_Angeles")` để chuyển đổi chuẩn xác sang PDT/PST (khung 17:00–18:00 PDT ngày 2026-10-04, chiều tối Chủ Nhật). Bỏ nhận định phỏng đoán "giờ cao điểm Bắc Mỹ", phản ánh trung thực dữ liệu đo đạc.
+  - **Nhúng Phụ Đề An Toàn & Mux Audit Gate (`src/ffmpeg_ops.py`, `upscale.py`):**
+    - Quy trình giao dịch: `embed_subtitle_track()` ghi ra file tạm `.embed_sub.tmp.mkv` với đầy đủ map `-map 0:v:0 -map 0:a? -map 1:0 -map 0:s? -map 0:t? -map_chapters 0 -c copy -max_interleave_delta 0`.
+    - Chạy `verify_mux_integrity()` đối soát trực tiếp giữa file tạm và video nguồn gốc (kiểm tra bit-exact MD5 audio, đan xen gói tin 10s, seek volumedetect 7 mốc $\le 0.5$ dB, số font $\ge$ nguồn: đúng 11 font cho Tập 1, 24 font cho Tập 2, chapters).
+    - CHỈ khi Mux Audit đạt PASS mới atomic `shutil.move` thay thế file 4K MKV thành phẩm; nếu FAIL, giữ nguyên 100% file 4K gốc, dọn sạch file tạm, in cảnh báo và giữ `.vi.srt` ngoài.
+    - Bổ sung cờ `--no-embed` (mặc định False).
+    - Kiểm thử tích hợp Stage B với stub backend (0 API call) trên bản sao 3 tập đạt PASS 100% (tập 1 & 2 không áp offset, tập 3 tự động bù -11.141 ms, font đính kèm nguyên vẹn).
 
 
 

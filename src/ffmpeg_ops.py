@@ -14,7 +14,7 @@ import json
 import shutil
 import subprocess
 from glob import glob
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from src.config import (
     HEVC_ENCODER,
@@ -258,6 +258,7 @@ def mux_final_container(upscaled_video: str, original_video: str, final_output: 
 def embed_subtitle_track(
     mkv_path: str,
     srt_path: str,
+    original_source_path: Optional[str] = None,
     language: str = "vie",
     title: str = "Tiếng Việt (AI Vietsub)",
     is_default: bool = True
@@ -265,21 +266,34 @@ def embed_subtitle_track(
     """
     Nhúng luồng phụ đề SRT đã dịch vào container MKV 4K thành phẩm dưới dạng soft subtitle.
     Đồng thời bảo toàn nguyên bản video 4K, audio gốc, phụ đề cũ, font chữ và chapters.
+    Quy trình an toàn:
+    1. Ghi ra file tạm tmp_out (.embed_sub.tmp.mkv).
+    2. Chạy verify_mux_integrity kiểm tra tính toàn vẹn (Audio MD5, interleaving 10s, seek volume, font/chap count) so với nguồn gốc.
+    3. Chỉ khi audit PASS mới thực hiện shutil.move ghi đè lên file 4K.
+    4. Nếu FAIL hoặc ngoại lệ: Giữ nguyên file 4K, xóa file tạm, ghi cảnh báo, giữ file .vi.srt ngoài.
     """
     if not os.path.exists(mkv_path) or not os.path.exists(srt_path):
         return False
 
+    ref_source = original_source_path if (original_source_path and os.path.exists(original_source_path)) else mkv_path
+
     tmp_out = mkv_path + ".embed_sub.tmp.mkv"
+    if os.path.exists(tmp_out):
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+
     cmd = [
         "ffmpeg", "-y",
         "-i", mkv_path,
         "-sub_charenc", "UTF-8",
         "-i", srt_path,
         "-map", "0:v:0",
-        "-map", "0:a:0",
+        "-map", "0:a?",
         "-map", "1:0",       # Luồng phụ đề tiếng Việt mới
         "-map", "0:s?",      # Toàn bộ phụ đề cũ nếu có
-        "-map", "0:t?",      # Font chữ đính kèm
+        "-map", "0:t?",      # Toàn bộ font chữ đính kèm
         "-map_chapters", "0",
         "-c", "copy",
         "-metadata:s:s:0", f"language={language}",
@@ -291,19 +305,33 @@ def embed_subtitle_track(
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1000:
+        if r.returncode != 0 or not os.path.exists(tmp_out) or os.path.getsize(tmp_out) <= 1000:
+            if r.returncode != 0 and r.stderr:
+                err_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
+                print(f"⚠️ [FFMPEG SUB EMBED] Lỗi mã hóa phụ đề (mã lỗi {r.returncode}): {err_line}")
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            return False
+
+        # Kiểm định an toàn bằng verify_mux_integrity trước khi thay thế file 4K
+        from src.mux_audit import verify_mux_integrity
+        audit = verify_mux_integrity(ref_source, tmp_out)
+        if audit.get("status") == "PASS":
             shutil.move(tmp_out, mkv_path)
             return True
         else:
-            if r.returncode != 0 and r.stderr:
-                err_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
-                print(f"⚠️ [FFMPEG SUB EMBED] Mã lỗi {r.returncode}: {err_line}")
+            reasons = "; ".join(audit.get("failure_reasons", []))
+            print(f"⚠️ [FFMPEG SUB EMBED AUDIT FAIL] File tạm không vượt qua kiểm định tính toàn vẹn container ({reasons}). Giữ nguyên file 4K gốc và giữ file .vi.srt ngoài!")
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
             return False
     except Exception as e:
-        print(f"⚠️ [FFMPEG SUB EMBED] Ngoại lệ: {e}")
+        print(f"⚠️ [FFMPEG SUB EMBED] Ngoại lệ khi nhúng phụ đề: {e}")
         if os.path.exists(tmp_out):
-            os.remove(tmp_out)
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
         return False
+
 

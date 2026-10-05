@@ -48,6 +48,7 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 * `--no-auto-offset`: Tắt tính năng tự động bù lệch thời gian phụ đề trong hàng đợi.
 * `--sub-offset-ms [ms]`: Bù lệch thời gian phụ đề thủ công theo mili-giây (ví dụ `-11154`). Trong hàng đợi, cờ này chỉ áp dụng khi có `--sub-offset-target`.
 * `--sub-offset-target [tên]`: Chỉ định tên tập cụ thể áp dụng offset thủ công trong hàng đợi.
+* `--no-embed`: Không nhúng track phụ đề vào container MKV 4K, chỉ xuất và giữ file .vi.srt ngoài.
 * `--night-report [phiên]`: Sinh báo cáo tổng kết phiên chạy đêm từ log, telemetry CSV, audit.json và DB (Chế độ chỉ đọc, không gọi GPU/API).
 * `-b`, `--bitrate`: Bitrate video 4K (Mặc định: `28M`).
 * `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu (Mặc định: `8` giây - tối ưu vừa vặn trong RAM Disk).

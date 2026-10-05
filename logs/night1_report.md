@@ -355,8 +355,8 @@ Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế
   - **Khung 18:00 – 19:00 PT (PDT):**
     * `gemini-3.5-flash`: 2 requests (2 thành công 100%, 0 lần 503).
 * **Nhận định & Khuyến nghị:**
-  - Khung giờ 17:00–18:00 PDT (chiều tối Chủ Nhật tại Bờ Tây Hoa Kỳ) ghi nhận tình trạng spike tải tạm thời trên cụm API của các model mới nhất (`gemini-3.8-flash` và `gemini-3.7-flash`).
-  - Chuỗi fallback tự động đa tầng (`3.8 -> 3.7 -> 3.6 -> 3.5`) đã phát huy tác dụng: khi 3.8 và 3.7 gặp lỗi 503 tạm thời, 3.6 và 3.5 đã tự động gánh toàn bộ các câu thoại còn lại mà không làm gián đoạn hay hỏng tiến trình.
+  - Toàn bộ 55 requests diễn ra trong một cửa sổ ~9 phút (07:51 – 08:00 VN, tương ứng 17:51 – 18:00 PDT). Trong cửa sổ ngắn này, `gemini-3.8-flash` và `gemini-3.7-flash` bị lỗi 503 tạm thời. Do chỉ là quan sát trong một khoảng thời gian hẹp ~9 phút, không thể suy diễn thành quy luật theo khung giờ.
+  - Chuỗi fallback tự động đa tầng (`3.8 -> 3.7 -> 3.6 -> 3.5`) đã phát huy tác dụng: khi 3.8 và 3.7 gặp lỗi 503 trong cửa sổ đó, 3.6 và 3.5 đã tự động hoàn thành các câu thoại mà không làm gián đoạn tiến trình.
   - **Quy tắc bất biến:** Không thay đổi chuỗi model (giữ nguyên `3.8 -> 3.7 -> 3.6 -> 3.5 -> local`).
 
 ---
@@ -376,14 +376,31 @@ Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế
 | **5. Đồng Bộ Luồng & Handshake** | **~102,0s** | 14.6% | **-10,5s** | — | **PHẦN DƯ (Residual)**: Tính toán từ $\text{Thời gian ngoài AI} - \sum(\text{Pha đo được})$. Phản ánh độ lệch đồng bộ giữa các luồng (Tập 2 âm nhẹ -10.5s do các pha gối đầu nhẹ lên nhau). |
 | **TỔNG CỘNG** | **696,0s** | 100% | **1.174,5s** | 100% | **Khớp chính xác với độ lệch đo đạc thực tế.** |
 
-### Đối Chiếu Số Liệu Khung Hình Giữ Lại ($n_{unique}$) Của Tập 2:
-* **20.876 frames (38.82% kept):** **SỐ ĐO THÔ** từ bộ lọc `mpdecimate` quét toàn tập (`raw_kept_frames` không kèm ép ranh giới).
-* **20.977 frames (39.14% kept):** **SỐ ĐO THỰC TẾ ĐƯA VÀO AI** sau khi thuật toán pipeline ép giữ thêm **101 frames ranh giới chunk 8s** ($i \times 192$, với $i = 0, 1, \dots, 178$).
-* **Kết luận:** Cả hai số liệu đều hoàn toàn chính xác theo từng định nghĩa kỹ thuật ($20.977 = 20.876 + 101$).
+### Đối Chiếu Số Liệu Khung Hình Giữ Lại ($n_{unique}$) & Tỷ Lệ Dedup:
+* **Tập 1 (`I.Want.to.Love.You...S01E13`, 34.046 frames):**
+  * Giữ lại: **15.669 frames (46.0% kept)** | Loại bỏ: **18.377 frames (54.0% dropped)** *(SỐ ĐO)*.
+* **Tập 2 (`[SubsPlease] Re Zero - 84`, 34.046 frames):**
+  * Số đo thô từ `mpdecimate`: **20.876 frames (61.3% kept)** | Loại bỏ: **13.170 frames (38.7% dropped)** *(SỐ ĐO)*.
+  * Số thực tế đưa vào AI sau ép 101 frames ranh giới chunk: **20.977 frames (61.6% kept)** | Loại bỏ: **13.069 frames (38.4% dropped)** *(SỐ ĐO)*.
+* **Tập 3 (`[SubsPlease] Slime S4 - 24`, 34.046 frames):**
+  * Giữ lại: **18.527 frames (54.4% kept)** | Loại bỏ: **15.519 frames (45.6% dropped)** *(SỐ ĐO)*.
+* **Kết luận:** Bảng lập lịch chỉ cần dùng $n_{unique}$ sau ép ranh giới (**20.977 frames** cho Tập 2) để tính toán ETA.
 
-### Nguyên Nhân Khác Biệt Giữa 2 Tập:
-* Tập 2 có số frame giữ lại ($n_{unique} = 20.977$, 61.2%) cao hơn nhiều so với Tập 1 ($n_{unique} = 15.669$, 45.6%).
+### Nguyên Nhân Khác Biệt Thời Gian Chờ Giữa 2 Tập:
+* Tập 2 có số frame đưa vào AI ($n_{unique} = 20.977$, 61.6% kept) cao hơn nhiều so với Tập 1 ($n_{unique} = 15.669$, 46.0% kept).
 * Do Tập 2 có nhiều phân đoạn hành động nặng (170–192 frames/chunk thay vì 40–80 frames/chunk như Tập 1), dung lượng ảnh PNG 4K sinh ra vượt ngưỡng 2.5–3.0 GB nhanh hơn, kích hoạt cơ chế an toàn backpressure **66 lần** (so với **29 lần** ở Tập 1), dẫn đến thời gian chờ gộp lên tới 1.145s (~19 phút).
+
+### Đánh Giá 3 Cấu Hình Backpressure & Khả Năng Tối Ưu Hóa:
+
+| Cấu Hình | Định Nghĩa Kỹ Thuật | Thời Gian Chờ (Đo / Ước Lượng) | Phân Loại & Đánh Giá Rủi Ro |
+| :--- | :--- | :---: | :--- |
+| **(a) Hiện tại** | RAM disk 4GB, cổng `need = n_unique * 12.0MB * 1.3` | **540s** (Tập 1), **1.145s** (Tập 2) | **SỐ ĐO THẬT**: 29 lần chờ (Tập 1) và 66 lần chờ (Tập 2). An toàn tuyệt đối, 0 tràn RAM disk, 0 SSD swap. |
+| **(b) Cổng kích thước động** | RAM disk 4GB, cổng `need = n_unique * png_size * 1.2` | Giảm chờ ~50–70% *(ƯỚC LƯỢNG chưa đo)* | **ƯỚC LƯỢNG (chưa đo)**. Lưu ý kỹ thuật: Cổng **bắt buộc phải dùng p95 hoặc max kích thước PNG gần đây × 1.2**, tuyệt đối KHÔNG dùng trung bình (~9.8 MB) vì các frame nặng trong cảnh hành động có thể đạt 11–12 MB, nếu dùng trung bình sẽ cho qua quá sớm làm tràn RAM Disk. |
+| **(c) Nâng RAM Disk 5GB + Cổng động** | RAM disk 5GB, cổng `need = n_unique * png_size * 1.2` | Triệt tiêu phần lớn thời gian chờ *(ƯỚC LƯỢNG chưa đo)* | **ƯỚC LƯỢNG (chưa đo)**. Chiếm 5GB / 18GB Unified Memory. Có nguy cơ tăng memory pressure khi gối đầu CPU + Metal + Media Engine. |
+
+* **Đối chiếu chéo với GPU idle:**
+  * GPU idle trong ca Đêm 1 là **6.70%** (Tập 1) và **8.56%** (Tập 2), gần bằng tỷ lệ thời gian chờ backpressure trên tổng thời gian chạy (**5.2%** và **8.4%**).
+  * Điều này chứng minh: Lợi ích tối đa về mặt thời gian nếu triệt tiêu hoàn toàn việc chờ backpressure chỉ là khoảng **5% – 8%**, không hơn. Vì vậy, việc tinh chỉnh này không đáng làm trước ca Đêm 2 để bảo toàn tuyệt đối tính ổn định của hệ thống.
 
 ---
 
@@ -391,30 +408,36 @@ Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế
 
 * **Phản hồi trực tiếp từ người dùng:**
   > *«tôi đã xem và nghe phụ đề toàn bộ tập 1 và 2, tất cả đều ổn không có gì sai sót hay lỗi».*
-* **Ý nghĩa kiểm định:**
-  1. **Chất lượng phụ đề (Subtitles):** Khẳng định chuỗi dịch tự động đa tầng với Stage A Cast Sheet và glossary base 231 thuật ngữ cho ra bản dịch tiếng Việt nói tự nhiên, chuẩn văn phong, đúng đại từ xưng hô xuyên suốt tập phim, không có lỗi ngữ cảnh hay lỗi xưng hô suồng sã.
-  2. **Chất lượng hình ảnh 4K & Đồng bộ A/V:** Khẳng định video 4K upscale bằng PyTorch MPS FP16 giữ nét vẽ mượt mà, không giật lag, không mất frame cử động và đồng bộ tuyệt đối giữa âm thanh gốc với hình ảnh và phụ đề.
 
 ---
 
-## 12. Điều Tra & Khắc Phục Cảnh Báo Nhúng Phụ Đề Vào MKV
+## 12. Điều Tra & Khắc Phục Nhúng Phụ Đề Vào Container MKV
 
 * **Hiện tượng trong ca Đêm 1:** 
   Khi kết thúc Stage B độc lập cho Tập 1 và Tập 2, pipeline in cảnh báo: `⚠️ Không thể nhúng phụ đề vào container 4K, file phụ đề ngoài vẫn sẵn sàng.`
-* **Tái hiện trên bản sao (File Copy Test):**
-  - Thực hiện lệnh sao chép APFS clone `cp -c` cho cả 2 file 4K MKV thành phẩm sang file kiểm thử độc lập (`test_ep1_clone.mkv` và `test_ep2_clone.mkv`), hoàn toàn không tác động đến file gốc.
-  - Chạy hàm `embed_subtitle_track()` trên cả hai bản sao.
-  - **Kết quả ngoại lệ bắt được:**
-    ```text
-    ⚠️ [FFMPEG SUB EMBED] Ngoại lệ: name 'shutil' is not defined
-    ```
 * **Nguyên nhân cốt lõi (Root Cause):**
-  - Trong file `src/ffmpeg_ops.py`, tại hàm `embed_subtitle_track()`, sau khi `ffmpeg` chạy thành công tạo file tạm `tmp_out`, lệnh `shutil.move(tmp_out, mkv_path)` được gọi.
+  - Trong `src/ffmpeg_ops.py`, tại hàm `embed_subtitle_track()`, sau khi `ffmpeg` chạy thành công tạo file tạm `tmp_out`, lệnh `shutil.move(tmp_out, mkv_path)` được gọi.
   - Tuy nhiên, module `shutil` **chưa được import** ở đầu file `src/ffmpeg_ops.py` (chỉ có `os`, `json`, `subprocess`, `glob`, `typing`).
   - Lệnh `ffmpeg` thực tế đã tạo file thành công với mã thoát 0, nhưng Python ném ra `NameError: name 'shutil' is not defined`. Khối `try...except` đã bắt lỗi này và xóa file tạm, dẫn đến cảnh báo hiển thị sai lệch.
-* **Biện pháp khắc phục:**
-  - Bổ sung `import shutil` vào danh sách imports của `src/ffmpeg_ops.py`.
-  - Kiểm thử lại trên bản sao của cả 2 tập: `embed_subtitle_track()` trả về `True`, luồng phụ đề tiếng Việt `subrip` được đặt làm default track, bảo toàn 100% video HEVC 10-bit, audio gốc, toàn bộ phụ đề cũ, 16 font chữ nhúng (TTF) và chapters.
+* **Đính chính số lượng Font chữ đính kèm:**
+  - Con số "16 font" ở log cũ là do lệnh ffprobe kiểm tra nhanh bị giới hạn hiển thị `[:25]`.
+  - Kiểm tra toàn diện trên file nguồn và file 4K bằng `probe_video()` xác nhận chính xác:
+    * **Tập 1 (`I.Want.to.Love.You...S01E13`):** Đúng **11 font attachments** (TTF/OTF).
+    * **Tập 2 (`[SubsPlease] Re Zero - 84`):** Đúng **24 font attachments** (TTF/OTF).
+* **Quy trình nhúng phụ đề an toàn mới:**
+  1. Ghi luồng phụ đề ra file tạm `mkv_path.embed_sub.tmp.mkv` với đầy đủ map `-map 0:v:0 -map 0:a? -map 1:0 -map 0:s? -map 0:t? -map_chapters 0 -c copy -max_interleave_delta 0`.
+  2. Tự động chạy `verify_mux_integrity()` so sánh file tạm với video nguồn gốc:
+     - Kiểm tra bit-exact MD5 của toàn bộ luồng audio gốc.
+     - Kiểm tra đan xen gói tin 10s (Window Interleaving).
+     - Kiểm tra âm lượng tại 7 mốc thời gian seek bằng `volumedetect` (lệch $\le 0.5$ dB).
+     - Kiểm tra số luồng audio, số font đính kèm (phải $\ge$ nguồn: 11 font cho Tập 1, 24 font cho Tập 2) và chapters.
+  3. **Chỉ khi Mux Audit đạt PASS 100%:** Mới thực hiện `shutil.move` nguyên tử ghi đè lên file 4K thành phẩm.
+  4. **Nếu Mux Audit trả về FAIL hoặc gặp ngoại lệ:** Giữ nguyên file 4K gốc không chỉnh sửa, xóa sạch file tạm, in cảnh báo chi tiết lý do và giữ file `.vi.srt` độc lập bên ngoài.
+  5. Bổ sung cờ `--no-embed` (mặc định False) cho phép người dùng chủ động tắt bước nhúng và chỉ giữ file phụ đề ngoài nếu muốn.
+* **Kết quả nghiệm thu trên bản sao APFS clone (`cp -c`):**
+  - **Tập 1:** Embed thành công trong 4.25s (dung lượng tạm 1756.78 MB), Audit status **PASS**, font attachments **11/11**, subs: 9, audio: 1.
+  - **Tập 2:** Embed thành công trong 4.95s (dung lượng tạm 1655.12 MB), Audit status **PASS**, font attachments **24/24**, subs: 2, audio: 1.
+  - **Failure test:** Cố tình đưa file lệch nguồn để kích hoạt lỗi MD5 audio $\to$ hàm trả về `False`, file 4K được giữ nguyên vẹn 100% byte, file tạm được dọn sạch.
 
 
 

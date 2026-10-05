@@ -280,6 +280,12 @@ def build_arg_parser():
         help="Tắt cơ chế tự động bù lệch thời gian phụ đề trong hàng đợi"
     )
     parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        default=False,
+        help="Không nhúng track phụ đề vào container MKV 4K, chỉ xuất và giữ file .vi.srt ngoài"
+    )
+    parser.add_argument(
         "--night-report",
         nargs="?",
         const="night1",
@@ -413,12 +419,15 @@ def main():
             from src.ffmpeg_ops import embed_subtitle_track
             target_4k = os.path.join(sub_out_dir, f"{base_vid_name}_4K.mkv")
             if os.path.exists(target_4k):
-                print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_4k)}...")
-                ok = embed_subtitle_track(target_4k, str(srt_path))
-                if ok:
-                    print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container 4K MKV!")
+                if not getattr(args, "no_embed", False):
+                    print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_4k)}...")
+                    ok = embed_subtitle_track(target_4k, str(srt_path), original_source_path=target_subs_vid)
+                    if ok:
+                        print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container 4K MKV!")
+                    else:
+                        print("⚠️ Không thể nhúng phụ đề vào container 4K (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
                 else:
-                    print("⚠️ Không thể nhúng phụ đề vào container 4K, file phụ đề ngoài vẫn sẵn sàng.")
+                    print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container 4K, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
         sys.exit(0)
 
@@ -620,6 +629,8 @@ def main():
             ]
             if args.subs_upgrade:
                 sub_cmd.append("--subs-upgrade")
+            if getattr(args, "no_embed", False):
+                sub_cmd.append("--no-embed")
 
             # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi:
             manual_offset_applied = False
