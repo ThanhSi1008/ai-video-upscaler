@@ -14,25 +14,25 @@ def test_detect_auto_offset_on_real_episodes():
     if not base_dir.exists():
         pytest.skip("RawSources directory not available")
 
-    # Ep 1: I Want to Love You 13 (natural sync, should not apply)
-    ja_ep1 = base_dir / "I.Want.to.Love.You.Till.Your.Dying.Day.S01E13.I.Miss.You.REPACK.1080p.CR.WEB-DL.JPN.AAC2.0.H.264.MSubs-ToonsHub.ja.srt"
-    en_ep1 = base_dir / "I.Want.to.Love.You.Till.Your.Dying.Day.S01E13.I.Miss.You.REPACK.1080p.CR.WEB-DL.JPN.AAC2.0.H.264.MSubs-ToonsHub.en.srt"
+    # Ep 1: Kimi ga Shinu made Koi wo Shitai 13 (natural sync, should not apply)
+    ja_ep1 = base_dir / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13.ja.srt"
+    en_ep1 = base_dir / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13.en.srt"
     if ja_ep1.exists() and en_ep1.exists():
         offset_ms, is_applied, reason, stats = detect_auto_offset(str(ja_ep1), str(en_ep1))
         assert not is_applied, f"Ep 1 should not apply auto-offset: {reason}"
         assert abs(offset_ms) < 1000
 
     # Ep 2: Re Zero 84 (natural sync, should not apply)
-    ja_ep2 = base_dir / "[SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84 (1080p) [5188BBC4].ja.srt"
-    en_ep2 = base_dir / "[SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84 (1080p) [5188BBC4].en.srt"
+    ja_ep2 = base_dir / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84.ja.srt"
+    en_ep2 = base_dir / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84.en.srt"
     if ja_ep2.exists() and en_ep2.exists():
         offset_ms, is_applied, reason, stats = detect_auto_offset(str(ja_ep2), str(en_ep2))
         assert not is_applied, f"Ep 2 should not apply auto-offset: {reason}"
         assert abs(offset_ms) < 1000
 
     # Ep 3: Slime S4-24 (sponsor card gap, should detect ~ -11141 ms and apply)
-    ja_ep3 = base_dir / "[SubsPlease] Tensei Shitara Slime Datta Ken S4 - 24 (1080p) [AA94BC1F].ja.srt"
-    en_ep3 = base_dir / "[SubsPlease] Tensei Shitara Slime Datta Ken S4 - 24 (1080p) [AA94BC1F].en.srt"
+    ja_ep3 = base_dir / "Tensei_Shitara_Slime_Datta_Ken" / "Tensei_Shitara_Slime_Datta_Ken_S04E24.ja.srt"
+    en_ep3 = base_dir / "Tensei_Shitara_Slime_Datta_Ken" / "Tensei_Shitara_Slime_Datta_Ken_S04E24.en.srt"
     if ja_ep3.exists() and en_ep3.exists():
         offset_ms, is_applied, reason, stats = detect_auto_offset(str(ja_ep3), str(en_ep3))
         assert is_applied, f"Ep 3 should apply auto-offset: {reason}"

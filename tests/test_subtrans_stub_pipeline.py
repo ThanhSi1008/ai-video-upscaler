@@ -34,9 +34,9 @@ TMP_TEST_DIR = Path("/tmp/test_subtrans_integration")
 
 EPISODES = [
     {
-        "name": "EP1 (I Want to Love You 13)",
-        "source": RAW_DIR / "I.Want.to.Love.You.Till.Your.Dying.Day.S01E13.I.Miss.You.REPACK.1080p.CR.WEB-DL.JPN.AAC2.0.H.264.MSubs-ToonsHub.mkv",
-        "upscaled": UPSCALED_DIR / "I.Want.to.Love.You.Till.Your.Dying.Day.S01E13.I.Miss.You.REPACK.1080p.CR.WEB-DL.JPN.AAC2.0.H.264.MSubs-ToonsHub_4K.mkv",
+        "name": "EP1 (Kimi ga Shinu made Koi wo Shitai 13)",
+        "source": RAW_DIR / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13.mkv",
+        "upscaled": UPSCALED_DIR / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13_4K.mkv",
         "expected_offset_applied": False,
         "expected_offset_min": -300,
         "expected_offset_max": 0,
@@ -44,8 +44,8 @@ EPISODES = [
     },
     {
         "name": "EP2 (Re Zero 84)",
-        "source": RAW_DIR / "[SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84 (1080p) [5188BBC4].mkv",
-        "upscaled": UPSCALED_DIR / "[SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84 (1080p) [5188BBC4]_4K.mkv",
+        "source": RAW_DIR / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84.mkv",
+        "upscaled": UPSCALED_DIR / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84_4K.mkv",
         "expected_offset_applied": False,
         "expected_offset_min": -200,
         "expected_offset_max": 0,
@@ -53,7 +53,7 @@ EPISODES = [
     },
     {
         "name": "EP3 (Slime S4-24)",
-        "source": RAW_DIR / "[SubsPlease] Tensei Shitara Slime Datta Ken S4 - 24 (1080p) [AA94BC1F].mkv",
+        "source": RAW_DIR / "Tensei_Shitara_Slime_Datta_Ken" / "Tensei_Shitara_Slime_Datta_Ken_S04E24.mkv",
         "upscaled": None,  # Tập 3 chưa hoàn tất upscale ở Đêm 1
         "expected_offset_applied": True,
         "expected_offset_min": -11300,
