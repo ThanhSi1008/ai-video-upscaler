@@ -351,6 +351,13 @@ def run_upscale_pipeline(
                     )
                     kept_indices = c_plan["kept_indices"] if c_plan else None
 
+                    # Đảm bảo RAM Disk có tối thiểu không gian an toàn cho 1080p frames (~350MB) trước khi extract
+                    t_wait_ext = time.time()
+                    while (shutil.disk_usage(cache_root).free / (1024 * 1024)) < 450.0:
+                        if time.time() - t_wait_ext > 120.0:
+                            break
+                        time.sleep(0.2)
+
                     t0 = time.time()
                     f_count = extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=kept_indices)
                     t_ext = time.time() - t0
@@ -487,7 +494,17 @@ def run_upscale_pipeline(
                                     future_encode = None
                                     free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
-                                # Ngay lập tức khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
+                                # Nếu RAM Disk còn dưới 800 MB và chunk trước đang encode ở luồng nền:
+                                # Chờ Media Engine giải phóng trước khi cho CPU decode trích xuất chunk tiếp theo
+                                if future_encode is not None and not future_encode.done():
+                                    cur_free = shutil.disk_usage(cache_root).free / (1024 * 1024)
+                                    if cur_free < 800.0:
+                                        prev_enc_elapsed = future_encode.result()
+                                        total_enc_time += prev_enc_elapsed
+                                        future_encode = None
+                                        free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
+
+                                # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
                                 if i + 1 < len(chunks_to_process) and (future_extract is None or future_extract.done()):
                                     future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
                                 elif i + 1 >= len(chunks_to_process):

@@ -102,12 +102,11 @@ def parse_and_align_subtitles(
         clean_ja = clean_subtitle_text(raw_text)
         is_skip = should_skip_cue(event.style, raw_text, skip_styles_regex)
 
+        matching_en_cues = []
         aligned_en = None
         is_dropped_sound = False
         if not is_skip and clean_ja:
             if en_cues:
-                # Find all EN cues whose overlap is at least overlap_threshold * EN duration
-                matching_en_texts = []
                 for ec in en_cues:
                     # Calculate time overlap between JA and EN cue
                     overlap_start = max(event.start, ec["start"])
@@ -115,10 +114,10 @@ def parse_and_align_subtitles(
                     overlap_duration = max(0, overlap_end - overlap_start)
 
                     if overlap_duration >= (ec["duration"] * overlap_threshold):
-                        matching_en_texts.append(ec["text"])
+                        matching_en_cues.append(ec)
 
-                if matching_en_texts:
-                    aligned_en = " ".join(matching_en_texts)
+                if matching_en_cues:
+                    aligned_en = " ".join(ec["text"] for ec in matching_en_cues)
                     matched_en_count += 1
 
             if is_pure_sound_cue(clean_ja) and not aligned_en and sound_cues == "drop":
@@ -127,10 +126,17 @@ def parse_and_align_subtitles(
             else:
                 dialogue_cue_count += 1
 
+        # Trục thời gian chuẩn: Khi có đối ứng tiếng Anh từ video gốc, lấy start/end từ EN
+        cue_start = event.start
+        cue_end = event.end
+        if matching_en_cues and not is_skip:
+            cue_start = matching_en_cues[0]["start"]
+            cue_end = matching_en_cues[-1]["end"]
+
         cue = Cue(
             id=idx,
-            start=event.start,
-            end=event.end,
+            start=cue_start,
+            end=cue_end,
             style=event.style,
             ja=clean_ja,
             en=aligned_en,
@@ -141,6 +147,16 @@ def parse_and_align_subtitles(
             raw_text=raw_text
         )
         cues.append(cue)
+
+    # Xử lý các cặp cue liên tiếp cùng trỏ vào một cue EN dài (chia khoảng thời gian tránh đè nhau)
+    for i in range(len(cues) - 1):
+        c1, c2 = cues[i], cues[i+1]
+        if not c1.is_skipped and not c2.is_skipped and c1.start == c2.start and c1.end == c2.end:
+            len1 = max(1, len(c1.ja))
+            len2 = max(1, len(c2.ja))
+            split_t = c1.start + int((c1.end - c1.start) * (len1 / (len1 + len2)))
+            c1.end = split_t
+            c2.start = split_t
 
     dropped_count = sum(1 for c in cues if c.is_dropped_sound)
     if dropped_count > 0:
