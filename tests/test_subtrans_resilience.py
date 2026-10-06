@@ -152,7 +152,8 @@ class TestSubtransResilience(unittest.TestCase):
         pipeline.cache.get_cue.return_value = None
 
         with patch("time.sleep", return_value=None), \
-             patch("subtrans.throttle.time.sleep", return_value=None):
+             patch("subtrans.throttle.time.sleep", return_value=None), \
+             patch("subtrans.cache.TranslationCache.is_model_exhausted", return_value=False):
             import pysubs2
             dummy_ssa = pysubs2.SSAFile()
 
