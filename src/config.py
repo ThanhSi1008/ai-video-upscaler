@@ -111,7 +111,8 @@ DEFAULT_DEDUP_ENABLED = True
 # -----------------------------------------------------------------------------
 # CẤU HÌNH RAM DISK (ZERO NVME SSD WEAR)
 # -----------------------------------------------------------------------------
-DEFAULT_RAMDISK_SIZE_MB = 4096  # 4 GB RAM Disk ảo trong Unified Memory
+DEFAULT_RAMDISK_SIZE_MB = 5120  # 5 GB RAM Disk ảo trong Unified Memory (đủ đệm an toàn chunk 192 frames 4K ~3.1GB + input)
+DEFAULT_PNG_UNIT_SIZE_MB = 16.0  # Sàn ước tính an toàn dung lượng frame 4K PNG (RGB24 3840x2160 cho Anime ~14-16MB)
 
 # -----------------------------------------------------------------------------
 # CẤU HÌNH APPLE MEDIA ENGINE (VIDEOTOOLBOX HARDWARE ENCODER 10-BIT)

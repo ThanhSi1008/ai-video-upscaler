@@ -34,6 +34,7 @@ from src.config import (
     DEFAULT_FRAME_FORMAT,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RAMDISK_SIZE_MB,
+    DEFAULT_PNG_UNIT_SIZE_MB,
     acquire_gpu_lock,
     release_gpu_lock,
 )
@@ -226,7 +227,7 @@ def run_upscale_pipeline(
             json.dump(manifest_data, f, indent=2, ensure_ascii=False)
 
         # Kích thước RAM Disk (ước lượng dựa theo độ dài phân đoạn và định dạng)
-        multiplier = 11.0 if fmt == "png" else 4.5
+        multiplier = 18.0 if fmt == "png" else 4.5
         ramdisk_size = max(DEFAULT_RAMDISK_SIZE_MB, int(segment_time * 24 * multiplier / 1024) + 1024)
 
         # Khởi tạo RAM Disk Context
@@ -384,10 +385,10 @@ def run_upscale_pipeline(
                     c_plan = item["extracted"]["chunk_plan"]
                     exp_frames = item["extracted"]["expected_frames"]
 
+                    concat_script = os.path.join(cache_root, f"concat_{c_idx:04d}.txt") if c_plan else None
                     t0 = time.time()
                     try:
                         if c_plan:
-                            concat_script = os.path.join(cache_root, f"concat_{c_idx:04d}.txt")
                             generate_concat_demuxer_script(
                                 runs=c_plan["runs"],
                                 frames_out_dir=c_out_dir,
@@ -404,8 +405,6 @@ def run_upscale_pipeline(
                                 fps_den=meta["fps_den"],
                                 bitrate=bitrate
                             )
-                            if os.path.exists(concat_script):
-                                os.remove(concat_script)
                         else:
                             encode_chunk_hevc(
                                 frames_dir=c_out_dir,
@@ -416,6 +415,11 @@ def run_upscale_pipeline(
                             )
                         return time.time() - t0
                     finally:
+                        if concat_script and os.path.exists(concat_script):
+                            try:
+                                os.remove(concat_script)
+                            except OSError:
+                                pass
                         shutil.rmtree(c_in_dir, ignore_errors=True)
                         shutil.rmtree(c_out_dir, ignore_errors=True)
 
@@ -439,24 +443,30 @@ def run_upscale_pipeline(
 
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
+
+                            # Chờ giải mã CPU chunk hiện tại sẵn sàng (chỉ lấy 1 lần cho chunk i)
+                            if future_extract is not None:
+                                extracted = future_extract.result()
+                                future_extract = None
+                            else:
+                                extracted = worker_extract(target_chunk)
+
+                            c_in_dir = extracted["in_dir"]
+                            c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
+                            os.makedirs(c_out_dir, exist_ok=True)
+
                             chunk_attempt = 0
                             max_chunk_retries = 2
 
                             while True:
                                 seg_start_time = time.time()
-
-                                # Chờ giải mã CPU chunk hiện tại sẵn sàng (nếu chưa xong)
-                                extracted = future_extract.result()
-                                c_in_dir = extracted["in_dir"]
-                                c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
-                                os.makedirs(c_out_dir, exist_ok=True)
-
                                 n_unique = extracted["ai_frames"]
 
-                                # 2.2 Cổng Backpressure: need = số frame × max(kích thước PNG chunk gần nhất, p95 tích lũy, sàn 9 MB) × 1.2
-                                recent_png_mb = chunk_png_unit_sizes[-1] if chunk_png_unit_sizes else 9.0
-                                p95_png_mb = float(np.percentile(chunk_png_unit_sizes, 95)) if chunk_png_unit_sizes else 9.0
-                                unit_size_mb = max(recent_png_mb, p95_png_mb, 9.0) if fmt.lower() == "png" else 1.2
+                                # 2.2 Cổng Backpressure: need = số frame × max(kích thước PNG chunk gần nhất, p95 tích lũy, sàn DEFAULT_PNG_UNIT_SIZE_MB) × 1.2
+                                floor_png_mb = DEFAULT_PNG_UNIT_SIZE_MB
+                                recent_png_mb = chunk_png_unit_sizes[-1] if chunk_png_unit_sizes else floor_png_mb
+                                p95_png_mb = float(np.percentile(chunk_png_unit_sizes, 95)) if chunk_png_unit_sizes else floor_png_mb
+                                unit_size_mb = max(recent_png_mb, p95_png_mb, floor_png_mb) if fmt.lower() == "png" else 1.2
                                 need_mb = n_unique * unit_size_mb * 1.2
                                 free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
@@ -495,7 +505,7 @@ def run_upscale_pipeline(
                                     free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
                                 # Nếu RAM Disk còn dưới 800 MB và chunk trước đang encode ở luồng nền:
-                                # Chờ Media Engine giải phóng trước khi cho CPU decode trích xuất chunk tiếp theo
+                                # Chờ Media Engine giải phóng trước khi bắt đầu infer
                                 if future_encode is not None and not future_encode.done():
                                     cur_free = shutil.disk_usage(cache_root).free / (1024 * 1024)
                                     if cur_free < 800.0:
@@ -503,12 +513,6 @@ def run_upscale_pipeline(
                                         total_enc_time += prev_enc_elapsed
                                         future_encode = None
                                         free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
-
-                                # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
-                                if i + 1 < len(chunks_to_process) and (future_extract is None or future_extract.done()):
-                                    future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
-                                elif i + 1 >= len(chunks_to_process):
-                                    future_extract = None
 
                                 # Kiểm tra giới hạn cứng ENOSPC trước khi infer
                                 min_needed_mb = n_unique * unit_size_mb
@@ -660,6 +664,9 @@ def run_upscale_pipeline(
                                         )
                                         throttling_warned = True
 
+                            # Dọn sạch input frames của chunk hiện tại ngay lập tức sau khi AI infer xong
+                            shutil.rmtree(c_in_dir, ignore_errors=True)
+
                             # Nếu phân đoạn trước đang mã hóa ở luồng nền, chờ hoàn tất và ghi log
                             if future_encode is not None:
                                 prev_enc_elapsed = future_encode.result()
@@ -690,6 +697,7 @@ def run_upscale_pipeline(
                                     steady_fps=last_ai_result.get("steady_fps"),
                                     rss_mb=last_ai_result.get("peak_rss_mb")
                                 )
+                                future_encode = None
 
                             # Khởi động mã hóa VideoToolbox cho chunk hiện tại ở luồng nền (Media Engine)
                             encode_item = {
@@ -706,6 +714,12 @@ def run_upscale_pipeline(
                                 suffix="Hardware Encoding 10-bit (Pipelined)..."
                             )
                             future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
+
+                            # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
+                            if i + 1 < len(chunks_to_process):
+                                future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
+                            else:
+                                future_extract = None
 
                             # Kiểm tra mốc hạn chót nếu bật --allow-partial
                             if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
