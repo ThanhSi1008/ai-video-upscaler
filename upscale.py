@@ -31,6 +31,12 @@ from src.pipeline import run_upscale_pipeline, FailedResumableError
 from src.ffmpeg_ops import probe_video
 from src.dedup import spawn_background_preflight
 from src.models_resolver import list_models_formatted
+from src.cleanup import (
+    cleanup_checkpoint_dir,
+    cleanup_subtitle_extracts,
+    organize_output_artifacts,
+    clean_all_temporary_data,
+)
 from pathlib import Path
 
 
@@ -307,6 +313,24 @@ def build_arg_parser():
         action="store_true",
         help="Chạy lại quy trình dịch phụ đề cho các tập ghi nhận trong pending_subs.json"
     )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        default=False,
+        help="Giữ lại thư mục tạm và checkpoint (.temp_<basename>) sau khi upscale thành công (Mặc định: Tự động dọn dẹp sạch sẽ để tiết kiệm dung lượng SSD)"
+    )
+    parser.add_argument(
+        "--clean-temp", "--cleanup",
+        action="store_true",
+        default=False,
+        help="Quét và dọn dẹp sạch sẽ toàn bộ thư mục tạm (.temp_*), symlinks mồ côi và gom báo cáo audit trong thư mục xuất xưởng"
+    )
+    parser.add_argument(
+        "--no-organize-audit",
+        action="store_true",
+        default=False,
+        help="Không tự động gom các file báo cáo kiểm định (.audit.json, .audit.md, .cast.yaml) vào thư mục con audit/"
+    )
 
     return parser
  
@@ -417,6 +441,22 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
 
 def main():
     args = parse_args()
+
+    # Xử lý cờ --clean-temp / --cleanup (Dọn dẹp nhanh thư mục tạm và gom gọn audit)
+    if getattr(args, "clean_temp", False):
+        from src.config import DEFAULT_OUTPUT_DIR
+        from src.logger import format_bytes
+        target_clean_dir = args.output if (args.output and os.path.isdir(args.output)) else DEFAULT_OUTPUT_DIR
+        print(f"\n🧹 Bắt đầu quét và dọn dẹp thư mục: {target_clean_dir}...")
+        report = clean_all_temporary_data(target_clean_dir)
+        print(f"✅ Đã dọn dẹp {len(report['cleaned_dirs'])} thư mục/symlink tạm:")
+        for cd in report['cleaned_dirs']:
+            print(f"   • {cd}")
+        print(f"📁 Đã gom {len(report['organized_files'])} file báo cáo kỹ thuật vào 'audit/':")
+        for of in report['organized_files']:
+            print(f"   • {of}")
+        print(f"🛡️  Tổng dung lượng SSD đã giải phóng: {format_bytes(report['bytes_freed'])}\n")
+        sys.exit(0)
 
     # Xử lý cờ --night-report (Sinh báo cáo tổng kết phiên đêm, chỉ đọc)
     if args.night_report:
@@ -531,6 +571,11 @@ def main():
                             print("⚠️ Không thể nhúng phụ đề vào container 4K (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
                     else:
                         print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container 4K, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
+
+        # Dọn dẹp tệp phụ đề tạm và gom gọn báo cáo audit
+        cleanup_subtitle_extracts(vid_dir, base_vid_name)
+        if not getattr(args, "no_organize_audit", False):
+            organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
 
         sys.exit(0)
 
@@ -678,7 +723,8 @@ def main():
                 preview_seconds=args.preview,
                 dedup=not args.no_dedup,
                 allow_partial=args.allow_partial,
-                deadline_dt=deadline_dt
+                deadline_dt=deadline_dt,
+                keep_temp=args.keep_temp
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
             if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
@@ -693,6 +739,10 @@ def main():
 
             # Cập nhật fps từ audit.json nếu có
             audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
+            if audit_path and not os.path.exists(audit_path):
+                alt_audit = os.path.join(os.path.dirname(out_file), "audit", os.path.basename(audit_path))
+                if os.path.exists(alt_audit):
+                    audit_path = alt_audit
             if audit_path and os.path.exists(audit_path):
                 try:
                     with open(audit_path, "r", encoding="utf-8") as f:
@@ -752,7 +802,8 @@ def main():
                     preview_seconds=args.preview,
                     dedup=not args.no_dedup,
                     allow_partial=args.allow_partial,
-                    deadline_dt=None
+                    deadline_dt=None,
+                    keep_temp=args.keep_temp
                 )
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))
@@ -815,6 +866,16 @@ def main():
                 print(f"⏱️ Tiến trình con phụ đề vượt quá thời gian tối đa ({sub_timeout}s) và đã bị ngắt an toàn. Video 4K không bị ảnh hưởng!")
             except Exception as se:
                 print(f"⚠️ Lỗi khởi chạy tiến trình con phụ đề: {se}")
+
+    # -------------------------------------------------------------------------
+    # DỌN DẸP PHỤ ĐỀ TẠM & GOM GỌN CÁC FILE KỸ THUẬT (AUDIT/CAST) SAU KHI HOÀN TẤT
+    # -------------------------------------------------------------------------
+    if not getattr(args, "no_organize_audit", False) and completed_videos:
+        for src_vid, out_vid in completed_videos:
+            sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
+            base_vid_name = os.path.splitext(os.path.basename(src_vid))[0]
+            cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(src_vid)), base_vid_name)
+            organize_output_artifacts(sub_out_dir, base_name=base_vid_name)
 
     # -------------------------------------------------------------------------
     # KIỂM ĐỊNH TẤT CẢ CÁC TẬP: NẾU CÒN TẬP CHƯA XONG THÌ THOÁT MÃ ≠ 0 VÀ IN BẢNG

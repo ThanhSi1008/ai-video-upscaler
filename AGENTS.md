@@ -47,6 +47,9 @@
 | `--no-auto-offset` | `False` | Ép tắt tính năng auto-offset trong hàng đợi |
 | `--sub-offset-ms` | `0` | Bù offset phụ đề thủ công theo mili-giây (luôn có độ ưu tiên cao nhất) |
 | `--no-embed` | `False` | Tắt bước nhúng phụ đề vào container MKV thành phẩm |
+| `--keep-temp` | `False` | Giữ lại thư mục tạm `.temp_<basename>` (mặc định: tự động dọn dẹp sạch khi Mux PASS) |
+| `--clean-temp`, `--cleanup` | `False` | Quét dọn toàn bộ thư mục tạm và gom file audit/cast trong thư mục xuất xưởng rồi thoát |
+| `--no-organize-audit` | `False` | Tắt bước gom các file audit (.audit.json, .audit.md, .cast.yaml) vào thư mục con `audit/` |
 | `--dry-run` | `False` | Chạy mô phỏng toàn bộ quy trình mà không gọi AI hay API |
 
 ---
@@ -77,6 +80,7 @@ upscale/
 │   ├── pipeline.py         # Orchestrator: Triple-buffering, Rolling Segments, Checkpoint Resume
 │   ├── scheduler.py        # Dynamic overnight queue scheduler & ETA predictor
 │   ├── night_report.py     # Báo cáo viễn trắc tổng kết phiên chạy qua đêm Markdown
+│   ├── cleanup.py          # Auto-cleanup: Dọn dẹp thư mục tạm (.temp_*), symlinks & gom gọn audit/
 │   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
 ├── subtrans/               # Engine dịch thuật phụ đề (xem subtrans/AGENTS.md)
 ├── bin/realesrgan/         # Universal Mach-O binary & NCNN models (.param / .bin)
@@ -140,6 +144,7 @@ upscale/
 * **Xử lý chú thích âm thanh:** Cờ `--sound-cues {drop,translate}` (mặc định `drop` tự động lọc bỏ cue thuần ngoặc đơn không có phụ đề tiếng Anh đối ứng).
 * **Khóa GPU độc quyền:** Dùng file khóa `/tmp/upscale_gpu.lock` kiểm soát GPU theo từng chunk infer, cho phép nạp Ollama ở stage phụ đề sau khi hoàn tất upscale GPU.
 * **Cổng kiểm định Mux:** `src/mux_audit.py` xác minh toàn vẹn luồng stream copy và khớp số lượng font chữ nhúng trước khi xuất xưởng.
+* **Tự động Dọn Dẹp Checkpoint & Gom Gọn Audit:** `src/cleanup.py` kích hoạt tự động sau khi `verify_mux_integrity` trả về PASS; xóa sạch `.temp_<basename>` (kể cả symlinks, thư mục con thực tế và thư mục rỗng) giúp thu hồi ~6.6 GB/tập; tự động gom các file `.audit.json`, `.audit.md`, `.cast.yaml` vào subfolder `audit/` để thư mục xuất xưởng chỉ còn video `.mkv` và `.vi.srt`. Cờ `--keep-temp` cho phép giữ lại khi cần debug.
 
 ---
 

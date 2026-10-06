@@ -78,6 +78,7 @@ from src.preflight import (
     run_preflight_checks,
     send_macos_notification
 )
+from src.cleanup import cleanup_checkpoint_dir, organize_output_artifacts
 
 
 def run_upscale_pipeline(
@@ -96,7 +97,8 @@ def run_upscale_pipeline(
     preview_seconds: Optional[int] = None,
     dedup: bool = True,
     allow_partial: bool = False,
-    deadline_dt: Optional[datetime] = None
+    deadline_dt: Optional[datetime] = None,
+    keep_temp: bool = False
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên Apple Silicon M3 Pro"""
     validate_environment()
@@ -809,8 +811,7 @@ def run_upscale_pipeline(
             mux_final_container(merged_video, input_path, output_path)
             stage_timings["Đóng gói Container gốc (Muxing)"] = time.time() - t_mux_start
 
-            # Dọn dẹp thư mục trung gian trên SSD
-            shutil.rmtree(work_dir, ignore_errors=True)
+            # Xóa file tạm đoạn xem trước (preview) nếu có
             if preview_temp_input and os.path.exists(preview_temp_input):
                 os.remove(preview_temp_input)
 
@@ -895,6 +896,14 @@ def run_upscale_pipeline(
                 if mux_res.get("status") == "FAIL":
                     logger.error(f"❌ MUX AUDIT THẤT BẠI: {mux_res.get('failure_reasons')}", to_console=True)
                     raise RuntimeError(f"Mux audit container thất bại: {mux_res.get('failure_reasons')}")
+
+                # -------------------------------------------------------------
+                # TỰ ĐỘNG DỌN DẸP THƯ MỤC CHECKPOINT TRÊN SSD KHI XUẤT XƯỞNG PASS
+                # -------------------------------------------------------------
+                if not keep_temp:
+                    cleanup_checkpoint_dir(work_dir, output_dir=os.path.dirname(output_path), logger=logger)
+                else:
+                    logger.info(f"ℹ️ Cờ --keep-temp được bật: Giữ lại thư mục tạm '{work_dir}'.", to_console=True)
             except Exception as e:
                 logger.warn(f"Lỗi kiểm định audit.json: {e}")
                 if "Mux audit container thất bại" in str(e):
