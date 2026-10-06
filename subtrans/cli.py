@@ -47,6 +47,7 @@ def check():
         try:
             from google import genai
             from subtrans.cache import execute_and_log_api_request
+            client = genai.Client(api_key=api_key)
             # Simple ping logged via unified wrapper
             _ = execute_and_log_api_request(
                 lambda: list(client.models.list(config={"page_size": 5})),
