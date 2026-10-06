@@ -1,7 +1,7 @@
 # AGENTS.md — AI Agent Guidelines & Architecture Compass
 
 > **Kim chỉ nam dành cho các AI Agent khi đọc, bảo trì và phát triển codebase này.**
-> **Quy tắc bắt buộc:** Ngắn gọn, chuẩn xác, không suy diễn; cập nhật file này sau mỗi lần tái cấu trúc hoặc thay đổi kiến trúc code.
+> **Quy tắc bắt buộc:** Ngắn gọn, chuẩn xác, không suy diễn; cập nhật file này sau mỗi lần tái cấu trúc hoặc thay đổi kiến trúc code; **BẮT BUỘC commit chi tiết sau MỖI yêu cầu** (nêu rõ nguồn yêu cầu, việc đã làm, lỗi đã fix, số liệu thực nghiệm).
 > Chi tiết thực nghiệm & số đo: xem [docs/engineering-log.md](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md) | Phân hệ phụ đề: xem [subtrans/AGENTS.md](file:///Users/xis108/Desktop/upscale/subtrans/AGENTS.md).
 
 ---
@@ -121,6 +121,13 @@ upscale/
 
 ## 5. Ranh Giới Hành Động Cho AI Agent (Agent Boundaries)
 
+* **Kỷ Luật Commit Từng Yêu Cầu (Mandatory Commit Per Request):**
+  * Sau khi hoàn thành **MỖI** yêu cầu (dù từ Người dùng trực tiếp hay từ AI nghiên cứu), **bắt buộc phải commit Git ngay lập tức**. Tuyệt đối không dồn gộp nhiều yêu cầu hoặc nhiều đợt sửa đổi vào một commit chung.
+  * Thông điệp commit (commit message & body) phải trình bày rõ ràng 3 yếu tố:
+    1. **Nguồn yêu cầu:** Do Người dùng yêu cầu hay AI nghiên cứu đề xuất.
+    2. **Hành động cụ thể:** Đã làm gì, đã fix những lỗi gì, đã tối ưu hoặc tái cấu trúc những module nào.
+    3. **Số liệu & Kết quả:** Đính kèm số liệu kiểm chứng (kết quả `pytest`, dung lượng bộ nhớ giải phóng, fps, trạng thái audit, v.v.).
+  * Điều này đảm bảo lịch sử Git phản ánh chính xác timeline tiến độ, giúp trích xuất báo cáo kỹ thuật tức thì mà không cần lục tìm phức tạp.
 * **Bảo vệ Gemini API Key:** Key lấy từ biến môi trường `GEMINI_API_KEY` hoặc file `.env`. Nghiêm cấm in, ghi log, hoặc commit API key ra màn hình và file lưu trữ.
 * **Bảo vệ Quota Ban Ngày:** Tuyệt đối không chạy lệnh gọi API Gemini thật trong khoảng từ **14:00 đến đêm chạy**. Mọi kiểm thử chức năng bắt buộc dùng cờ `--dry-run` hoặc stub backend.
 * **Bảo toàn Checkpoint Resume:** Tuyệt đối không xóa hay sửa đổi các file trong thư mục `.temp_<basename>` trên SSD khi chưa có sự xác nhận của người dùng.
@@ -145,6 +152,7 @@ upscale/
 * **Khóa GPU độc quyền:** Dùng file khóa `/tmp/upscale_gpu.lock` kiểm soát GPU theo từng chunk infer, cho phép nạp Ollama ở stage phụ đề sau khi hoàn tất upscale GPU.
 * **Cổng kiểm định Mux:** `src/mux_audit.py` xác minh toàn vẹn luồng stream copy và khớp số lượng font chữ nhúng trước khi xuất xưởng.
 * **Tự động Dọn Dẹp Checkpoint & Gom Gọn Audit:** `src/cleanup.py` kích hoạt tự động sau khi `verify_mux_integrity` trả về PASS; xóa sạch `.temp_<basename>` (kể cả symlinks, thư mục con thực tế và thư mục rỗng) giúp thu hồi ~6.6 GB/tập; tự động gom các file `.audit.json`, `.audit.md`, `.cast.yaml` vào subfolder `audit/` để thư mục xuất xưởng chỉ còn video `.mkv` và `.vi.srt`. Cờ `--keep-temp` cho phép giữ lại khi cần debug.
+* **Đa Khóa Gemini & Xoay Vòng Hạn Mức (Multi-Key Rotation):** `subtrans/config.py` và `subtrans/gemini_backend.py` hỗ trợ nạp song song nhiều API Key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`,...). Khi gặp lỗi 429 (`RESOURCE_EXHAUSTED`), hệ thống tự động xoay sang key kế tiếp ngay trong batch dịch, nâng hạn ngạch từ 1.500 lên 6.000+ RPD mà không ngắt quãng pipeline.
 
 ---
 
@@ -154,4 +162,4 @@ Một phiên làm việc hoặc mã nguồn được coi là hoàn tất khi th�
 1. **Kiểm thử tự động:** Chạy `pytest` đạt **PASS 100%** cho toàn bộ các bài test không đánh dấu `@pytest.mark.gpu`.
 2. **Kiểm định Mux:** Hàm `verify_mux_integrity` trả về `status: "PASS"` (khớp số kênh audio, số luồng sub, và số lượng font chữ đính kèm).
 3. **Bảo toàn khung hình:** `ffprobe -count_frames` trên video 4K thành phẩm khớp chính xác từng khung hình so với video nguồn gốc.
-4. **Trạng thái Git:** `git status` sạch hoàn toàn, không có file tạm bị bỏ sót; tag phiên bản được cập nhật tương ứng.
+4. **Trạng thái Git & Kỷ luật Commit:** Mỗi yêu cầu hoàn thành đều được commit riêng biệt với thông điệp rõ nguồn, nội dung làm/fix và số liệu; `git status` sạch hoàn toàn, không có file tạm bị bỏ sót; tag phiên bản được cập nhật tương ứng.
