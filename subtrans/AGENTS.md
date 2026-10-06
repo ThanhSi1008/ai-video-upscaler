@@ -66,8 +66,8 @@ subtrans/
    * Tạm dừng (pause) theo `retryDelay` hoặc exponential backoff + jitter (tối đa 5 lần thử lại).
    * **Bắt buộc retry trên CÙNG model** để bảo toàn tính nhất quán tuyệt đối của đại từ xưng hô toàn tập.
 2. **Lỗi 429 PerDay (Daily Quota RPD cạn kiệt ngày):**
-   * Ngay lập tức ghi DB đánh dấu model cạn kiệt cho tới mốc reset giờ Thái Bình Dương (00:00 PT = 14:00 VN).
-   * **Chuyển thẳng sang model kế tiếp trong chuỗi** mà không pause/chờ vô ích.
+   * **Xoay vòng Key trước khi chuyển model (Multi-Key Rotation):** Nếu cấu hình nhiều key trong `.env` (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`), hệ thống tự động xoay sang key tiếp theo để tiếp tục dịch trên CÙNG model trước khi phải hạ cấp xuống model khác.
+   * Khi TẤT CẢ các keys đều cạn kiệt trên model đó: Ngay lập tức ghi DB đánh dấu model cạn kiệt cho tới mốc reset giờ Thái Bình Dương (00:00 PT = 14:00 VN) và **chuyển sang model kế tiếp trong chuỗi**.
 3. **Fallback sang Ollama Local (`translategemma:12b`):**
    * Chỉ kích hoạt khi TOÀN BỘ chuỗi Gemini cạn kiệt VÀ **không có tiến trình Upscale GPU nào đang chạy**.
    * Nếu GPU đang bận upscale, hệ thống đánh dấu các câu là `[Chưa dịch]` để bảo vệ VRAM và checkpoint, chờ người dùng tiếp tục sau.

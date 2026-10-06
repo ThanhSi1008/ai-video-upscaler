@@ -81,7 +81,45 @@ def update_model_quota_in_yaml(model_name: str, quota_id: str, quota_value: Any,
         logging.getLogger("subtrans.config").warning(f"Could not update quota in models.yaml for {model_name}: {e}")
 
 
+def get_gemini_api_keys() -> list[str]:
+    """
+    Thu thập danh sách tất cả các GEMINI_API_KEY từ môi trường và .env:
+    - Hỗ trợ GEMINI_API_KEYS (phân tách dấu phẩy hoặc khoảng trắng)
+    - Hỗ trợ GEMINI_API_KEY (phân tách dấu phẩy hoặc đơn lẻ)
+    - Hỗ trợ các biến GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3,...
+    Trả về danh sách các key không trùng lặp và không rỗng.
+    """
+    keys = []
+
+    # 1. Từ GEMINI_API_KEYS
+    raw_keys = os.environ.get("GEMINI_API_KEYS", "")
+    if raw_keys:
+        for k in raw_keys.replace(";", ",").split(","):
+            k_clean = k.strip()
+            if k_clean and k_clean not in keys:
+                keys.append(k_clean)
+
+    # 2. Từ GEMINI_API_KEY (hỗ trợ cả dấu phẩy)
+    raw_key = os.environ.get("GEMINI_API_KEY", "")
+    if raw_key:
+        for k in raw_key.replace(";", ",").split(","):
+            k_clean = k.strip()
+            if k_clean and k_clean not in keys:
+                keys.append(k_clean)
+
+    # 3. Quét các biến GEMINI_API_KEY_*
+    for env_k, env_v in sorted(os.environ.items()):
+        if env_k.startswith("GEMINI_API_KEY_") and env_v:
+            for k in env_v.replace(";", ",").split(","):
+                k_clean = k.strip()
+                if k_clean and k_clean not in keys:
+                    keys.append(k_clean)
+
+    return keys
+
+
 def get_gemini_api_key() -> Optional[str]:
-    """Retrieves GEMINI_API_KEY from environment."""
-    return os.environ.get("GEMINI_API_KEY")
+    """Retrieves primary GEMINI_API_KEY from environment."""
+    keys = get_gemini_api_keys()
+    return keys[0] if keys else None
 

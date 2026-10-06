@@ -13,7 +13,7 @@ import os
 import re
 import json
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
@@ -145,7 +145,8 @@ class GeminiTranslator(BaseTranslator):
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: Optional[Union[str, List[str]]] = None,
+        api_keys: Optional[List[str]] = None,
         model: str = "gemini-3.8-flash",
         temperature: float = 0.0,
         gloss_skill_names: bool = False,
@@ -154,7 +155,27 @@ class GeminiTranslator(BaseTranslator):
         http_options: Optional[types.HttpOptions] = None,
         dry_run: bool = False,
     ):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        from subtrans.config import get_gemini_api_keys
+
+        # Thu thập toàn bộ danh sách API Keys
+        collected_keys: List[str] = []
+        if api_keys:
+            collected_keys.extend(api_keys)
+        if isinstance(api_key, list):
+            collected_keys.extend(api_key)
+        elif isinstance(api_key, str) and api_key.strip():
+            for k in api_key.replace(";", ",").split(","):
+                k_clean = k.strip()
+                if k_clean and k_clean not in collected_keys:
+                    collected_keys.append(k_clean)
+
+        if not collected_keys:
+            collected_keys = get_gemini_api_keys()
+
+        self.api_keys: List[str] = collected_keys
+        self.current_key_idx: int = 0
+        self.api_key: Optional[str] = self.api_keys[0] if self.api_keys else None
+
         if not self.api_key and not dry_run:
             raise ValueError("GEMINI_API_KEY is required for GeminiTranslator.")
         self.timeout_ms = timeout_ms
@@ -183,8 +204,25 @@ class GeminiTranslator(BaseTranslator):
                 f"Please specify an explicit versioned model (e.g. gemini-3.8-flash) or set allow_latest_alias=True."
             )
 
+    def rotate_key(self) -> bool:
+        """
+        Xoay sang API Key tiếp theo trong danh sách khi key hiện tại cạn hạn mức.
+        Trả về True nếu còn key khả dụng, False nếu đã hết danh sách key.
+        """
+        if self.current_key_idx + 1 < len(self.api_keys):
+            self.current_key_idx += 1
+            self.api_key = self.api_keys[self.current_key_idx]
+            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+            masked = f"{self.api_key[:6]}...{self.api_key[-4:]}"
+            logging.getLogger("subtrans.gemini").warning(
+                f"🔄 [KEY ROTATION] Đã tự động xoay sang API Key [{self.current_key_idx + 1}/{len(self.api_keys)}]: "
+                f"{masked} cho model '{self.model}'."
+            )
+            return True
+        return False
+
     def _call_api(self, prompt_text: str, system_prompt: str = SYSTEM_INSTRUCTION) -> List[Dict[str, Any]]:
-        """Invokes Gemini API requesting structured JSON array with minimal thinking overhead."""
+        """Invokes Gemini API requesting structured JSON array with minimal thinking overhead and key rotation."""
         if self.dry_run:
             return []
 
@@ -199,23 +237,35 @@ class GeminiTranslator(BaseTranslator):
         if thinking_cfg:
             config_kwargs["thinking_config"] = thinking_cfg
 
-        def _send():
-            return self.client.models.generate_content(
-                model=self.model,
-                contents=prompt_text,
-                config=types.GenerateContentConfig(**config_kwargs)
-            )
+        while True:
+            def _send():
+                return self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt_text,
+                    config=types.GenerateContentConfig(**config_kwargs)
+                )
 
-        response = execute_and_log_api_request(
-            _send,
-            model=self.model,
-            backend="gemini",
-            cues_count=0,
-            request_type="translation"
-        )
-        raw_text = response.text.strip()
-        data = json.loads(raw_text)
-        return data
+            try:
+                response = execute_and_log_api_request(
+                    _send,
+                    model=self.model,
+                    backend="gemini",
+                    cues_count=0,
+                    request_type="translation"
+                )
+                raw_text = response.text.strip()
+                data = json.loads(raw_text)
+                return data
+            except Exception as e:
+                err_str = str(e).lower()
+                is_quota_err = any(k in err_str for k in [
+                    "429", "resource_exhausted", "quota", "perday", "requestsperday", "daily"
+                ])
+                # Nếu gặp lỗi hạn mức và còn key tiếp theo trong danh sách:
+                if is_quota_err and self.rotate_key():
+                    continue
+                # Nếu đã hết key hoặc lỗi không thể khắc phục bằng đổi key: ném ra ngoài
+                raise
 
     def translate_batch(
         self,

@@ -40,15 +40,16 @@ def check():
     except ImportError as e:
         table.add_row("Python Packages", "[red]MISSING[/red]", str(e))
 
-    # 2. Check Gemini API Key
-    api_key = get_gemini_api_key()
-    if api_key:
-        masked_key = f"{api_key[:6]}...{api_key[-4:]}"
+    # 2. Check Gemini API Keys
+    from subtrans.config import get_gemini_api_keys
+    api_keys = get_gemini_api_keys()
+    if api_keys:
+        masked_list = [f"{k[:6]}...{k[-4:]}" for k in api_keys]
         try:
             from google import genai
             from subtrans.cache import execute_and_log_api_request
-            client = genai.Client(api_key=api_key)
-            # Simple ping logged via unified wrapper
+            # Ping thử nghiệm với key đầu tiên
+            client = genai.Client(api_key=api_keys[0])
             _ = execute_and_log_api_request(
                 lambda: list(client.models.list(config={"page_size": 5})),
                 model="gemini-3.8-flash",
@@ -56,7 +57,8 @@ def check():
                 cues_count=0,
                 request_type="ping_check"
             )
-            table.add_row("Gemini API", "[green]READY[/green]", f"Key active ({masked_key})")
+            desc_keys = f"{len(api_keys)} keys active: {', '.join(masked_list)}"
+            table.add_row("Gemini API", "[green]READY[/green]", desc_keys)
         except Exception as e:
             table.add_row("Gemini API", "[yellow]KEY ERROR[/yellow]", f"Invalid key or network failure: {e}")
     else:

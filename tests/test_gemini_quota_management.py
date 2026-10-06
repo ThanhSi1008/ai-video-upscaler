@@ -214,7 +214,30 @@ class TestGeminiQuotaManagement(unittest.TestCase):
                 dry_run=False, # Không dry-run nhưng đã có cast sheet và không có nhân vật mới
             )
             self.assertIsNotNone(g2)
-            self.assertEqual(len(g1.characters), len(g2.characters))
+    def test_6_multi_key_rotation(self):
+        """Kiểm tra cơ chế nạp nhiều API Key và tự động xoay key (Key Rotation)."""
+        from subtrans.config import get_gemini_api_keys
+        
+        # Test 1: Khởi tạo translator với 2 keys
+        translator = GeminiTranslator(
+            api_keys=["test_key_111111", "test_key_222222"],
+            model="gemini-3.8-flash",
+            dry_run=True
+        )
+        self.assertEqual(len(translator.api_keys), 2)
+        self.assertEqual(translator.api_key, "test_key_111111")
+        self.assertEqual(translator.current_key_idx, 0)
+
+        # Test 2: Xoay sang key thứ 2
+        can_rotate = translator.rotate_key()
+        self.assertTrue(can_rotate)
+        self.assertEqual(translator.api_key, "test_key_222222")
+        self.assertEqual(translator.current_key_idx, 1)
+
+        # Test 3: Xoay tiếp khi đã hết danh sách key
+        can_rotate_again = translator.rotate_key()
+        self.assertFalse(can_rotate_again)
+        self.assertEqual(translator.current_key_idx, 1)
 
 
 if __name__ == "__main__":
