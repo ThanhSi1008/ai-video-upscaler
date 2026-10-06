@@ -30,7 +30,7 @@ style_rules:
   - "Do not translate Japanese honorifics literally. Follow address_rules and the terms table. Do not leave -san/-kun/-chan/-sama in the Vietnamese unless a term entry says so."
   - "Character names: use the spelling in the glossary. If absent, use the Romaji spelling exactly as it appears in the English track, consistently. Never invent Vietnamese renderings of names."
   - "Place names, organizations, and named techniques not in the glossary: keep the English-track romanization and translate only descriptive parts."
-  - "Do not translate or add sound effects, laughs, or breaths. Keep only short interjections that carry meaning (Hả?, Ừ, Ơ?, Hừ)."
+  - "Do not translate or add laughs or breaths in spoken dialogue. For standalone sound effects in parentheses (e.g. （鳥のさえずり）), translate the sound concisely in parentheses (e.g. (tiếng chim hót)); never leave a cue empty."
   - "Keep each cue's content inside that cue: never merge, split, reorder, or drop cues. Maximum 2 lines, about 42 characters per line."
   - "No translator notes or explanations in parentheses unless a term entry's note requires it."
   - "Match register: keep rude, polite, archaic, childish, or dialect speech recognizable in Vietnamese, without censoring or toning down."

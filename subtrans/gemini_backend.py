@@ -277,6 +277,10 @@ class GeminiTranslator(BaseTranslator):
         try:
             self.stats["api_requests"] += 1
             items = self._call_api(prompt_str, system_prompt=system_prompt)
+            for c, it in zip(cues, items):
+                if isinstance(it, dict) and not (it.get("vi") or "").strip():
+                    if re.match(r"^[（\(][^）\)]+[）\)]$", (c.ja or "").strip()):
+                        it["vi"] = "(âm thanh)"
             is_valid, err_msg = validate_translations(expected_ids, items)
             if is_valid:
                 for c, it in zip(cues, items):
@@ -308,6 +312,10 @@ class GeminiTranslator(BaseTranslator):
         )
         self.stats["api_requests"] += 1
         items = self._call_api(strict_prompt, system_prompt=system_prompt)
+        for c, it in zip(cues, items):
+            if isinstance(it, dict) and not (it.get("vi") or "").strip():
+                if re.match(r"^[（\(][^）\)]+[）\)]$", (c.ja or "").strip()):
+                    it["vi"] = "(âm thanh)"
         is_valid, err_msg = validate_translations(expected_ids, items)
         if is_valid:
             for c, it in zip(cues, items):
