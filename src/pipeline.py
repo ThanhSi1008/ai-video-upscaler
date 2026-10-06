@@ -33,9 +33,20 @@ from src.config import (
     DEFAULT_SEGMENT_TIME,
     DEFAULT_FRAME_FORMAT,
     DEFAULT_OUTPUT_DIR,
-    DEFAULT_RAMDISK_SIZE_MB
+    DEFAULT_RAMDISK_SIZE_MB,
+    acquire_gpu_lock,
+    release_gpu_lock,
 )
 from src.ramdisk import RAMDisk
+
+
+class FailedResumableError(RuntimeError):
+    """Lỗi dừng chunk do ENOSPC sau số lần thử lại; tập có thể resume an toàn từ checkpoint."""
+    def __init__(self, message: str, chunk_idx: int, up_segs_dir: str):
+        super().__init__(message)
+        self.chunk_idx = chunk_idx
+        self.up_segs_dir = up_segs_dir
+
 from src.ffmpeg_ops import (
     probe_video,
     split_video_segments,
@@ -401,189 +412,300 @@ def run_upscale_pipeline(
                         shutil.rmtree(c_in_dir, ignore_errors=True)
                         shutil.rmtree(c_out_dir, ignore_errors=True)
 
-                # Thực thi gối đầu song song (Double-Buffering Bounded Queue <= 2 chunks trên RAM Disk)
-                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="DecodeWorker") as dec_exec, \
-                     ThreadPoolExecutor(max_workers=1, thread_name_prefix="EncodeWorker") as enc_exec:
+                acquire_gpu_lock()
+                try:
+                    # Thực thi gối đầu song song (Double-Buffering Bounded Queue <= 2 chunks trên RAM Disk)
+                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="DecodeWorker") as dec_exec, \
+                         ThreadPoolExecutor(max_workers=1, thread_name_prefix="EncodeWorker") as enc_exec:
 
-                    # Bắt đầu trích xuất chunk đầu tiên
-                    future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
-                    future_encode = None
-                    last_encode_item = None
-                    last_ai_result = None
-                    last_seg_start = 0.0
-                    ai_fps_history = []
-                    initial_baseline_fps = None
-                    throttling_warned = False
-                    partial_paused = False
+                        # Bắt đầu trích xuất chunk đầu tiên
+                        future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
+                        future_encode = None
+                        last_encode_item = None
+                        last_ai_result = None
+                        last_seg_start = 0.0
+                        ai_fps_history = []
+                        initial_baseline_fps = None
+                        throttling_warned = False
+                        partial_paused = False
+                        chunk_png_unit_sizes = []
 
-                    for i, target_chunk in enumerate(chunks_to_process):
-                        c_idx, c_seg_file, c_seg_out = target_chunk
-                        seg_start_time = time.time()
+                        for i, target_chunk in enumerate(chunks_to_process):
+                            c_idx, c_seg_file, c_seg_out = target_chunk
+                            chunk_attempt = 0
+                            max_chunk_retries = 2
 
-                        # Chờ giải mã CPU chunk hiện tại sẵn sàng (nếu chưa xong)
-                        extracted = future_extract.result()
+                            while True:
+                                seg_start_time = time.time()
 
-                        # Ngay lập tức khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
-                        if i + 1 < len(chunks_to_process):
-                            future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
-                        else:
-                            future_extract = None
+                                # Chờ giải mã CPU chunk hiện tại sẵn sàng (nếu chưa xong)
+                                extracted = future_extract.result()
+                                c_in_dir = extracted["in_dir"]
+                                c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
+                                os.makedirs(c_out_dir, exist_ok=True)
 
-                        c_in_dir = extracted["in_dir"]
-                        c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
-                        os.makedirs(c_out_dir, exist_ok=True)
+                                n_unique = extracted["ai_frames"]
 
-                        total_frames_processed += extracted["expected_frames"]
-                        total_ai_frames += extracted["ai_frames"]
-                        total_ext_time += extracted["ext_time"]
+                                # 2.2 Cổng Backpressure: need = số frame × max(kích thước PNG chunk gần nhất, p95 tích lũy, sàn 9 MB) × 1.2
+                                recent_png_mb = chunk_png_unit_sizes[-1] if chunk_png_unit_sizes else 9.0
+                                p95_png_mb = float(np.percentile(chunk_png_unit_sizes, 95)) if chunk_png_unit_sizes else 9.0
+                                unit_size_mb = max(recent_png_mb, p95_png_mb, 9.0) if fmt.lower() == "png" else 1.2
+                                need_mb = n_unique * unit_size_mb * 1.2
+                                free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
-                        # 2.2 Kiểm tra dung lượng RAM Disk thực tế trước khi AI xuất frame 4K (Worst-case protection)
-                        # Tính trước: need = n_unique * size_est * 1.3 (với PNG 4K ~12 MB/frame, chunk 192 frame cần ~3.0 GB)
-                        n_unique = extracted["ai_frames"]
-                        size_est_mb = 12.0 if fmt.lower() == "png" else 1.2
-                        need_mb = n_unique * size_est_mb * 1.3
-                        free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
-
-                        # Nếu RAM Disk hiện tại không đủ chỗ an toàn và đang có chunk trước encode ở luồng nền:
-                        # Đồng bộ đợi Media Engine encode xong và dọn sạch frame chunk trước
-                        if future_encode is not None and free_mb < need_mb:
-                            logger.info(
-                                f"⚠️ RAM Disk trống {free_mb:.0f} MB < nhu cầu an toàn {need_mb:.0f} MB "
-                                f"({n_unique} frames x {size_est_mb:.1f}MB x 1.3). Chờ Media Engine giải phóng chunk trước..."
-                            )
-                            prev_enc_elapsed = future_encode.result()
-                            total_enc_time += prev_enc_elapsed
-                            prev_c_idx = last_encode_item["target"][0]
-                            prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
-                            prev_seg_elapsed = time.time() - last_seg_start
-                            prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
-                            render_progress(
-                                prev_c_idx + 1, total_segs,
-                                prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
-                                suffix=f"[{prev_seg_fps:.2f} fps | Đã giải phóng RAM Disk]"
-                            )
-                            logger.log_chunk_done(
-                                chunk_idx=prev_c_idx,
-                                total_chunks=total_segs,
-                                frames=prev_exp_frames,
-                                ai_time=last_ai_result["elapsed_seconds"],
-                                ai_fps=last_ai_result["fps"],
-                                enc_time=prev_enc_elapsed,
-                                total_chunk_time=prev_seg_elapsed,
-                                output_seg=last_encode_item["target"][2],
-                                t0_seconds=last_ai_result.get("t0_seconds"),
-                                steady_fps=last_ai_result.get("steady_fps"),
-                                rss_mb=last_ai_result.get("peak_rss_mb")
-                            )
-                            future_encode = None
-                            free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
-
-                        # Kiểm tra giới hạn cứng ENOSPC trước khi khởi động NCNN
-                        min_needed_mb = n_unique * size_est_mb
-                        if free_mb < min_needed_mb:
-                            raise OSError(
-                                28,
-                                f"RAM Disk không đủ không gian cho chunk {c_idx}: Trống {free_mb:.0f} MB, "
-                                f"cần tối thiểu {min_needed_mb:.0f} MB ({n_unique} frames x {size_est_mb:.1f}MB). Dừng an toàn ENOSPC."
-                            )
-
-                        # 2.2 Độc quyền suy luận AI NCNN Vulkan trên GPU M3 Pro (Main thread)
-                        dedup_info = f" (Deduplication: {extracted['ai_frames']}/{extracted['frame_count']} frames)" if extracted["chunk_plan"] else ""
-                        render_progress(
-                            c_idx, total_segs,
-                            prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
-                            suffix=f"AI Metal Inferencing{dedup_info}..."
-                        )
-                        ai_result = upscale_frames_with_fallback(
-                            input_dir=c_in_dir,
-                            output_dir=c_out_dir,
-                            model_info=model_info,
-                            engine=engine,
-                            precision=precision,
-                            fmt=fmt,
-                            logger=logger
-                        )
-                        total_ai_time += ai_result["elapsed_seconds"]
-                        curr_fps = ai_result.get("fps", 0.0)
-                        if curr_fps > 0:
-                            ai_fps_history.append(curr_fps)
-                            if initial_baseline_fps is None and len(ai_fps_history) >= 2:
-                                initial_baseline_fps = float(np.mean(ai_fps_history[:2]))
-                            elif initial_baseline_fps is not None and len(ai_fps_history) >= 10:
-                                recent_10 = ai_fps_history[-10:]
-                                drop_pct = ((initial_baseline_fps - float(np.mean(recent_10))) / initial_baseline_fps) * 100.0
-                                if drop_pct > 8.0 and all(f < initial_baseline_fps * 0.92 for f in recent_10) and not throttling_warned:
-                                    logger.warn(
-                                        f"⚠️ CẢNH BÁO NHIỆT/THROTTLE: Tốc độ GPU ({float(np.mean(recent_10)):.2f} fps) "
-                                        f"đã giảm {drop_pct:.1f}% (> 8%) so với đầu phiên ({initial_baseline_fps:.2f} fps) "
-                                        f"trong 10 chunk liên tiếp.",
-                                        to_console=True
+                                # Nếu RAM Disk không đủ chỗ an toàn và đang có chunk trước encode ở luồng nền:
+                                # Đồng bộ đợi Media Engine encode xong và dọn sạch frame chunk trước
+                                if future_encode is not None and free_mb < need_mb:
+                                    logger.info(
+                                        f"⚠️ [BACKPRESSURE] RAM Disk trống {free_mb:.0f} MB < nhu cầu an toàn {need_mb:.0f} MB "
+                                        f"({n_unique} frames x {unit_size_mb:.1f}MB x 1.2). Chờ Media Engine giải phóng chunk trước..."
                                     )
-                                    throttling_warned = True
+                                    prev_enc_elapsed = future_encode.result()
+                                    total_enc_time += prev_enc_elapsed
+                                    prev_c_idx = last_encode_item["target"][0]
+                                    prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                    prev_seg_elapsed = time.time() - last_seg_start
+                                    prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
+                                    render_progress(
+                                        prev_c_idx + 1, total_segs,
+                                        prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                                        suffix=f"[{prev_seg_fps:.2f} fps | Đã giải phóng RAM Disk]"
+                                    )
+                                    logger.log_chunk_done(
+                                        chunk_idx=prev_c_idx,
+                                        total_chunks=total_segs,
+                                        frames=prev_exp_frames,
+                                        ai_time=last_ai_result["elapsed_seconds"],
+                                        ai_fps=last_ai_result["fps"],
+                                        enc_time=prev_enc_elapsed,
+                                        total_chunk_time=prev_seg_elapsed,
+                                        output_seg=last_encode_item["target"][2],
+                                        t0_seconds=last_ai_result.get("t0_seconds"),
+                                        steady_fps=last_ai_result.get("steady_fps"),
+                                        rss_mb=last_ai_result.get("peak_rss_mb")
+                                    )
+                                    future_encode = None
+                                    free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
-                        # Nếu phân đoạn trước đang mã hóa ở luồng nền, chờ hoàn tất và ghi log
-                        if future_encode is not None:
-                            prev_enc_elapsed = future_encode.result()
-                            total_enc_time += prev_enc_elapsed
-                            prev_c_idx = last_encode_item["target"][0]
-                            prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
-                            prev_seg_elapsed = time.time() - last_seg_start
-                            prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
-                            remaining_segs = total_segs - (prev_c_idx + 1)
-                            eta_seconds = remaining_segs * prev_seg_elapsed
+                                # Ngay lập tức khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
+                                if i + 1 < len(chunks_to_process) and (future_extract is None or future_extract.done()):
+                                    future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
+                                elif i + 1 >= len(chunks_to_process):
+                                    future_extract = None
 
-                            render_progress(
-                                prev_c_idx + 1, total_segs,
-                                prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
-                                suffix=f"[{prev_seg_fps:.2f} fps (AI: {last_ai_result['fps']:.2f}) | ETA: {format_time(eta_seconds)}]"
-                            )
-                            print()
-                            logger.log_chunk_done(
-                                chunk_idx=prev_c_idx,
-                                total_chunks=total_segs,
-                                frames=prev_exp_frames,
-                                ai_time=last_ai_result["elapsed_seconds"],
-                                ai_fps=last_ai_result["fps"],
-                                enc_time=prev_enc_elapsed,
-                                total_chunk_time=prev_seg_elapsed,
-                                output_seg=last_encode_item["target"][2],
-                                t0_seconds=last_ai_result.get("t0_seconds"),
-                                steady_fps=last_ai_result.get("steady_fps"),
-                                rss_mb=last_ai_result.get("peak_rss_mb")
-                            )
+                                # Kiểm tra giới hạn cứng ENOSPC trước khi infer
+                                min_needed_mb = n_unique * unit_size_mb
+                                if free_mb < min_needed_mb:
+                                    raise OSError(
+                                        28,
+                                        f"RAM Disk không đủ không gian cho chunk {c_idx}: Trống {free_mb:.0f} MB, "
+                                        f"cần tối thiểu {min_needed_mb:.0f} MB ({n_unique} frames x {unit_size_mb:.1f}MB). Dừng an toàn ENOSPC."
+                                    )
 
-                        # Khởi động mã hóa VideoToolbox cho chunk hiện tại ở luồng nền (Media Engine)
-                        encode_item = {
-                            "target": target_chunk,
-                            "extracted": extracted,
-                            "out_dir": c_out_dir
-                        }
-                        last_encode_item = encode_item
-                        last_ai_result = ai_result
-                        last_seg_start = seg_start_time
-                        render_progress(
-                            c_idx, total_segs,
-                            prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
-                            suffix="Hardware Encoding 10-bit (Pipelined)..."
-                        )
-                        future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
+                                # Hàm callback kiểm tra lại giữa chunk khi chunk trước chưa encode xong
+                                def _mid_chunk_bp_check(curr_idx: int, tot_frames: int):
+                                    nonlocal future_encode, total_enc_time, free_mb, last_encode_item, last_ai_result, last_seg_start
+                                    if future_encode is not None and not future_encode.done():
+                                        cur_free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
+                                        rem_frames = max(1, tot_frames - curr_idx)
+                                        rem_need_mb = rem_frames * unit_size_mb * 1.2
+                                        if cur_free_mb < rem_need_mb:
+                                            logger.info(
+                                                f"⚠️ [MID-CHUNK BACKPRESSURE] Giữa chunk {c_idx+1}: RAM Disk trống {cur_free_mb:.0f} MB < "
+                                                f"nhu cầu còn lại {rem_need_mb:.0f} MB. Chờ Media Engine hoàn tất chunk trước..."
+                                            )
+                                            prev_enc = future_encode.result()
+                                            total_enc_time += prev_enc
+                                            prev_c = last_encode_item["target"][0]
+                                            prev_exp = last_encode_item["extracted"]["expected_frames"]
+                                            prev_elap = time.time() - last_seg_start
+                                            prev_fps = (prev_exp / prev_elap) if prev_elap > 0 else 0.0
+                                            render_progress(
+                                                prev_c + 1, total_segs,
+                                                prefix=f"✨ Đoạn {prev_c+1:02d}/{total_segs:02d}",
+                                                suffix=f"[{prev_fps:.2f} fps | Đã giải phóng RAM Disk]"
+                                            )
+                                            logger.log_chunk_done(
+                                                chunk_idx=prev_c,
+                                                total_chunks=total_segs,
+                                                frames=prev_exp,
+                                                ai_time=last_ai_result["elapsed_seconds"],
+                                                ai_fps=last_ai_result["fps"],
+                                                enc_time=prev_enc,
+                                                total_chunk_time=prev_elap,
+                                                output_seg=last_encode_item["target"][2],
+                                                t0_seconds=last_ai_result.get("t0_seconds"),
+                                                steady_fps=last_ai_result.get("steady_fps"),
+                                                rss_mb=last_ai_result.get("peak_rss_mb")
+                                            )
+                                            future_encode = None
+                                            free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
-                        # Kiểm tra mốc hạn chót nếu bật --allow-partial
-                        if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
-                            logger.info(
-                                f"⏰ [ALLOW-PARTIAL DEADLINE] Đã chạm mốc hạn chót ({deadline_dt.strftime('%H:%M:%S')}). "
-                                f"Dừng sạch tại ranh giới phân đoạn {c_idx+1}/{total_segs}.",
-                                to_console=True
-                            )
-                            partial_paused = True
-                            if future_extract is not None:
                                 try:
-                                    res_ext = future_extract.result()
-                                    shutil.rmtree(res_ext.get("in_dir", ""), ignore_errors=True)
-                                except Exception:
-                                    pass
-                                future_extract = None
-                            break
+                                    # 2.2 Độc quyền suy luận AI NCNN Vulkan / PyTorch MPS trên GPU M3 Pro (Main thread)
+                                    dedup_info = f" (Deduplication: {extracted['ai_frames']}/{extracted['frame_count']} frames)" if extracted["chunk_plan"] else ""
+                                    render_progress(
+                                        c_idx, total_segs,
+                                        prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                                        suffix=f"AI Metal Inferencing{dedup_info}..."
+                                    )
+                                    ai_result = upscale_frames_with_fallback(
+                                        input_dir=c_in_dir,
+                                        output_dir=c_out_dir,
+                                        model_info=model_info,
+                                        engine=engine,
+                                        precision=precision,
+                                        fmt=fmt,
+                                        logger=logger,
+                                        mid_chunk_callback=_mid_chunk_bp_check
+                                    )
+
+                                    # Tích lũy kích thước frame PNG thực tế
+                                    try:
+                                        out_files = [os.path.join(c_out_dir, f) for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")]
+                                        if out_files:
+                                            actual_avg_mb = (sum(os.path.getsize(f) for f in out_files) / len(out_files)) / (1024 * 1024)
+                                            chunk_png_unit_sizes.append(actual_avg_mb)
+                                    except Exception:
+                                        pass
+
+                                    # Chunk hoàn thành thành công, thoát vòng lặp retry
+                                    break
+
+                                except Exception as chunk_err:
+                                    err_msg = str(chunk_err)
+                                    is_enospc = (
+                                        (isinstance(chunk_err, OSError) and getattr(chunk_err, "errno", None) == 28)
+                                        or "No space left on device" in err_msg
+                                        or "ENOSPC" in err_msg
+                                        or "exit code 228" in err_msg
+                                    )
+                                    if is_enospc and chunk_attempt < max_chunk_retries:
+                                        chunk_attempt += 1
+                                        logger.warn(
+                                            f"⚠️ [ENOSPC RETRY] Gặp lỗi thiếu đĩa tại phân đoạn [{c_idx+1}/{total_segs}] "
+                                            f"(lần thử {chunk_attempt}/{max_chunk_retries}): {chunk_err}. "
+                                            f"Đang dọn sạch file dở, chờ Media Engine và thử lại...",
+                                            to_console=True
+                                        )
+                                        shutil.rmtree(c_out_dir, ignore_errors=True)
+                                        if os.path.exists(c_seg_out):
+                                            try:
+                                                os.remove(c_seg_out)
+                                            except OSError:
+                                                pass
+                                        if future_encode is not None:
+                                            try:
+                                                prev_enc = future_encode.result()
+                                                total_enc_time += prev_enc
+                                            except Exception:
+                                                pass
+                                            future_encode = None
+                                        # Tái tạo lại frame trích xuất nếu cần
+                                        if not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
+                                            os.makedirs(c_in_dir, exist_ok=True)
+                                            extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=extracted.get("chunk_plan", {}).get("kept_indices") if extracted.get("chunk_plan") else None)
+                                        time.sleep(1.0)
+                                        continue
+                                    elif is_enospc:
+                                        shutil.rmtree(c_out_dir, ignore_errors=True)
+                                        if os.path.exists(c_seg_out):
+                                            try:
+                                                os.remove(c_seg_out)
+                                            except OSError:
+                                                pass
+                                        raise FailedResumableError(
+                                            f"Tập dừng tại phân đoạn {c_idx+1}/{total_segs} do ENOSPC sau {max_chunk_retries} lần thử lại.",
+                                            chunk_idx=c_idx,
+                                            up_segs_dir=up_segs_dir
+                                        ) from chunk_err
+                                    else:
+                                        raise
+
+                            total_frames_processed += extracted["expected_frames"]
+                            total_ai_frames += extracted["ai_frames"]
+                            total_ext_time += extracted["ext_time"]
+                            total_ai_time += ai_result["elapsed_seconds"]
+                            curr_fps = ai_result.get("fps", 0.0)
+                            if curr_fps > 0:
+                                ai_fps_history.append(curr_fps)
+                                if initial_baseline_fps is None and len(ai_fps_history) >= 2:
+                                    initial_baseline_fps = float(np.mean(ai_fps_history[:2]))
+                                elif initial_baseline_fps is not None and len(ai_fps_history) >= 10:
+                                    recent_10 = ai_fps_history[-10:]
+                                    drop_pct = ((initial_baseline_fps - float(np.mean(recent_10))) / initial_baseline_fps) * 100.0
+                                    if drop_pct > 8.0 and all(f < initial_baseline_fps * 0.92 for f in recent_10) and not throttling_warned:
+                                        logger.warn(
+                                            f"⚠️ CẢNH BÁO NHIỆT/THROTTLE: Tốc độ GPU ({float(np.mean(recent_10)):.2f} fps) "
+                                            f"đã giảm {drop_pct:.1f}% (> 8%) so với đầu phiên ({initial_baseline_fps:.2f} fps) "
+                                            f"trong 10 chunk liên tiếp.",
+                                            to_console=True
+                                        )
+                                        throttling_warned = True
+
+                            # Nếu phân đoạn trước đang mã hóa ở luồng nền, chờ hoàn tất và ghi log
+                            if future_encode is not None:
+                                prev_enc_elapsed = future_encode.result()
+                                total_enc_time += prev_enc_elapsed
+                                prev_c_idx = last_encode_item["target"][0]
+                                prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                prev_seg_elapsed = time.time() - last_seg_start
+                                prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
+                                remaining_segs = total_segs - (prev_c_idx + 1)
+                                eta_seconds = remaining_segs * prev_seg_elapsed
+
+                                render_progress(
+                                    prev_c_idx + 1, total_segs,
+                                    prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                                    suffix=f"[{prev_seg_fps:.2f} fps (AI: {last_ai_result['fps']:.2f}) | ETA: {format_time(eta_seconds)}]"
+                                )
+                                print()
+                                logger.log_chunk_done(
+                                    chunk_idx=prev_c_idx,
+                                    total_chunks=total_segs,
+                                    frames=prev_exp_frames,
+                                    ai_time=last_ai_result["elapsed_seconds"],
+                                    ai_fps=last_ai_result["fps"],
+                                    enc_time=prev_enc_elapsed,
+                                    total_chunk_time=prev_seg_elapsed,
+                                    output_seg=last_encode_item["target"][2],
+                                    t0_seconds=last_ai_result.get("t0_seconds"),
+                                    steady_fps=last_ai_result.get("steady_fps"),
+                                    rss_mb=last_ai_result.get("peak_rss_mb")
+                                )
+
+                            # Khởi động mã hóa VideoToolbox cho chunk hiện tại ở luồng nền (Media Engine)
+                            encode_item = {
+                                "target": target_chunk,
+                                "extracted": extracted,
+                                "out_dir": c_out_dir
+                            }
+                            last_encode_item = encode_item
+                            last_ai_result = ai_result
+                            last_seg_start = seg_start_time
+                            render_progress(
+                                c_idx, total_segs,
+                                prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                                suffix="Hardware Encoding 10-bit (Pipelined)..."
+                            )
+                            future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
+
+                            # Kiểm tra mốc hạn chót nếu bật --allow-partial
+                            if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
+                                logger.info(
+                                    f"⏰ [ALLOW-PARTIAL DEADLINE] Đã chạm mốc hạn chót ({deadline_dt.strftime('%H:%M:%S')}). "
+                                    f"Dừng sạch tại ranh giới phân đoạn {c_idx+1}/{total_segs}.",
+                                    to_console=True
+                                )
+                                partial_paused = True
+                                if future_extract is not None:
+                                    try:
+                                        res_ext = future_extract.result()
+                                        shutil.rmtree(res_ext.get("in_dir", ""), ignore_errors=True)
+                                    except Exception:
+                                        pass
+                                    future_extract = None
+                                break
 
                     # Sau khi hoàn tất toàn bộ loop: Chờ chunk cuối cùng mã hóa xong
                     if future_encode is not None:
@@ -628,6 +750,8 @@ def run_upscale_pipeline(
                             to_console=True
                         )
                         return up_segs_dir
+                finally:
+                    release_gpu_lock()
 
             stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
             logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)

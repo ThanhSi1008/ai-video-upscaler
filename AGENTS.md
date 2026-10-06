@@ -134,7 +134,11 @@ upscale/
 * **Ngưỡng Deduplication:** Chọn `hi=768:lo=320:frac=0.33` (giảm 60.86% thời gian GPU; đối soát 16x16/8x8 block đạt 0% lỗi khẩu hình/chớp mắt trên mẫu kiểm tra; chi tiết: [docs/engineering-log.md#3](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md#3)).
 * **Tái tạo khung hình 4K (Re-expansion):** Chọn **FFmpeg Concat Demuxer** theo thời lượng run đại diện + `fps=24000/1001` (triệt tiêu 100% chi phí đĩa của hardlinks).
 * **Đồng nhất xưng hô:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; chuỗi Gemini ưu tiên bảo toàn đại từ (chi tiết: [subtrans/AGENTS.md](file:///Users/xis108/Desktop/upscale/subtrans/AGENTS.md)).
-* **Căn chỉnh phụ đề tự động:** Thuật toán `--auto-offset` kiểm định 4 tầng (ngưỡng 1.0s, số cặp >= 30, quintile drift <= 0.5s, độ khớp tăng >= 15 điểm; chi tiết: [docs/engineering-log.md#6](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md#6)).
+* **Căn chỉnh phụ đề tự động:** Thuật toán `--auto-offset` kiểm định 4 tầng (ngưỡng 0.5s [cập nhật từ 1.0s sau đêm 2], số cặp >= 30, quintile drift <= 0.5s, độ khớp tăng >= 15 điểm; chi tiết: [docs/engineering-log.md#6](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md#6)).
+* **Cổng Backpressure & Chống ENOSPC:** Công thức `need = n_unique × max(recent, p95, 9.0) × 1.2` kèm kiểm tra giữa chunk; cơ chế retry tối đa 2 lần, đánh dấu `failed-resumable`, tự thử lại cuối hàng đợi; thoát mã non-zero và in bảng CHƯA XONG nếu chưa hoàn tất.
+* **Chốt chặn phụ đề & Idempotency:** Tuyệt đối không ghi `[Chưa dịch]` vào file SRT (dùng text EN fallback); chỉ nhúng khi bản dịch thật ≥ 95% và uncertain < 10%; cờ `--subs-pending`; bóc tách track cũ trước khi nhúng mới.
+* **Xử lý chú thích âm thanh:** Cờ `--sound-cues {drop,translate}` (mặc định `drop` tự động lọc bỏ cue thuần ngoặc đơn không có phụ đề tiếng Anh đối ứng).
+* **Khóa GPU độc quyền:** Dùng file khóa `/tmp/upscale_gpu.lock` kiểm soát GPU theo từng chunk infer, cho phép nạp Ollama ở stage phụ đề sau khi hoàn tất upscale GPU.
 * **Cổng kiểm định Mux:** `src/mux_audit.py` xác minh toàn vẹn luồng stream copy và khớp số lượng font chữ nhúng trước khi xuất xưởng.
 
 ---

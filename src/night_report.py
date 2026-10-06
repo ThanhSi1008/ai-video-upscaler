@@ -68,13 +68,30 @@ def parse_telemetry_window(
         delta_sw = sw_end - sw_start
         peak_sw = max(float(r["swap_used_mb"]) for r in rows_in_window) if rows_in_window else sw_end
 
-        thermal_states = set(r["thermal_status"] for r in rows_in_window if r.get("thermal_status"))
+        delta_write_gib = None
+        delta_read_gib = None
+        if "ioreg_write_bytes" in start_row and "ioreg_write_bytes" in end_row:
+            try:
+                w_start = int(start_row["ioreg_write_bytes"])
+                w_end = int(end_row["ioreg_write_bytes"])
+                delta_write_gib = (w_end - w_start) / (1024.0 ** 3)
+            except Exception:
+                pass
+        if "ioreg_read_bytes" in start_row and "ioreg_read_bytes" in end_row:
+            try:
+                r_start = int(start_row["ioreg_read_bytes"])
+                r_end = int(end_row["ioreg_read_bytes"])
+                delta_read_gib = (r_end - r_start) / (1024.0 ** 3)
+            except Exception:
+                pass
 
         return {
             "start_time": start_row["timestamp"],
             "end_time": end_row["timestamp"],
             "delta_ssd_mb": delta_ssd_mb,
             "delta_ssd_gib": delta_ssd_gib,
+            "delta_write_gib": delta_write_gib,
+            "delta_read_gib": delta_read_gib,
             "delta_pageouts": delta_po,
             "start_swap_mb": sw_start,
             "end_swap_mb": sw_end,
@@ -272,7 +289,10 @@ def generate_night_report_text(session_name: str = "night1") -> str:
     telem = parse_telemetry_window(csv_file, start_epoch, end_epoch)
     lines.append("## 2. Viễn Trắc Hệ Thống (Phần Cứng & Ổ Cứng)")
     if telem and not telem.get("error"):
-        lines.append(f"* **Dung lượng ghi SSD (disk0):** **{telem['delta_ssd_mb']:,.2f} MB** (**{telem['delta_ssd_gib']:.2f} GiB**)")
+        lines.append(f"* **Dung lượng chuyển SSD (đọc+ghi qua iostat disk0):** **{telem['delta_ssd_mb']:,.2f} MB** (**{telem['delta_ssd_gib']:.2f} GiB**)")
+        if telem.get("delta_write_gib") is not None and telem.get("delta_read_gib") is not None:
+            lines.append(f"* **Dung lượng ghi SSD thực tế (ioreg):** **{telem['delta_write_gib']:.2f} GiB**")
+            lines.append(f"* **Dung lượng đọc SSD thực tế (ioreg):** **{telem['delta_read_gib']:.2f} GiB**")
         lines.append(f"* **Tăng trưởng Pageouts:** **+{telem['delta_pageouts']:,}** trang")
         lines.append(f"* **Bộ nhớ Swap:** Ban đầu **{telem['start_swap_mb']:.2f} MB** ➔ Kết thúc **{telem['end_swap_mb']:.2f} MB** (Tăng: **+{telem['delta_swap_mb']:.2f} MB**, Đỉnh: **{telem['peak_swap_mb']:.2f} MB**)")
         lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))} (Hoàn toàn không nghẽn nhiệt)")

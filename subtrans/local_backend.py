@@ -51,21 +51,41 @@ class OllamaTranslator(BaseTranslator):
         return False
 
     def is_upscale_running(self) -> bool:
-        """Kiểm tra có tiến trình upscale nào đang chạy trên GPU Metal hay không (B3)."""
+        """Kiểm tra có tiến trình upscale nào đang chiếm GPU hay không qua GPU_LOCK_FILE (Item 5)."""
+        from src.config import GPU_LOCK_FILE
         import psutil
+
+        # 1. Kiểm tra khóa GPU giai đoạn upscale
+        if os.path.exists(GPU_LOCK_FILE):
+            try:
+                with open(GPU_LOCK_FILE, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    pid = int(content)
+                    if psutil.pid_exists(pid):
+                        return True
+                    else:
+                        # Process đã thoát nhưng lock chưa dọn
+                        try:
+                            os.remove(GPU_LOCK_FILE)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # 2. Kiểm tra binary ncnn realesrgan đang chạy
         curr_pid = os.getpid()
         for p in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 if p.info["pid"] == curr_pid:
                     continue
                 cmdline = " ".join(p.info["cmdline"] or [])
-                if "upscale.py" in cmdline and "--subs-only" not in cmdline:
-                    return True
-                if "realesr-animevideov3" in cmdline:
+                if "realesrgan-ncnn-vulkan" in cmdline or "realesr-animevideov3" in cmdline:
                     return True
             except Exception:
                 pass
         return False
+
 
     def unload(self):
         """Unloads the model from unified memory (keep_alive: 0) and verifies empty VRAM (B3)."""

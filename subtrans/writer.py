@@ -44,7 +44,7 @@ def clean_and_normalize_vietnamese(text: str) -> str:
         return ""
 
     if text.strip() in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
-        return "[Chưa dịch]"
+        return ""
 
     # 1. Strip HTML tags like <i>, </i>, <b>, <font color="...">, etc.
     text = re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", text)
@@ -60,12 +60,15 @@ def clean_and_normalize_vietnamese(text: str) -> str:
 
     # 5. Strip bracketed sound effects/descriptions: [cười], (tiếng nổ), [Sound], (laugh)
     text = re.sub(r"\[[^\]]*\]", "", text)
-    text = re.sub(
+    stripped = re.sub(
         r"\([^\)]*(?:tiếng|cười|khóc|thở|nói|nhạc|âm thanh|la|hét|laugh|music|sigh|gasp|screaming)[^\)]*\)",
         "",
         text,
         flags=re.IGNORECASE,
-    )
+    ).strip()
+    if stripped:
+        text = stripped
+
 
     # 6. Punctuation rules:
     # Replace unicode ellipsis '…' with three ASCII dots '...'
@@ -200,18 +203,28 @@ def write_srt_subtitles(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     blocks = []
+    kept_cues = [c for c in cues if not getattr(c, "is_dropped_sound", False)]
 
-    for idx, cue in enumerate(cues, start=1):
+    for idx, cue in enumerate(kept_cues, start=1):
         t_start = format_timestamp_srt(cue.start)
         t_end = format_timestamp_srt(cue.end)
-        raw_vi = cue.vi or cue.ja or ""
+
+        # Chốt chặn Item 4a: KHÔNG ghi [Chưa dịch] vào SRT; cue lỗi dùng tạm text EN tham chiếu
+        raw_vi = (cue.vi or "").strip()
+        if not raw_vi or raw_vi in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
+            raw_vi = (cue.en or cue.ja or "").strip()
+            cue.used_en_fallback = True
+
         clean_text = clean_and_normalize_vietnamese(raw_vi)
+        if not clean_text:
+            clean_text = (cue.en or cue.ja or "").strip()
 
         if wrap_chars:
             clean_text = wrap_subtitle_line(clean_text, wrap_chars=wrap_chars)
 
         block = f"{idx}\n{t_start} --> {t_end}\n{clean_text}"
         blocks.append(block)
+
 
     content = "\n\n".join(blocks) + "\n"
     with open(output_path, "w", encoding="utf-8", newline="\n") as f:

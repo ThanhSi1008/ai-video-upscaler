@@ -4,7 +4,7 @@
 tests/benchmark_pipelined_3min.py
 Chạy kiểm định mẫu 3 phút (4.360 frames) với kiến trúc Pipelined Double-Buffering:
 1. Ghi nhận viễn trắc phần cứng TRƯỚC và SAU khi chạy:
-   - iostat -Id (Đo chính xác I/O SSD MB written để kiểm chứng Zero SSD Wear)
+   - iostat -Id (Đo chính xác I/O SSD MB chuyển (đọc+ghi) để kiểm chứng Zero SSD Wear)
    - vm_stat (Đo số trang paged out thực tế)
    - sysctl vm.swapusage
 2. Chạy toàn bộ 23 phân đoạn gối đầu song song (CPU decode N+1, GPU infer N, Media Engine encode N-1).

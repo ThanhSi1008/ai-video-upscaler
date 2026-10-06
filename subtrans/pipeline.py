@@ -173,6 +173,7 @@ class TranslationPipeline:
         output_basename: Optional[str] = None,
         subs_upgrade: bool = False,
         auto_offset: bool = False,
+        sound_cues: str = "drop",
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
@@ -242,8 +243,10 @@ class TranslationPipeline:
                 en_path=str(en_path) if en_path else None,
                 en_offset_ms=en_offset_ms,
                 ja_offset_ms=sub_offset_ms,
+                sound_cues=sound_cues,
             )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
+
 
         if self.limit_cues:
             cues = cues[:self.limit_cues]
@@ -528,10 +531,44 @@ class TranslationPipeline:
             self.reviewer.unload()
         stage_times["stage_review"] = time.monotonic() - t_srev
 
-        # Stage 4: Writing output (SRT default, exactly ONE line per cue unless --wrap)
+        # Stage 4: Writing output (Item 4b: Chốt chặn kiểm định chất lượng nội dung)
         t_s4 = time.monotonic()
         out_ext = self.output_format.lower()
-        out_file = self.output_dir / f"{base_name}.vi.{out_ext}"
+
+        active_dialogue_cues = [c for c in cues if not c.is_skipped and not getattr(c, "is_dropped_sound", False)]
+        total_active = len(active_dialogue_cues)
+        real_translated_cues = [
+            c for c in active_dialogue_cues
+            if c.vi and not getattr(c, "used_en_fallback", False) and c.vi.strip() not in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]
+        ]
+        real_rate = (len(real_translated_cues) / total_active) if total_active > 0 else 1.0
+        uncertain_cues = [c for c in active_dialogue_cues if getattr(c, "uncertain", False)]
+        uncertain_rate = (len(uncertain_cues) / total_active) if total_active > 0 else 0.0
+
+        is_qualified = (real_rate >= 0.95 and uncertain_rate < 0.10)
+        from src.config import add_pending_sub, remove_pending_sub
+        import datetime
+
+        if is_qualified:
+            out_file = self.output_dir / f"{base_name}.vi.{out_ext}"
+            remove_pending_sub(base_name)
+        else:
+            out_file = self.output_dir / f"{base_name}.vi.partial.{out_ext}"
+            add_pending_sub({
+                "base_name": base_name,
+                "ja_path": str(ja_path),
+                "en_path": str(en_path) if en_path else None,
+                "output_dir": str(self.output_dir),
+                "real_rate": round(real_rate, 4),
+                "uncertain_rate": round(uncertain_rate, 4),
+                "timestamp": datetime.datetime.now().isoformat()
+            })
+            console.print(
+                f"\n[bold yellow]⚠️ [CHỐT CHẶN PHỤ ĐỀ] Tập '{base_name}' chưa đạt chuẩn nhúng "
+                f"(Bản dịch thật: {real_rate*100:.1f}% < 95% hoặc Nghi vấn: {uncertain_rate*100:.1f}% >= 10%).[/bold yellow]\n"
+                f"   • Đã ghi file tạm: [yellow]{out_file}[/yellow]\n"
+                f"   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n"
+            )
 
         with console.status(f"[bold blue]Stage 4: Writing subtitle file to {out_file}...[/bold blue]"):
             saved_path = write_subtitles(
@@ -565,6 +602,9 @@ class TranslationPipeline:
         stats["dry_run"] = self.dry_run
         stats["pacific_time_cues"] = self.cache.get_cues_today_pt()
         stats["pacific_time_requests"] = self.cache.get_requests_today_pt()
+        stats["is_qualified"] = is_qualified
+        stats["real_rate"] = real_rate
+        stats["uncertain_rate"] = uncertain_rate
         stats["offset_info"] = {
             "applied_offset_ms": sub_offset_ms,
             "detected_offset_ms": det_offset,
@@ -609,4 +649,9 @@ class TranslationPipeline:
             "elapsed_seconds": elapsed,
             "stats": stats,
             "stage_times": stage_times,
+            "is_qualified": is_qualified,
+            "is_partial": not is_qualified,
+            "real_rate": real_rate,
+            "uncertain_rate": uncertain_rate,
         }
+

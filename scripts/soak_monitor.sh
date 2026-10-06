@@ -36,7 +36,7 @@ else
 fi
 
 # Ghi Header CSV
-echo "timestamp,epoch,pageouts,pageins,swap_used_mb,swap_free_mb,mem_free_pct,disk0_mb_total,ramdisk_free_mb,thermal_status,gpu_power_w,gpu_temp_c" > "$OUTPUT_CSV"
+echo "timestamp,epoch,pageouts,pageins,swap_used_mb,swap_free_mb,mem_free_pct,disk0_mb_total,ioreg_write_bytes,ioreg_read_bytes,ramdisk_free_mb,thermal_status,gpu_power_w,gpu_temp_c" > "$OUTPUT_CSV"
 
 echo "Đang theo dõi... Bấm Ctrl+C để dừng."
 
@@ -59,11 +59,34 @@ while true; do
         MEM_FREE_PCT="NA"
     fi
 
-    # 4. iostat -Id disk0 (Total MB transferred since boot)
+    # 4. iostat -Id disk0 (Dung lượng chuyển đọc+ghi MB từ lúc boot)
     DISK0_MB=$(iostat -Id disk0 2>/dev/null | tail -n 1 | awk '{print $3}')
     if [ -z "$DISK0_MB" ]; then
         DISK0_MB="NA"
     fi
+
+    # 4b. ioreg IOBlockStorageDriver disk0 (Bytes Write và Read riêng biệt)
+    IOREG_STATS=$(python3 -c '
+import subprocess, re
+try:
+    out = subprocess.check_output(["ioreg", "-c", "IOBlockStorageDriver", "-k", "Statistics", "-r", "-l"], text=True)
+    for block in out.split("+-o IOBlockStorageDriver"):
+        if "\"BSD Name\" = \"disk0\"" in block:
+            bw = re.search(r"\"Bytes \(Write\)\"\s*=\s*(\d+)", block)
+            br = re.search(r"\"Bytes \(Read\)\"\s*=\s*(\d+)", block)
+            w = bw.group(1) if bw else "NA"
+            r = br.group(1) if br else "NA"
+            print(f"{w},{r}")
+            break
+    else:
+        print("NA,NA")
+except Exception:
+    print("NA,NA")
+' 2>/dev/null || echo "NA,NA")
+    IOREG_WRITE=$(echo "$IOREG_STATS" | awk -F',' '{print $1}')
+    IOREG_READ=$(echo "$IOREG_STATS" | awk -F',' '{print $2}')
+    [ -z "$IOREG_WRITE" ] && IOREG_WRITE="NA"
+    [ -z "$IOREG_READ" ] && IOREG_READ="NA"
 
     # 5. RAM disk free MB
     RAMDISK_FREE="0"
@@ -92,7 +115,7 @@ while true; do
         [ -z "$GPU_TEMP" ] && GPU_TEMP="NA"
     fi
 
-    echo "$TS,$EPOCH,$PAGEOUTS,$PAGEINS,$SWAP_USED,$SWAP_FREE,$MEM_FREE_PCT,$DISK0_MB,$RAMDISK_FREE,$THERM_STATUS,$GPU_POWER,$GPU_TEMP" >> "$OUTPUT_CSV"
+    echo "$TS,$EPOCH,$PAGEOUTS,$PAGEINS,$SWAP_USED,$SWAP_FREE,$MEM_FREE_PCT,$DISK0_MB,$IOREG_WRITE,$IOREG_READ,$RAMDISK_FREE,$THERM_STATUS,$GPU_POWER,$GPU_TEMP" >> "$OUTPUT_CSV"
 
     sleep "$INTERVAL"
 done

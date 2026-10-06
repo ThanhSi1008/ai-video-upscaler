@@ -7,6 +7,7 @@ Quản lý cấu hình tập trung, đường dẫn binary, thông số mã hóa
 import os
 import shutil
 import sys
+import json
 
 # -----------------------------------------------------------------------------
 # ĐƯỜNG DẪN DỰ ÁN & BINARY
@@ -18,6 +19,70 @@ BIN_DIR = os.path.join(ROOT_DIR, "bin", "realesrgan")
 REALESRGAN_BIN = os.path.join(BIN_DIR, "realesrgan-ncnn-vulkan")
 MODELS_DIR = os.path.join(BIN_DIR, "models")
 LOGS_DIR = os.path.join(ROOT_DIR, "logs")
+GPU_LOCK_FILE = os.path.join(ROOT_DIR, ".gpu_active.lock")
+PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "pending_subs.json")
+
+
+def load_pending_subs() -> list:
+    """Đọc danh sách các tập phụ đề chưa đạt chuẩn (Item 4b)."""
+    if not os.path.exists(PENDING_SUBS_FILE):
+        return []
+    try:
+        with open(PENDING_SUBS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def add_pending_sub(record: dict) -> None:
+    """Thêm hoặc cập nhật một tập vào pending_subs.json."""
+    if os.environ.get("PYTEST_CURRENT_TEST") and "dummy" in record.get("base_name", ""):
+        return
+    items = load_pending_subs()
+    # Loại bỏ bản ghi cũ cùng base_name nếu có
+    items = [it for it in items if it.get("base_name") != record.get("base_name")]
+    items.append(record)
+    try:
+        with open(PENDING_SUBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def remove_pending_sub(base_name: str) -> None:
+    """Xóa một tập khỏi pending_subs.json khi đã đạt chuẩn."""
+    items = load_pending_subs()
+    new_items = [it for it in items if it.get("base_name") != base_name]
+    if len(new_items) != len(items):
+        try:
+            with open(PENDING_SUBS_FILE, "w", encoding="utf-8") as f:
+                json.dump(new_items, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+
+def acquire_gpu_lock() -> None:
+    """Tạo file khóa đánh dấu giai đoạn upscale GPU đang hoạt động."""
+    try:
+        with open(GPU_LOCK_FILE, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n")
+    except Exception:
+        pass
+
+
+def release_gpu_lock() -> None:
+    """Giải phóng file khóa giai đoạn upscale GPU."""
+    try:
+        if os.path.exists(GPU_LOCK_FILE):
+            os.remove(GPU_LOCK_FILE)
+    except Exception:
+        pass
+
+
+import atexit
+atexit.register(release_gpu_lock)
+
 
 
 # -----------------------------------------------------------------------------

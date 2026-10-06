@@ -209,7 +209,7 @@ class BackgroundQueuePreflightManager:
 def compute_overnight_schedule(
     queue: List[str],
     deadline_str: Optional[str] = None,
-    fps_median: float = 1.66,
+    fps_median: float = 1.61,
     fps_p5: float = 1.62,
     video_overhead_seconds: float = 930.0,
     subtitles_overhead_seconds: float = 300.0,
@@ -224,7 +224,7 @@ def compute_overnight_schedule(
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
 
     Quy chuẩn:
-      - Tốc độ AI: trung vị 1.66 fps, P5 1.62 fps (đo đạc thực tế trong pipeline M3 Pro C1).
+      - Tốc độ AI: trung vị 1.61 fps (cỡ mẫu n=5 tập: Slime 55 chunks, Futsutsuka 01, 02, 03, I.Want, Re:Zero), P5 1.62 fps.
       - Overhead: video ~930s (hiệu chỉnh theo 2 tập đêm 1 [691s–1166s], n=2) + subtitles ~300s (Stage A + B2 100-cues + audit) = 1230s (~20.5m).
       - Quyết định deadline: dựa trên ETA P5 + biên an toàn 7% ETA (decision_eta = eta_p5 * 1.07).
       - Nếu không kịp và có --allow-partial: cho phép chạy đến hạn chót, dừng sạch ở ranh giới chunk.

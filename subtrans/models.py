@@ -20,6 +20,8 @@ class Cue(BaseModel):
     backend_used: Optional[str] = None  # "gemini" | "local" | "cache" | "skipped"
     model_used: Optional[str] = None  # e.g. "gemini-3.8-flash", "translategemma:12b"
     is_skipped: bool = False
+    is_dropped_sound: bool = False
+    used_en_fallback: bool = False
     uncertain: bool = False
     raw_text: Optional[str] = None  # Original raw text for skipped cues
 

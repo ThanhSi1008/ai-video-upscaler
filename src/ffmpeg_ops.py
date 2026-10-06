@@ -284,6 +284,23 @@ def embed_subtitle_track(
         except OSError:
             pass
 
+    # Lấy thông tin streams của mkv_path để lọc bỏ track tiếng Việt cũ (Item 4d: idempotent)
+    non_vie_sub_indices = []
+    try:
+        probe_cmd = ["ffprobe", "-v", "error", "-show_streams", "-of", "json", mkv_path]
+        r_probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if r_probe.returncode == 0:
+            data = json.loads(r_probe.stdout)
+            sub_stream_idx = 0
+            for s in data.get("streams", []):
+                if s.get("codec_type") == "subtitle":
+                    lang = str(s.get("tags", {}).get("language", "")).lower()
+                    if lang not in ("vie", "vi", "vietnamese"):
+                        non_vie_sub_indices.append(sub_stream_idx)
+                    sub_stream_idx += 1
+    except Exception:
+        pass
+
     cmd = [
         "ffmpeg", "-y",
         "-i", mkv_path,
@@ -291,18 +308,28 @@ def embed_subtitle_track(
         "-i", srt_path,
         "-map", "0:v:0",
         "-map", "0:a?",
-        "-map", "1:0",       # Luồng phụ đề tiếng Việt mới
-        "-map", "0:s?",      # Toàn bộ phụ đề cũ nếu có
+        "-map", "1:0",       # Luồng phụ đề tiếng Việt mới ở vị trí s:0
+    ]
+    # Chỉ map các luồng phụ đề cũ không phải tiếng Việt (bỏ track vie cũ)
+    for s_idx in non_vie_sub_indices:
+        cmd.extend(["-map", f"0:s:{s_idx}"])
+
+    cmd.extend([
         "-map", "0:t?",      # Toàn bộ font chữ đính kèm
         "-map_chapters", "0",
         "-c", "copy",
         "-metadata:s:s:0", f"language={language}",
         "-metadata:s:s:0", f"title={title}",
         "-disposition:s:0", "default" if is_default else "0",
-        "-disposition:s:1", "0",
+    ])
+    for i in range(1, len(non_vie_sub_indices) + 1):
+        cmd.extend([f"-disposition:s:{i}", "0"])
+
+    cmd.extend([
         "-max_interleave_delta", "0",
         tmp_out
-    ]
+    ])
+
     try:
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(tmp_out) or os.path.getsize(tmp_out) <= 1000:

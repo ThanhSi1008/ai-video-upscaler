@@ -166,7 +166,8 @@ class MPSPersistentWorker:
         input_dir: str,
         output_dir: str,
         fmt: str = "png",
-        logger=None
+        logger=None,
+        mid_chunk_callback=None
     ) -> Dict[str, Any]:
         """
         Suy luận toàn bộ ảnh trong input_dir và lưu 4K vào output_dir trên RAM Disk.
@@ -234,6 +235,15 @@ class MPSPersistentWorker:
 
                 write_futures.append(writer_executor.submit(save_task, out_path, out_np))
 
+                if mid_chunk_callback and idx == (len(img_files) // 2):
+                    try:
+                        mid_chunk_callback(idx, len(img_files))
+                    except Exception as e_cb:
+                        if "No space left on device" in str(e_cb) or (isinstance(e_cb, OSError) and getattr(e_cb, "errno", None) == 28):
+                            raise
+                        if logger:
+                            logger.warn(f"Lỗi mid_chunk_callback: {e_cb}")
+
             # Chờ toàn bộ writer threads hoàn tất
             for f in write_futures:
                 f.result()
@@ -297,7 +307,8 @@ def upscale_frames_with_fallback(
     engine: str = "mps",
     precision: str = "fp16",
     fmt: str = "png",
-    logger=None
+    logger=None,
+    mid_chunk_callback=None
 ) -> Dict[str, Any]:
     """
     Hàm giao tiếp chính thực hiện suy luận khung hình cho 1 chunk:
@@ -335,7 +346,8 @@ def upscale_frames_with_fallback(
             input_dir=input_dir,
             output_dir=output_dir,
             fmt=fmt,
-            logger=logger
+            logger=logger,
+            mid_chunk_callback=mid_chunk_callback
         )
         worker.restart_if_needed(logger=logger)
         res["engine_used"] = f"mps_{precision}"

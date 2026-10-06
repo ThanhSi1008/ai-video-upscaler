@@ -45,6 +45,14 @@ def should_skip_cue(style: str, raw_text: str, skip_styles_regex: str = DEFAULT_
     return False
 
 
+def is_pure_sound_cue(text: str) -> bool:
+    """Kiểm tra cue thuần ngoặc đơn (sound effect/description, e.g. （鳥のさえずり）, (息をのむ))."""
+    if not text:
+        return False
+    t = text.strip()
+    return bool(re.match(r"^[（\(][^）\)]+[）\)]$", t))
+
+
 def parse_and_align_subtitles(
     ja_path: str,
     en_path: Optional[str] = None,
@@ -52,7 +60,8 @@ def parse_and_align_subtitles(
     ja_offset_ms: int = 0,
     skip_styles_regex: str = DEFAULT_SKIP_STYLES,
     overlap_threshold: float = 0.5,
-    match_warning_pct: float = 0.8
+    match_warning_pct: float = 0.8,
+    sound_cues: str = "drop",
 ) -> Tuple[List[Cue], pysubs2.SSAFile, Optional[pysubs2.SSAFile]]:
     """
     Parses Japanese and optional English subtitles, cleans text, and aligns them by time overlap.
@@ -94,8 +103,8 @@ def parse_and_align_subtitles(
         is_skip = should_skip_cue(event.style, raw_text, skip_styles_regex)
 
         aligned_en = None
+        is_dropped_sound = False
         if not is_skip and clean_ja:
-            dialogue_cue_count += 1
             if en_cues:
                 # Find all EN cues whose overlap is at least overlap_threshold * EN duration
                 matching_en_texts = []
@@ -112,6 +121,12 @@ def parse_and_align_subtitles(
                     aligned_en = " ".join(matching_en_texts)
                     matched_en_count += 1
 
+            if is_pure_sound_cue(clean_ja) and not aligned_en and sound_cues == "drop":
+                is_dropped_sound = True
+                is_skip = True
+            else:
+                dialogue_cue_count += 1
+
         cue = Cue(
             id=idx,
             start=event.start,
@@ -119,12 +134,18 @@ def parse_and_align_subtitles(
             style=event.style,
             ja=clean_ja,
             en=aligned_en,
-            vi=raw_text if is_skip else None,  # Preserved unchanged if skipped
-            backend_used="skipped" if is_skip else None,
+            vi=raw_text if (is_skip and not is_dropped_sound) else None,
+            backend_used="dropped_sound" if is_dropped_sound else ("skipped" if is_skip else None),
             is_skipped=is_skip,
+            is_dropped_sound=is_dropped_sound,
             raw_text=raw_text
         )
         cues.append(cue)
+
+    dropped_count = sum(1 for c in cues if c.is_dropped_sound)
+    if dropped_count > 0:
+        logger.info(f"Đã loại bỏ {dropped_count} cue chú thích âm thanh thuần ngoặc đơn không có đối ứng tiếng Anh (--sound-cues {sound_cues}).")
+
 
     # Check match warning threshold
     if en_ssa and dialogue_cue_count > 0:
@@ -234,8 +255,8 @@ def detect_auto_offset(
     med_sec = statistics.median(cluster_diffs)
     med_ms = round(med_sec * 1000)
 
-    # 1. Check |offset| >= 1.0s
-    cond_mag = abs(med_sec) >= 1.0
+    # 1. Check |offset| >= 0.5s (Item 8: cập nhật ngưỡng từ 1.0s xuống 0.5s)
+    cond_mag = abs(med_sec) >= 0.5
 
     # 2. Check pairs >= 30
     cond_pairs = len(cluster_diffs) >= 30
