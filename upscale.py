@@ -358,21 +358,59 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
             en_sub = c
             break
 
-    # 2. Nếu chưa có ja_sub, thử trích xuất từ container video qua ffmpeg
-    if not ja_sub:
-        try:
-            meta = probe_video(video_path)
-            if meta.get("subtitle_count", 0) > 0:
-                tmp_dir = os.path.join(vid_dir, f".temp_{base_name}")
-                os.makedirs(tmp_dir, exist_ok=True)
-                extracted_ja = os.path.join(tmp_dir, "extracted_ja.ass")
-                # Trích xuất stream subtitle đầu tiên
-                cmd = ["ffmpeg", "-y", "-i", video_path, "-map", "0:s:0", "-c:s", "copy", extracted_ja]
-                r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if r.returncode == 0 and os.path.exists(extracted_ja) and os.path.getsize(extracted_ja) > 100:
-                    ja_sub = extracted_ja
-        except Exception:
-            pass
+    # 2. Kiểm tra container video qua ffprobe để trích xuất nếu thiếu file rời
+    tmp_dir = os.path.join(vid_dir, f".temp_{base_name}")
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=index:stream_tags=language,title",
+            "-select_streams", "s",
+            "-of", "json",
+            video_path
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        sub_info = json.loads(r.stdout).get("streams", [])
+
+        if sub_info:
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            # 2a. Trích xuất stream EN từ container video nếu chưa có file EN rời
+            if not en_sub:
+                en_idx = None
+                for s in sub_info:
+                    lang = s.get("tags", {}).get("language", "").lower()
+                    title = s.get("tags", {}).get("title", "").lower()
+                    if lang in ("eng", "en") or "english" in title or "eng" in title:
+                        en_idx = s["index"]
+                        break
+                # Nếu không gắn cờ ngôn ngữ rõ ràng nhưng có stream subtitle, lấy stream đầu tiên làm EN tham chiếu
+                if en_idx is None and len(sub_info) > 0:
+                    en_idx = sub_info[0]["index"]
+
+                if en_idx is not None:
+                    extracted_en = os.path.join(tmp_dir, "extracted_en.ass")
+                    ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{en_idx}", "-c:s", "copy", extracted_en]
+                    sub_res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if sub_res.returncode == 0 and os.path.exists(extracted_en) and os.path.getsize(extracted_en) > 100:
+                        en_sub = extracted_en
+
+            # 2b. Trích xuất stream JA từ container video nếu chưa có file JA rời
+            if not ja_sub:
+                ja_idx = None
+                for s in sub_info:
+                    lang = s.get("tags", {}).get("language", "").lower()
+                    title = s.get("tags", {}).get("title", "").lower()
+                    if lang in ("jpn", "ja") or "japanese" in title or "jpn" in title:
+                        ja_idx = s["index"]
+                        break
+                if ja_idx is not None:
+                    extracted_ja = os.path.join(tmp_dir, "extracted_ja.ass")
+                    ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{ja_idx}", "-c:s", "copy", extracted_ja]
+                    sub_res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if sub_res.returncode == 0 and os.path.exists(extracted_ja) and os.path.getsize(extracted_ja) > 100:
+                        ja_sub = extracted_ja
+    except Exception:
+        pass
 
     return ja_sub, en_sub
 

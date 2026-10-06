@@ -237,8 +237,9 @@ class OllamaTranslator(BaseTranslator):
 
         prompt_lines.append("\nLines to translate (Bắt buộc dịch từng dòng theo format [id] Bản dịch):")
         for cue in cues:
-            en_part = f" (EN: {cue.en})" if cue.en else ""
-            prompt_lines.append(f"[{cue.id}] {cue.ja}{en_part}")
+            main_line = cue.ja if cue.ja else (cue.en or "")
+            en_part = f" (EN: {cue.en})" if (cue.en and cue.ja) else ""
+            prompt_lines.append(f"[{cue.id}] {main_line}{en_part}")
 
         messages = [
             {"role": "user", "content": "\n".join(prompt_lines)}

@@ -15,6 +15,46 @@ import subprocess
 from typing import Optional
 
 
+def cleanup_orphan_ramdisks():
+    """Tự động dọn dẹp các RAM disk UpscaleRAM_<pid> bị mồ côi từ tiến trình cũ đã thoát."""
+    if sys.platform != "darwin":
+        return
+    vols_dir = "/Volumes"
+    if not os.path.exists(vols_dir):
+        return
+    for item in os.listdir(vols_dir):
+        if item.startswith("UpscaleRAM_"):
+            parts = item.split("_")
+            if len(parts) >= 2 and parts[1].isdigit():
+                pid = int(parts[1])
+                is_running = False
+                try:
+                    os.kill(pid, 0)
+                    is_running = True
+                except (OSError, ProcessLookupError):
+                    is_running = False
+
+                if not is_running:
+                    mount_path = os.path.join(vols_dir, item)
+                    try:
+                        subprocess.run(
+                            ["diskutil", "eject", mount_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5
+                        )
+                    except Exception:
+                        try:
+                            subprocess.run(
+                                ["hdiutil", "detach", mount_path, "-force"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=5
+                            )
+                        except Exception:
+                            pass
+
+
 class RAMDisk:
     """
     Context manager quản lý RAM Disk HFS+ trên macOS.
@@ -30,6 +70,9 @@ class RAMDisk:
         self._cleaned_up: bool = False
 
     def __enter__(self) -> str:
+        # Tự động dọn dẹp các RAM disk mồ côi từ phiên trước (nếu có)
+        cleanup_orphan_ramdisks()
+
         if self.enabled and sys.platform == "darwin":
             try:
                 # 1. Tạo RAM block device (512 bytes per sector)

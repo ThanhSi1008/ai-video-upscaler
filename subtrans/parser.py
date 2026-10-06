@@ -107,18 +107,36 @@ def parse_and_align_subtitles(
         is_dropped_sound = False
         if not is_skip and clean_ja:
             if en_cues:
+                dur_ja = max(1, event.end - event.start)
                 for ec in en_cues:
                     # Calculate time overlap between JA and EN cue
                     overlap_start = max(event.start, ec["start"])
                     overlap_end = min(event.end, ec["end"])
                     overlap_duration = max(0, overlap_end - overlap_start)
 
-                    if overlap_duration >= (ec["duration"] * overlap_threshold):
+                    if (
+                        overlap_duration >= (ec["duration"] * overlap_threshold)
+                        or overlap_duration >= (dur_ja * overlap_threshold)
+                        or overlap_duration >= 300
+                    ):
                         matching_en_cues.append(ec)
 
                 if matching_en_cues:
                     aligned_en = " ".join(ec["text"] for ec in matching_en_cues)
                     matched_en_count += 1
+                else:
+                    # Fallback tìm EN cue gần nhất trong phạm vi sai số ±800ms nếu không có overlap trực tiếp
+                    nearest_en = None
+                    min_dist = float("inf")
+                    for ec in en_cues:
+                        dist = abs((event.start + event.end) / 2.0 - (ec["start"] + ec["end"]) / 2.0)
+                        if dist < 800 and dist < min_dist:
+                            min_dist = dist
+                            nearest_en = ec
+                    if nearest_en:
+                        matching_en_cues.append(nearest_en)
+                        aligned_en = nearest_en["text"]
+                        matched_en_count += 1
 
             if is_pure_sound_cue(clean_ja) and not aligned_en and sound_cues == "drop":
                 is_dropped_sound = True
@@ -271,8 +289,8 @@ def detect_auto_offset(
     med_sec = statistics.median(cluster_diffs)
     med_ms = round(med_sec * 1000)
 
-    # 1. Check |offset| >= 0.5s (Item 8: cập nhật ngưỡng từ 1.0s xuống 0.5s)
-    cond_mag = abs(med_sec) >= 0.5
+    # 1. Check |offset| >= 0.2s (Bù tự động từ 200ms trở lên nếu các cặp ghép đồng thuận cao)
+    cond_mag = abs(med_sec) >= 0.2
 
     # 2. Check pairs >= 30
     cond_pairs = len(cluster_diffs) >= 30
@@ -308,7 +326,7 @@ def detect_auto_offset(
 
     failed_reasons = []
     if not cond_mag:
-        failed_reasons.append(f"|offset| ({abs(med_sec):.3f}s) < 1.0s")
+        failed_reasons.append(f"|offset| ({abs(med_sec):.3f}s) < 0.2s")
     if not cond_pairs:
         failed_reasons.append(f"số cặp ghép ({len(cluster_diffs)}) < 30")
     if not cond_drift:

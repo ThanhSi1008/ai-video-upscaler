@@ -26,8 +26,9 @@ from subtrans.cache import execute_and_log_api_request
 logger = logging.getLogger("subtrans.gemini")
 
 SYSTEM_INSTRUCTION = (
-    "You are an expert anime subtitle translator, translating Japanese (source of truth) "
-    "with English reference context into natural, readable spoken Vietnamese subtitles.\n"
+    "You are an expert anime subtitle translator, translating dialogue into natural, readable spoken Vietnamese subtitles.\n"
+    "The subtitle timing and line structure are anchored to the English dialogue from the source video, while the "
+    "Japanese dialogue provides the authentic source nuance, character pronouns, honorifics, and tone.\n"
     "Strict Priorities:\n"
     "1. No mistranslation. When unsure, choose the simpler, safer rendering and set \"uncertain\": true instead of inventing meaning.\n"
     "2. Natural, readable spoken Vietnamese that sounds natural when read aloud (never word-for-word calques).\n"
