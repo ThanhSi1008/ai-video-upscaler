@@ -791,15 +791,15 @@ def main():
             if getattr(args, "no_embed", False):
                 sub_cmd.append("--no-embed")
 
-            # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi:
+            # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi / tập đơn lẻ:
             manual_offset_applied = False
             if args.sub_offset_ms:
-                if args.sub_offset_target and args.sub_offset_target.lower() in os.path.basename(src_vid).lower():
+                if len(videos) == 1 or (args.sub_offset_target and args.sub_offset_target.lower() in os.path.basename(src_vid).lower()):
                     manual_offset_applied = True
-                    print(f"  • [QUEUE OFFSET] Áp dụng cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms cho tập chỉ định: '{os.path.basename(src_vid)}'")
+                    print(f"  • [OFFSET] Áp dụng cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms cho: '{os.path.basename(src_vid)}'")
                     sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
                 elif not args.sub_offset_target:
-                    print(f"  ⚠️ [QUEUE OFFSET WARNING] Cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms được truyền nhưng KHÔNG có --sub-offset-target. Để bảo toàn đồng bộ của các tập khác, offset thủ công KHÔNG áp dụng toàn cục cho '{os.path.basename(src_vid)}' (dùng --auto-offset tính riêng).")
+                    print(f"  ⚠️ [QUEUE OFFSET WARNING] Cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms được truyền trong hàng đợi nhiều tập nhưng KHÔNG có --sub-offset-target. Để bảo toàn đồng bộ của các tập khác, offset thủ công KHÔNG áp dụng toàn cục cho '{os.path.basename(src_vid)}' (dùng --auto-offset tính riêng).")
 
             # Nếu không áp dụng offset thủ công cho tập này, dùng auto_offset nếu được bật
             if not manual_offset_applied and queue_auto_offset:
