@@ -309,6 +309,12 @@ def build_arg_parser():
         help="Xử lý chú thích âm thanh thuần ngoặc đơn: 'drop' (bỏ qua, mặc định) hoặc 'translate' (dịch)"
     )
     parser.add_argument(
+        "--subs-quality",
+        choices=["normal", "high"],
+        default="normal",
+        help="Chất lượng dịch phụ đề: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"
+    )
+    parser.add_argument(
         "--subs-pending",
         action="store_true",
         help="Chạy lại quy trình dịch phụ đề cho các tập ghi nhận trong pending_subs.json"
@@ -492,6 +498,7 @@ def main():
                 output_format="srt",
                 require_approved_cast=False,
                 allow_latest_alias=False,
+                subs_quality=getattr(args, "subs_quality", "normal"),
             )
             res = sub_pipe.run(
                 ja_path=Path(ja_s),
@@ -538,6 +545,7 @@ def main():
             output_format="srt",
             require_approved_cast=False,
             allow_latest_alias=False,
+            subs_quality=getattr(args, "subs_quality", "normal"),
         )
         base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
         use_auto_offset = bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False
@@ -836,6 +844,7 @@ def main():
                 src_vid,
                 "-o", sub_out_dir,
                 "--sound-cues", args.sound_cues,
+                "--subs-quality", args.subs_quality,
             ]
             if args.subs_upgrade:
                 sub_cmd.append("--subs-upgrade")

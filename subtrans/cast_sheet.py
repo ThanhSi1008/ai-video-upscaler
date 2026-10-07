@@ -77,8 +77,11 @@ def extract_series_name(name_or_path: str) -> str:
 
 
 def get_series_cast_path(series_name: str, out_dir: Path) -> Path:
-    """Trả về đường dẫn file cast sheet của toàn bộ: out/<series>.cast.yaml."""
+    """Trả về đường dẫn file cast sheet của toàn bộ: out/<series>.cast.yaml (hoặc out/audit/<series>.cast.yaml)."""
     norm_series = re.sub(r'[\s/\\:]+', '_', series_name.strip())
+    audit_file = out_dir / "audit" / f"{norm_series}.cast.yaml"
+    if audit_file.exists():
+        return audit_file
     return out_dir / f"{norm_series}.cast.yaml"
 
 

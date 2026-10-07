@@ -143,11 +143,13 @@ def get_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
 class GeminiTranslator(BaseTranslator):
     """Google Gemini translation backend with structured schema output and automatic split-retry."""
 
+    all_rotation_events: List[Dict[str, Any]] = []
+
     def __init__(
         self,
         api_key: Optional[Union[str, List[str]]] = None,
         api_keys: Optional[List[str]] = None,
-        model: str = "gemini-3.8-flash",
+        model: str = "gemini-3.5-flash-lite",
         temperature: float = 0.0,
         gloss_skill_names: bool = False,
         allow_latest_alias: bool = False,
@@ -155,7 +157,10 @@ class GeminiTranslator(BaseTranslator):
         http_options: Optional[types.HttpOptions] = None,
         dry_run: bool = False,
     ):
+        import datetime
         from subtrans.config import get_gemini_api_keys
+        from subtrans.cache import TranslationCache, compute_key_id
+        from subtrans.throttle import RateLimiter
 
         # Thu thập toàn bộ danh sách API Keys
         collected_keys: List[str] = []
@@ -173,22 +178,40 @@ class GeminiTranslator(BaseTranslator):
             collected_keys = get_gemini_api_keys()
 
         self.api_keys: List[str] = collected_keys
-        self.current_key_idx: int = 0
-        self.api_key: Optional[str] = self.api_keys[0] if self.api_keys else None
+        self.key_ids: List[str] = [compute_key_id(k) for k in self.api_keys]
+        self.cache = TranslationCache()
 
-        if not self.api_key and not dry_run:
-            raise ValueError("GEMINI_API_KEY is required for GeminiTranslator.")
-        self.timeout_ms = timeout_ms
-        self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
-        if self.api_key:
-            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
-        else:
-            self.client = None
         self.model = model
         self.temperature = temperature
         self.gloss_skill_names = gloss_skill_names
         self.allow_latest_alias = allow_latest_alias
         self.dry_run = dry_run
+        self.timeout_ms = timeout_ms
+        self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
+
+        # Client-side rate limiting theo khóa (A4: Lite <= 12 RPM, Flash <= 4 RPM)
+        rpm_limit = 12 if "lite" in self.model.lower() else 4
+        self.rate_limiters: Dict[str, RateLimiter] = {
+            kid: RateLimiter(max_rpm=rpm_limit) for kid in self.key_ids
+        }
+        self.rotation_events: List[Dict[str, Any]] = []
+
+        # Chọn key đầu tiên chưa bị cạn kiệt cho model này
+        self.current_key_idx: int = 0
+        for idx, kid in enumerate(self.key_ids):
+            if not self.cache.is_key_model_exhausted(kid, self.model):
+                self.current_key_idx = idx
+                break
+
+        self.api_key: Optional[str] = self.api_keys[self.current_key_idx] if self.api_keys else None
+
+        if not self.api_key and not dry_run:
+            raise ValueError("GEMINI_API_KEY is required for GeminiTranslator.")
+
+        if self.api_key:
+            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+        else:
+            self.client = None
 
         # Batch & request statistics
         self.stats = {
@@ -204,27 +227,45 @@ class GeminiTranslator(BaseTranslator):
                 f"Please specify an explicit versioned model (e.g. gemini-3.8-flash) or set allow_latest_alias=True."
             )
 
-    def rotate_key(self) -> bool:
+    def rotate_key(self, reason: str = "") -> bool:
         """
-        Xoay sang API Key tiếp theo trong danh sách khi key hiện tại cạn hạn mức.
+        Xoay sang API Key tiếp theo trong danh sách chưa bị cạn hạn mức cho model này.
         Trả về True nếu còn key khả dụng, False nếu đã hết danh sách key.
         """
-        if self.current_key_idx + 1 < len(self.api_keys):
-            self.current_key_idx += 1
-            self.api_key = self.api_keys[self.current_key_idx]
-            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
-            masked = f"{self.api_key[:6]}...{self.api_key[-4:]}"
-            logging.getLogger("subtrans.gemini").warning(
-                f"🔄 [KEY ROTATION] Đã tự động xoay sang API Key [{self.current_key_idx + 1}/{len(self.api_keys)}]: "
-                f"{masked} cho model '{self.model}'."
-            )
-            return True
+        import datetime
+        old_idx = self.current_key_idx
+        old_kid = self.key_ids[old_idx] if self.key_ids else "none"
+
+        for next_idx in range(old_idx + 1, len(self.api_keys)):
+            next_kid = self.key_ids[next_idx]
+            if not self.cache.is_key_model_exhausted(next_kid, self.model):
+                self.current_key_idx = next_idx
+                self.api_key = self.api_keys[self.current_key_idx]
+                self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+                event = {
+                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "model": self.model,
+                    "from_key_id": old_kid,
+                    "to_key_id": next_kid,
+                    "reason": reason or "429 PerDay",
+                }
+                self.rotation_events.append(event)
+                GeminiTranslator.all_rotation_events.append(event)
+                logging.getLogger("subtrans.gemini").warning(
+                    f"🔄 [KEY ROTATION] Chuyển khóa cho model '{self.model}': {old_kid} ➔ {next_kid} ({reason})"
+                )
+                return True
         return False
 
     def _call_api(self, prompt_text: str, system_prompt: str = SYSTEM_INSTRUCTION) -> List[Dict[str, Any]]:
-        """Invokes Gemini API requesting structured JSON array with minimal thinking overhead and key rotation."""
+        """Invokes Gemini API requesting structured JSON array with rate limiting, retries, and key rotation."""
         if self.dry_run:
             return []
+
+        import time
+        import random
+        from subtrans.throttle import parse_429_details, DailyQuotaExhaustedError
+        from subtrans.cache import get_next_pt_reset
 
         config_kwargs = {
             "system_instruction": system_prompt,
@@ -237,7 +278,27 @@ class GeminiTranslator(BaseTranslator):
         if thinking_cfg:
             config_kwargs["thinking_config"] = thinking_cfg
 
+        # Pre-check: nếu key hiện tại đã bị cạn kiệt cho model này thì thử xoay trước
+        curr_kid = self.key_ids[self.current_key_idx] if self.key_ids else "none"
+        if self.cache.is_key_model_exhausted(curr_kid, self.model):
+            if not self.rotate_key(reason="Pre-check: Khóa hiện tại đã hết hạn mức ngày"):
+                next_pt, next_vn = get_next_pt_reset()
+                raise DailyQuotaExhaustedError(
+                    model=self.model,
+                    quota_id="AllKeysExhausted",
+                    quota_value="",
+                    reset_pt_str=next_pt.strftime("%Y-%m-%d %H:%M PT"),
+                    reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
+                )
+
+        max_transient_retries = 3
+        transient_attempt = 0
+
         while True:
+            curr_kid = self.key_ids[self.current_key_idx] if self.key_ids else "none"
+            if curr_kid in self.rate_limiters:
+                self.rate_limiters[curr_kid].wait_if_needed()
+
             def _send():
                 return self.client.models.generate_content(
                     model=self.model,
@@ -251,20 +312,72 @@ class GeminiTranslator(BaseTranslator):
                     model=self.model,
                     backend="gemini",
                     cues_count=0,
-                    request_type="translation"
+                    request_type="translation",
+                    cache=self.cache,
+                    key_id=curr_kid,
                 )
                 raw_text = response.text.strip()
                 data = json.loads(raw_text)
                 return data
             except Exception as e:
                 err_str = str(e).lower()
-                is_quota_err = any(k in err_str for k in [
-                    "429", "resource_exhausted", "quota", "perday", "requestsperday", "daily"
-                ])
-                # Nếu gặp lỗi hạn mức và còn key tiếp theo trong danh sách:
-                if is_quota_err and self.rotate_key():
-                    continue
-                # Nếu đã hết key hoặc lỗi không thể khắc phục bằng đổi key: ném ra ngoài
+                is_429 = "429" in err_str or "resource_exhausted" in err_str or "too many requests" in err_str
+
+                if is_429:
+                    quota_id, quota_value, retry_delay = parse_429_details(e)
+                    qid_lower = (quota_id or "").lower()
+                    is_per_day = any(p in qid_lower for p in ["perday", "requestsperday", "daily", "day"]) or "perday" in err_str or "requestsperday" in err_str
+
+                    if is_per_day:
+                        # (a) 429 PerDay -> đánh dấu (key_id, model) cạn đến 00:00 PT, chuyển ngay SANG KHÓA KẾ của CÙNG model
+                        self.cache.mark_key_model_exhausted(
+                            key_id=curr_kid,
+                            model=self.model,
+                            quota_id=quota_id or "PerDay",
+                            quota_value=quota_value or "",
+                            reason=f"429 PerDay: {quota_id}"
+                        )
+                        if self.rotate_key(reason=f"429 PerDay ({quota_id})"):
+                            transient_attempt = 0
+                            continue
+                        else:
+                            # Hết toàn bộ khóa của model này -> ném DailyQuotaExhaustedError để chuyển sang model kế
+                            next_pt, next_vn = get_next_pt_reset()
+                            raise DailyQuotaExhaustedError(
+                                model=self.model,
+                                quota_id=quota_id or "PerDay",
+                                quota_value=quota_value or "",
+                                reset_pt_str=next_pt.strftime("%Y-%m-%d %H:%M PT"),
+                                reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
+                            )
+                    else:
+                        # (b) 429 PerMinute -> chờ retryDelay, KHÔNG xoay khóa
+                        wait_sec = float(retry_delay) if retry_delay else 10.0
+                        logging.getLogger("subtrans.gemini").warning(
+                            f"⏳ [429 PER-MINUTE] Model '{self.model}' trên key {curr_kid} cần chờ {wait_sec:.1f}s (KHÔNG xoay khóa)..."
+                        )
+                        time.sleep(wait_sec)
+                        continue
+
+                # (c) 503 unavailable hoặc (d) network/timeout
+                is_transient = any(k in err_str for k in ["503", "unavailable", "timeout", "timed out", "connection", "remoteendclosed", "deadline"])
+                if is_transient:
+                    if transient_attempt < max_transient_retries:
+                        transient_attempt += 1
+                        backoff = (2 ** transient_attempt) + random.uniform(0.5, 1.5)
+                        logging.getLogger("subtrans.gemini").warning(
+                            f"⚠️ [TRANSIENT {err_str[:30]}] Thử lại ({transient_attempt}/{max_transient_retries}) sau {backoff:.1f}s trên cùng khóa {curr_kid}..."
+                        )
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        # Thử lại tối đa 3 lần với backoff trên cùng khóa rồi sang model kế (KHÔNG xoay khóa)
+                        logging.getLogger("subtrans.gemini").error(
+                            f"❌ Server/Network error liên tiếp 3 lần trên {curr_kid}. Chuyển sang model kế!"
+                        )
+                        raise
+
+                # Các lỗi khác: ném ra ngoài
                 raise
 
     def translate_batch(

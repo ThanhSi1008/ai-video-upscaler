@@ -258,6 +258,19 @@ def generate_qa_report(
             "",
         ])
 
+    # Section: Key Rotation Events
+    key_rotations = stats.get("key_rotations", [])
+    if key_rotations:
+        lines.extend([
+            f"### 🔄 Nhật Ký Xoay Khóa API ({len(key_rotations)} lần xoay)",
+            "",
+            "| Thời Gian | Model | Khóa Nguồn (key_id) | Khóa Đích (key_id) | Lý Do |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ])
+        for kr in key_rotations:
+            lines.append(f"| {kr.get('time', 'N/A')} | `{kr.get('model', 'N/A')}` | `{kr.get('from_key_id', 'N/A')}` | `{kr.get('to_key_id', 'N/A')}` | {kr.get('reason', 'N/A')} |")
+        lines.append("")
+
     # Section: Phân loại dữ liệu minh bạch
     lines.extend([
         "### 3. Phân Loại Dữ Liệu Báo Cáo (Data Transparency Breakdown)",
@@ -274,8 +287,8 @@ def generate_qa_report(
     lines.extend([
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Số request cho tập 300 cues (~3 requests) | Tính toán lý thuyết: 300 ÷ 100 cues/batch = 3 |",
         f"| **ƯỚC LƯỢNG (ESTIMATED)** | Thời điểm reset quota: `{next_vn.strftime('%H:%M %d/%m')}` | Tính toán qua `zoneinfo` (PDT 14:00 / PST 15:00) |",
-        f"| **CHƯA XÁC MINH (UNVERIFIED)** | Hạn mức RPD = 20 (Flash) / 500 (Lite) | Chưa xác minh (nguồn bên thứ ba, chờ đối soát AI Studio) |",
-        f"| **CHƯA XÁC MINH (UNVERIFIED)** | Giới hạn RPM/TPM của từng model | Đang để trống (chưa có số liệu chính thức từ dashboard) |",
+        f"| **ĐÃ XÁC MINH (VERIFIED)** | Hạn mức Flash (RPM 5, RPD 20), Lite (RPM 15, RPD 500) | Nguồn: Ảnh AI Studio 07/10/2026, 4 project riêng biệt |",
+        f"| **ĐÃ XÁC MINH (VERIFIED)** | Client-side Rate Limit (Lite ≤ 12 RPM, Flash ≤ 4 RPM) | Cài đặt giới hạn trượt trong `gemini_backend.py` |",
         "",
     ])
 

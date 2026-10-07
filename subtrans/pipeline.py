@@ -54,6 +54,7 @@ class TranslationPipeline:
         allow_latest_alias: bool = False,
         dry_run: bool = False,
         batch_size: Optional[int] = None,
+        subs_quality: str = "normal",  # "normal" (Lite first) | "high" (Flash first)
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
@@ -69,19 +70,27 @@ class TranslationPipeline:
         self.review_file = review_file
         self.allow_latest_alias = allow_latest_alias
         self.dry_run = dry_run
+        self.subs_quality = subs_quality
 
         # Chuỗi model: Nạp từ models.yaml, tuyệt đối không dùng model preview
-        # Chuỗi chuẩn: gemini-3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash -> 3.5-flash-lite -> local
-        chain = self.models_cfg.get("chain", [
-            "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "local"
+        # A6: Lite làm model chính theo mặc định. Cờ --subs-quality high đảo thứ tự (Flash trước, Lite sau).
+        raw_chain = self.models_cfg.get("chain", [
+            "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "local"
         ])
-        gemini_chain = [m for m in chain if m != "local" and "preview" not in m.lower()]
+        gemini_chain = [m for m in raw_chain if m != "local" and "preview" not in m.lower()]
+        lite_models = [m for m in gemini_chain if "lite" in m.lower()]
+        flash_models = [m for m in gemini_chain if "lite" not in m.lower()]
+
+        if self.subs_quality == "high":
+            ordered_chain = flash_models + lite_models
+        else:
+            ordered_chain = lite_models + flash_models
 
         gemini_cfg = self.cfg.get("gemini", {})
-        self.gemini_model = model_override or (gemini_chain[0] if gemini_chain else "gemini-3.8-flash")
-        self.fallback_models: List[str] = [m for m in gemini_chain if m != self.gemini_model]
+        self.gemini_model = model_override or (ordered_chain[0] if ordered_chain else "gemini-3.5-flash-lite")
+        self.fallback_models: List[str] = [m for m in ordered_chain if m != self.gemini_model]
         self.lite_model = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
-        self.gemini_rpm = gemini_cfg.get("max_rpm", 5)
+        self.gemini_rpm = gemini_cfg.get("max_rpm", 15 if "lite" in self.gemini_model.lower() else 5)
 
         # Protection against mutable alias 'gemini-flash-latest' per ADDENDUM 8
         if "latest" in self.gemini_model.lower() and not self.allow_latest_alias:
@@ -258,7 +267,8 @@ class TranslationPipeline:
         # Stage A: Cast Sheet generation (Quản lý theo bộ <series>.cast.yaml, chỉ gọi API khi có nhân vật mới)
         t_sa = time.monotonic()
         base_name = output_basename or ja_path.stem
-        cast_file = self.output_dir / f"{base_name}.cast.yaml"
+        audit_cast_file = self.output_dir / "audit" / f"{base_name}.cast.yaml"
+        cast_file = audit_cast_file if audit_cast_file.exists() else self.output_dir / f"{base_name}.cast.yaml"
         if not self.local_only:
             with console.status("[bold blue]Stage A: Analyzing series cast & character pronoun table...[/bold blue]"):
                 cast_glossary = load_or_generate_series_cast_sheet(
@@ -283,6 +293,7 @@ class TranslationPipeline:
             # Auto-detect existing Stage A Cast Sheet from candidate paths for fair local evaluation
             candidate_cast_paths = [
                 cast_file,
+                self.output_dir / "audit" / f"{base_name}.cast.yaml",
                 self.output_dir / f"{base_name}.cast.yaml",
                 Path("out") / f"{base_name}.cast.yaml",
                 Path("out/gemini") / f"{base_name}.cast.yaml",
@@ -605,6 +616,7 @@ class TranslationPipeline:
         stats["is_qualified"] = is_qualified
         stats["real_rate"] = real_rate
         stats["uncertain_rate"] = uncertain_rate
+        stats["key_rotations"] = list(GeminiTranslator.all_rotation_events)
         stats["offset_info"] = {
             "applied_offset_ms": sub_offset_ms,
             "detected_offset_ms": det_offset,

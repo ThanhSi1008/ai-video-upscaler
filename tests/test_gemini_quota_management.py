@@ -63,13 +63,13 @@ class TestGeminiQuotaManagement(unittest.TestCase):
         self.assertEqual(models["gemini-3.5-flash-lite"]["rpd"], 500)
         self.assertEqual(models["gemini-3.1-flash-lite"]["rpd"], 500)
 
-        # Chuỗi model: 3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash -> 3.5-flash-lite -> local
+        # Chuỗi model A6: 3.5-flash-lite -> 3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash -> local
         expected_chain = [
+            "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
             "local"
         ]
         self.assertEqual(cfg["chain"], expected_chain)

@@ -185,6 +185,7 @@ def run(
     require_approved_cast: bool = typer.Option(False, "--require-approved-cast", help="Pause to inspect Stage A cast sheet before continuing"),
     review_file: bool = typer.Option(False, "--review-file", help="Generate out/<name>.review.srt containing uncertain lines"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
+    subs_quality: str = typer.Option("normal", "--subs-quality", help="Chất lượng dịch: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"),
     auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
@@ -219,6 +220,7 @@ def run(
         review_file=review_file,
         dry_run=dry_run,
         batch_size=batch_size,
+        subs_quality=subs_quality,
     )
 
     try:

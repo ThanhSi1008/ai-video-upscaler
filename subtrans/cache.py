@@ -45,6 +45,13 @@ def get_next_pt_reset() -> Tuple[datetime.datetime, datetime.datetime]:
     return next_pt, next_vn
 
 
+def compute_key_id(api_key: str) -> str:
+    """Trả về 8 ký tự đầu của sha256(api_key). Tuyệt đối không log hay lưu key thật."""
+    if not api_key:
+        return "none"
+    return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()[:8]
+
+
 def compute_cue_cache_key(
     model: str,
     ja: str,
@@ -109,6 +116,19 @@ class TranslationCache:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS key_exhaustion (
+                    key_id TEXT,
+                    model TEXT,
+                    pt_date TEXT,
+                    exhausted_until_pt TEXT,
+                    quota_id TEXT,
+                    quota_value TEXT,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (key_id, model, pt_date)
+                )
+            """)
             # Ensure columns exist if table was created earlier
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(translations)")
@@ -126,6 +146,8 @@ class TranslationCache:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN quota_value TEXT")
             if "error_type" not in cols:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN error_type TEXT")
+            if "key_id" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN key_id TEXT")
 
             # Backfill pt_date bằng ZoneInfo("America/Los_Angeles") cho các bản ghi cũ
             today_pt = get_today_pt_str()
@@ -191,16 +213,56 @@ class TranslationCache:
         status: str = "success",
         error_type: str = "",
         quota_id: str = "",
-        quota_value: str = ""
+        quota_value: str = "",
+        key_id: str = ""
     ):
         """Ghi nhận một lời gọi API vào cơ sở dữ liệu để theo dõi hạn mức theo ngày Thái Bình Dương."""
         pt_date = get_today_pt_str()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
-                INSERT INTO api_requests (model, backend, cues_count, status, error_type, quota_id, quota_value, pt_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (model, backend, cues_count, status, error_type, quota_id, str(quota_value), pt_date))
+                INSERT INTO api_requests (model, backend, cues_count, status, error_type, quota_id, quota_value, pt_date, key_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (model, backend, cues_count, status, error_type, quota_id, str(quota_value), pt_date, key_id))
             conn.commit()
+
+    def mark_key_model_exhausted(
+        self,
+        key_id: str,
+        model: str,
+        quota_id: str = "PerDay",
+        quota_value: str = "",
+        reason: str = ""
+    ):
+        """Đánh dấu (key_id, model) cạn hạn mức đến 00:00 PT ngày tiếp theo."""
+        today_pt = get_today_pt_str()
+        next_pt, _ = get_next_pt_reset()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO key_exhaustion (key_id, model, pt_date, exhausted_until_pt, quota_id, quota_value, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (key_id, model, today_pt, next_pt.isoformat(), quota_id, str(quota_value), reason))
+            conn.commit()
+
+    def is_key_model_exhausted(self, key_id: str, model: str) -> bool:
+        """Kiểm tra xem (key_id, model) có bị cạn hạn mức trong ngày PT hiện tại không."""
+        today_pt = get_today_pt_str()
+        now_pt = get_now_pt()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT exhausted_until_pt FROM key_exhaustion
+                WHERE key_id = ? AND model = ? AND pt_date = ?
+            """, (key_id, model, today_pt))
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return False
+            try:
+                exhausted_until = datetime.datetime.fromisoformat(row[0])
+                if exhausted_until.tzinfo is None:
+                    exhausted_until = exhausted_until.replace(tzinfo=PT_TZ)
+                return now_pt < exhausted_until
+            except Exception:
+                return False
 
     def mark_model_exhausted(
         self,
@@ -306,7 +368,8 @@ def execute_and_log_api_request(
     backend: str = "gemini",
     cues_count: int = 0,
     request_type: str = "translation",
-    cache: Optional[TranslationCache] = None
+    cache: Optional[TranslationCache] = None,
+    key_id: str = ""
 ):
     """
     HÀM BỌC DUY NHẤT (Single Unified Wrapper) cho TẤT CẢ các lời gọi API.
@@ -323,7 +386,8 @@ def execute_and_log_api_request(
             status="success",
             error_type="",
             quota_id="",
-            quota_value=""
+            quota_value="",
+            key_id=key_id
         )
         return res
     except Exception as e:
@@ -359,7 +423,8 @@ def execute_and_log_api_request(
             status=status_str,
             error_type=error_type,
             quota_id=quota_id or "",
-            quota_value=str(quota_value or "")
+            quota_value=str(quota_value or ""),
+            key_id=key_id
         )
         raise
 

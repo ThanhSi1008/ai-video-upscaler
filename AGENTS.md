@@ -152,7 +152,7 @@ upscale/
 * **Khóa GPU độc quyền:** Dùng file khóa `/tmp/upscale_gpu.lock` kiểm soát GPU theo từng chunk infer, cho phép nạp Ollama ở stage phụ đề sau khi hoàn tất upscale GPU.
 * **Cổng kiểm định Mux:** `src/mux_audit.py` xác minh toàn vẹn luồng stream copy và khớp số lượng font chữ nhúng trước khi xuất xưởng.
 * **Tự động Dọn Dẹp Checkpoint & Gom Gọn Audit:** `src/cleanup.py` kích hoạt tự động sau khi `verify_mux_integrity` trả về PASS; xóa sạch `.temp_<basename>` (kể cả symlinks, thư mục con thực tế và thư mục rỗng) giúp thu hồi ~6.6 GB/tập; tự động gom các file `.audit.json`, `.audit.md`, `.cast.yaml` vào subfolder `audit/` để thư mục xuất xưởng chỉ còn video `.mkv` và `.vi.srt`. Cờ `--keep-temp` cho phép giữ lại khi cần debug.
-* **Đa Khóa Gemini & Xoay Vòng Hạn Mức (Multi-Key Rotation):** `subtrans/config.py` và `subtrans/gemini_backend.py` hỗ trợ nạp song song nhiều API Key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`,...). Khi gặp lỗi 429 (`RESOURCE_EXHAUSTED`), hệ thống tự động xoay sang key kế tiếp ngay trong batch dịch, nâng hạn ngạch từ 1.500 lên 6.000+ RPD mà không ngắt quãng pipeline.
+* **Đa Khóa Gemini & Xoay Vòng Hạn Mức (Multi-Key Rotation):** `subtrans/config.py` và `subtrans/gemini_backend.py` hỗ trợ nạp song song nhiều API Key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`,...). Khi gặp lỗi 429 (`RESOURCE_EXHAUSTED` / PerDay), hệ thống tự động xoay sang key kế tiếp của cùng model trong batch dịch, nâng hạn ngạch Lite lên 2.000 RPD (500 RPD/key) và Flash lên 80 RPD/model (20 RPD/key) từ 4 project độc lập mà không ngắt quãng pipeline.
 
 ---
 

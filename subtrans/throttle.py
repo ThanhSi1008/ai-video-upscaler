@@ -134,9 +134,13 @@ def parse_429_details(exc: Exception) -> Tuple[Optional[str], Optional[str], Opt
         if m_qid:
             quota_id = m_qid.group(1)
         else:
-            m_metric = re.search(r"(GenerateContentRequestsPer[A-Za-z0-9]+)", err_str)
+            m_metric = re.search(r"metric\s+['\"]?([A-Za-z0-9_-]+)['\"]?", err_str)
             if m_metric:
                 quota_id = m_metric.group(1)
+            else:
+                m_metric2 = re.search(r"((?:GenerateContent)?RequestsPer[A-Za-z0-9]+)", err_str)
+                if m_metric2:
+                    quota_id = m_metric2.group(1)
 
     if not quota_value:
         m_qval = re.search(r"quotaValue['\":\s]+['\"]?(\d+)['\"]?", err_str, re.IGNORECASE)
