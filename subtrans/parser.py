@@ -220,15 +220,12 @@ def parse_and_align_subtitles(
         )
         cues.append(cue)
 
-    # Đảm bảo tính tuần tự nghiêm ngặt, triệt tiêu 100% trùng start và chồng lấn thời gian (overlap)
-    valid_cues = [c for c in cues if not c.is_skipped and not c.is_dropped_sound]
-    for i in range(len(valid_cues) - 1):
-        c1, c2 = valid_cues[i], valid_cues[i + 1]
-        if c1.start == c2.start:
-            c2.start = c1.start + 200
-            c2.end = max(c2.end, c2.start + 300)
-        if c1.end > c2.start:
-            c1.end = max(c1.start + 200, c2.start - 40)
+    # Sắp xếp danh sách cue tuần tự theo start time tăng dần (bảo toàn trọn vẹn thời lượng âm thanh gốc)
+    cues.sort(key=lambda c: (c.start, c.end))
+    for i in range(len(cues) - 1):
+        if cues[i].start == cues[i + 1].start:
+            cues[i + 1].start += 10
+            cues[i + 1].end = max(cues[i + 1].end, cues[i + 1].start + 300)
 
     dropped_count = sum(1 for c in cues if c.is_dropped_sound)
     if dropped_count > 0:
