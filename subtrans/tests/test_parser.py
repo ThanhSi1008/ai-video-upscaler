@@ -93,3 +93,71 @@ def test_alignment_2_to_1(tmp_path):
     # overlap 1: 1500ms out of 3500ms (42.8% < 50% -> not matched)
     # overlap 2: 1900ms out of 3500ms (54.2% >= 50% -> matched)
     assert cues[1].en == "Wait, don't leave me!"
+
+
+def test_strip_speaker_prefix():
+    from subtrans.parser import strip_speaker_prefix
+    # Không prefix
+    p, r = strip_speaker_prefix("こんにちは")
+    assert p == "" and r == "こんにちは"
+
+    # Ngoặc đơn tiếng Nhật
+    p, r = strip_speaker_prefix("（珊瑚(さんご)）お気を確かに！")
+    assert p == "珊瑚(さんご)" and r == "お気を確かに！"
+
+    # Dấu gạch ngang kèm ngoặc người nói
+    p, r = strip_speaker_prefix("-（絹秀）金淑妃(きんしゅくひ)")
+    assert p == "絹秀" and r == "金淑妃(きんしゅくひ)"
+
+    # Chỉ có dấu gạch ngang
+    p, r = strip_speaker_prefix("- お前は誰だ")
+    assert p == "" and r == "お前は誰だ"
+
+
+def test_split_multi_speaker_cc_events():
+    from subtrans.parser import split_multi_speaker_cc_events
+    events = [
+        # Multi-speaker có dấu gạch ngang
+        pysubs2.SSAEvent(start=1000, end=3000, text=r"-（絹秀）金淑妃\N-（清佳）あっ…"),
+        # Cue đơn thoại dài bẻ dòng thông thường (không phải multi-speaker)
+        pysubs2.SSAEvent(start=3500, end=5000, text=r"果たして 玲琳様に\Nそのような ご体力があるのか"),
+        # Cue âm thanh + thoại
+        pysubs2.SSAEvent(start=5500, end=7000, text=r"（扉が開く音）\N（莉莉）慧月様"),
+    ]
+    split_res = split_multi_speaker_cc_events(events)
+    # Event 1 tách thành 2, Event 2 giữ nguyên 1, Event 3 tách thành 2 -> Tổng cộng 5
+    assert len(split_res) == 5
+    assert split_res[0].text == "-（絹秀）金淑妃"
+    assert split_res[1].text == "-（清佳）あっ…"
+    assert split_res[0].start == 1000 and split_res[1].start == 1000
+    assert split_res[2].text == r"果たして 玲琳様に\Nそのような ご体力があるのか"
+    assert split_res[3].text == "（扉が開く音）"
+    assert split_res[4].text == "（莉莉）慧月様"
+
+
+def test_multi_speaker_pipeline_alignment(tmp_path):
+    ja_file = tmp_path / "ja_cc.srt"
+    en_file = tmp_path / "en.srt"
+
+    ja_ssa = pysubs2.SSAFile()
+    # Event 1: Seika gọi "Aunt!"
+    ja_ssa.events.append(pysubs2.SSAEvent(start=857648, end=858691, text=r"{\an8}（清佳）叔母様！"))
+    # Event 2: Multi-speaker: Kenshuu quát "Kin Shukuhi!" + Seika "Ah..."
+    ja_ssa.events.append(pysubs2.SSAEvent(start=858774, end=860317, text=r"-（絹秀）金淑妃(きんしゅくひ)\N-（清佳）あっ…"))
+    ja_ssa.save(str(ja_file))
+
+    en_ssa = pysubs2.SSAFile()
+    en_ssa.events.append(pysubs2.SSAEvent(start=857040, end=857960, text="Aunt!"))
+    en_ssa.events.append(pysubs2.SSAEvent(start=858040, end=859380, text="Pure Consort Kin."))
+    en_ssa.save(str(en_file))
+
+    cues, _, _ = parse_and_align_subtitles(str(ja_file), str(en_file), sound_cues="drop")
+    # CUE 1: Seika: "叔母様！"
+    # CUE 2: Kenshuu: "金淑妃(きんしゅくひ)" -> KHÔNG BỊ BỎ QUÊN!
+    # CUE 3: Seika: "あっ…" (bị drop bởi sound_cues="drop")
+    active_dialogue_cues = [c for c in cues if not c.is_skipped]
+    assert len(active_dialogue_cues) == 2
+    assert active_dialogue_cues[0].ja == "叔母様！"
+    assert active_dialogue_cues[1].ja == "金淑妃(きんしゅくひ)"
+    assert "Pure Consort Kin." in active_dialogue_cues[1].en
+

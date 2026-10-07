@@ -58,8 +58,12 @@ MUSIC_OR_SYMBOL_REGEX = re.compile(r"^[♪～\s\-_~♩♫♬]+$")
 
 
 def strip_speaker_prefix(text: str) -> Tuple[str, str]:
-    """Tách tên người nói ở đầu câu nếu có: （珊瑚(さんご)）Lời thoại -> ('珊瑚(さんご)', 'Lời thoại')."""
+    """Tách tên người nói ở đầu câu nếu có: （珊瑚(さんご)）Lời thoại hoặc -（絹秀）Lời thoại -> ('絹秀', 'Lời thoại')."""
     t = text.strip()
+    dash_match = re.match(r"^[-–—]\s*", t)
+    if dash_match:
+        t = t[dash_match.end():].strip()
+
     if not (t.startswith("（") or t.startswith("(")):
         return "", t
     depth = 0
@@ -102,6 +106,56 @@ def is_pure_sound_cue(text: str) -> bool:
             return True
 
     return bool(re.match(r"^[（\(][^）\)]+[）\)]$", t))
+
+
+def is_multi_speaker_or_multi_event_text(raw_text: str) -> Tuple[bool, List[str]]:
+    """
+    Phát hiện các cue Closed Captions (CC) chứa nhiều người nói hoặc vừa có chú thích âm thanh vừa có thoại:
+    Ví dụ:
+        -（絹秀）金淑妃(きんしゅくひ)\\N-（清佳）あっ…
+        （扉が開く音）\\N（莉莉）慧月様
+    """
+    clean_raw = ASS_TAG_REGEX.sub("", raw_text).strip()
+    raw_lines = re.split(r"\\N|\\n|\r\n|\n", clean_raw)
+    lines = [l.strip() for l in raw_lines if l.strip()]
+    if len(lines) < 2:
+        return False, []
+
+    prefix_pattern = re.compile(r"^[-–—]\s*|^[（\(][^）\)]+[）\)]")
+    hyphen_pattern = re.compile(r"^[-–—]\s*")
+
+    # Nếu có từ 2 dòng trở lên bắt đầu bằng dấu gạch ngang -> chắc chắn là multi-speaker dialogue
+    hyphen_count = sum(1 for l in lines if hyphen_pattern.match(l))
+    if hyphen_count >= 2:
+        return True, lines
+
+    # Nếu tất cả các dòng đều bắt đầu bằng speaker prefix hoặc sound cue [（(]...[）)]
+    all_prefixed = all(bool(prefix_pattern.match(l)) for l in lines)
+    if all_prefixed:
+        return True, lines
+
+    return False, []
+
+
+def split_multi_speaker_cc_events(events: List[pysubs2.SSAEvent]) -> List[pysubs2.SSAEvent]:
+    """
+    Tách các event Closed Captions (CC) gộp nhiều người nói thành các event độc lập cùng start/end.
+    Điều này đảm bảo mỗi nhân vật đều được dịch độc lập và không bị Gemini bỏ quên câu thoại.
+    """
+    if not events:
+        return []
+
+    split_events: List[pysubs2.SSAEvent] = []
+    for e in events:
+        is_multi, lines = is_multi_speaker_or_multi_event_text(e.text)
+        if is_multi:
+            for line in lines:
+                ev = copy.deepcopy(e)
+                ev.text = line
+                split_events.append(ev)
+        else:
+            split_events.append(copy.deepcopy(e))
+    return split_events
 
 
 def deduplicate_consecutive_cc_events(events: List[pysubs2.SSAEvent]) -> List[pysubs2.SSAEvent]:
@@ -154,6 +208,7 @@ def parse_and_align_subtitles(
         ja_ssa.shift(ms=ja_offset_ms)
         logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
     ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
+    ja_ssa.events = split_multi_speaker_cc_events(ja_ssa.events)
     en_ssa = pysubs2.load(en_path) if en_path else None
 
     # Pre-process EN cues if available
@@ -192,7 +247,7 @@ def parse_and_align_subtitles(
             is_skip = True
         else:
             prefix, rest = strip_speaker_prefix(clean_ja)
-            if prefix and rest:
+            if rest:
                 clean_ja = rest
 
         matching_en_cues = []
