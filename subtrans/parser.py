@@ -45,11 +45,61 @@ def should_skip_cue(style: str, raw_text: str, skip_styles_regex: str = DEFAULT_
     return False
 
 
-def is_pure_sound_cue(text: str) -> bool:
-    """Kiểm tra cue thuần ngoặc đơn (sound effect/description, e.g. （鳥のさえずり）, (息をのむ))."""
-    if not text:
-        return False
+SOUND_KEYWORDS_REGEX = re.compile(
+    r"(息|せき|咳|ため息|泣き声|笑い声|声|音|足音|鳥|叫び|うめき|喘ぎ|すする|啜り|ハア|ハァ|ゴホ|ケホ|ヒソヒソ|ざわめき|物音|ドア|雷|雨|風|ベル|拍手|歓声|悲鳴|鳴き声)",
+    re.IGNORECASE,
+)
+PURE_INTERJECTION_REGEX = re.compile(
+    r"^((ハア|ハァ|はあ|はぁ|ふう|ふぅ|フウ|フゥ|うっ|くっ|あっ|えっ|ん|んっ|フッ|ふっ|へっ|へ|ほっ|ほ|ちっ|チッ|はむっ|うう|う～|わあ|わぁ|きゃっ|ぎゃっ|ええっ|えっ|ひっ|ひぃ)[\s…\.\-—!！?？]*)+$",
+    re.IGNORECASE,
+)
+MUSIC_OR_SYMBOL_REGEX = re.compile(r"^[♪～\s\-_~♩♫♬]+$")
+
+
+def strip_speaker_prefix(text: str) -> Tuple[str, str]:
+    """Tách tên người nói ở đầu câu nếu có: （珊瑚(さんご)）Lời thoại -> ('珊瑚(さんご)', 'Lời thoại')."""
     t = text.strip()
+    if not (t.startswith("（") or t.startswith("(")):
+        return "", t
+    depth = 0
+    idx = -1
+    for i, ch in enumerate(t):
+        if ch in ("（", "("):
+            depth += 1
+        elif ch in ("）", ")"):
+            depth -= 1
+            if depth == 0:
+                idx = i
+                break
+    if idx != -1:
+        prefix = t[1:idx].strip()
+        rest = t[idx + 1:].strip()
+        return prefix, rest
+    return "", t
+
+
+def is_pure_sound_cue(text: str) -> bool:
+    """Kiểm tra cue thuần mô tả âm thanh, tiếng thở, tiếng kêu hoặc SDH không chứa lời thoại."""
+    if not text:
+        return True
+    t = text.strip()
+    if MUSIC_OR_SYMBOL_REGEX.match(t):
+        return True
+
+    prefix, rest = strip_speaker_prefix(t)
+    if prefix:
+        # Nếu có lời thoại thật đằng sau và không phải tiếng than thở thuần túy -> Không phải pure sound cue
+        if rest and not PURE_INTERJECTION_REGEX.match(rest):
+            return False
+        return True
+
+    if PURE_INTERJECTION_REGEX.match(t):
+        return True
+    if SOUND_KEYWORDS_REGEX.search(t) and len(t) <= 25:
+        bracket_match = re.match(r"^[（\(\[【].+[）\)\]】]$", t)
+        if bracket_match:
+            return True
+
     return bool(re.match(r"^[（\(][^）\)]+[）\)]$", t))
 
 
@@ -102,9 +152,19 @@ def parse_and_align_subtitles(
         clean_ja = clean_subtitle_text(raw_text)
         is_skip = should_skip_cue(event.style, raw_text, skip_styles_regex)
 
+        # Kiểm tra sound cue / SDH
+        is_sound = is_pure_sound_cue(clean_ja)
+        is_dropped_sound = False
+        if is_sound and sound_cues == "drop":
+            is_dropped_sound = True
+            is_skip = True
+        else:
+            prefix, rest = strip_speaker_prefix(clean_ja)
+            if prefix and rest:
+                clean_ja = rest
+
         matching_en_cues = []
         aligned_en = None
-        is_dropped_sound = False
         if not is_skip and clean_ja:
             if en_cues:
                 dur_ja = max(1, event.end - event.start)
@@ -138,18 +198,12 @@ def parse_and_align_subtitles(
                         aligned_en = nearest_en["text"]
                         matched_en_count += 1
 
-            if is_pure_sound_cue(clean_ja) and not aligned_en and sound_cues == "drop":
-                is_dropped_sound = True
-                is_skip = True
-            else:
-                dialogue_cue_count += 1
+            dialogue_cue_count += 1
 
-        # Trục thời gian chuẩn: Khi có đối ứng tiếng Anh từ video gốc, lấy start/end từ EN
+        # Trục thời gian chuẩn xác: Luôn giữ nguyên start/end từ tiếng Nhật gốc (đã được auto-offset)
+        # EN chỉ dùng làm tham chiếu dịch thuật ngữ nghĩa, không dùng để ghi đè timeline nhằm triệt tiêu lỗi đè phụ đề
         cue_start = event.start
         cue_end = event.end
-        if matching_en_cues and not is_skip:
-            cue_start = matching_en_cues[0]["start"]
-            cue_end = matching_en_cues[-1]["end"]
 
         cue = Cue(
             id=idx,
@@ -166,19 +220,19 @@ def parse_and_align_subtitles(
         )
         cues.append(cue)
 
-    # Xử lý các cặp cue liên tiếp cùng trỏ vào một cue EN dài (chia khoảng thời gian tránh đè nhau)
-    for i in range(len(cues) - 1):
-        c1, c2 = cues[i], cues[i+1]
-        if not c1.is_skipped and not c2.is_skipped and c1.start == c2.start and c1.end == c2.end:
-            len1 = max(1, len(c1.ja))
-            len2 = max(1, len(c2.ja))
-            split_t = c1.start + int((c1.end - c1.start) * (len1 / (len1 + len2)))
-            c1.end = split_t
-            c2.start = split_t
+    # Đảm bảo tính tuần tự nghiêm ngặt, triệt tiêu 100% trùng start và chồng lấn thời gian (overlap)
+    valid_cues = [c for c in cues if not c.is_skipped and not c.is_dropped_sound]
+    for i in range(len(valid_cues) - 1):
+        c1, c2 = valid_cues[i], valid_cues[i + 1]
+        if c1.start == c2.start:
+            c2.start = c1.start + 200
+            c2.end = max(c2.end, c2.start + 300)
+        if c1.end > c2.start:
+            c1.end = max(c1.start + 200, c2.start - 40)
 
     dropped_count = sum(1 for c in cues if c.is_dropped_sound)
     if dropped_count > 0:
-        logger.info(f"Đã loại bỏ {dropped_count} cue chú thích âm thanh thuần ngoặc đơn không có đối ứng tiếng Anh (--sound-cues {sound_cues}).")
+        logger.info(f"Đã loại bỏ {dropped_count} cue chú thích âm thanh thuần ngoặc đơn / SDH (--sound-cues {sound_cues}).")
 
 
     # Check match warning threshold
