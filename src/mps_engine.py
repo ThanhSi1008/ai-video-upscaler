@@ -69,7 +69,9 @@ class AnimeJaNaiCompact2x(nn.Module):
         feat = x
         for layer in self.body:
             feat = layer(feat)
-        return self.upsampler(feat)
+        out = self.upsampler(feat)
+        base = F.interpolate(x, scale_factor=2.0, mode='nearest')
+        return out + base
 
 
 class MPSError(Exception):

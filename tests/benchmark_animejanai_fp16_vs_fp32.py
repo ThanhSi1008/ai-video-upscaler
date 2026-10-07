@@ -40,7 +40,9 @@ class SRVGGNetCompact2x(nn.Module):
         feat = x
         for layer in self.body:
             feat = layer(feat)
-        return self.upsampler(feat)
+        out = self.upsampler(feat)
+        base = F.interpolate(x, scale_factor=2.0, mode='nearest')
+        return out + base
 
 def extract_25_diverse_frames():
     os.makedirs(TEMP_FRAMES_DIR, exist_ok=True)

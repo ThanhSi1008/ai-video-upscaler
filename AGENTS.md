@@ -80,6 +80,7 @@ upscale/
 │   ├── pipeline.py         # Orchestrator: Triple-buffering, Rolling Segments, Checkpoint Resume
 │   ├── scheduler.py        # Dynamic overnight queue scheduler & ETA predictor
 │   ├── night_report.py     # Báo cáo viễn trắc tổng kết phiên chạy qua đêm Markdown
+│   ├── output_sanity.py    # Output Sanity Guard: Chốt chặn kiểm định đầu ra (|ΔY| <= 6, corr >= 0.98)
 │   ├── cleanup.py          # Auto-cleanup: Dọn dẹp thư mục tạm (.temp_*), symlinks & gom gọn audit/
 │   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
 ├── subtrans/               # Engine dịch thuật phụ đề (xem subtrans/AGENTS.md)
@@ -153,6 +154,7 @@ upscale/
 * **Cổng kiểm định Mux:** `src/mux_audit.py` xác minh toàn vẹn luồng stream copy và khớp số lượng font chữ nhúng trước khi xuất xưởng.
 * **Tự động Dọn Dẹp Checkpoint & Gom Gọn Audit:** `src/cleanup.py` kích hoạt tự động sau khi `verify_mux_integrity` trả về PASS; xóa sạch `.temp_<basename>` (kể cả symlinks, thư mục con thực tế và thư mục rỗng) giúp thu hồi ~6.6 GB/tập; tự động gom các file `.audit.json`, `.audit.md`, `.cast.yaml` vào subfolder `audit/` để thư mục xuất xưởng chỉ còn video `.mkv` và `.vi.srt`. Cờ `--keep-temp` cho phép giữ lại khi cần debug.
 * **Đa Khóa Gemini & Xoay Vòng Hạn Mức (Multi-Key Rotation):** `subtrans/config.py` và `subtrans/gemini_backend.py` hỗ trợ nạp song song nhiều API Key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`,...). Khi gặp lỗi 429 (`RESOURCE_EXHAUSTED` / PerDay), hệ thống tự động xoay sang key kế tiếp của cùng model trong batch dịch, nâng hạn ngạch Lite lên 2.000 RPD (500 RPD/key) và Flash lên 80 RPD/model (20 RPD/key) từ 4 project độc lập mà không ngắt quãng pipeline.
+* **Đính chính số đo AnimeJaNai & Chốt chặn đầu ra Output Sanity Guard:** Mọi kết quả đo đạc AnimeJaNai trước đây trên MPS (D4 PSNR 74 dB đối chiếu sai giữa FP16 và FP32 đều thiếu residual, D8 fps 1.79, D10b) đều **KHÔNG CÓ GIÁ TRỊ** về độ đúng của đầu ra do lớp `AnimeJaNaiCompact2x` thiếu phép cộng phần dư nearest ×2 dẫn đến video đầu ra bị đen (luma 0.04–0.35). Đã sửa triệt để tại tag `janai-fix` với phép cộng `F.interpolate(x, scale_factor=2.0, mode='nearest')` (khớp bit-exact 0.0 với spandrel CPU, PSNR 75–158 dB). Đồng thời thiết lập chốt chặn bắt buộc `src/output_sanity.py` (kiểm tra sau chunk 1 và mỗi 10 chunk sau: |ΔY| ≤ 6/255, corr ≥ 0.98; nếu sai dừng ngay lập tức, ghi `audit.json: FAIL (OUTPUT_SANITY)`, cấm mux và cấm chuyển model theo D6).
 
 ---
 

@@ -442,6 +442,7 @@ def run_upscale_pipeline(
                         throttling_warned = False
                         partial_paused = False
                         chunk_png_unit_sizes = []
+                        sanity_checks_history = []
 
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
@@ -591,6 +592,49 @@ def run_upscale_pipeline(
                                             chunk_png_unit_sizes.append(actual_avg_mb)
                                     except Exception:
                                         pass
+
+                                    # Chốt chặn kiểm định chất lượng hình ảnh đầu ra C3:
+                                    # Thực hiện sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunk sau
+                                    should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
+                                    if should_check_sanity:
+                                        out_frame_list = sorted([f for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")])
+                                        if out_frame_list:
+                                            sample_f = out_frame_list[0]
+                                            src_f = os.path.join(c_in_dir, sample_f)
+                                            out_f = os.path.join(c_out_dir, sample_f)
+                                            if os.path.exists(src_f) and os.path.exists(out_f):
+                                                from src.output_sanity import check_frame_sanity, OutputSanityError, write_failed_sanity_audit
+                                                s_res = check_frame_sanity(src_f, out_f)
+                                                s_res["chunk"] = c_idx + 1
+                                                s_res["frame"] = sample_f
+                                                sanity_checks_history.append(s_res)
+                                                if not s_res["passed"]:
+                                                    err_msg = (
+                                                        f"❌ [CHỐT CHẶN ĐẦU RA THẤT BẠI] Phân đoạn {c_idx+1:02d}: "
+                                                        f"|ΔY| = {s_res['delta_y']} (trần {s_res['max_delta_y']}), "
+                                                        f"Corr = {s_res['corr']} (sàn {s_res['min_corr']}). "
+                                                        f"Mô hình có dấu hiệu xuất video đen hoặc sai lệch cấu trúc!"
+                                                    )
+                                                    logger.error(err_msg, to_console=True)
+                                                    audit_file = os.path.splitext(output_path)[0] + ".audit.json"
+                                                    write_failed_sanity_audit(
+                                                        audit_file_path=audit_file,
+                                                        source_file=input_path,
+                                                        output_file=output_path,
+                                                        model_info=model_info,
+                                                        engine=engine,
+                                                        precision=precision,
+                                                        chunk_idx=c_idx,
+                                                        metrics=s_res,
+                                                        all_checks=sanity_checks_history
+                                                    )
+                                                    raise OutputSanityError(err_msg, metrics=s_res)
+                                                else:
+                                                    logger.info(
+                                                        f"🛡️ [OUTPUT SANITY PASS] Đoạn {c_idx+1:02d}: |ΔY| = {s_res['delta_y']:.2f}, "
+                                                        f"Corr = {s_res['corr']:.4f} ({s_res['elapsed_ms']:.1f}ms)",
+                                                        to_console=False
+                                                    )
 
                                     # Chunk hoàn thành thành công, thoát vòng lặp retry
                                     break
@@ -887,6 +931,11 @@ def run_upscale_pipeline(
                     "average_pipeline_fps": round(avg_fps, 2),
                     "ai_steady_fps": round(ai_fps, 2),
                     "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "output_sanity": {
+                        "status": "PASS" if (sanity_checks_history and all(c.get("passed", False) for c in sanity_checks_history)) else ("SKIPPED" if not sanity_checks_history else "FAIL"),
+                        "total_checks": len(sanity_checks_history),
+                        "checks": sanity_checks_history
+                    },
                     "mux_audit": mux_res
                 }
                 with open(audit_file, "w", encoding="utf-8") as f:

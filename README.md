@@ -62,7 +62,7 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 ## 📊 2. Số Liệu Đo Đạc Thực Tế Trên Apple Silicon M3 Pro
 
-* **Tốc độ suy luận AI (1080p ➔ 4K):** Đạt ổn định **1.68 – 1.70 fps** trên GPU Metal với PyTorch MPS FP16 (`realesr-animevideov3`) và **1.79 fps** với `AnimeJaNai HD V3 Compact`.
+* **Tốc độ suy luận AI (1080p ➔ 4K):** Đạt ổn định **1.68 – 1.70 fps** trên GPU Metal với PyTorch MPS FP16 (`realesr-animevideov3`). *(Lưu ý: Số đo 1.79 fps trước đây của AnimeJaNai Compact bị vô hiệu do lỗi lớp forward thiếu phép cộng residual dẫn đến video đen; đã được khắc phục tại tag `janai-fix` kèm chốt chặn đầu ra Output Sanity Guard).*
 * **Soak Test 6.000 frame liên tục (1 giờ):** Median **1.683 fps**, P5 **1.677 fps**, Đỉnh driver VRAM **2.090,8 MB**, Footprint RSS **674,4 MB**, Pageouts: **+133**.
 * **Thời gian xử lý video 3 phút (~4.360 frames, 2.186 unique frames):** Hoàn tất toàn bộ trong **23 phút 59 giây** (Pipelined Double-Buffering trên MPS), nhanh hơn bản tuần tự 13 phút 10 giây (-35,4%).
 * **Sức chứa ca chạy qua đêm (Overnight Batch):** Sức chứa thực tế là **~2 tập mỗi đêm** (mỗi tập 24 phút cần ~3 giờ thực tế ở mức $n_{unique}$ trung bình ~17.200 frames kết hợp overhead video ~15.5m và phụ đề ~5m). Hàng đợi 3 tập chỉ hoàn tất trọn vẹn trong ca 7.5–8 giờ khi tổng $n_{unique}$ của 3 tập đủ nhỏ (ví dụ các tập nhiều cảnh tĩnh với $n_{unique} \le 13.000$). Với các tập chưa đo preflight, hệ thống tự động áp dụng ước lượng thận trọng 60.0% kept frames ($n=4$) để đảm bảo an toàn hạn chót.
