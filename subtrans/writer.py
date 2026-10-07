@@ -177,15 +177,20 @@ def optimize_cues_for_playback(
         dur2 = max(1, next_cue.end - next_cue.start)
         gap = next_cue.start - curr.end
 
-        # Chuẩn hóa văn bản so sánh trùng lặp
+        # Chuẩn hóa văn bản so sánh trùng lặp / roll-up CC:
         norm_curr = re.sub(r"[^\w\s]", "", clean_curr).strip().lower()
         norm_next = re.sub(r"[^\w\s]", "", clean_next).strip().lower()
-        is_same_content = (norm_curr == norm_next or norm_curr in norm_next or norm_next in norm_curr)
+        is_same_content = (norm_curr == norm_next and (next_cue.start <= curr.end + 500 or start_diff <= 1500)) or (
+            start_diff <= 800
+            and len(norm_curr) >= 15
+            and len(norm_next) >= 15
+            and (norm_next.startswith(norm_curr) or norm_curr.startswith(norm_next))
+        )
 
         # -------------------------------------------------------------
         # Ca A: Trùng lặp nội dung hoặc bao hàm nhau (Duplicate / Roll-up Fragments)
         # -------------------------------------------------------------
-        if is_same_content and (next_cue.start <= curr.end + 500 or start_diff <= 1500):
+        if is_same_content:
             chosen_text = clean_curr if len(clean_curr) >= len(clean_next) else clean_next
             curr.start = min(curr.start, next_cue.start)
             curr.end = max(curr.end, next_cue.end)
@@ -228,9 +233,10 @@ def optimize_cues_for_playback(
         total_len = len(clean_curr) + len(clean_next)
         is_compact = (total_len <= 85)
 
+        has_continuation_start = bool(clean_next and clean_next[0].islower())
         is_continuation = (
-            clean_curr.endswith((",", "...", "—"))
-            or (clean_next and clean_next[0].islower())
+            clean_curr.endswith((",", "—", "..."))
+            and has_continuation_start
         )
         is_completed_sentence = (
             clean_curr.endswith(("!", "?"))
@@ -263,7 +269,14 @@ def optimize_cues_for_playback(
             prev = deduped_merged[-1]
             p_norm = re.sub(r"[^\w\s]", "", prev.vi or "").strip().lower()
             c_norm = re.sub(r"[^\w\s]", "", c.vi or "").strip().lower()
-            if (p_norm == c_norm or p_norm in c_norm or c_norm in p_norm) and c.start <= prev.end + 500:
+            start_diff = abs(c.start - prev.start)
+            is_post_dup = (p_norm == c_norm and c.start <= prev.end + 500) or (
+                start_diff <= 800
+                and len(p_norm) >= 15
+                and len(c_norm) >= 15
+                and (c_norm.startswith(p_norm) or p_norm.startswith(c_norm))
+            )
+            if is_post_dup:
                 prev.end = max(prev.end, c.end)
                 if len(c.vi or "") > len(prev.vi or ""):
                     prev.vi = c.vi

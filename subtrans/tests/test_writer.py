@@ -159,3 +159,19 @@ def test_optimize_cues_banquet_scene_no_stacking():
         assert len(lines) <= 2, f"Too many lines in block: {c.vi}"
 
 
+def test_optimize_cues_echoed_keywords_preserved():
+    """Kiểm tra khi nhân vật nhại lại/nhắc lại từ khóa của câu trước (echoing dialogue) không bị nuốt mất."""
+    from subtrans.writer import optimize_cues_for_playback
+    cues = [
+        Cue(id=82, ja="a", start=312228, end=316149, vi="lại có phần hơi bất thường thế này khiến tớ khá bất ngờ đấy."),
+        Cue(id=83, ja="b", start=316232, end=318234, vi="Hơi bất thường..."),
+        Cue(id=84, ja="c", start=318317, end=319444, vi="(Tousetsu) Hừm... -(Leelee) Hả?"),
+    ]
+    optimized = optimize_cues_for_playback(cues)
+    assert len(optimized) == 3
+    assert "lại có phần hơi bất thường" in optimized[0].vi
+    assert optimized[1].vi == "Hơi bất thường..."
+    assert "(Tousetsu) Hừm..." in optimized[2].vi
+
+
+
