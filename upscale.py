@@ -578,10 +578,14 @@ def main():
                             print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container 4K MKV!")
                         else:
                             print("⚠️ Không thể nhúng phụ đề vào container 4K (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
-                    else:
                         print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container 4K, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
-        # Dọn dẹp tệp phụ đề tạm và gom gọn báo cáo audit
+            # Luôn đồng bộ file phụ đề .vi.srt cùng tên ngay cạnh video gốc để IINA tự động nhận
+            raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
+            if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
+                import shutil
+                shutil.copy2(str(srt_path), raw_side_srt)
+                print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho IINA: {os.path.basename(raw_side_srt)}")
         cleanup_subtitle_extracts(vid_dir, base_vid_name)
         if not getattr(args, "no_organize_audit", False):
             organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
