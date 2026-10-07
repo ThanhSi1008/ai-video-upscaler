@@ -538,7 +538,8 @@ def main():
             print(f"   • File tham chiếu EN: {en_sub}")
 
         from subtrans.pipeline import TranslationPipeline
-        sub_out_dir = Path(args.output) if args.output and os.path.isdir(args.output) else Path(os.path.dirname(os.path.abspath(target_subs_vid)))
+        vid_dir = os.path.dirname(os.path.abspath(target_subs_vid))
+        sub_out_dir = Path(args.output) if args.output and os.path.isdir(args.output) else Path(vid_dir)
         sub_pipeline = TranslationPipeline(
             local_only=False,
             output_dir=sub_out_dir,
