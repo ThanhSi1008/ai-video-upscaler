@@ -5,6 +5,7 @@ Stage 1: Parse, clean, and align Japanese and English subtitles.
 """
 
 import re
+import copy
 import logging
 import statistics
 from collections import Counter
@@ -103,6 +104,36 @@ def is_pure_sound_cue(text: str) -> bool:
     return bool(re.match(r"^[（\(][^）\)]+[）\)]$", t))
 
 
+def deduplicate_consecutive_cc_events(events: List[pysubs2.SSAEvent]) -> List[pysubs2.SSAEvent]:
+    """
+    Hợp nhất các event Closed Captions (CC) liên tiếp bị phân mảnh có cùng nội dung thoại.
+    Các nguồn phụ đề như Netflix CC thường chia 1 câu thoại thành nhiều event nối đuôi nhau
+    hoặc chèn khung roll-up lặp lại văn bản.
+    """
+    if not events:
+        return []
+
+    sorted_evts = sorted(events, key=lambda e: (e.start, e.end))
+    deduped: List[pysubs2.SSAEvent] = []
+
+    for e in sorted_evts:
+        txt = clean_subtitle_text(e.text).strip()
+        if not txt:
+            continue
+
+        if deduped:
+            prev = deduped[-1]
+            prev_txt = clean_subtitle_text(prev.text).strip()
+            # Nếu cùng nội dung thoại và thời gian nối tiếp hoặc chồng lấn (gap <= 350ms)
+            if prev_txt == txt and e.start <= prev.end + 350:
+                prev.end = max(prev.end, e.end)
+                continue
+
+        deduped.append(copy.deepcopy(e))
+
+    return deduped
+
+
 def parse_and_align_subtitles(
     ja_path: str,
     en_path: Optional[str] = None,
@@ -122,6 +153,7 @@ def parse_and_align_subtitles(
     if ja_offset_ms != 0:
         ja_ssa.shift(ms=ja_offset_ms)
         logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
+    ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
     en_ssa = pysubs2.load(en_path) if en_path else None
 
     # Pre-process EN cues if available

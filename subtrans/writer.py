@@ -116,15 +116,16 @@ def optimize_cues_for_playback(
 ) -> List[Cue]:
     """
     Tối ưu hóa các khung phụ đề hiển thị cho trải nghiệm xem phim hoàn hảo (IINA/mpv/VLC/TV):
-    1. Dual Dialogue: Gộp 2 người nói cùng lúc / gần như cùng lúc thành 1 cue 2 dòng
-       (- Câu 1\n- Câu 2) với thời lượng đủ đọc song song, giải quyết triệt để lỗi
-       câu trước bị đè mất chỉ sau 1-2s.
-    2. Rapid Fragments: Hợp nhất các mảnh câu liên tiếp nói quá nhanh (< 1.2s mỗi mảnh)
-       thành 1 câu trọn vẹn liền mạch.
-    3. Minimum Display Duration: Kéo dài thời lượng hiển thị tối thiểu lên 1.2s - 1.4s
-       cho các câu ngắn để người xem kịp đọc.
-    4. Monotonic Ordering & Gap Normalization: Bảo toàn thứ tự thời gian tuần tự,
-       chống va chạm gây flicker trên render engine.
+    1. Anti-Duplicate: Loại bỏ triệt để hiện tượng lặp lại cùng một câu hoặc câu con
+       khi phụ đề nguồn CC bị roll-up / chẻ mảnh.
+    2. Dual Dialogue: Gộp 2 người nói cùng lúc / gần như cùng lúc thành 1 cue 2 dòng
+       (- Câu 1\\n- Câu 2) với thời lượng đủ đọc song song.
+    3. Rapid Fragments: Hợp nhất các mảnh câu liên tiếp nói quá nhanh (< 1.2s mỗi mảnh)
+       khi câu trước chưa kết thúc (kết thúc bằng ,, ..., — hoặc câu sau viết thường).
+    4. Minimum Display Duration: Kéo dài thời lượng hiển thị tối thiểu cho câu ngắn.
+    5. Strict Zero-Overlap & Gap Normalization: Triệt tiêu 100% hiện tượng chồng lấn thời gian
+       giữa các block riêng biệt (c.end <= next_c.start - 40ms), ngăn chặn triệt để lỗi
+       IINA/mpv render 2 block cùng lúc thành 3-4 dòng đè kín màn hình.
     """
     kept = [c for c in cues if not getattr(c, "is_dropped_sound", False) and not getattr(c, "is_skipped", False)]
     if not kept:
@@ -174,17 +175,34 @@ def optimize_cues_for_playback(
         overlap = min(curr.end, next_cue.end) - max(curr.start, next_cue.start)
         dur1 = max(1, curr.end - curr.start)
         dur2 = max(1, next_cue.end - next_cue.start)
+        gap = next_cue.start - curr.end
+
+        # Chuẩn hóa văn bản so sánh trùng lặp
+        norm_curr = re.sub(r"[^\w\s]", "", clean_curr).strip().lower()
+        norm_next = re.sub(r"[^\w\s]", "", clean_next).strip().lower()
+        is_same_content = (norm_curr == norm_next or norm_curr in norm_next or norm_next in norm_curr)
 
         # -------------------------------------------------------------
-        # Ca 1: Hai người nói cùng lúc hoặc gần như cùng lúc (Dual Dialogue)
+        # Ca A: Trùng lặp nội dung hoặc bao hàm nhau (Duplicate / Roll-up Fragments)
+        # -------------------------------------------------------------
+        if is_same_content and (next_cue.start <= curr.end + 500 or start_diff <= 1500):
+            chosen_text = clean_curr if len(clean_curr) >= len(clean_next) else clean_next
+            curr.start = min(curr.start, next_cue.start)
+            curr.end = max(curr.end, next_cue.end)
+            curr.vi = chosen_text
+            merged.append(curr)
+            i += 2
+            continue
+
+        # -------------------------------------------------------------
+        # Ca B: Hai người nói cùng lúc hoặc gần như cùng lúc (Dual Dialogue)
         # -------------------------------------------------------------
         is_simultaneous = (
-            start_diff <= 800 and (overlap >= 400 or (overlap / min(dur1, dur2)) >= 0.35)
-        ) or (
-            start_diff <= 1200 and overlap >= 700 and (overlap / dur2) >= 0.55
+            (start_diff <= 1000 and (overlap >= 350 or (overlap / min(dur1, dur2)) >= 0.35))
+            or (start_diff <= 1400 and overlap >= 600 and (overlap / dur2) >= 0.50)
         )
 
-        if is_simultaneous:
+        if is_simultaneous and not is_same_content:
             line1 = f"- {clean_curr.lstrip('-—– ')}"
             line2 = f"- {clean_next.lstrip('-—– ')}"
             dual_str = f"{line1}\n{line2}"
@@ -203,9 +221,8 @@ def optimize_cues_for_playback(
             continue
 
         # -------------------------------------------------------------
-        # Ca 2: Một câu bị tách làm 2 mảnh nói quá nhanh (Chained Rapid Fragments)
+        # Ca C: Một câu bị tách làm 2 mảnh nói quá nhanh (Chained Rapid Fragments)
         # -------------------------------------------------------------
-        gap = next_cue.start - curr.end
         is_close_gap = (-150 <= gap <= 350)
         is_too_fast = (dur1 < 1200 or dur2 < 1200)
         total_len = len(clean_curr) + len(clean_next)
@@ -214,16 +231,17 @@ def optimize_cues_for_playback(
         is_continuation = (
             clean_curr.endswith((",", "...", "—"))
             or (clean_next and clean_next[0].islower())
-            or (not clean_curr.endswith((".", "!", "?")) and (dur1 < 900 or dur2 < 900))
+        )
+        is_completed_sentence = (
+            clean_curr.endswith(("!", "?"))
+            or (clean_curr.endswith(".") and not clean_curr.endswith("..."))
         )
 
-        if is_close_gap and is_too_fast and is_compact and is_continuation:
+        if is_close_gap and is_too_fast and is_compact and is_continuation and not is_completed_sentence:
             if clean_curr.endswith((",", "...", "—")):
                 merged_str = f"{clean_curr} {clean_next}"
-            elif not clean_curr.endswith((".", "!", "?")):
-                merged_str = f"{clean_curr}, {clean_next}"
             else:
-                merged_str = f"{clean_curr} {clean_next}"
+                merged_str = f"{clean_curr}, {clean_next}"
 
             new_start = curr.start
             new_end = max(next_cue.end, curr.start + min_duration_ms)
@@ -238,31 +256,61 @@ def optimize_cues_for_playback(
         merged.append(curr)
         i += 1
 
-    # Giai đoạn 2: Bảo vệ thời lượng tối thiểu & Gap Normalization
-    for j in range(len(merged)):
-        c = merged[j]
+    # Giai đoạn 2: Post-merge Dedup Pass (Loại bỏ triệt để khối lặp còn sót)
+    deduped_merged: List[Cue] = []
+    for c in merged:
+        if deduped_merged:
+            prev = deduped_merged[-1]
+            p_norm = re.sub(r"[^\w\s]", "", prev.vi or "").strip().lower()
+            c_norm = re.sub(r"[^\w\s]", "", c.vi or "").strip().lower()
+            if (p_norm == c_norm or p_norm in c_norm or c_norm in p_norm) and c.start <= prev.end + 500:
+                prev.end = max(prev.end, c.end)
+                if len(c.vi or "") > len(prev.vi or ""):
+                    prev.vi = c.vi
+                continue
+        deduped_merged.append(c)
+
+    # Giai đoạn 3: Duration Extension (Kéo dài câu ngắn cho kịp đọc)
+    for c in deduped_merged:
         txt = (c.vi or "").strip()
-        is_dual_text = "\n" in txt
-        base_dur = min_dual_duration_ms if is_dual_text else min_duration_ms
-        needed = max(base_dur, min(6000, int(len(txt) * 45)))
+        is_dual = "\n" in txt
+        base_dur = min_dual_duration_ms if is_dual else min_duration_ms
+        needed = max(base_dur, min(6000, int(len(txt) * 42)))
+        c.end = max(c.end, c.start + needed)
 
-        if c.end - c.start < needed:
-            if j < len(merged) - 1:
-                next_c = merged[j + 1]
-                if next_c.start > c.start:
-                    max_end = next_c.start - 40
-                    if max_end > c.end:
-                        c.end = min(c.start + needed, max_end)
+    # Giai đoạn 4: Strict Zero-Overlap Pass (Tuyệt đối không chồng lấn thời gian)
+    k = 0
+    while k < len(deduped_merged) - 1:
+        c1 = deduped_merged[k]
+        c2 = deduped_merged[k + 1]
+
+        if c2.start < c1.start:
+            c2.start = c1.start
+
+        if c1.end > c2.start - 40:
+            safe_end = c2.start - 40
+            if safe_end >= c1.start + 600:
+                c1.end = safe_end
+                k += 1
             else:
-                c.end = c.start + needed
-
-        if j < len(merged) - 1:
-            next_c = merged[j + 1]
-            inter_gap = next_c.start - c.end
+                lines1 = [l.strip() for l in (c1.vi or "").split("\n") if l.strip()]
+                lines2 = [l.strip() for l in (c2.vi or "").split("\n") if l.strip()]
+                if len(lines1) == 1 and len(lines2) == 1:
+                    c1.vi = f"- {lines1[0].lstrip('-—– ')}\n- {lines2[0].lstrip('-—– ')}"
+                    c1.start = min(c1.start, c2.start)
+                    c1.end = max(c1.end, c2.end)
+                    deduped_merged.pop(k + 1)
+                else:
+                    c2.start = c1.end + 40
+                    c2.end = max(c2.end, c2.start + min_duration_ms)
+                    k += 1
+        else:
+            inter_gap = c2.start - c1.end
             if 0 < inter_gap < 40:
-                c.end = max(c.start + 400, next_c.start - 40)
+                c1.end = max(c1.start + 400, c2.start - 40)
+            k += 1
 
-    return merged
+    return deduped_merged
 
 
 

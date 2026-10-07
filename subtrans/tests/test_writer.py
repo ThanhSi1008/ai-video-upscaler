@@ -110,3 +110,52 @@ def test_write_srt_subtitles_preserves_dual_dialogue(tmp_path):
     assert len(blocks) == 1
     assert "00:00:10,000 --> 00:00:13,500" in blocks[0]
 
+
+def test_optimize_cues_anti_duplicate_roll_up():
+    """Kiểm tra hai cue CC lặp nội dung hoặc một câu bao hàm câu kia -> gộp thành 1 câu, không tạo dual."""
+    from subtrans.writer import optimize_cues_for_playback
+    cues = [
+        Cue(id=0, start=1000, end=3000, ja="あ", vi="Leelee, chúng ta hãy đi tìm nữ quan đó thôi."),
+        Cue(id=1, start=2000, end=5000, ja="い", vi="Leelee, chúng ta hãy đi tìm nữ quan đó thôi."),
+    ]
+    optimized = optimize_cues_for_playback(cues)
+    assert len(optimized) == 1
+    assert optimized[0].vi == "Leelee, chúng ta hãy đi tìm nữ quan đó thôi."
+    assert "\n" not in optimized[0].vi
+
+
+def test_optimize_cues_strict_zero_overlap():
+    """Kiểm tra mọi block độc lập không bao giờ chồng lấn thời gian (c.end <= next.start - 40ms)."""
+    from subtrans.writer import optimize_cues_for_playback
+    cues = [
+        Cue(id=0, start=1000, end=4000, ja="あ", vi="Câu thoại đầu tiên kéo dài."),
+        Cue(id=1, start=3500, end=7000, ja="い", vi="Câu thoại thứ hai bắt đầu sớm."),
+    ]
+    optimized = optimize_cues_for_playback(cues)
+    for k in range(len(optimized) - 1):
+        assert optimized[k].end <= optimized[k + 1].start - 40
+
+
+def test_optimize_cues_banquet_scene_no_stacking():
+    """Kiểm tra phân đoạn phức tạp phòng tiệc (6 cues) không bao giờ bị đè 3-4 dòng trên IINA."""
+    from subtrans.writer import optimize_cues_for_playback
+    cues = [
+        Cue(id=188, start=717049, end=721178, ja="あらまあ 随分 見事な品ですこと", vi="Ôi chao, đây quả là một món đồ lộng lẫy làm sao."),
+        Cue(id=189, start=720761, end=723889, ja="莉莉 例の女官を探しましょう", vi="Leelee, chúng ta hãy đi tìm nữ quan đó thôi."),
+        Cue(id=190, start=721262, end=724515, ja="身ひとつで 謹慎されていたはずでは？", vi="Chẳng phải ả ta đáng lẽ phải đang chịu cấm túc và không mang theo gì sao?"),
+        Cue(id=191, start=723973, end=724515, ja="うん", vi="Ừm."),
+        Cue(id=192, start=724598, end=728018, ja="それが どうして こんなものを お持ちなのやら", vi="Vậy mà cớ sao ả lại có thể sở hữu một thứ thế này cơ chứ?"),
+        Cue(id=193, start=725599, end=728018, ja="雅容様は どこにいるんだろう", vi="Gayou-sama đang ở đâu nhỉ?"),
+    ]
+    optimized = optimize_cues_for_playback(cues)
+
+    # 1. Tuyệt đối không chồng lấn thời gian
+    for k in range(len(optimized) - 1):
+        assert optimized[k].end <= optimized[k + 1].start - 40, f"Overlap at {k}: {optimized[k].end} > {optimized[k+1].start - 40}"
+
+    # 2. Không có block nào chứa > 2 dòng
+    for c in optimized:
+        lines = [l for l in c.vi.split("\n") if l.strip()]
+        assert len(lines) <= 2, f"Too many lines in block: {c.vi}"
+
+
