@@ -7,6 +7,7 @@ Supports style_rules, address_rules, terms filtering, and per-series overriding.
 
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import re
 import yaml
 import json
 
@@ -21,6 +22,37 @@ from subtrans.models import (
 )
 
 DEFAULT_BASE_GLOSSARY_PATH = Path(__file__).parent / "glossary.yaml"
+GLOSSARIES_DIR = Path(__file__).resolve().parent.parent / "glossaries"
+
+
+def find_series_glossary(series_or_filename: str, glossaries_dir: Optional[Path] = None) -> Optional[Path]:
+    """
+    Tự động tìm file glossary riêng của bộ anime trong thư mục glossaries/.
+    Ví dụ: 'Futsutsuka_Na_Akujo_Dewa_Gozaimasu_Ga' -> glossaries/glossary.futsutsuka.yaml
+    """
+    g_dir = glossaries_dir or GLOSSARIES_DIR
+    if not g_dir.exists() or not series_or_filename:
+        return None
+
+    # Chuẩn hoá tên chuỗi đầu vào (bỏ ký tự đặc biệt, lowercase)
+    norm_name = re.sub(r'[^a-zA-Z0-9]', '', series_or_filename.lower())
+    if not norm_name:
+        return None
+
+    candidates = (
+        list(g_dir.glob("glossary.*.yaml"))
+        + list(g_dir.glob("glossary.*.yml"))
+        + list(g_dir.glob("glossary.*.json"))
+    )
+    for cand in candidates:
+        parts = cand.name.split(".")
+        if len(parts) >= 3 and parts[0] == "glossary":
+            key = parts[1].lower()
+            norm_key = re.sub(r'[^a-zA-Z0-9]', '', key)
+            if norm_key and norm_key in norm_name:
+                return cand
+
+    return None
 
 
 def _parse_pronoun_list(raw_list: List[Dict[str, Any]]) -> List[PronounRule]:
@@ -155,10 +187,10 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
         term_dict[ot.ja] = ot  # overrides matching ja
     merged_terms = list(term_dict.values())
 
-    # Merge characters: override characters replace base characters by name_ja
-    char_dict: Dict[str, Character] = {c.name_ja: c for c in base.characters}
+    # Merge characters: override characters replace base characters by name_ja (or name_vi fallback)
+    char_dict: Dict[str, Character] = {(c.name_ja or c.name_vi): c for c in base.characters}
     for oc in override.characters:
-        char_dict[oc.name_ja] = oc
+        char_dict[oc.name_ja or oc.name_vi] = oc
     merged_characters = list(char_dict.values())
 
     return Glossary(

@@ -27,7 +27,7 @@ from subtrans.review import LocalReviewer
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError, DailyQuotaExhaustedError
 from subtrans.writer import write_subtitles
 from subtrans.report import generate_qa_report
-from subtrans.glossary import load_glossary, merge_glossaries, DEFAULT_BASE_GLOSSARY_PATH
+from subtrans.glossary import load_glossary, merge_glossaries, DEFAULT_BASE_GLOSSARY_PATH, find_series_glossary
 from subtrans.cast_sheet import generate_cast_sheet, load_or_generate_series_cast_sheet
 
 logger = logging.getLogger("subtrans.pipeline")
@@ -223,6 +223,12 @@ class TranslationPipeline:
             console.print("[bold yellow]⚡ Cờ --subs-upgrade được kích hoạt: Bỏ qua cache các câu Lite/Local để nâng cấp dịch bằng model cao hơn.[/bold yellow]")
 
         base_glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH) if DEFAULT_BASE_GLOSSARY_PATH.exists() else None
+        if not glossary_path:
+            cand_name = output_basename or ja_path.stem
+            auto_g = find_series_glossary(cand_name)
+            if auto_g:
+                glossary_path = auto_g
+                console.print(f"  • [bold green]Tự động nhận diện Glossary riêng của series:[/bold green] [cyan]{auto_g.name}[/cyan]")
         override_glossary = load_glossary(glossary_path) if glossary_path else None
         glossary = merge_glossaries(base=base_glossary, override=override_glossary)
 

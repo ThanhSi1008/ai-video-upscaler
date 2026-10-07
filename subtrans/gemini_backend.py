@@ -37,7 +37,9 @@ SYSTEM_INSTRUCTION = (
     "5. Punctuation: use '...' (three ASCII dots, never unicode ellipsis); use '—' at end of interrupted speech; '?!' allowed; max two consecutive ! or ?.\n"
     "6. Sentences split across cues: translate at sentence level, then divide across the SAME cues at natural phrase boundaries. "
     "The continuation cue MUST start in lowercase; the preceding fragment MUST end with ',' or '...'. Never move content beyond that split.\n"
-    "7. Names and nicknames: keep Romaji spelling. Keep deliberate nicknames exactly as source uses them (e.g. 'Emilia-tan', 'Barusu', 'Ram').\n"
+    "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English reference track (e.g. 'Reirin', 'Keigetsu', 'Leelee', 'Kou', 'Shu', 'Gayou', 'Barusu', 'Emilia-tan', 'Ram'). "
+    "NEVER translate proper names or clan names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (ABSOLUTELY NO 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Chu', 'Hoàng', 'Thư', 'Kim', 'Lợi Lợi'). "
+    "Keep palace/organization names in Romaji or EN romanization (e.g. 'cung Shuku', 'cung Kouki', 'Quý phi Shu').\n"
     "8. Register: archaic or divine (ta/ngươi/ngài, tiểu thư, chàng) vs modern casual (tôi/cậu/em/anh). Decide from character profile.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
@@ -422,6 +424,7 @@ class GeminiTranslator(BaseTranslator):
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",
             "Follow character relationships, pronouns, and glossary strictly.",
+            "CRITICAL NAMING RULE: Always keep character names, family/clan names, and palace names in Romaji matching the English reference track (e.g. Reirin, Keigetsu, Leelee, Kou, Shu). NEVER translate them into Sino-Vietnamese (Hán-Việt) or Vietnamese words (DO NOT use Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt, Chu, Hoàng, Thư, Lợi Lợi).",
             "When unsure of a rendering, set 'uncertain': true instead of inventing meaning.",
         ]
         if self.gloss_skill_names:
@@ -432,10 +435,10 @@ class GeminiTranslator(BaseTranslator):
         prompt_lines.append(f"\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
         prompt_str = "\n".join(prompt_lines)
 
-        # Build system prompt from glossary style_rules if provided
+        # Build system prompt from glossary style_rules if provided (append to maintain SYSTEM_INSTRUCTION rules)
         system_prompt = SYSTEM_INSTRUCTION
         if glossary and glossary.style_rules:
-            system_prompt = "\n".join(glossary.style_rules) + "\nOutput must be a valid JSON array matching the provided schema."
+            system_prompt = SYSTEM_INSTRUCTION + "\n\nAdditional Series Style Rules:\n" + "\n".join(glossary.style_rules) + "\nOutput must be a valid JSON array matching the provided schema."
 
         # Attempt 1: Call API
         try:

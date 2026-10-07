@@ -1,0 +1,198 @@
+# =====================================================================
+# glossary.futsutsuka.yaml
+# Bảng thuật ngữ chuyên biệt cho anime:
+# "Futsutsuka na Akujo dewa Gozaimasu ga" (Though I Am an Inept Villainess)
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Futsutsuka na Akujo dewa Gozaimasu ga specific terms, palaces, clans, and characters"
+  genres: [palace, fantasy, drama]
+
+style_rules:
+  - "CRITICAL: ALWAYS keep proper character names, family/clan names, and palace names in exact Romaji matching the English reference track (e.g. Reirin, Keigetsu, Kou, Shu, Gayou, Leelee)."
+  - "NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (ABSOLUTELY NO 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Chu', 'Hoàng', 'Thư', 'Kim', 'Huyền', 'Lợi Lợi')."
+  - "Keep palace and consort titles combined naturally: 'cung Shuku', 'cung Kouki', 'Quý phi Shu', 'Quý phi Kou', 'gia tộc Kou', 'gia tộc Shu'."
+
+characters:
+  - name_ja: "玲琳"
+    name_vi: "Reirin"
+    gender: "female"
+    register: "noble"
+    speaks_to:
+      - listener: "Keigetsu"
+        self: "ta"
+        other: "ngươi"
+        note: "Đối thoại giữa hai tiểu thư hoán đổi thân phận"
+      - listener: "Koushun"
+        self: "thần"
+        other: "Điện hạ"
+      - listener: "all"
+        self: "ta"
+        other: "các ngươi"
+
+  - name_ja: "慧月"
+    name_vi: "Keigetsu"
+    gender: "female"
+    register: "noble"
+    speaks_to:
+      - listener: "Reirin"
+        self: "ta"
+        other: "ngươi"
+      - listener: "all"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "雅羊"
+    name_vi: "Gayou"
+    gender: "male"
+    register: "noble"
+
+  - name_ja: "浩俊"
+    name_vi: "Koushun"
+    gender: "male"
+    register: "divine"
+    speaks_to:
+      - listener: "Reirin"
+        self: "ta"
+        other: "nàng"
+      - listener: "all"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "玉俊"
+    name_vi: "Gyokushun"
+    gender: "male"
+    register: "noble"
+
+  - name_ja: "翠玉"
+    name_vi: "Suigyoku"
+    gender: "female"
+    register: "noble"
+    speaks_to:
+      - listener: "Reirin"
+        self: "em"
+        other: "tiểu thư"
+        note: "Thị nữ thân cận của Reirin"
+
+  - name_ja: "珊瑚"
+    name_vi: "Sango"
+    gender: "female"
+    register: "noble"
+    speaks_to:
+      - listener: "Keigetsu"
+        self: "em"
+        other: "tiểu thư"
+
+  - name_ja: "リーリー"
+    name_vi: "Leelee"
+    gender: "other"
+    register: "modern casual"
+
+terms:
+  # Tên nhân vật & linh thú chính (nghiêm cấm Hán-Việt)
+  - ja: "玲琳"
+    en: "Reirin"
+    vi: "Reirin"
+    alt: ["Kou Reirin"]
+    note: "Tên nữ chính. TUYỆT ĐỐI KHÔNG dịch là Linh Lâm."
+  - ja: "慧月"
+    en: "Keigetsu"
+    vi: "Keigetsu"
+    alt: ["Shu Keigetsu"]
+    note: "Tên nữ phụ hoán đổi thân xác. TUYỆT ĐỐI KHÔNG dịch là Huệ Nguyệt hay Tuệ Nguyệt."
+  - ja: "雅羊"
+    en: "Gayou"
+    aliases: ["雅容", "Gaiyou"]
+    vi: "Gayou"
+    note: "Nhân vật gia tộc Shu. Không dịch Hán-Việt."
+  - ja: "浩俊"
+    en: "Koushun"
+    vi: "Koushun"
+    note: "Thái tử Koushun. Không dịch là Hạo Tuấn."
+  - ja: "玉俊"
+    en: "Gyokushun"
+    vi: "Gyokushun"
+    note: "Không dịch là Ngọc Tuấn."
+  - ja: "翠玉"
+    en: "Suigyoku"
+    vi: "Suigyoku"
+    note: "Thị nữ của Reirin. Không dịch là Thúy Ngọc."
+  - ja: "珊瑚"
+    en: "Sango"
+    vi: "Sango"
+    note: "Thị nữ của Keigetsu. Không dịch là San Hô."
+  - ja: "莉莉"
+    en: "Leelee"
+    aliases: ["リーリー", "Rirui"]
+    vi: "Leelee"
+    note: "Chim cưng của Reirin. TUYỆT ĐỐI KHÔNG dịch là Lợi Lợi."
+
+  # Các gia tộc lớn (Tứ đại gia tộc)
+  - ja: "黄家"
+    en: "Kou clan"
+    aliases: ["Kou family", "House of Kou"]
+    vi: "gia tộc Kou"
+    note: "Gia tộc của Reirin. Giữ nguyên họ Kou, không dịch thành Hoàng gia hay họ Hoàng."
+  - ja: "朱家"
+    en: "Shu clan"
+    aliases: ["Shu family", "House of Shu"]
+    vi: "gia tộc Shu"
+    note: "Gia tộc của Keigetsu. Giữ nguyên họ Shu, không dịch thành Chu gia hay họ Chu."
+  - ja: "金家"
+    en: "Kin clan"
+    aliases: ["Kin family"]
+    vi: "gia tộc Kin"
+    note: "Giữ họ Kin, không dịch là Kim gia."
+  - ja: "玄家"
+    en: "Gen clan"
+    aliases: ["Gen family"]
+    vi: "gia tộc Gen"
+    note: "Giữ họ Gen, không dịch là Huyền gia."
+
+  # Các cung điện / tước vị cung đình
+  - ja: "朱貴妃"
+    en: "Noble Consort Shu"
+    aliases: ["Consort Shu"]
+    vi: "Quý phi Shu"
+    alt: ["nương nương Shu"]
+    note: "Giữ họ Shu, không dịch là Chu Quý phi hay Thư Quý phi."
+  - ja: "黄貴妃"
+    en: "Noble Consort Kou"
+    aliases: ["Consort Kou"]
+    vi: "Quý phi Kou"
+    alt: ["nương nương Kou"]
+    note: "Giữ họ Kou, không dịch là Hoàng Quý phi."
+  - ja: "淑姫"
+    en: "Shuku Princess"
+    aliases: ["Princess Shuku"]
+    vi: "Thục phi Shuku"
+    alt: ["nương nương Shuku"]
+  - ja: "慧姫"
+    en: "Kei Princess"
+    aliases: ["Princess Kei"]
+    vi: "Huệ phi Kei"
+    alt: ["nương nương Kei"]
+  - ja: "雛宮"
+    en: "雏宮"
+    vi: "Sồ Cung"
+    alt: ["hậu cung tập sự", "cung tập sự"]
+    note: "Nơi các phi tần tập sự tuyển chọn học tập và sinh sống."
+  - ja: "朱宮"
+    en: "Shu Palace"
+    vi: "cung Shu"
+    note: "Cung điện của gia tộc Shu."
+  - ja: "黄宮"
+    en: "Kou Palace"
+    vi: "cung Kou"
+    note: "Cung điện của gia tộc Kou."
+  - ja: "淑景舎"
+    en: "Shuku Palace"
+    aliases: ["Shukukeisha"]
+    vi: "cung Shuku"
+    note: "Nơi ở của Reirin."
+  - ja: "登華殿"
+    en: "Touka Palace"
+    aliases: ["Touka-den"]
+    vi: "điện Touka"

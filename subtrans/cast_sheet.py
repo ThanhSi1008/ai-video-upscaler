@@ -27,7 +27,8 @@ CAST_PROMPT_TEMPLATE = """
 You are an expert anime subtitle director. Analyze the following anime dialogue lines and determine the cast members, their character relationships, registers, and Vietnamese pronouns.
 
 Rules:
-1. Names: Keep Romaji spelling exactly as in English subtitles (e.g. Subaru, Emilia, Ram, Rem, Shaula, Reid, Volcanica, Farsale).
+1. Names: ALWAYS keep Romaji spelling exactly as in English subtitles (e.g. Subaru, Emilia, Ram, Rem, Reirin, Keigetsu, Kou, Shu, Leelee, Gayou).
+   CRITICAL: NEVER translate character names or clan/family names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (DO NOT use Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt, Chu, Hoàng, Thư, Lợi Lợi, etc.). Always use exact Romaji matching the English subtitles!
 2. Nicknames: Keep deliberate nicknames intact (e.g. "Emilia-tan", "Barusu").
 3. Register:
    - Archaic, divine, dragons, royalty, powerful elders: ta / ngươi / ngài / bệ hạ / tiểu thư / chàng.

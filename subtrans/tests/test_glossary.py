@@ -42,3 +42,44 @@ def test_merge_glossaries():
     assert term_map["魔法"] == "ma pháp"
     assert len(merged.characters) == 1
     assert merged.characters[0].name_vi == "Subaru"
+
+
+def test_find_series_glossary():
+    from subtrans.glossary import find_series_glossary
+    # Test matching Futsutsuka
+    res = find_series_glossary("Futsutsuka_Na_Akujo_Dewa_Gozaimasu_Ga_S01E04")
+    assert res is not None
+    assert res.name == "glossary.futsutsuka.yaml"
+
+    # Test matching Mushoku
+    res_m = find_series_glossary("Mushoku_Tensei_S02E01")
+    assert res_m is not None
+    assert res_m.name == "glossary.mushoku.yaml"
+
+    # Non-existent
+    assert find_series_glossary("Some_Completely_Unknown_Anime_123") is None
+
+
+def test_futsutsuka_glossary_content():
+    from subtrans.glossary import find_series_glossary
+    g_path = find_series_glossary("Futsutsuka")
+    assert g_path is not None
+    g = load_glossary(g_path)
+    assert g is not None
+
+    char_names = {c.name_vi for c in g.characters}
+    assert "Reirin" in char_names
+    assert "Keigetsu" in char_names
+    assert "Leelee" in char_names
+    assert "Gayou" in char_names
+
+    # Check terms do not contain Han-Viet name translations
+    term_vi_map = {t.ja: t.vi for t in g.terms}
+    assert term_vi_map["玲琳"] == "Reirin"
+    assert term_vi_map["慧月"] == "Keigetsu"
+    assert term_vi_map["莉莉"] == "Leelee"
+    assert "Linh Lâm" not in term_vi_map.values()
+    assert "Huệ Nguyệt" not in term_vi_map.values()
+    assert "Tuệ Nguyệt" not in term_vi_map.values()
+    assert "Lợi Lợi" not in term_vi_map.values()
+
