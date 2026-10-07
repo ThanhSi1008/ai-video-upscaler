@@ -1,49 +1,52 @@
 models:
   gemini-3.8-flash:
     tier: free_tier
+    rpm: 5
+    tpm: 250000
     rpd: 20
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
-    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
-      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.7-flash:
     tier: free_tier
+    rpm: 5
+    tpm: 250000
     rpd: 20
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
-    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
-      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active_with_spikes
     note: Thường xuyên gặp 503 UNAVAILABLE (high demand spike)
   gemini-3.6-flash:
     tier: free_tier
+    rpm: 5
+    tpm: 250000
     rpd: 20
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
-    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
-      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.5-flash:
     tier: free_tier
+    rpm: 5
+    tpm: 250000
     rpd: 20
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
-    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
-      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    status: active
+  gemini-2.5-flash:
+    tier: free_tier
+    rpm: 5
+    tpm: 250000
+    rpd: 20
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.5-flash-lite:
     tier: free_tier
+    rpm: 15
+    tpm: 250000
     rpd: 500
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
-    rpd_source: chưa xác minh (nguồn bên thứ ba)
+    verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.1-flash-lite:
     tier: free_tier
+    rpm: 15
+    tpm: 250000
     rpd: 500
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
     rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   translategemma:12b:
@@ -55,9 +58,9 @@ models:
     status: active
   unit-test-model:
     tier: test
+    rpm: 5
+    tpm: 250000
     rpd: 20
-    rpm: chưa biết (cần đo)
-    tpm: chưa xác minh
     rpd_source: đọc từ lỗi 429 (GenerateContentRequestsPerDayPerProjectPerModel) (GenerateContentRequestsPerDayPerProjectPerModel)
 chain:
 - gemini-3.8-flash
