@@ -75,3 +75,10 @@ def test_gemini_translator_retry_and_split():
     ]
     res = translator.translate_batch(cues, [])
     assert res == ["Chào bạn", "Tạm biệt"]
+
+
+def test_vocative_proper_name_prompt_instruction():
+    from subtrans.gemini_backend import SYSTEM_INSTRUCTION
+    assert "Addressing by proper name (Vocative)" in SYSTEM_INSTRUCTION
+    assert "ALWAYS KEEP the Romaji proper name directly in the Vietnamese dialogue line" in SYSTEM_INSTRUCTION
+

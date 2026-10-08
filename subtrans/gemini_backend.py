@@ -40,7 +40,8 @@ SYSTEM_INSTRUCTION = (
     "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English reference track (e.g. 'Fran', 'Urushi', 'Jean', 'Reirin', 'Keigetsu', 'Rudeus', 'Emilia'). "
     "NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (ABSOLUTELY NO 'Pháp Lạp', 'Ô Lỗ Thi', 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Kim', 'Hoàng'). "
     "Keep places, guilds, and organization names in Romaji/English romanization (e.g. 'thị trấn Alessa', 'thị trấn cảng Dars', 'Đảo nổi').\n"
-    "8. Register & pacing: Match character personality and pacing. For quiet/stoic characters (like Fran), keep lines short, direct, and natural. "
+    "8. Addressing by proper name (Vocative): When Japanese dialogue addresses someone by their proper name (e.g. フラン -> Fran, ジャン -> Jean, ネルさん -> chị Nell / Nell, 玲琳 -> Reirin), ALWAYS KEEP the Romaji proper name directly in the Vietnamese dialogue line (e.g. 'Fran, em có sao không?', 'Jean, cẩn thận!', 'Cảm ơn chị Nell', 'Reirin, chuyện gì vậy?'). NEVER drop or replace the proper name with generic standalone pronouns ('anh/chị/em/cậu/cô/mày') to avoid wrong pronoun assumptions and preserve audio-subtitle sync.\n"
+    "9. Register & pacing: Match character personality and pacing. For quiet/stoic characters (like Fran), keep lines short, direct, and natural. "
     "Differentiate internal monologues (tôi/mình) from telepathic/spoken dialogue based on the relationship table.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
@@ -426,6 +427,7 @@ class GeminiTranslator(BaseTranslator):
             "Translate the following subtitle batch into Vietnamese.",
             "Follow character relationships, pronouns, and glossary strictly.",
             "CRITICAL NAMING RULE: Always keep character names, family/clan names, and organization names in Romaji matching the English reference track (e.g. Fran, Urushi, Jean, Reirin, Keigetsu, Rudeus). NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (DO NOT use Pháp Lạp, Ô Lỗ Thi, Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt).",
+            "ADDRESSING BY NAME: Whenever someone is addressed by their proper name in Japanese (vocative), ALWAYS preserve that Romaji proper name directly in the Vietnamese subtitle line (e.g. 'Fran, ...', 'Jean, ...', 'chị Nell, ...'). Do NOT replace proper names with generic standalone pronouns.",
             "When unsure of a rendering, set 'uncertain': true instead of inventing meaning.",
         ]
         if self.gloss_skill_names:

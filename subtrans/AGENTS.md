@@ -9,14 +9,17 @@
 
 1. **Không dịch sai / không bịa đặt:** Khi nghi vấn hoặc thiếu ngữ cảnh, chọn phương án an toàn nhất và gắn cờ `"uncertain": true`.
 2. **Văn phong tiếng Việt tự nhiên khi đọc to:** Tránh dịch thô theo từng từ (word-for-word); giữ nhịp điệu đàm thoại tự nhiên của anime.
-3. **Đồng nhất đại từ xưng hô và tên riêng toàn tập:** Bắt buộc tuân theo bảng nhân vật Stage A Cast Sheet (`out/<name>.cast.yaml`).
+3. **Đồng nhất đại từ xưng hô và bảo tồn tên riêng Romaji khi gọi tên:** Bắt buộc tuân theo bảng nhân vật Stage A Cast Sheet (`out/<name>.cast.yaml`). Khi lời thoại tiếng Nhật gọi đích danh ai đó bằng tên riêng (vocative, e.g. `フラン` -> Fran, `ジャン` -> Jean, `ネルさん` -> chị Nell, `玲琳` -> Reirin), **bắt buộc giữ nguyên tên riêng Romaji trong câu phụ đề tiếng Việt**. Tuyệt đối không thay thế tên riêng bằng đại từ xưng hô chung chung (anh/em/cậu/cô/mày) để triệt tiêu lỗi đoán sai đại từ và giữ đồng bộ âm thanh - chữ viết.
 4. **Bảo tồn chuẩn mẫu SRT:** Xuất chuẩn định dạng phụ đề tương thích cao nhất với các trình phát video hiện đại (IINA, mpv, VLC).
 5. **Tiếng Nhật là chân lý (Source of Truth):** Tiếng Anh chỉ dùng để bổ trợ xác định chủ ngữ, ngôi xưng hô, đối tượng khi câu thoại tiếng Nhật lược bỏ (zero-pronouns).
 
 ---
 
-## 2. Quy Chuẩn Định Dạng SRT (Sample Fidelity)
+## 2. Quy Chuẩn Định Dạng SRT & Xưng Hô (Sample Fidelity)
 
+* **Bảo tồn tên riêng Romaji khi xưng hô gọi tên (Vocative Name Retention):**
+  * Khi lời thoại tiếng Nhật gọi tên nhân vật, phụ đề tiếng Việt phải giữ nguyên tên Romaji (e.g. "Fran, cẩn thận!", "Jean, chạy đi!", "Cảm ơn chị Nell", "Reirin, chuyện gì vậy?").
+  * Có thể kèm từ xưng hô thân mật/kính ngữ tự nhiên ("chị Nell", "bác Garrus"), nhưng **tên riêng Romaji bắt buộc phải xuất hiện**, không được triệt tiêu thành các đại từ chung chung ("cậu", "anh", "em", "mày").
 * **Số dòng văn bản:** Mặc định xuất **chính xác 1 dòng văn bản / cue** (không tự ý ngắt 2 dòng; độ dài có thể lên tới 107 ký tự). Giới hạn mềm: 80 ký tự. Chỉ ngắt dòng khi người dùng chỉ định rõ `--wrap N`.
 * **Dấu câu chuẩn hóa:**
   * Dấu ba chấm: Sử dụng đúng 3 chấm ASCII `...` (không dùng ký tự unicode `…`).

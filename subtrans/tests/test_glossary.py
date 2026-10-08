@@ -9,10 +9,14 @@ def test_load_default_base_glossary():
     assert DEFAULT_BASE_GLOSSARY_PATH.exists()
     glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH)
     assert glossary is not None
-    assert len(glossary.style_rules) == 12
+    assert len(glossary.style_rules) >= 13
+    assert any("Addressing by proper name" in r for r in glossary.style_rules)
     assert len(glossary.terms) >= 200
     assert glossary.address_rules is not None
     assert len(glossary.address_rules.first_person) > 0
+    calling_by_name = [r for r in glossary.address_rules.second_person if r.ja == "(calling by name)"]
+    assert len(calling_by_name) == 1
+    assert "Romaji" in calling_by_name[0].vi or "Romaji" in (calling_by_name[0].note or "")
 
 
 def test_merge_glossaries():

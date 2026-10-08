@@ -182,6 +182,7 @@ class OllamaTranslator(BaseTranslator):
         sys_msg = (
             "You are an expert anime subtitle translator from Japanese to natural Vietnamese. "
             "Translate the given line faithfully, keeping correct character pronouns and register. "
+            "Whenever someone is addressed by their proper name in Japanese, always keep the Romaji proper name directly in Vietnamese. "
             "Output ONLY the translated line without quotation marks or notes."
         )
         glossary_txt = self._format_glossary(glossary, [cue])
@@ -220,6 +221,7 @@ class OllamaTranslator(BaseTranslator):
             "Translate each of the following numbered Japanese anime subtitle lines into natural, spoken Vietnamese.",
             "Rules:\n- Output format strictly: [number] Vietnamese translation",
             "- Follow Character pronouns and relationships strictly (Do NOT default to 'tôi - cô' for lovers/family).",
+            "- Whenever someone is addressed by their proper name in Japanese (vocative), ALWAYS preserve that Romaji proper name directly in Vietnamese (e.g. 'Fran, ...', 'Jean, ...', 'chị Nell, ...'). Do NOT replace proper names with generic standalone pronouns.",
             "- Do NOT add quotation marks around the translated lines.",
             "- Do not merge or omit lines. Output nothing else."
         ]

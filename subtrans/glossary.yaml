@@ -29,6 +29,7 @@ style_rules:
   - "Choose Vietnamese pronouns from the speaker-to-listener relationship (age, rank, intimacy, gender, setting) and keep each character's pronouns consistent across the whole series."
   - "Do not translate Japanese honorifics literally. Follow address_rules and the terms table. Do not leave -san/-kun/-chan/-sama in the Vietnamese unless a term entry says so."
   - "Character, clan, family, and palace names: use the spelling in the glossary. If absent, ALWAYS use the Romaji spelling exactly as it appears in the English track (e.g. Reirin, Keigetsu, Kou, Shu, Gayou). NEVER translate proper names or clan names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (ABSOLUTELY NO 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Chu', 'Hoàng', 'Thư', 'Kim', 'Lợi Lợi')."
+  - "Addressing by proper name: Whenever the Japanese dialogue addresses someone by their proper name (e.g. calling 'Fran', 'Jean', 'Nell', 'Reirin'), ALWAYS retain the Romaji proper name directly in the Vietnamese subtitle line (e.g. 'Fran, em có sao không?', 'Jean, cẩn thận!'). Never omit the name or replace it entirely with standalone generic pronouns (anh/em/cậu/cô/mày) to avoid mistranslation and keep sync with the voiceover."
   - "Place names, organizations, palaces, and named techniques not in the glossary: keep the English-track romanization and translate only descriptive parts (e.g. 'cung Shuku', 'cung Kouki', 'Quý phi Shu')."
   - "Do not translate or add laughs or breaths in spoken dialogue. For standalone sound effects in parentheses (e.g. （鳥のさえずり）), translate the sound concisely in parentheses (e.g. (tiếng chim hót)); never leave a cue empty."
   - "Keep each cue's content inside that cue: never merge, split, reorder, or drop cues. Maximum 2 lines, about 42 characters per line."
@@ -64,7 +65,7 @@ address_rules:
     - {ja: "あんた", vi: "anh", alt: ["bà", "ông", "cô", "mày"], note: "Rude or very familiar; choose by age and gender."}
     - {ja: "てめえ / 貴様 / きさま", vi: "mày", alt: ["ngươi", "tên khốn"], note: "Hostile. Archaic or military: ngươi."}
     - {ja: "君たち / お前ら / あんたたち", vi: "các cậu", alt: ["chúng mày", "các ngươi"], note: "Match the singular register."}
-    - {ja: "(calling by name)", vi: "giữ nguyên tên", note: "Add kinship/title (anh/chị/em/cô/thầy) only when the relationship needs it."}
+    - {ja: "(calling by name)", vi: "giữ nguyên tên Romaji", note: "Bắt buộc giữ nguyên tên Romaji trong phụ đề khi người nói gọi tên nhân vật. Có thể kèm từ xưng hô phù hợp (anh/chị/em/cô/thầy) trước hoặc sau tên nếu ngữ cảnh cần, nhưng TUYỆT ĐỐI KHÔNG được bỏ tên hay thay bằng đại từ chung chung."}
 
   honorifics:
     - {ja: "〜さん", vi: "(bỏ)", alt: ["anh + tên", "chị + tên", "cô + tên", "chú + tên", "bác + tên", "ông + tên", "bà + tên"], note: "Drop the suffix or convert to a kinship/title term by age. Do not leave -san."}
