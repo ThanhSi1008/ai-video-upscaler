@@ -20,6 +20,7 @@ from src.config import (
     DEFAULT_DEDUP_HI,
     DEFAULT_DEDUP_LO,
     DEFAULT_DEDUP_FRAC,
+    ROOT_DIR,
     HEVC_ENCODER,
     HEVC_PIX_FMT,
     HEVC_COLOR_RANGE,
@@ -28,6 +29,125 @@ from src.config import (
     HEVC_COLOR_TRC,
     HEVC_TAG
 )
+
+DEDUP_POLICY_PARAMS = {
+    "default": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC},
+    "sensitive": {"hi": 512, "lo": 160, "frac": 0.15},
+    "sensitive-a": {"hi": 512, "lo": 160, "frac": 0.15},
+    "sensitive-b": {"hi": 384, "lo": 128, "frac": 0.10},
+    "motion": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "tau": 0.3},
+    "off": {"all_keep": True}
+}
+
+
+def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> str:
+    """
+    Xác định chính sách deduplication theo thứ tự ưu tiên:
+    1. CLI cờ --dedup-policy
+    2. shows.yaml (trường dedup_policy trong rule khớp tên video)
+    3. Mặc định: 'default'
+    """
+    if cli_policy:
+        return cli_policy.lower()
+
+    shows_yaml = os.path.join(ROOT_DIR, "shows.yaml")
+    if os.path.exists(shows_yaml):
+        try:
+            import yaml
+            import fnmatch
+            with open(shows_yaml, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            rules = data.get("shows", []) or []
+            vname = os.path.basename(video_path)
+            vdir = os.path.basename(os.path.dirname(os.path.abspath(video_path)))
+            for r in rules:
+                pat = r.get("pattern", "")
+                pol = r.get("dedup_policy")
+                if pol and (fnmatch.fnmatch(vname, pat) or fnmatch.fnmatch(vdir, pat) or (pat and pat.lower() in vname.lower())):
+                    return str(pol).lower()
+        except Exception:
+            pass
+    return "default"
+
+
+def detect_global_motion_frames(
+    input_path: str,
+    tau: float = 0.3,
+    min_response: float = 0.1,
+    scale_w: int = 480,
+    scale_h: int = 270
+) -> List[bool]:
+    """
+    Phát hiện chuyển động toàn cục (camera pan/zoom/tilt) giữa frame t và frame t-1
+    bằng phase correlation (OpenCV) trên luma thu nhỏ 480x270:
+    - Toàn khung: max(|dx|, |dy|) >= tau (quy về pixel 1080p) và response >= min_response
+    - 4 góc phần tư: kiểm tra chuyển động ngược chiều giữa các góc đối nghịch (zoom in/out)
+    Trả về mảng boolean có độ dài bằng tổng số frame, phần tử t True nếu có chuyển động so với t-1.
+    """
+    import cv2
+    import numpy as np
+
+    frame_bytes = scale_w * scale_h
+    hann_full = cv2.createHanningWindow((scale_w, scale_h), cv2.CV_32F)
+    qw, qh = scale_w // 2, scale_h // 2
+    hann_quad = cv2.createHanningWindow((qw, qh), cv2.CV_32F)
+
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", input_path,
+        "-fps_mode", "passthrough",
+        "-vf", f"scale={scale_w}:{scale_h},format=gray",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-"
+    ]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 10)
+    has_motion = []
+    prev_gray = None
+    scale_factor = 1080.0 / scale_h  # 4.0
+
+    while True:
+        raw = proc.stdout.read(frame_bytes)
+        if len(raw) < frame_bytes:
+            break
+        curr_gray = np.frombuffer(raw, dtype=np.uint8).reshape((scale_h, scale_w)).astype(np.float32)
+
+        if prev_gray is None:
+            has_motion.append(False)  # Frame 0 không có frame trước
+        else:
+            # 1. Chuyển động toàn khung
+            (dx, dy), resp = cv2.phaseCorrelate(prev_gray, curr_gray, hann_full)
+            dx_1080 = abs(dx * scale_factor)
+            dy_1080 = abs(dy * scale_factor)
+            max_disp = max(dx_1080, dy_1080)
+
+            is_motion = bool(max_disp >= tau and resp >= min_response)
+
+            # 2. Nếu chưa thỏa mãn, kiểm tra zoom qua 4 góc phần tư
+            if not is_motion:
+                tl = cv2.phaseCorrelate(prev_gray[:qh, :qw], curr_gray[:qh, :qw], hann_quad)
+                br = cv2.phaseCorrelate(prev_gray[qh:, qw:], curr_gray[qh:, qw:], hann_quad)
+                tr = cv2.phaseCorrelate(prev_gray[:qh, qw:], curr_gray[:qh, qw:], hann_quad)
+                bl = cv2.phaseCorrelate(prev_gray[qh:, :qw], curr_gray[qh:, :qw], hann_quad)
+
+                dx_tl, dy_tl = tl[0][0] * scale_factor, tl[0][1] * scale_factor
+                dx_br, dy_br = br[0][0] * scale_factor, br[0][1] * scale_factor
+                dx_tr, dy_tr = tr[0][0] * scale_factor, tr[0][1] * scale_factor
+                dx_bl, dy_bl = bl[0][0] * scale_factor, bl[0][1] * scale_factor
+
+                zoom_tl_br = bool((dx_tl * dx_br < 0 or dy_tl * dy_br < 0) and (abs(dx_tl - dx_br) >= tau or abs(dy_tl - dy_br) >= tau) and tl[1] >= min_response and br[1] >= min_response)
+                zoom_tr_bl = bool((dx_tr * dx_bl < 0 or dy_tr * dy_bl < 0) and (abs(dx_tr - dx_bl) >= tau or abs(dy_tr - dy_bl) >= tau) and tr[1] >= min_response and bl[1] >= min_response)
+
+                if zoom_tl_br or zoom_tr_bl:
+                    is_motion = True
+
+            has_motion.append(is_motion)
+
+        prev_gray = curr_gray
+
+    proc.wait()
+    return has_motion
 
 
 def scan_dedup_plan(
@@ -39,12 +159,15 @@ def scan_dedup_plan(
     hi: int = DEFAULT_DEDUP_HI,
     lo: int = DEFAULT_DEDUP_LO,
     frac: float = DEFAULT_DEDUP_FRAC,
-    chunk_frame_counts: Optional[List[int]] = None
+    chunk_frame_counts: Optional[List[int]] = None,
+    policy: str = "default",
+    motion_tau: float = 0.3
 ) -> Dict[str, Any]:
     """
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
     Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
-    Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp 100% với phân đoạn thực tế.
+    Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp hoàn toàn với phân đoạn thực tế.
+    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, off.
     """
     # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
     ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -64,38 +187,76 @@ def scan_dedup_plan(
     if probe_res.returncode == 0 and probe_res.stdout.strip().isdigit():
         expected_frames = int(probe_res.stdout.strip())
 
-    cmd = [
-        "ffmpeg", "-i", input_path,
-        "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
-        "-v", "debug",
-        "-f", "null", "-"
-    ]
+    policy_clean = policy.lower()
+    if policy_clean not in DEDUP_POLICY_PARAMS:
+        raise ValueError(f"Chính sách dedup không hợp lệ: '{policy}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}")
 
-    pattern = re.compile(r"\[Parsed_mpdecimate_0.*?\]\s+.*?\b(keep|drop)\s+pts:")
+    # Áp dụng thông số theo chính sách nếu là giá trị mặc định
+    if policy_clean in ["sensitive", "sensitive-a"]:
+        hi, lo, frac = 512, 160, 0.15
+    elif policy_clean == "sensitive-b":
+        hi, lo, frac = 384, 128, 0.10
+    elif policy_clean == "motion":
+        hi, lo, frac = DEFAULT_DEDUP_HI, DEFAULT_DEDUP_LO, DEFAULT_DEDUP_FRAC
+
     frame_actions: List[str] = []
 
-    # Thực thi ffmpeg và bắt dòng log debug
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
+    if policy_clean == "off":
+        if expected_frames is None or expected_frames <= 0:
+            count_cmd = [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_path
+            ]
+            c_res = subprocess.run(count_cmd, stdout=subprocess.PIPE, text=True)
+            if c_res.returncode == 0 and c_res.stdout.strip().isdigit():
+                expected_frames = int(c_res.stdout.strip())
+            else:
+                expected_frames = 1
+        total_frames = expected_frames
+        frame_actions = ["keep"] * total_frames
+    else:
+        cmd = [
+            "ffmpeg", "-i", input_path,
+            "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
+            "-v", "debug",
+            "-f", "null", "-"
+        ]
 
-    if proc.stderr:
-        for line in proc.stderr:
-            m = pattern.search(line)
-            if m:
-                frame_actions.append(m.group(1))
+        pattern = re.compile(r"\[Parsed_mpdecimate_0.*?\]\s+.*?\b(keep|drop)\s+pts:")
 
-    proc.wait()
-    if proc.returncode != 0 and not frame_actions:
-        raise RuntimeError(f"Lỗi khi quét mpdecimate trên file: {input_path}")
+        # Thực thi ffmpeg và bắt dòng log debug
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
 
-    total_frames = len(frame_actions)
-    if total_frames == 0:
-        raise ValueError("Không quét được frame nào từ file video.")
+        if proc.stderr:
+            for line in proc.stderr:
+                m = pattern.search(line)
+                if m:
+                    frame_actions.append(m.group(1))
+
+        proc.wait()
+        if proc.returncode != 0 and not frame_actions:
+            raise RuntimeError(f"Lỗi khi quét mpdecimate trên file: {input_path}")
+
+        total_frames = len(frame_actions)
+        if total_frames == 0:
+            raise ValueError("Không quét được frame nào từ file video.")
+
+        # Chính sách motion: Bổ sung các frame có chuyển động toàn cục
+        if policy_clean == "motion":
+            motion_mask = detect_global_motion_frames(input_path, tau=motion_tau)
+            for i in range(min(len(frame_actions), len(motion_mask))):
+                if motion_mask[i]:
+                    frame_actions[i] = "keep"
 
     # 3. Assertions bất biến: tổng keep + drop phải bằng len(frame_actions) và khớp ffprobe
     raw_keep = sum(1 for a in frame_actions if a == "keep")
@@ -223,6 +384,13 @@ def scan_dedup_plan(
     plan_data = {
         "source_file": os.path.basename(input_path),
         "ffmpeg_version": ffmpeg_ver,
+        "dedup_policy": policy_clean,
+        "dedup_params": {
+            "hi": hi if policy_clean != "off" else None,
+            "lo": lo if policy_clean != "off" else None,
+            "frac": frac if policy_clean != "off" else None,
+            "motion_tau": motion_tau if policy_clean == "motion" else None
+        },
         "total_frames": total_frames,
         "raw_kept_frames": raw_keep,
         "raw_dropped_frames": raw_drop,
@@ -252,23 +420,35 @@ def load_or_create_plan(
     fps_num: int = 24000,
     fps_den: int = 1001,
     resume: bool = True,
-    chunk_frame_counts: Optional[List[int]] = None
+    chunk_frame_counts: Optional[List[int]] = None,
+    policy: str = "default",
+    motion_tau: float = 0.3
 ) -> Dict[str, Any]:
     """
     Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
     nếu chưa có hoặc không khớp với chunk_frame_counts thực tế thì tự động quét lại.
+    Từ chối resume nếu chính sách dedup_policy trong cache khác với chính sách yêu cầu.
     """
+    policy_clean = policy.lower()
     if resume and os.path.exists(plan_path):
         try:
             with open(plan_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             chunks = data.get("chunks", [])
             if data.get("total_frames", 0) > 0 and len(chunks) > 0:
+                cached_policy = data.get("dedup_policy", "default")
+                if cached_policy != policy_clean:
+                    raise ValueError(
+                        f"Từ chối resume: Kế hoạch trong {plan_path} sử dụng chính sách dedup '{cached_policy}' "
+                        f"khác với chính sách yêu cầu '{policy_clean}'. Vui lòng dùng --force hoặc xóa file để quét lại."
+                    )
                 if chunk_frame_counts is None:
                     return data
                 cached_counts = [c["total_frames"] for c in chunks]
                 if cached_counts == chunk_frame_counts:
                     return data
+        except ValueError:
+            raise
         except Exception:
             pass
 
@@ -278,7 +458,9 @@ def load_or_create_plan(
         segment_seconds=segment_seconds,
         fps_num=fps_num,
         fps_den=fps_den,
-        chunk_frame_counts=chunk_frame_counts
+        chunk_frame_counts=chunk_frame_counts,
+        policy=policy_clean,
+        motion_tau=motion_tau
     )
 
 

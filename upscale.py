@@ -226,6 +226,12 @@ def build_arg_parser():
         help="Không sử dụng bộ lọc frame trùng (Deduplication) mà tính toán 100%% tất cả các khung hình"
     )
     parser.add_argument(
+        "--dedup-policy",
+        default=None,
+        choices=["default", "sensitive", "sensitive-a", "sensitive-b", "motion", "off"],
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), off (giữ tất cả)"
+    )
+    parser.add_argument(
         "--preview",
         type=int,
         nargs="?",
@@ -737,7 +743,8 @@ def main():
                 dedup=not args.no_dedup,
                 allow_partial=args.allow_partial,
                 deadline_dt=deadline_dt,
-                keep_temp=args.keep_temp
+                keep_temp=args.keep_temp,
+                dedup_policy=args.dedup_policy
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
             if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
@@ -816,7 +823,8 @@ def main():
                     dedup=not args.no_dedup,
                     allow_partial=args.allow_partial,
                     deadline_dt=None,
-                    keep_temp=args.keep_temp
+                    keep_temp=args.keep_temp,
+                    dedup_policy=args.dedup_policy
                 )
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))

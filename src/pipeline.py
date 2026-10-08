@@ -61,7 +61,8 @@ from src.dedup import (
     load_or_create_plan,
     prune_redundant_frames,
     generate_concat_demuxer_script,
-    encode_chunk_reexpanded
+    encode_chunk_reexpanded,
+    resolve_dedup_policy
 )
 from src.ai_engine import upscale_frames
 from src.models_resolver import resolve_model_for_video
@@ -99,7 +100,8 @@ def run_upscale_pipeline(
     dedup: bool = True,
     allow_partial: bool = False,
     deadline_dt: Optional[datetime] = None,
-    keep_temp: bool = False
+    keep_temp: bool = False,
+    dedup_policy: Optional[str] = None
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên Apple Silicon M3 Pro"""
     validate_environment()
@@ -290,8 +292,9 @@ def run_upscale_pipeline(
 
             dedup_plan = None
             if dedup:
+                effective_dedup_policy = resolve_dedup_policy(input_path, dedup_policy)
                 plan_file = os.path.join(work_dir, "plan.json")
-                logger.info("Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập (plan.json)...", to_console=True)
+                logger.info(f"Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập ({effective_dedup_policy})...", to_console=True)
                 t_pref_start = time.time()
                 dedup_plan = load_or_create_plan(
                     input_path=input_path,
@@ -300,7 +303,8 @@ def run_upscale_pipeline(
                     fps_num=meta["fps_num"],
                     fps_den=meta["fps_den"],
                     resume=resume,
-                    chunk_frame_counts=seg_frame_counts
+                    chunk_frame_counts=seg_frame_counts,
+                    policy=effective_dedup_policy
                 )
                 if dedup_plan:
                     dedup_plan["model_id"] = model_info["id"]
