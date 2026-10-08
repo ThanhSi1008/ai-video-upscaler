@@ -174,4 +174,19 @@ def test_optimize_cues_echoed_keywords_preserved():
     assert "(Tousetsu) Hừm..." in optimized[2].vi
 
 
+def test_optimize_cues_duplicate_variant_dialogue():
+    """Kiểm tra hai cue trùng lặp/dị bản câu thoại gần nhau không bị biến thành Dual Dialogue 2 dòng."""
+    from subtrans.writer import optimize_cues_for_playback
+    cues = [
+        Cue(id=303, ja="ふはははは!", start=893685, end=898148, vi="Đúng là pháp sư chiêu hồn vĩ đại thời đại chúng ta! Ngài đỉnh quá!"),
+        Cue(id=304, ja="まさに偉大な死霊術師 素敵ですー!", start=894227, end=898148, vi="Đúng là pháp sư chiêu hồn vĩ đại, tuyệt vời quá!"),
+    ]
+    optimized = optimize_cues_for_playback(cues)
+    assert len(optimized) == 1
+    # Không được có dấu gạch ngang đầu dòng hay ngắt 2 dòng
+    assert "\n" not in optimized[0].vi
+    assert "Đúng là pháp sư chiêu hồn vĩ đại" in optimized[0].vi
+
+
+
 

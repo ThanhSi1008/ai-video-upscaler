@@ -20,6 +20,9 @@
 * **Bảo tồn tên riêng Romaji khi xưng hô gọi tên (Vocative Name Retention):**
   * Khi lời thoại tiếng Nhật gọi tên nhân vật, phụ đề tiếng Việt phải giữ nguyên tên Romaji (e.g. "Fran, cẩn thận!", "Jean, chạy đi!", "Cảm ơn chị Nell", "Reirin, chuyện gì vậy?").
   * Có thể kèm từ xưng hô thân mật/kính ngữ tự nhiên ("chị Nell", "bác Garrus"), nhưng **tên riêng Romaji bắt buộc phải xuất hiện**, không được triệt tiêu thành các đại từ chung chung ("cậu", "anh", "em", "mày").
+* **Chống dịch đúp tiếng cười & Triệt tiêu dị bản trùng lặp trong Dual Dialogue:**
+  * Các từ tượng thanh tiếng cười anime (`ふはは+`, `ははは+`, `フハハ+`, `ククク+`, `ふふふ+`...) được nhận diện chính xác là interjection/sound cue trong `subtrans/parser.py`, tránh bị gán nhầm câu thoại tiếng Anh overlap của nhân vật khác.
+  * Bộ `optimize_cues_for_playback` trong `subtrans/writer.py` tự động phát hiện các câu xuất hiện cùng lúc chia sẻ tiền tố chung dài (common prefix >= 15 chars) hoặc độ trùng lặp từ vựng >= 60% để chỉ giữ lại 1 câu hoàn chỉnh duy nhất, tuyệt đối không gộp thành 2 dòng Dual Dialogue lặp lại nhau.
 * **Số dòng văn bản:** Mặc định xuất **chính xác 1 dòng văn bản / cue** (không tự ý ngắt 2 dòng; độ dài có thể lên tới 107 ký tự). Giới hạn mềm: 80 ký tự. Chỉ ngắt dòng khi người dùng chỉ định rõ `--wrap N`.
 * **Dấu câu chuẩn hóa:**
   * Dấu ba chấm: Sử dụng đúng 3 chấm ASCII `...` (không dùng ký tự unicode `…`).

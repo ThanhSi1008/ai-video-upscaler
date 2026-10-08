@@ -177,14 +177,48 @@ def optimize_cues_for_playback(
         dur2 = max(1, next_cue.end - next_cue.start)
         gap = next_cue.start - curr.end
 
-        # Chuẩn hóa văn bản so sánh trùng lặp / roll-up CC:
+        # 1. Phát hiện nói đồng thời / overlap (Simultaneous speakers)
+        is_simultaneous = (
+            (start_diff <= 1000 and (overlap >= 350 or (overlap / min(dur1, dur2)) >= 0.35))
+            or (start_diff <= 1400 and overlap >= 600 and (overlap / dur2) >= 0.50)
+        )
+
+        # 2. Chuẩn hóa văn bản so sánh trùng lặp / roll-up CC / dị bản dịch đúp:
         norm_curr = re.sub(r"[^\w\s]", "", clean_curr).strip().lower()
         norm_next = re.sub(r"[^\w\s]", "", clean_next).strip().lower()
-        is_same_content = (norm_curr == norm_next and (next_cue.start <= curr.end + 500 or start_diff <= 1500)) or (
-            start_diff <= 800
-            and len(norm_curr) >= 15
-            and len(norm_next) >= 15
-            and (norm_next.startswith(norm_curr) or norm_curr.startswith(norm_next))
+
+        # Kiểm tra tiền tố chung dài nhất (Longest common prefix):
+        common_len = 0
+        min_len = min(len(norm_curr), len(norm_next))
+        while common_len < min_len and norm_curr[common_len] == norm_next[common_len]:
+            common_len += 1
+        common_prefix = norm_curr[:common_len].strip()
+        common_words = common_prefix.split()
+
+        # Kiểm tra độ trùng lặp từ vựng (Word overlap):
+        words1 = set(norm_curr.split())
+        words2 = set(norm_next.split())
+        has_high_word_overlap = False
+        if words1 and words2:
+            min_w = min(len(words1), len(words2))
+            if min_w >= 4 and len(words1 & words2) / min_w >= 0.60:
+                has_high_word_overlap = True
+
+        is_same_content = (
+            (norm_curr == norm_next and (next_cue.start <= curr.end + 500 or start_diff <= 1500))
+            or (
+                start_diff <= 800
+                and len(norm_curr) >= 15
+                and len(norm_next) >= 15
+                and (norm_next.startswith(norm_curr) or norm_curr.startswith(norm_next))
+            )
+            or (
+                (is_simultaneous or start_diff <= 1200)
+                and (
+                    (len(common_prefix) >= 15 and (len(common_words) >= 3 or common_len >= min_len * 0.5))
+                    or has_high_word_overlap
+                )
+            )
         )
 
         # -------------------------------------------------------------
@@ -202,11 +236,6 @@ def optimize_cues_for_playback(
         # -------------------------------------------------------------
         # Ca B: Hai người nói cùng lúc hoặc gần như cùng lúc (Dual Dialogue)
         # -------------------------------------------------------------
-        is_simultaneous = (
-            (start_diff <= 1000 and (overlap >= 350 or (overlap / min(dur1, dur2)) >= 0.35))
-            or (start_diff <= 1400 and overlap >= 600 and (overlap / dur2) >= 0.50)
-        )
-
         if is_simultaneous and not is_same_content:
             line1 = f"- {clean_curr.lstrip('-—– ')}"
             line2 = f"- {clean_next.lstrip('-—– ')}"

@@ -161,3 +161,14 @@ def test_multi_speaker_pipeline_alignment(tmp_path):
     assert active_dialogue_cues[1].ja == "金淑妃(きんしゅくひ)"
     assert "Pure Consort Kin." in active_dialogue_cues[1].en
 
+
+def test_laughter_sound_cue_detection():
+    from subtrans.parser import is_pure_sound_cue
+    assert is_pure_sound_cue("ふはははは!") is True
+    assert is_pure_sound_cue("フハハハ…") is True
+    assert is_pure_sound_cue("ははは！") is True
+    assert is_pure_sound_cue("ククク…") is True
+    assert is_pure_sound_cue("うふふ～") is True
+    assert is_pure_sound_cue("まさに偉大な死霊術師 素敵ですー!") is False
+
+
