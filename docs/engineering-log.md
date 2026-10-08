@@ -157,7 +157,67 @@
 * Hạn ngạch: Gemini 2.5 Flash-Lite đạt 2.000 RPD (500 RPD/key), Flash đạt 80 RPD (20 RPD/key).
 * Tự động xoay vòng key khi gặp mã 429 (`RESOURCE_EXHAUSTED`), đảm bảo chuỗi dịch phụ đề không bị nghẽn gián đoạn.
 
+
+
 ### C. Đính Chính Lỗi Residual AnimeJaNai & Chốt Chặn Output Sanity Guard
 * Khắc phục triệt để lỗi thiếu `F.interpolate` nearest x2 trên `AnimeJaNaiCompact2x` tại tag `janai-fix` (Commit `ca8f1d9`).
 * Thiết lập chốt chặn bắt buộc `src/output_sanity.py`: Kiểm tra |ΔY| <= 6/255 và corr >= 0.98 sau chunk 1 và mỗi 10 chunk sau để ngăn chặn triệt để video đen/mờ.
+
+---
+
+## 9. Thực Nghiệm Các Chính Sách Deduplication (CPU Preflight & Global Motion Detection)
+
+### A. Đặt Vấn Đề & Phản Hồi Từ Người Dùng
+* **Phản hồi người dùng:**
+  1. Hai model P/Q (Real-ESRGAN và AnimeJaNai HD V3 Compact) sau khi fix residual không có sự khác biệt rõ rệt về cảm quan.
+  2. Ở các tập WEB-DL trước đây, từng xuất hiện hiện tượng giật/khựng ở các cảnh camera lia (pan) hoặc phóng to (zoom) chậm nhưng chưa quá rõ.
+  3. Cả nguồn BD và WEB-DL đều mong muốn cân bằng theo nguyên lý Pareto: những phân cảnh cần mượt (pan/zoom chuyển động) thì phải mượt, đồng thời tìm phương án giữ chuyển động với chi phí GPU tăng ít nhất có thể.
+
+### B. Thiết Kế & Thuật Toán Các Chính Sách Dedup (CPU Preflight)
+1. `default`: `hi=768:lo=320:frac=0.33` (chính sách mặc định hiện tại).
+2. `sensitive-a`: `hi=512:lo=160:frac=0.15` (hạ ngưỡng block 8x8 mpdecimate).
+3. `sensitive-b`: `hi=384:lo=128:frac=0.10` (hạ sâu ngưỡng block 8x8 mpdecimate).
+4. `motion` ($\tau \in \{0.15, 0.30, 0.50\}$): Giữ nếu `default` giữ HOẶC phát hiện chuyển động camera toàn cục so với frame nguồn liền trước.
+   - Thu nhỏ luma về $480 \times 270$ grayscale.
+   - Tính toán Phase Correlation (`cv2.phaseCorrelate`) trên toàn khung hình và 4 góc phần tư độc lập.
+   - Giữ frame nếu $\max|\Delta| \ge \tau$ (quy đổi về pixel 1080p) và response peak $\ge 0.10$, hoặc có vector dịch chuyển nghịch đảo giữa các góc đối diện (zoom in/out).
+5. `off`: Giữ toàn bộ 100% khung hình (tắt deduplication).
+
+### C. Số Liệu Đo Đạc Thực Nghiệm (CPU Preflight & Motion Simulation)
+
+#### 1. Mẫu Clip 1 Phút BD Remux (`sample_1min_bd.mkv`, 1.438 frames, 1.275 frame có chuyển động thật $\tau \ge 0.15$px = 88.7%):
+| Chính sách | Kept Frames | Tỷ lệ giữ | Đóng băng clip | Đóng băng 44–46s | Frame thêm | Độ chính xác chuyển động thật | Est. Thời gian (h) | CPU (s) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `default` | 834 / 1.438 | 58.0% | 37.7% | 57.8% | 0 | - | 0.40h (24.1m) | 4.9s |
+| `sensitive-a` | 913 / 1.438 | 63.5% | 31.8% | 42.2% | +79 | 95.8% | 0.42h (25.0m) | 4.6s |
+| `sensitive-b` | 961 / 1.438 | 66.8% | 28.1% | **0.0%** | +127 | 96.9% | 0.42h (25.4m) | 4.5s |
+| `motion-0.15` | 1.315 / 1.438 | 91.4% | **0.0%** | **0.0%** | +481 | 100.0% | 0.49h (29.1m) | 9.6s |
+| `motion-0.30` | 1.076 / 1.438 | 74.8% | 18.9% | **0.0%** | +242 | 99.2% | 0.44h (26.6m) | 9.8s |
+| `motion-0.50` | 923 / 1.438 | 64.2% | 30.8% | 22.2% | +89 | 98.9% | 0.42h (25.1m) | 9.9s |
+| `off` | 1.438 / 1.438 | 100.0% | **0.0%** | **0.0%** | +604 | 79.6% | 0.51h (30.4m) | 0.2s |
+
+#### 2. Mẫu 3 Phút WEB-DL (`sample_3min.mkv`, 4.360 frames, 3.328 frame có chuyển động thật $\tau \ge 0.15$px = 76.3%):
+| Chính sách | Kept Frames | Tỷ lệ giữ | Đóng băng clip | Frame thêm | Độ chính xác chuyển động thật | Est. Thời gian (h) | CPU (s) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `default` | 2.186 / 4.360 | 50.1% | 43.6% | 0 | - | 0.64h (38.1m) | 14.1s |
+| `sensitive-a` | 2.713 / 4.360 | 62.2% | 32.7% | +527 | 69.1% | 0.73h (43.6m) | 12.3s |
+| `sensitive-b` | 2.903 / 4.360 | 66.6% | 28.9% | +717 | 68.3% | 0.76h (45.6m) | 11.3s |
+| `motion-0.15` | 3.637 / 4.360 | 83.4% | **0.0%** | +1.451 | 100.0% | 0.89h (53.2m) | 25.9s |
+| `motion-0.30` | 2.754 / 4.360 | 63.2% | 27.7% | +568 | 93.3% | 0.73h (44.0m) | 26.7s |
+| `motion-0.50` | 2.252 / 4.360 | 51.7% | 41.7% | +66 | 93.9% | 0.65h (38.8m) | 27.0s |
+| `off` | 4.360 / 4.360 | 100.0% | **0.0%** | +2.174 | 66.7% | 1.01h (60.6m) | 0.2s |
+
+#### 3. Toàn Tập BD Remux Đầy Đủ (`S01E02`, 34.069 frames, ~23.7 phút):
+| Chính sách | Kept Frames | Tỷ lệ giữ | Ước lượng 1 tập (h) | Chênh lệch so với default | CPU Preflight Scan |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `default` | 22.135 / 34.069 | 64.97% | 4.08h (4h 05m) | Baseline (0) | 101.1s (~1.7m) |
+| `sensitive-a` | 23.271 / 34.069 | 68.31% | 4.27h (4h 16m) | +1.136 frames (+5.1%, +11m) | 97.9s (~1.6m) |
+| `sensitive-b` | 23.568 / 34.069 | 69.18% | 4.32h (4h 19m) | +1.433 frames (+6.5%, +14m) | 96.3s (~1.6m) |
+| `motion-0.30` | 26.613 / 34.069 | 78.12% | 4.85h (4h 51m) | +4.478 frames (+20.2%, +46m) | 209.4s (~3.5m) |
+| `off` | 34.069 / 34.069 | 100.0% | 6.14h (6h 08m) | +11.934 frames (+53.9%, +123m) | 1.5s |
+
+### D. Nhận Định Kỹ Thuật & Đề Xuất Ứng Viên Pareto
+* **Giữ nguyên mặc định:** `default` tiếp tục giữ vai trò mặc định toàn hệ thống để bảo đảm tốc độ và sức chứa 2 tập/đêm cho người dùng phổ thông.
+* **Đề xuất Ứng viên 1 (`motion-0.30`):** Ứng viên cao cấp xử lý triệt để hiện tượng giật camera pan/zoom. Xóa sạch 100% hiện tượng đóng băng tại cửa sổ 44–46s; 93.3% - 99.2% số frame giữ thêm là chuyển động thật. Phù hợp cấu hình qua `shows.yaml` cho các bộ phim anime có nhiều cảnh lia máy nghệ thuật.
+* **Đề xuất Ứng viên 2 (`sensitive-b`):** Ứng viên hiệu năng/chi phí thấp. Chỉ cần chỉnh tham số `mpdecimate` mà không cần thêm bước tính toán OpenCV; giảm hiện tượng đứng hình tại cảnh 44–46s về 0.0% với chi phí tăng chỉ ~14 phút/tập trên BD Remux.
 
