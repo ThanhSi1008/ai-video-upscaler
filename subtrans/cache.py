@@ -180,21 +180,21 @@ class TranslationCache:
             conn.commit()
 
     def get_cue(self, cache_key: str) -> Optional[str]:
-        """Retrieves cached translation for a cue. Bỏ qua nếu là chuỗi chưa dịch."""
+        """Retrieves cached translation for a cue. Bỏ qua nếu là chuỗi chưa dịch hoặc dry-run."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT vi FROM translations WHERE cache_key = ?", (cache_key,))
             row = cursor.fetchone()
             if row and row[0]:
                 val = row[0].strip()
-                if val.lower() in UNTRANSLATED_STRINGS:
+                if val.lower() in UNTRANSLATED_STRINGS or val.startswith("[DRY-RUN") or "[dry-run]" in val.lower():
                     return None
                 return val
         return None
 
     def set_cue(self, cache_key: str, backend: str, model: str, vi: str):
-        """Saves translated cue into cache kèm ngày Thái Bình Dương (PT). Tuyệt đối KHÔNG cache chuỗi [Chưa dịch]."""
-        if not vi or vi.strip().lower() in UNTRANSLATED_STRINGS:
+        """Saves translated cue into cache kèm ngày Thái Bình Dương (PT). Tuyệt đối KHÔNG cache chuỗi [Chưa dịch] hoặc [DRY-RUN]."""
+        if not vi or vi.strip().lower() in UNTRANSLATED_STRINGS or vi.startswith("[DRY-RUN") or "[dry-run]" in vi.lower():
             return
 
         pt_date = get_today_pt_str()

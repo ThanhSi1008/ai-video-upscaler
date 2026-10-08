@@ -221,3 +221,29 @@
 * **Đề xuất Ứng viên 1 (`motion-0.30`):** Ứng viên cao cấp xử lý triệt để hiện tượng giật camera pan/zoom. Xóa sạch 100% hiện tượng đóng băng tại cửa sổ 44–46s; 93.3% - 99.2% số frame giữ thêm là chuyển động thật. Phù hợp cấu hình qua `shows.yaml` cho các bộ phim anime có nhiều cảnh lia máy nghệ thuật.
 * **Đề xuất Ứng viên 2 (`sensitive-b`):** Ứng viên hiệu năng/chi phí thấp. Chỉ cần chỉnh tham số `mpdecimate` mà không cần thêm bước tính toán OpenCV; giảm hiện tượng đứng hình tại cảnh 44–46s về 0.0% với chi phí tăng chỉ ~14 phút/tập trên BD Remux.
 
+---
+
+## 10. Khai Thác Tri-Lingual Corpus Season 1 Tensei Shitara Ken Deshita & Dịch Thuật Season 2
+
+### A. Khai Thác Dữ Liệu Phụ Đề Chuẩn B-Global (Season 1)
+* **Quy mô tập mẫu:** 11 tập Season 1 (`S01E02` đến `S01E12`, BD Remux 1080p).
+* **Trích xuất & Lưu trữ đa ngữ:** Đã trích xuất và bảo toàn 100% ba luồng phụ đề nguyên bản (Tiếng Việt B-Global ASS, Tiếng Nhật SDH ASS, Tiếng Anh Kaleido-subs ASS) vào thư mục `Subtitles_Archive/Season_01/` và `archive_subtitles/Tensei_Shitara_Ken_Deshita/Season_01/` (tổng 33 file phụ đề).
+* **Xây dựng từ điển Schema v2 (`glossary.tenken.yaml`):**
+  - Khai thác 11 nhân vật cốt lõi (Fran, Sư phụ, Urushi, Jean Doubee, Bernard, Andy, Amanda, Nell, Klimt, Garrus, Donadrond).
+  - 253 thuật ngữ ma pháp, kỹ năng, địa danh, tước hiệu và bang hội chuẩn phòng thu.
+  - 6 style rules chuyên sâu định hình tính cách nhân vật: Fran ít nói/câu ngắn, Sư phụ bảo bọc/chu đáo, sói Urushi (tuyệt đối không dịch thành Jet), Jean Doubee kịch tính/quý tộc.
+  - Thiết lập symlink đa hình thức: `glossary.tenken.yaml`, `glossary.tenseishitarakendeshita.yaml`, `glossary.reincarnatedasasword.yaml`.
+
+### B. Khắc Phục Lỗi Cache Bẩn Dry-Run Trong `subtrans/cache.py`
+* **Vấn đề phát hiện:** Chế độ thử nghiệm `--dry-run` trước đây vô tình ghi các bản ghi giả lập `[DRY-RUN VI] English text...` vào cơ sở dữ liệu SQLite `translations.db`. Khi người dùng thực thi dịch thật, pipeline kích hoạt Cache Hit (47.2%) và trả về chuỗi tiếng Anh giả lập thay vì gọi AI dịch tiếng Việt.
+* **Giải pháp:** Bổ sung chốt chặn bắt buộc tại `get_cue` và `set_cue` trong `subtrans/cache.py`: Tuyệt đối từ chối lưu và đọc các chuỗi chứa tiền tố `[DRY-RUN]`. Dọn sạch toàn bộ 622 bản ghi rác trong cơ sở dữ liệu.
+
+### C. Dịch Thuật Season 2 (S02E01 & S02E02)
+* **Đầu vào:** Phụ đề tiếng Nhật ABEMA WebRip (`.ja.srt`) kết hợp phụ đề tiếng Anh đối chiếu SubsPlease (`.en.ass`) với bù độ lệch thời gian `--en-offset-ms -846` (E01) và `-844` (E02).
+* **Số liệu thực thi:**
+  - **Tập 1 (S02E01, 439 thoại):** Hoàn thành trong **73.1 giây** (5 requests Gemini Flash-Lite). Tỷ lệ dịch thật 100%, 0 lỗi format, 0 câu `[Chưa dịch]`.
+  - **Tập 2 (S02E02, 451 thoại):** Hoàn thành trong **113.4 giây** (kích hoạt thành công cơ chế Self-Healing Bisect khi phát hiện ký tự sót `魔石`, tự động tách đôi 100 cues -> 50 + 50 cues để dịch lại hoàn hảo).
+* **Bàn giao thành phẩm:**
+  - Tự động tạo và đặt 2 file `.vi.srt` ngay bên cạnh file video MKV gốc trong `RawSources/Tensei_Shitara_Ken_Deshita/` để trình phát phát hiện tức thì.
+  - Lưu trữ đầy đủ bộ phụ đề 3 thứ tiếng vào `Subtitles_Archive/Season_02/`.
+

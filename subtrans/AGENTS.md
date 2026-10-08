@@ -76,6 +76,9 @@ subtrans/
 ### C. Cơ Chế Stage A Cast Sheet Unconditional Inclusion
 * Bảng quan hệ nhân vật và xưng hô sinh ra từ Stage A luôn được truyền vào prompt của mọi batch (kể cả khi câu thoại trong batch đó không nhắc tên nhân vật), giúp model giải quyết triệt để vấn đề zero-pronouns của tiếng Nhật.
 
+### D. Chốt Chặn Toàn Vẹn Cache & Cấm Cache Chuỗi Thử Nghiệm Dry-Run
+* Tuyệt đối không lưu các bản ghi giả lập `[DRY-RUN]` hoặc chuỗi `[Chưa dịch]` vào SQLite cache `subtrans/.cache/translations.db`. Hàm `get_cue` và `set_cue` tự động loại bỏ các chuỗi này để ngăn chặn hiện tượng ô nhiễm cache khi người dùng chạy lệnh dịch thật sau lệnh dry-run.
+
 ---
 
 ## 5. Lệnh CLI Cơ Bản
