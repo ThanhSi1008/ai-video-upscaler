@@ -306,5 +306,13 @@ def batch(
         pipeline.run(ja_path=f, en_path=en_f, glossary_path=glossary)
 
 
+@app.command(name="eval")
+def eval_cmd():
+    """Runs the quantitative evaluation harness against regression and pronoun benchmark suites."""
+    from subtrans.eval.runner import run_evaluation
+    run_evaluation()
+
+
 if __name__ == "__main__":
     app()
+

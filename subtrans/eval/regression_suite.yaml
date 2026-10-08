@@ -1,0 +1,65 @@
+# =====================================================================
+# regression_suite.yaml
+# Bộ 6 ca kiểm thử hồi quy chuẩn hóa cho phân hệ dịch phụ đề subtrans.
+# Mỗi ca đại diện cho 1 bài toán thực tế đã được giải quyết.
+# =====================================================================
+
+version: 1
+description: "Regression test suite covering 6 canonical edge cases in anime localization"
+
+cases:
+  - id: "case_01_multi_speaker_cc_split"
+    name: "Tách sự kiện Closed Captions gộp 2 người nói"
+    category: "multi_speaker_cc"
+    raw_ja: "-（絹秀）金淑妃(きんしゅくひ)\\N-（清佳）あっ…"
+    raw_en: "Pure Consort Kin."
+    expected_cue_count: 2
+    must_contain_phrase: "金淑妃"
+    description: "Ngăn chặn việc Gemini bỏ quên câu thoại của người nói thứ nhất khi CC gộp hai nhân vật."
+
+  - id: "case_02_strict_zero_overlap"
+    name: "Triệt tiêu 100% chồng lấn thời gian (Strict 40ms Gap)"
+    category: "zero_overlap"
+    cues_input:
+      - {start: 1000, end: 4000, vi: "Câu một kéo dài."}
+      - {start: 3800, end: 7000, vi: "Câu hai bắt đầu sớm."}
+    expected_max_end_cue_1: 3760  # 3800 - 40ms
+    description: "Đảm bảo c.end <= next.start - 40ms để không bị tràn 3-4 dòng trên IINA/mpv."
+
+  - id: "case_03_cache_pollution_guard"
+    name: "Chống ô nhiễm SQLite Cache do chuỗi Dry-Run"
+    category: "cache_integrity"
+    forbidden_strings:
+      - "[DRY-RUN VI] Hello"
+      - "[Chưa dịch]"
+      - "(Chưa dịch)"
+      - "[untranslated]"
+    expected_cache_saved: false
+    description: "Cache database không bao giờ lưu trữ các chuỗi giả lập hoặc câu chưa hoàn tất."
+
+  - id: "case_04_vocative_name_retention"
+    name: "Bảo tồn tên riêng Romaji khi đối thoại gọi tên"
+    category: "vocative_name"
+    raw_ja: "フラン、大丈夫？"
+    raw_en: "Fran, are you okay?"
+    target_character_romaji: "Fran"
+    forbidden_pattern: "^(cậu|em|anh|bạn)\\s+có\\s+sao\\s+không"
+    description: "Bắt buộc giữ tên Romaji trong phụ đề khi tiếng Nhật gọi đích danh tên nhân vật."
+
+  - id: "case_05_anime_laughter_sound_cue"
+    name: "Phát hiện tiếng cười anime, chống gán nhầm câu thoại tiếng Anh"
+    category: "anime_laughter"
+    raw_ja: "ふはははは!"
+    overlap_en: "Truly, the greatest necromancer of our time! You're killing it, sir!"
+    expected_is_sound_cue: true
+    description: "Phân loại chính xác tiếng cười của Jean là interjection, không gán câu EN của người khác vào."
+
+  - id: "case_06_anti_duplicate_dual_dialogue"
+    name: "Triệt tiêu dị bản trùng lặp trong Dual Dialogue"
+    category: "anti_duplicate"
+    simultaneous_cues:
+      - {id: 303, start: 893685, end: 898148, vi: "Đúng là pháp sư chiêu hồn vĩ đại thời đại chúng ta! Ngài đỉnh quá!"}
+      - {id: 304, start: 894227, end: 898148, vi: "Đúng là pháp sư chiêu hồn vĩ đại, tuyệt vời quá!"}
+    expected_output_cues_count: 1
+    forbidden_in_output: "\n"
+    description: "Hai câu có tiền tố chung dài hoặc từ vựng >= 60% chỉ giữ lại 1 câu duy nhất."

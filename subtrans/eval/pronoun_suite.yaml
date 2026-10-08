@@ -1,0 +1,141 @@
+# =====================================================================
+# pronoun_suite.yaml
+# Bộ benchmark kiểm chuẩn đại từ và xưng hô (Pronoun & Relationship Benchmark)
+# Bao gồm các cặp quan hệ tiêu biểu của 2 series: Tenken và Futsutsuka.
+# =====================================================================
+
+version: 1
+description: "Hand-labeled benchmark cues for measuring Pronoun Accuracy & Vocative Retention"
+
+cues:
+  # --- Series: Tensei Shitara Ken Deshita (Tenken) ---
+  - id: "tenken_01"
+    series: "tenken"
+    speaker: "Fran"
+    addressee: "Shishou"
+    mode: "spoken"
+    ja: "師匠、大丈夫？"
+    en: "Master, are you okay?"
+    allowed_pronouns: ["sư phụ"]
+    expected_names: []
+
+  - id: "tenken_02"
+    series: "tenken"
+    speaker: "Fran"
+    addressee: "Shishou"
+    mode: "spoken"
+    ja: "うん。師匠、行こう。"
+    en: "Yeah. Master, let's go."
+    allowed_pronouns: ["sư phụ"]
+    expected_names: []
+
+  - id: "tenken_03"
+    series: "tenken"
+    speaker: "Shishou"
+    addressee: "Fran"
+    mode: "spoken"
+    ja: "フラン、危ない！"
+    en: "Fran, look out!"
+    allowed_pronouns: ["ta", "tôi", "em"]
+    expected_names: ["Fran"]
+
+  - id: "tenken_04"
+    series: "tenken"
+    speaker: "Shishou"
+    addressee: "Fran"
+    mode: "spoken"
+    ja: "よくやったな、フラン。"
+    en: "Well done, Fran."
+    allowed_pronouns: ["ta", "tôi", "em"]
+    expected_names: ["Fran"]
+
+  - id: "tenken_05"
+    series: "tenken"
+    speaker: "Shishou"
+    addressee: null
+    mode: "inner"
+    ja: "俺はどうして剣になっちまったんだろう…"
+    en: "How did I end up becoming a sword...?"
+    allowed_pronouns: ["tôi", "mình"]
+    expected_names: []
+
+  - id: "tenken_06"
+    series: "tenken"
+    speaker: "Fran"
+    addressee: "Urushi"
+    mode: "spoken"
+    ja: "ウルシ、ありがとう。"
+    en: "Thank you, Urushi."
+    allowed_pronouns: ["chị", "em"]
+    expected_names: ["Urushi"]
+
+  - id: "tenken_07"
+    series: "tenken"
+    speaker: "Fran"
+    addressee: "Nell"
+    mode: "spoken"
+    ja: "ネルさん、これをお願い。"
+    en: "Nell, please take this."
+    allowed_pronouns: ["chị", "em"]
+    expected_names: ["Nell"]
+
+  - id: "tenken_08"
+    series: "tenken"
+    speaker: "Jean"
+    addressee: "Fran"
+    mode: "spoken"
+    ja: "我こそは偉大なる死霊術師、ジャン・ドゥービーだ！"
+    en: "I am the great necromancer, Jean Doubee!"
+    allowed_pronouns: ["ta"]
+    expected_names: ["Jean"]
+
+  # --- Series: Futsutsuka Na Akujo Dewa Gozaimasu Ga (Futsutsuka) ---
+  - id: "futsutsuka_01"
+    series: "futsutsuka"
+    speaker: "Reirin"
+    addressee: "Keigetsu"
+    mode: "spoken"
+    ja: "慧月様、どうなさったのですか？"
+    en: "Lady Keigetsu, what is the matter?"
+    allowed_pronouns: ["cô", "ngài"]
+    expected_names: ["Keigetsu"]
+
+  - id: "futsutsuka_02"
+    series: "futsutsuka"
+    speaker: "Keigetsu"
+    addressee: "Reirin"
+    mode: "spoken"
+    ja: "玲琳、貴様さえいなければ…"
+    en: "Reirin, if only you weren't here..."
+    allowed_pronouns: ["ngươi", "mày", "cô"]
+    expected_names: ["Reirin"]
+
+  - id: "futsutsuka_03"
+    series: "futsutsuka"
+    speaker: "Reirin"
+    addressee: null
+    mode: "inner"
+    ja: "私の体は病弱だったけれど、この体なら…"
+    en: "My body was frail, but with this body..."
+    allowed_pronouns: ["tôi", "mình"]
+    expected_names: []
+
+  - id: "futsutsuka_04"
+    series: "futsutsuka"
+    speaker: "Tousetsu"
+    addressee: "Reirin"
+    mode: "spoken"
+    ja: "玲琳、そなたは何を考えている？"
+    en: "Reirin, what are you thinking?"
+    allowed_pronouns: ["ta", "nàng", "cô"]
+    expected_names: ["Reirin"]
+
+  - id: "futsutsuka_05"
+    series: "futsutsuka"
+    speaker: "Leelee"
+    addressee: "Reirin"
+    mode: "spoken"
+    ja: "玲琳様、お気を確かに！"
+    en: "Lady Reirin, please stay strong!"
+    allowed_pronouns: ["tiểu thư", "người", "nương nương"]
+    expected_names: ["Reirin"]

@@ -39,22 +39,25 @@
 
 ```text
 subtrans/
-├── cli.py                  # Typer CLI entrypoint: check, models, run, compare, batch
-├── pipeline.py             # Orchestrator: Stage A (Cast sheet) -> Stage B (Gemini/Local) -> Stage C (QA Audit)
+├── eval/                   # Evaluation Harness: metrics, regression_suite.yaml, pronoun_suite.yaml, runner
+├── cli.py                  # Typer CLI entrypoint: check, models, run, compare, batch, eval
+├── pipeline.py             # Orchestrator: Stage A (Cast sheet) -> Stage B (Gemini Cloud) -> Stage C (QA Audit)
 ├── config.py / config.yaml # Cấu hình RPM, RPD, chuỗi model, batch size (mặc định 100)
 ├── cast_sheet.py           # Stage A: Khám phá nhân vật, đại từ xưng hô, xuất out/<name>.cast.yaml
 ├── models.py               # Pydantic models: Cue, GlossaryTerm, AddressRules, Glossary (Schema v2)
 ├── parser.py               # pysubs2: lọc OP/ED/Signs, gỡ tag ASS, align time overlap JA-EN (>=50%)
 ├── gemini_backend.py       # Primary: Google GenAI SDK (JSON Schema, uncertain flag, Context +/-10)
-├── local_backend.py        # Fallback: Ollama (translategemma:12b, keep_alive: 0 khi giải phóng)
-├── review.py               # Optional Post-edit: Ollama (gemma3:12b)
+├── local_backend.py        # [DEPRECATED theo chỉ đạo Người dùng: 100% Cloud API, không dùng model local]
 ├── throttle.py             # RateLimiter, Exponential Backoff + Jitter, phân loại lỗi 429
 ├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256
 ├── glossary.py             # Loader & Merger: Nạp Base glossary + Per-series Override
-├── glossary.yaml           # Base glossary chuẩn: 12 style rules, address rules, 230+ anime terms
-├── writer.py               # Xuất file .srt chuẩn mẫu (1 dòng/cue, soft cap 80)
+├── glossary.yaml           # Base glossary chuẩn: 13 style rules, address rules, 230+ anime terms
+├── writer.py               # Xuất file .srt chuẩn mẫu (1 dòng/cue, soft cap 80, CPS, zero-overlap)
 └── report.py               # Stage C: Báo cáo QA audit Markdown (out/<name>.audit.md & --review-file)
 ```
+
+> **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.
+
 
 ---
 
