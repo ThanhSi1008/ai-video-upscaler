@@ -121,3 +121,23 @@
   - Tập 1 (`Kimi ga Shinu`): Offset đo được -148 ms ($< 1.0$s) -> Không áp dụng (PASS).
   - Tập 2 (`Re:Zero`): Offset đo được -98 ms ($< 1.0$s) -> Không áp dụng (PASS).
   - Tập 3 (`Slime S4-24`): Do bản phát sóng có thêm sponsor card 11 giây ở đầu, offset đo được **-11.141 ms** ($\approx -11.154$s), 285 cặp khớp, quintile drift 0.029s ($\le 0.5$s), tỷ lệ khớp tăng từ 55.9% -> 85.3% (+29.4 điểm) -> Tự động áp dụng thành công (PASS).
+
+---
+
+## 7. Sửa Lỗi Lệch Khung Hình BD Remux GOP Dài & Khảo Sát Giật Hình Camera Zoom
+
+### A. Khắc Phục Lệch Khung Hình BD Remux (Commit `5c868ab`)
+* **Vấn đề:** GOP dài biến thiên trên BD Remux (`[250, 250, 219...]`) làm lệch với lưới 192 frame tĩnh trong `src/dedup.py`, dẫn đến frame desync.
+* **Giải pháp:** Đưa `split_video_segments` lên trước, dùng `get_segments_frame_counts` đo số frame thực tế qua FFprobe, ép giữ frame đầu mỗi chunk (`keep`), tích hợp `video_frame_count` vào `src/mux_audit.py`.
+* **Kiểm định mẫu 1 phút BD Remux (`sample_1min_bd.mkv`):**
+  - Nguồn gốc: **1.438 frames** (AVC 1080p, 260.6 MB).
+  - Thành phẩm 4K: **1.438 frames** (100% khớp bit-exact, 0 frame mất mát). Kept AI: 841 frames (58.48%), Dropped: 597 frames (41.52%).
+  - Dung lượng 4K: **88.3 MB** (HEVC p010le bitrate tối ưu + Concat duration re-expansion).
+  - Mux audit: **PASS** (1.438 frames, 2ch audio FLAC, 15 fonts).
+
+### B. Thực Nghiệm MAE Hiện Tượng Giật Hình Ở Cảnh Camera Zoom/Pan Chậm (00:44 – 00:46)
+* **Số liệu đối soát 48 frames (2.0s @ 23.976 fps):**
+  - Nguồn BD gốc: 100% frame có chuyển động pixel liên tục ($0.53 \le \text{MAE} \le 3.8$, Mean $2.67$), **0 frame đứng hình**.
+  - Bản 4K thành phẩm: **24 / 47 bước chuyển tiếp (51.1%) bị đóng băng** (`diff < 0.05`), lặp lại frame cũ rồi nhảy nấc.
+* **Nguyên nhân cốt lõi:** Khối 8x8 của `mpdecimate` (`hi=768:lo=320:frac=0.33`) đánh giá sai chuyển động vi mô (sub-pixel camera pan/zoom) dưới ngưỡng tĩnh và gán nhãn `drop`.
+* **Đề xuất giải pháp:** Cờ `--no-dedup` cho BD Remux hoặc adaptive motion threshold theo series trong `shows.yaml`.
