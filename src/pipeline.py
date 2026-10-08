@@ -51,6 +51,7 @@ class FailedResumableError(RuntimeError):
 from src.ffmpeg_ops import (
     probe_video,
     split_video_segments,
+    get_segments_frame_counts,
     extract_frames,
     encode_chunk_hevc,
     concat_segments,
@@ -272,6 +273,21 @@ def run_upscale_pipeline(
             # -----------------------------------------------------------------
             # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
             # -----------------------------------------------------------------
+            existing_segs = sorted([
+                os.path.join(segs_dir, f)
+                for f in os.listdir(segs_dir)
+                if f.startswith("seg_") and f.endswith(".mp4")
+            ]) if os.path.exists(segs_dir) else []
+            if not existing_segs or not resume:
+                logger.info(f"Đang phân đoạn video thành các block {segment_time}s (Stream Copy)...", to_console=True)
+                t_split_start = time.time()
+                existing_segs = split_video_segments(input_path, segs_dir, segment_time)
+                stage_timings["Segment Split (Stream Copy)"] = time.time() - t_split_start
+
+            total_segs = len(existing_segs)
+            # Đo chính xác số frame thực tế của từng phân đoạn (khớp bit-exact theo Keyframe GOP của nguồn)
+            seg_frame_counts = get_segments_frame_counts(existing_segs)
+
             dedup_plan = None
             if dedup:
                 plan_file = os.path.join(work_dir, "plan.json")
@@ -283,7 +299,8 @@ def run_upscale_pipeline(
                     segment_seconds=segment_time,
                     fps_num=meta["fps_num"],
                     fps_den=meta["fps_den"],
-                    resume=resume
+                    resume=resume,
+                    chunk_frame_counts=seg_frame_counts
                 )
                 if dedup_plan:
                     dedup_plan["model_id"] = model_info["id"]
@@ -302,18 +319,6 @@ def run_upscale_pipeline(
                     to_console=True
                 )
 
-            existing_segs = sorted([
-                os.path.join(segs_dir, f)
-                for f in os.listdir(segs_dir)
-                if f.startswith("seg_") and f.endswith(".mp4")
-            ]) if os.path.exists(segs_dir) else []
-            if not existing_segs or not resume:
-                logger.info(f"Đang phân đoạn video thành các block {segment_time}s (Stream Copy)...", to_console=True)
-                t_split_start = time.time()
-                existing_segs = split_video_segments(input_path, segs_dir, segment_time)
-                stage_timings["Segment Split (Stream Copy)"] = time.time() - t_split_start
-
-            total_segs = len(existing_segs)
             logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU Metal...", to_console=True)
             print()
 
@@ -334,7 +339,7 @@ def run_upscale_pipeline(
                 if resume and os.path.exists(seg_out_file) and os.path.getsize(seg_out_file) > 10000:
                     logger.info(f"Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
                     print(f"⏭️  Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
-                    total_frames_processed += dedup_plan["chunks"][idx]["total_frames"] if (dedup and dedup_plan) else 192
+                    total_frames_processed += dedup_plan["chunks"][idx]["total_frames"] if (dedup and dedup_plan) else (seg_frame_counts[idx] if idx < len(seg_frame_counts) else 192)
                     continue
                 chunks_to_process.append((idx, seg_file, seg_out_file))
 

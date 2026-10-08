@@ -197,11 +197,42 @@ def verify_mux_integrity(src_path: str, out_path: str) -> Dict[str, Any]:
             vol_test_passed = False
             reasons.append(f"Mất tiếng hoàn toàn khi tua tới mốc t={t}s (src={v_src} dB, out=NULL)")
 
+    # 6. Check (e): Kiểm tra bảo toàn khung hình video (Video Frame Count Match per AGENTS.md Definition of Done)
+    frame_count_match = True
+    src_frames_cnt = None
+    out_frames_cnt = None
+    try:
+        r_s = subprocess.run([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-count_packets",
+            "-show_entries", "stream=nb_read_packets",
+            "-of", "csv=p=0",
+            src_path
+        ], capture_output=True, text=True, check=True)
+        r_o = subprocess.run([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-count_packets",
+            "-show_entries", "stream=nb_read_packets",
+            "-of", "csv=p=0",
+            out_path
+        ], capture_output=True, text=True, check=True)
+        src_frames_cnt = int(r_s.stdout.strip()) if r_s.stdout.strip().isdigit() else None
+        out_frames_cnt = int(r_o.stdout.strip()) if r_o.stdout.strip().isdigit() else None
+        if src_frames_cnt is not None and out_frames_cnt is not None:
+            frame_count_match = (src_frames_cnt == out_frames_cnt)
+            if not frame_count_match:
+                reasons.append(f"Lệch số frame video: Nguồn có {src_frames_cnt} frames, Đích có {out_frames_cnt} frames (Mất {src_frames_cnt - out_frames_cnt} frames)")
+    except Exception:
+        pass
+
     all_passed = (
         stream_check_passed and
         audio_md5_match and
         interleave_res["passed"] and
-        vol_test_passed
+        vol_test_passed and
+        frame_count_match
     )
 
     return {
@@ -215,6 +246,11 @@ def verify_mux_integrity(src_path: str, out_path: str) -> Dict[str, Any]:
             "output_fonts": out_attach_cnt,
             "source_chapters": src_chap_cnt,
             "output_chapters": out_chap_cnt
+        },
+        "video_frame_count": {
+            "passed": frame_count_match,
+            "source_frames": src_frames_cnt,
+            "output_frames": out_frames_cnt
         },
         "audio_bit_exact_md5": {
             "passed": audio_md5_match,

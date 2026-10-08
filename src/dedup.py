@@ -38,11 +38,13 @@ def scan_dedup_plan(
     fps_den: int = 1001,
     hi: int = DEFAULT_DEDUP_HI,
     lo: int = DEFAULT_DEDUP_LO,
-    frac: float = DEFAULT_DEDUP_FRAC
+    frac: float = DEFAULT_DEDUP_FRAC,
+    chunk_frame_counts: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
     Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
+    Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp 100% với phân đoạn thực tế.
     """
     # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
     ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -106,58 +108,115 @@ def scan_dedup_plan(
             f"Số frame quét từ debug log ({total_frames}) không khớp số frame ffprobe đếm được ({expected_frames})!"
         )
 
-    # Số frame lý tưởng mỗi chunk 8s
     fps_val = fps_num / fps_den
-    frames_per_chunk = int(round(segment_seconds * fps_val))
 
-    # BẮT BUỘC ÉP GIỮ FRAME ĐẦU MỖI CHUNK per AGENTS.md Invariant:
-    # kept = sorted(set(kept) | set(range(0, total, frames_per_chunk)))
-    chunk_start_indices = set(range(0, total_frames, frames_per_chunk))
-    for c_start in chunk_start_indices:
-        if c_start < total_frames:
-            frame_actions[c_start] = "keep"
+    if chunk_frame_counts is not None and len(chunk_frame_counts) > 0:
+        sum_chunks = sum(chunk_frame_counts)
+        assert sum_chunks == total_frames, (
+            f"Tổng số frame của các phân đoạn ({sum_chunks}) không khớp tổng frame ({total_frames})!"
+        )
+        chunk_start_indices = set()
+        curr_pos = 0
+        for count in chunk_frame_counts:
+            chunk_start_indices.add(curr_pos)
+            curr_pos += count
 
-    # Chia các frame thành từng chunk
-    chunks_meta = []
-    total_kept_count = 0
-    num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
+        for c_start in chunk_start_indices:
+            if c_start < total_frames:
+                frame_actions[c_start] = "keep"
 
-    for c_idx in range(num_chunks):
-        c_start = c_idx * frames_per_chunk
-        c_end = min((c_idx + 1) * frames_per_chunk, total_frames)
-        c_frames = frame_actions[c_start:c_end]
-        c_len = len(c_frames)
+        chunks_meta = []
+        total_kept_count = 0
+        curr_start = 0
 
-        # Xây dựng danh sách runs cho chunk này
-        runs: List[Dict[str, int]] = []
-        curr_kept = 0
-        curr_count = 0
-        kept_indices = []
+        for c_idx, c_len in enumerate(chunk_frame_counts):
+            c_start = curr_start
+            c_end = c_start + c_len
+            curr_start = c_end
+            c_frames = frame_actions[c_start:c_end]
 
-        for idx, act in enumerate(c_frames):
-            if act == "keep":
-                if curr_count > 0:
-                    runs.append({"frame_idx": curr_kept, "count": curr_count})
-                curr_kept = idx
-                curr_count = 1
-                kept_indices.append(idx)
-            else:
-                curr_count += 1
+            runs: List[Dict[str, int]] = []
+            curr_kept = 0
+            curr_count = 0
+            kept_indices = []
 
-        if curr_count > 0:
-            runs.append({"frame_idx": curr_kept, "count": curr_count})
+            for idx, act in enumerate(c_frames):
+                if act == "keep":
+                    if curr_count > 0:
+                        runs.append({"frame_idx": curr_kept, "count": curr_count})
+                    curr_kept = idx
+                    curr_count = 1
+                    kept_indices.append(idx)
+                else:
+                    curr_count += 1
 
-        total_kept_count += len(kept_indices)
+            if curr_count > 0:
+                runs.append({"frame_idx": curr_kept, "count": curr_count})
 
-        chunks_meta.append({
-            "chunk_idx": c_idx,
-            "start_frame": c_start,
-            "end_frame": c_end,
-            "total_frames": c_len,
-            "kept_count": len(kept_indices),
-            "kept_indices": kept_indices,
-            "runs": runs
-        })
+            total_kept_count += len(kept_indices)
+
+            chunks_meta.append({
+                "chunk_idx": c_idx,
+                "start_frame": c_start,
+                "end_frame": c_end,
+                "total_frames": c_len,
+                "kept_count": len(kept_indices),
+                "kept_indices": kept_indices,
+                "runs": runs
+            })
+
+        num_chunks = len(chunk_frame_counts)
+        frames_per_chunk = chunk_frame_counts[0] if num_chunks > 0 else int(round(segment_seconds * fps_val))
+    else:
+        # Số frame lý tưởng mỗi chunk 8s (chia đều)
+        frames_per_chunk = int(round(segment_seconds * fps_val))
+
+        # BẮT BUỘC ÉP GIỮ FRAME ĐẦU MỖI CHUNK per AGENTS.md Invariant:
+        chunk_start_indices = set(range(0, total_frames, frames_per_chunk))
+        for c_start in chunk_start_indices:
+            if c_start < total_frames:
+                frame_actions[c_start] = "keep"
+
+        chunks_meta = []
+        total_kept_count = 0
+        num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
+
+        for c_idx in range(num_chunks):
+            c_start = c_idx * frames_per_chunk
+            c_end = min((c_idx + 1) * frames_per_chunk, total_frames)
+            c_frames = frame_actions[c_start:c_end]
+            c_len = len(c_frames)
+
+            # Xây dựng danh sách runs cho chunk này
+            runs: List[Dict[str, int]] = []
+            curr_kept = 0
+            curr_count = 0
+            kept_indices = []
+
+            for idx, act in enumerate(c_frames):
+                if act == "keep":
+                    if curr_count > 0:
+                        runs.append({"frame_idx": curr_kept, "count": curr_count})
+                    curr_kept = idx
+                    curr_count = 1
+                    kept_indices.append(idx)
+                else:
+                    curr_count += 1
+
+            if curr_count > 0:
+                runs.append({"frame_idx": curr_kept, "count": curr_count})
+
+            total_kept_count += len(kept_indices)
+
+            chunks_meta.append({
+                "chunk_idx": c_idx,
+                "start_frame": c_start,
+                "end_frame": c_end,
+                "total_frames": c_len,
+                "kept_count": len(kept_indices),
+                "kept_indices": kept_indices,
+                "runs": runs
+            })
 
     dedup_ratio = (1.0 - (total_kept_count / total_frames)) * 100.0 if total_frames > 0 else 0.0
 
@@ -173,6 +232,7 @@ def scan_dedup_plan(
         "segment_seconds": segment_seconds,
         "frames_per_chunk": frames_per_chunk,
         "total_chunks": num_chunks,
+        "chunk_frame_counts": chunk_frame_counts,
         "total_kept_frames": total_kept_count,
         "dedup_ratio_percent": round(dedup_ratio, 2),
         "chunks": chunks_meta
@@ -191,18 +251,24 @@ def load_or_create_plan(
     segment_seconds: int = 8,
     fps_num: int = 24000,
     fps_den: int = 1001,
-    resume: bool = True
+    resume: bool = True,
+    chunk_frame_counts: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
     Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
-    nếu chưa có thì tự động quét preflight và lưu plan.json.
+    nếu chưa có hoặc không khớp với chunk_frame_counts thực tế thì tự động quét lại.
     """
     if resume and os.path.exists(plan_path):
         try:
             with open(plan_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if data.get("total_frames", 0) > 0 and len(data.get("chunks", [])) > 0:
-                return data
+            chunks = data.get("chunks", [])
+            if data.get("total_frames", 0) > 0 and len(chunks) > 0:
+                if chunk_frame_counts is None:
+                    return data
+                cached_counts = [c["total_frames"] for c in chunks]
+                if cached_counts == chunk_frame_counts:
+                    return data
         except Exception:
             pass
 
@@ -211,7 +277,8 @@ def load_or_create_plan(
         plan_path=plan_path,
         segment_seconds=segment_seconds,
         fps_num=fps_num,
-        fps_den=fps_den
+        fps_den=fps_den,
+        chunk_frame_counts=chunk_frame_counts
     )
 
 
