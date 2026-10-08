@@ -247,3 +247,32 @@
   - Tự động tạo và đặt 2 file `.vi.srt` ngay bên cạnh file video MKV gốc trong `RawSources/Tensei_Shitara_Ken_Deshita/` để trình phát phát hiện tức thì.
   - Lưu trữ đầy đủ bộ phụ đề 3 thứ tiếng vào `Subtitles_Archive/Season_02/`.
 
+---
+
+## 11. Nâng Cấp Toàn Diện Phân Hệ Dịch Thuật Subtrans (P0–P3) & Mở Rộng Bộ Kiểm Thử (155 Unit Tests PASS)
+
+### A. Triển Khai 4 Giai Đoạn Nâng Cấp Kiến Trúc (Roadmap P0 ➔ P3)
+1. **P0 — Evaluation Harness & Định Lượng Độc Lập (`subtrans/eval/`):**
+   * Xây dựng bộ công cụ tính chỉ số tất định: CPS, CJK leakage rate, Romaji vocative retention, zero-overlap compliance, pronoun matching.
+   * Đóng băng `regression_suite.yaml` (6 ca kiểm thử biên kinh điển) và `pronoun_suite.yaml` (13 ca đối thoại vai vế đại từ chuẩn).
+   * Runner CLI: `python3 subtrans.py eval` trực quan hóa tiến độ bằng bảng Rich formatting.
+   * **Ràng buộc chốt:** 100% sử dụng Cloud API (Gemini Flash-Lite, Flash), tuyệt đối không dùng local model.
+2. **P1 — Schema CoT & Linter V1 (`subtrans/linter.py`):**
+   * Đưa các trường suy luận ngữ cảnh (`speaker`, `addressee`, `mode`, `en_conflict`, `uncertain`) lên trước chuỗi tiếng Việt `vi` trong schema Gemini output, tạo Chain-of-Thought ngầm giải quyết triệt để xưng hô.
+   * Linter V1 kiểm tra 6 tiêu chuẩn phòng thu: CJK leakage, reading speed CPS (ngưỡng an toàn 20.0, trần cứng 25.0), Unicode NFC, Romaji vocatives, cấm calque Hán-Việt thô, và khoảng cách an toàn 40ms giữa 2 câu thoại.
+   * Cơ chế tự động sửa lỗi (`auto_fix_cues`): chuẩn hóa NFC, thu gọn khoảng trắng, tự động kéo giãn thời lượng câu thoại vào khoảng trống để hạ CPS.
+3. **P2 — Smart Cloud Cascade Model (`subtrans/cascade.py`):**
+   * Hàm tính độ khó $S(cue) \in [0.0, 15.0]$ tổng hợp từ cờ `uncertain`, `en_conflict`, lỗi linter, độ dài câu và từ vựng cổ ngữ.
+   * Mô hình biên tập 2 tầng 100% Cloud: Draft Pass dùng `gemini-3.5-flash-lite` (tiết kiệm quota), tự động lọc 5–15% cues khó ($S \ge 4.0$) chuyển sang Repair Pass dùng `gemini-3.8-flash` với vai trò biên tập viên trưởng.
+4. **P3 — Lightweight Subtitle RAG & Error Bank (`subtrans/rag.py`):**
+   * Cơ sở dữ liệu SQLite `.cache/knowledge.db` lưu trữ các đơn vị phụ đề mẫu đối chiếu chuẩn (`gold_units`) và bẫy lỗi kinh điển (`error_bank`).
+   * Tự động căn chỉnh và nạp thành công **4.144 câu song ngữ mẫu** từ 11 tập Tenken Season 1 qua `import_subtitles_triplet`.
+   * Truy vấn trích xuất tự động vài ví dụ mẫu (few-shot) và quy tắc phòng ngừa rủi ro tương ứng để tiêm vào payload prompt gửi tới Gemini API.
+
+### B. Mở Rộng Toàn Diện Bộ Kiểm Thử (155 Tests PASS)
+* **`subtrans/tests/test_rag.py` (13 tests):** Kiểm tra khởi tạo DB, từ chối chuỗi rỗng/khoảng trắng, tự động chuẩn hoá NFC, nạp & truy vấn few-shot, cô lập series (`series="tenken"` vs `futsutsuka`), không crash khi thiếu từ khóa kanji, chống trùng lặp, cô lập cautions theo series, quy tắc chung `series=None`, quy trình bóc tách triplet ASS (lọc tags `{\an8}`, lọc comment `is_comment=True`, lọc overlap < 300ms), xử lý thiếu file nguồn, import chỉ có JA + VI.
+* **`subtrans/tests/test_linter.py` (10 tests):** Kiểm tra bắt placeholder/rỗng (`[Chưa dịch]`, `[DRY-RUN]`), CJK leakage, ngưỡng biên CPS (0ms, 20.0 CPS an toàn, 20.1 CPS cảnh báo, 25.0 CPS cảnh báo, 25.1 CPS lỗi), chuẩn hóa NFC, từ cấm không phân biệt hoa thường, bảo tồn vocative với Glossary và CastSheet, ranh giới khoảng nghỉ zero-overlap (40ms vs 39ms vs overlap âm), tự động kéo giãn thời lượng câu cuối/khoảng trống hẹp, và định dạng báo cáo markdown.
+* **`subtrans/tests/test_gemini.py` (10 tests):** Kiểm tra lọc glossary liên quan, dịch thành công, chế độ dry-run không tốn quota, tự động retry & chia đôi (bisect), hướng dẫn xưng hô tên riêng trong prompt, gán metadata suy luận CoT, tiêm payload RAG few-shot & cautions, fallback câu thoại âm thanh rỗng `（ため息）`, phân loại danh mục `uncertain`, cấu hình thinking budget.
+* **`subtrans/tests/test_cascade.py` (10 tests):** Kiểm tra tính điểm độ khó baseline, các thành phần trọng số, lọc ứng viên cần sửa, ngưỡng lọc tùy chỉnh, bỏ qua khi toàn bộ câu đạt chuẩn, dry-run repair pass, API repair thành công, dự phòng khi API lỗi, tích hợp glossary trong repair, và phản hồi ID cục bộ.
+* **`subtrans/tests/test_eval_runner.py` (6 tests):** Kiểm tra nạp file YAML, tính toàn vẹn của 6 regression cases, tính toàn vẹn của 13 pronoun benchmark cues, so khớp đại từ & tên Romaji, tổng kết rỗng và thực thi runner.
+* **Tổng số kiểm thử đạt chuẩn:** **155 passed, 2 skipped** (thời gian chạy: 44.31 giây).
