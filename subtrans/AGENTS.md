@@ -40,14 +40,16 @@
 ```text
 subtrans/
 ├── eval/                   # Evaluation Harness: metrics, regression_suite.yaml, pronoun_suite.yaml, runner
+├── cascade.py              # Smart Cloud Cascade: S(cue) difficulty scoring & Flash repair pass
+├── rag.py                  # Lightweight Subtitle RAG & Error Bank: gold_units & error_bank (.cache/knowledge.db)
 ├── linter.py               # Linter V1: CJK leak, CPS reading speed, Unicode NFC, Romaji vocatives, banned calques
-├── cli.py                  # Typer CLI entrypoint: check, models, run, compare, batch, eval
-├── pipeline.py             # Orchestrator: Stage A (Cast) -> Stage B (Gemini Cloud) -> Stage 4 (Linter/Write) -> Stage C (QA)
+├── cli.py                  # Typer CLI entrypoint: check, models, run, compare, batch, eval, rag
+├── pipeline.py             # Orchestrator: Stage A (Cast) -> Stage B (Gemini Cloud) -> Stage 2c (Cascade) -> Stage 4 (Linter/Write) -> Stage C (QA)
 ├── config.py / config.yaml # Cấu hình RPM, RPD, chuỗi model, batch size (mặc định 100)
 ├── cast_sheet.py           # Stage A: Khám phá nhân vật, đại từ xưng hô, xuất out/<name>.cast.yaml
 ├── models.py               # Pydantic models: Cue (với CoT metadata), GlossaryTerm, AddressRules, Glossary
 ├── parser.py               # pysubs2: lọc OP/ED/Signs, gỡ tag ASS, align time overlap JA-EN (>=50%)
-├── gemini_backend.py       # Primary: Google GenAI SDK (Schema "Suy luận trước, dịch sau", typed uncertain, CoT)
+├── gemini_backend.py       # Primary: Google GenAI SDK (Schema "Suy luận trước, dịch sau", RAG context, CoT)
 ├── local_backend.py        # [DEPRECATED theo chỉ đạo Người dùng: 100% Cloud API, không dùng model local]
 ├── throttle.py             # RateLimiter, Exponential Backoff + Jitter, phân loại lỗi 429
 ├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256
@@ -60,6 +62,8 @@ subtrans/
 > **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.
 > **Schema "Suy luận trước, dịch sau":** `SubtitleOutputItem` đặt các trường `speaker`, `addressee`, `mode`, `en_conflict` lên TRƯỚC trường bản dịch `vi`, giúp mô hình giải quyết ngữ cảnh nhân vật và zero-pronouns trước khi sinh bản dịch tiếng Việt.
 > **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20, lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.
+> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 2000 RPD), tự động tính điểm độ khó $S(cue)$ và gom 5–15% số cue khó/nghi vấn gửi vào Repair Pass của `gemini-3.8-flash` dưới dạng biên tập viên trưởng.
+> **Lightweight RAG & Error Bank (P3):** Lưu trữ hơn 4.100+ câu mẫu song ngữ (`gold_units`) và 7 quy tắc bẫy lỗi (`error_bank`) trong SQLite để tự động trích xuất Few-shot và cảnh báo vào prompt dịch theo từng series.
 
 
 ---

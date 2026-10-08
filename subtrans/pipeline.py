@@ -125,6 +125,7 @@ class TranslationPipeline:
         self.gemini_backend: Optional[GeminiTranslator] = None
         self.ollama_backend: Optional[OllamaTranslator] = None
         self.reviewer: Optional[LocalReviewer] = None
+        self.enable_cascade: bool = trans_cfg.get("cascade", True)
 
     def _init_primary_backend(self):
         if not self.local_only and not self.gemini_backends:
@@ -533,9 +534,20 @@ class TranslationPipeline:
         if self.ollama_backend:
             self.ollama_backend.unload()
 
-        # Optional review
+        # Optional review / Smart Cloud Cascade Repair Pass (100% Cloud API)
         t_srev = time.monotonic()
-        if self.enable_review and self.reviewer:
+        if getattr(self, "enable_cascade", True) and not self.local_only and self.gemini_backends:
+            repair_backend = (
+                self.gemini_backends.get("gemini-3.8-flash")
+                or self.gemini_backends.get("gemini-3.7-flash")
+                or next(iter(self.gemini_backends.values()), None)
+            )
+            if repair_backend:
+                from subtrans.cascade import run_cascade_repair_pass
+                console.print(f"[bold cyan]🔍 [CASCADE PASS] Đánh giá và biên tập các câu khó bằng '{repair_backend.model}'...[/bold cyan]")
+                repair_stats = run_cascade_repair_pass(dialogue_cues, repair_translator=repair_backend, glossary=glossary)
+                stats["cascade_repaired"] = repair_stats.get("repaired_count", 0)
+        elif self.enable_review and self.reviewer:
             console.print("[bold cyan]🔍 Running optional review pass...[/bold cyan]")
             reviewed_cues = [c for c in dialogue_cues if c.vi]
             for i in range(0, len(reviewed_cues), self.local_batch_size):

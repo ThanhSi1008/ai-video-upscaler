@@ -313,6 +313,65 @@ def eval_cmd():
     run_evaluation()
 
 
+rag_app = typer.Typer(help="Manage lightweight Subtitle RAG knowledge base and Error Bank.", add_completion=False)
+app.add_typer(rag_app, name="rag")
+
+
+@rag_app.command(name="stats")
+def rag_stats():
+    """Displays statistics of the RAG Knowledge Base and Error Bank."""
+    from subtrans.rag import KnowledgeBase
+    kb = KnowledgeBase()
+    stats = kb.get_stats()
+    table = Table(title="Knowledge Base (RAG & Error Bank) Status")
+    table.add_column("Category", style="cyan")
+    table.add_column("Count", style="bold green")
+    table.add_row("Gold Subtitle Units", str(stats["gold_units_count"]))
+    table.add_row("Distinct Anime Series", str(stats["distinct_series_count"]))
+    table.add_row("Error Bank Rules", str(stats["error_bank_rules_count"]))
+    console.print(table)
+
+
+@rag_app.command(name="import")
+@app.command(name="import-gold")
+def rag_import(
+    directory: Path = typer.Argument(..., help="Directory containing subtitle files (*.ja.ass, *.en.ass, *.vi.ass)", exists=True),
+    series: str = typer.Option(..., "--series", "-s", help="Anime series identifier (e.g. 'tenken', 'futsutsuka')"),
+):
+    """Imports gold subtitle triplets (*.ja.ass, *.en.ass, *.vi.ass) into knowledge base."""
+    from subtrans.rag import KnowledgeBase
+    kb = KnowledgeBase()
+    files = list(directory.glob("*.*"))
+    episodes: dict = {}
+    for f in files:
+        fname = f.name
+        if ".ja." in fname:
+            stem = fname.split(".ja.")[0]
+            episodes.setdefault(stem, {})["ja"] = f
+        elif ".en." in fname:
+            stem = fname.split(".en.")[0]
+            episodes.setdefault(stem, {})["en"] = f
+        elif ".vi." in fname:
+            stem = fname.split(".vi.")[0]
+            episodes.setdefault(stem, {})["vi"] = f
+
+    total_imported = 0
+    console.print(f"\n[bold cyan]📦 Đang nhập phụ đề mẫu vào Gold Units cho bộ '{series}'...[/bold cyan]")
+    for stem, triplet in sorted(episodes.items()):
+        if "ja" in triplet and "vi" in triplet:
+            count = kb.import_subtitles_triplet(
+                ja_path=triplet["ja"],
+                en_path=triplet.get("en"),
+                vi_path=triplet["vi"],
+                series=series,
+                episode=stem,
+            )
+            total_imported += count
+            console.print(f"  • {stem}: [green]+{count} units[/green]")
+
+    console.print(f"\n[bold green]✅ Đã nạp thành công {total_imported} gold subtitle units vào Knowledge Base![/bold green]\n")
+
+
 if __name__ == "__main__":
     app()
 

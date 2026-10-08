@@ -472,6 +472,19 @@ class GeminiTranslator(BaseTranslator):
         if rel_glossary:
             payload["glossary"] = rel_glossary
 
+        # Add RAG few-shot examples and error cautions from KnowledgeBase
+        try:
+            from subtrans.rag import KnowledgeBase
+            kb = KnowledgeBase()
+            few_shots = kb.retrieve_few_shots(cues, max_examples=3)
+            if few_shots:
+                payload["approved_reference_examples"] = few_shots
+            cautions = kb.retrieve_cautions(cues, max_cautions=2)
+            if cautions:
+                payload["error_prevention_cautions"] = cautions
+        except Exception as e:
+            logger.debug(f"RAG retrieval skipped: {e}")
+
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",
             "Follow character relationships, pronouns, and glossary strictly.",
