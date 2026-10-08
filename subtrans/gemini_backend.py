@@ -37,10 +37,11 @@ SYSTEM_INSTRUCTION = (
     "5. Punctuation: use '...' (three ASCII dots, never unicode ellipsis); use '—' at end of interrupted speech; '?!' allowed; max two consecutive ! or ?.\n"
     "6. Sentences split across cues: translate at sentence level, then divide across the SAME cues at natural phrase boundaries. "
     "The continuation cue MUST start in lowercase; the preceding fragment MUST end with ',' or '...'. Never move content beyond that split.\n"
-    "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English reference track (e.g. 'Reirin', 'Keigetsu', 'Leelee', 'Kou', 'Shu', 'Gayou', 'Barusu', 'Emilia-tan', 'Ram'). "
-    "NEVER translate proper names or clan names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (ABSOLUTELY NO 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Chu', 'Hoàng', 'Thư', 'Kim', 'Lợi Lợi'). "
-    "Keep palace/organization names in Romaji or EN romanization (e.g. 'cung Shuku', 'cung Kouki', 'Quý phi Shu').\n"
-    "8. Register: archaic or divine (ta/ngươi/ngài, tiểu thư, chàng) vs modern casual (tôi/cậu/em/anh). Decide from character profile.\n"
+    "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English reference track (e.g. 'Fran', 'Urushi', 'Jean', 'Reirin', 'Keigetsu', 'Rudeus', 'Emilia'). "
+    "NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (ABSOLUTELY NO 'Pháp Lạp', 'Ô Lỗ Thi', 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Kim', 'Hoàng'). "
+    "Keep places, guilds, and organization names in Romaji/English romanization (e.g. 'thị trấn Alessa', 'thị trấn cảng Dars', 'Đảo nổi').\n"
+    "8. Register & pacing: Match character personality and pacing. For quiet/stoic characters (like Fran), keep lines short, direct, and natural. "
+    "Differentiate internal monologues (tôi/mình) from telepathic/spoken dialogue based on the relationship table.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
 
@@ -424,7 +425,7 @@ class GeminiTranslator(BaseTranslator):
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",
             "Follow character relationships, pronouns, and glossary strictly.",
-            "CRITICAL NAMING RULE: Always keep character names, family/clan names, and palace names in Romaji matching the English reference track (e.g. Reirin, Keigetsu, Leelee, Kou, Shu). NEVER translate them into Sino-Vietnamese (Hán-Việt) or Vietnamese words (DO NOT use Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt, Chu, Hoàng, Thư, Lợi Lợi).",
+            "CRITICAL NAMING RULE: Always keep character names, family/clan names, and organization names in Romaji matching the English reference track (e.g. Fran, Urushi, Jean, Reirin, Keigetsu, Rudeus). NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (DO NOT use Pháp Lạp, Ô Lỗ Thi, Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt).",
             "When unsure of a rendering, set 'uncertain': true instead of inventing meaning.",
         ]
         if self.gloss_skill_names:

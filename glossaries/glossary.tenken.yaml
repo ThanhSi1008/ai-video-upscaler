@@ -1,0 +1,263 @@
+# =====================================================================
+# glossary.tenken.yaml
+# Bảng thuật ngữ & phong cách dịch chuyên biệt cho anime:
+# "Tensei Shitara Ken Deshita" (Reincarnated as a Sword / Chuyển Sinh Thành Kiếm)
+# Dựa trên dữ liệu chuẩn đối soát từ 11 tập Season 1 B-Global Official Subtitles
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Tensei Shitara Ken Deshita specific terms, characters, magic skills, and style rules"
+  genres: [isekai, fantasy, adventure, action]
+
+style_rules:
+  - "CRITICAL: Character proper names MUST strictly follow standard Romaji/English anime localization: Fran, Shishou (Sư phụ), Urushi, Jean Doubee (Jean du Vix), Bernard, Amanda, Nell, Klimt, Garrus, Donadrond. NEVER transliterate into Sino-Vietnamese (ABSOLUTELY NO 'Pháp Lạp', 'Ô Lỗ Thi', 'A Mạn Đạt', 'Nhĩ', 'Khắc Lâm Mỗ Đặc')."
+  - "FRAN'S SPEECH STYLE: Fran is a laconic, stoic 12-year-old Black Cat Beastkin. Her sentences are short, direct, and unembellished (e.g. 'Sư phụ, đi thôi.', 'Ngon lắm.', 'Được rồi.', 'Cảm ơn em, Urushi.'). When talking to Shishou, she calls him 'Sư phụ' and refers to herself as 'Fran' or 'con'/'em' (or drops pronouns naturally)."
+  - "SHISHOU'S SPEECH STYLE: Shishou (Teacher/Master) acts as a caring guardian, mentor, and sword. In internal monologues (suy nghĩ nội tâm), he refers to himself as 'mình' or 'tôi'. When telepathically talking to Fran, he addresses her as 'Fran' and refers to himself as 'ta' or 'tôi'."
+  - "WOLF URUSHI: The darkness wolf companion is named 'Urushi' (NOT 'Jet' from English fan releases). Shishou and Fran treat Urushi with love. Urushi's vocalizations are natural wolf/dog sounds ('Gâu!', 'Oẳng!', 'Hú!')."
+  - "JEAN DOUBEE (Season 2): An eccentric, theatrical necromancer. He speaks in an elevated, theatrical tone ('Ta là Jean Doubee vĩ đại!', 'Ngươi...', 'Cấm ăn thêm bát thứ ba đấy')."
+  - "TERMINOLOGY FIDELITY: Always translate core RPG terms accurately: 'Hội mạo hiểm giả' (Adventurer Guild), 'Mạo hiểm giả' (Adventurer), 'Hắc Miêu tộc' (Black Cat Tribe), 'Thẩm định' (Appraisal), 'Thần giao cách cảm' (Telepathy), 'Tự tiến hóa' (Self-Evolution), 'Ma kiếm' (Magic Sword), 'Ma thú' (Demonic Beast), 'Hầm ngục' (Dungeon), 'Đảo nổi' (Floating/Sky Island), 'Thuật chiêu hồn' (Necromancy)."
+
+characters:
+  - name_ja: "フラン"
+    name_vi: "Fran"
+    gender: "female"
+    register: "stoic cute"
+    speaks_to:
+      - listener: "Shishou"
+        self: "Fran"
+        other: "Sư phụ"
+        note: "Fran tôn trọng và gắn bó sâu sắc với Sư phụ"
+      - listener: "Urushi"
+        self: "chị"
+        other: "Urushi"
+        note: "Đối xử như bạn đồng hành / thú cưng đáng yêu"
+      - listener: "Nell"
+        self: "em"
+        other: "chị Nell"
+      - listener: "Amanda"
+        self: "tôi"
+        other: "Amanda"
+      - listener: "Jean"
+        self: "tôi"
+        other: "Jean"
+      - listener: "all"
+        self: "tôi"
+        other: "ngươi"
+
+  - name_ja: "師匠"
+    name_vi: "Sư phụ"
+    gender: "male"
+    register: "guardian mentor"
+    speaks_to:
+      - listener: "Fran"
+        self: "ta"
+        other: "Fran"
+        note: "Xưng 'mình'/'tôi' khi độc thoại nội tâm"
+      - listener: "Urushi"
+        self: "ta"
+        other: "Urushi"
+      - listener: "Jean"
+        self: "ta"
+        other: "Jean"
+      - listener: "all"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "ウルシ"
+    name_vi: "Urushi"
+    gender: "male"
+    register: "beast"
+    note: "Tất Hắc Ma Lang (Darkness Wolf), tuyệt đối KHÔNG dịch thành Jet"
+
+  - name_ja: "ジャン・ドゥービー"
+    name_vi: "Jean Doubee"
+    gender: "male"
+    register: "eccentric noble"
+    speaks_to:
+      - listener: "Fran"
+        self: "ta"
+        other: "Fran"
+      - listener: "Shishou"
+        self: "ta"
+        other: "ngươi"
+      - listener: "Bernard"
+        self: "ta"
+        other: "ngươi"
+      - listener: "all"
+        self: "ta"
+        other: "các ngươi"
+
+  - name_ja: "ベルナルド"
+    name_vi: "Bernard"
+    gender: "male"
+    register: "butler servant"
+    speaks_to:
+      - listener: "Jean"
+        self: "tôi"
+        other: "ngài Jean"
+
+  - name_ja: "アンディ"
+    name_vi: "Andy"
+    gender: "other"
+    register: "summoned beast"
+    note: "Undead biết bay do Jean triệu hồi"
+
+  - name_ja: "アマンダ"
+    name_vi: "Amanda"
+    gender: "female"
+    register: "affectionate doting"
+    speaks_to:
+      - listener: "Fran"
+        self: "mẹ"
+        other: "Fran bé bỏng"
+
+  - name_ja: "ネル"
+    name_vi: "Nell"
+    gender: "female"
+    register: "friendly receptionist"
+    speaks_to:
+      - listener: "Fran"
+        self: "chị"
+        other: "Fran"
+
+  - name_ja: "クリムト"
+    name_vi: "Klimt"
+    gender: "male"
+    register: "guildmaster"
+
+  - name_ja: "ガルス"
+    name_vi: "Garrus"
+    gender: "male"
+    register: "rough dwarf"
+    speaks_to:
+      - listener: "Fran"
+        self: "ta"
+        other: "tiểu thư"
+
+  - name_ja: "ドナドロンド"
+    name_vi: "Donadrond"
+    gender: "male"
+    register: "boisterous examiner"
+
+terms:
+  # Địa danh & Thế giới
+  - ja: "アレッサ"
+    en: "Alessa"
+    vi: "Alessa"
+    note: "Thị trấn Alessa nơi Fran bắt đầu làm mạo hiểm giả"
+
+  - ja: "港町ダーズ"
+    en: "Port Town of Dars"
+    vi: "thị trấn cảng Dars"
+    note: "Thị trấn cảng Dars ở phía tây Alessa (Season 2)"
+
+  - ja: "浮遊島"
+    en: "Sky Island"
+    vi: "Đảo nổi"
+    alt: ["hòn đảo lơ lửng trên trời", "đảo bay"]
+    note: "Hòn đảo lơ lửng trên bầu trời (Bối cảnh chính Season 2)"
+
+  - ja: "クランゼル王国"
+    en: "Kranzel Kingdom"
+    vi: "Vương quốc Kranzel"
+
+  # Chủng tộc & Tổ chức
+  - ja: "黒猫族"
+    en: "Black Cat Tribe"
+    vi: "tộc Hắc Miêu"
+    alt: ["Hắc Miêu tộc"]
+    note: "Bộ tộc của Fran, từng bị coi là không thể tiến hóa"
+
+  - ja: "冒険者ギルド"
+    en: "Adventurer Guild"
+    vi: "Hội mạo hiểm giả"
+
+  - ja: "冒険者"
+    en: "adventurer"
+    vi: "mạo hiểm giả"
+
+  - ja: "ギルドマスター"
+    en: "Guildmaster"
+    vi: "Hội trưởng"
+    alt: ["Chủ hội"]
+
+  # Hệ thống ma pháp & Kỹ năng
+  - ja: "自己進化"
+    en: "Self-Evolution"
+    vi: "Tự tiến hóa"
+    note: "Kỹ năng độc nhất giúp Sư phụ nâng cấp thông số"
+
+  - ja: "自己進化ポイント"
+    en: "Self-Evolution Points"
+    vi: "điểm Tự tiến hóa"
+
+  - ja: "念話"
+    en: "Telepathy"
+    vi: "Thần giao cách cảm"
+    note: "Cách Sư phụ và Fran giao tiếp trong tâm trí"
+
+  - ja: "鑑定"
+    en: "Appraisal"
+    vi: "Thẩm định"
+    note: "Kỹ năng soi thông số của đối tượng"
+
+  - ja: "魔剣"
+    en: "Magic Sword"
+    vi: "Ma kiếm"
+
+  - ja: "魔獣"
+    en: "Demonic Beast"
+    vi: "ma thú"
+
+  - ja: "魔力"
+    en: "mana"
+    vi: "ma lực"
+
+  - ja: "死霊術"
+    en: "Necromancy"
+    vi: "thuật chiêu hồn"
+    alt: ["ma thuật tử linh"]
+
+  - ja: "死霊術研究所"
+    en: "Necromantic Atelier"
+    vi: "viện nghiên cứu thuật chiêu hồn"
+
+  - ja: "死霊術師"
+    en: "Necromancer"
+    vi: "pháp sư chiêu hồn"
+
+  - ja: "アンデッド"
+    en: "undead"
+    vi: "undead"
+
+  - ja: "眷属召喚"
+    en: "Familiar Summoning"
+    vi: "triệu hồi quyến thuộc"
+
+  - ja: "浄化魔術"
+    en: "Purification Magic"
+    vi: "ma thuật thanh tẩy"
+
+  - ja: "魂魄眼"
+    en: "Soul Eyes"
+    vi: "Hồn Phách Nhãn"
+    note: "Kỹ năng nhìn linh hồn của Jean"
+
+  - ja: "カレー"
+    en: "curry"
+    vi: "cà ri"
+    note: "Món ăn yêu thích số 1 của Fran"
+
+  - ja: "ゴルド"
+    en: "Gold"
+    vi: "Gold"
+    alt: ["gordo"]
+    note: "Đơn vị tiền tệ trong thế giới"
+
+  - ja: "皆殺しのジャン"
+    en: "Genocide Jean"
+    vi: "Jean Tận Diệt"
+    alt: ["Jean Thảm Sát"]
+    note: "Danh hiệu vang danh của Jean Doubee"
