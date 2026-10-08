@@ -587,6 +587,18 @@ class TranslationPipeline:
                 f"   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n"
             )
 
+        # Stage 4: Linter V1 Quality Verification & Subtitle Writing
+        from subtrans.linter import lint_subtitles, auto_fix_cues
+        cues, fixes_count = auto_fix_cues(cues)
+        lint_violations = lint_subtitles(cues, glossary=glossary)
+        if lint_violations:
+            lint_errors = [v for v in lint_violations if v.severity == "ERROR"]
+            lint_warnings = [v for v in lint_violations if v.severity == "WARNING"]
+            console.print(
+                f"[yellow]📋 [LINTER V1] Phát hiện {len(lint_violations)} cảnh báo/lỗi "
+                f"({len(lint_errors)} lỗi, {len(lint_warnings)} cảnh báo, {fixes_count} auto-fixes).[/yellow]"
+            )
+
         with console.status(f"[bold blue]Stage 4: Writing subtitle file to {out_file}...[/bold blue]"):
             saved_path = write_subtitles(
                 cues=cues,

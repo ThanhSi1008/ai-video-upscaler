@@ -12,6 +12,7 @@ Stage 4: Subtitle generation adhering strictly to ADDENDUM 6 specifications:
 
 import re
 import copy
+import unicodedata
 from pathlib import Path
 from typing import List, Optional, Tuple
 import pysubs2
@@ -83,7 +84,7 @@ def _clean_single_dialogue_line(text: str) -> str:
        (text.startswith('«') and text.endswith('»')):
         text = text[1:-1].strip()
 
-    return text
+    return unicodedata.normalize("NFC", text)
 
 
 def clean_and_normalize_vietnamese(text: str, preserve_dual: bool = False) -> str:
@@ -463,9 +464,14 @@ def write_srt_subtitles(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     blocks = []
-    processed_cues = optimize_cues_for_playback(cues) if optimize_playback else [
-        c for c in cues if not getattr(c, "is_dropped_sound", False)
-    ]
+    if optimize_playback:
+        processed_cues = optimize_cues_for_playback(cues)
+        from subtrans.linter import auto_fix_cues
+        processed_cues, _ = auto_fix_cues(processed_cues)
+    else:
+        processed_cues = [
+            c for c in cues if not getattr(c, "is_dropped_sound", False)
+        ]
 
     for idx, cue in enumerate(processed_cues, start=1):
         t_start = format_timestamp_srt(cue.start)
@@ -523,9 +529,14 @@ def write_subtitles(
         )
 
     # ASS format fallback (preserves styles and tags if needed)
-    processed_cues = optimize_cues_for_playback(cues) if optimize_playback else [
-        c for c in cues if not getattr(c, "is_dropped_sound", False)
-    ]
+    if optimize_playback:
+        processed_cues = optimize_cues_for_playback(cues)
+        from subtrans.linter import auto_fix_cues
+        processed_cues, _ = auto_fix_cues(processed_cues)
+    else:
+        processed_cues = [
+            c for c in cues if not getattr(c, "is_dropped_sound", False)
+        ]
     ssa = copy.deepcopy(original_ja_ssa)
     ssa.events.clear()
     for cue in processed_cues:

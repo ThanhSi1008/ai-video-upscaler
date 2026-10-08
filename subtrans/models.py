@@ -23,7 +23,18 @@ class Cue(BaseModel):
     is_dropped_sound: bool = False
     used_en_fallback: bool = False
     uncertain: bool = False
+    speaker: Optional[str] = None
+    addressee: Optional[str] = None
+    mode: Optional[str] = "spoken"
+    en_conflict: bool = False
+    uncertain_reason: Optional[str] = "none"
     raw_text: Optional[str] = None  # Original raw text for skipped cues
+
+    @property
+    def duration_ms(self) -> int:
+        """Returns the duration of the cue in milliseconds."""
+        return max(0, self.end - self.start)
+
 
 
 class GlossaryTerm(BaseModel):

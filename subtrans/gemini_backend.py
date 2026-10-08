@@ -13,8 +13,8 @@ import os
 import re
 import json
 import logging
-from typing import List, Dict, Any, Optional, Tuple, Union
-from pydantic import BaseModel
+from typing import List, Dict, Any, Optional, Tuple, Union, Literal
+from pydantic import BaseModel, field_validator
 from google import genai
 from google.genai import types
 
@@ -30,7 +30,7 @@ SYSTEM_INSTRUCTION = (
     "The subtitle timing and line structure are anchored to the English dialogue from the source video, while the "
     "Japanese dialogue provides the authentic source nuance, character pronouns, honorifics, and tone.\n"
     "Strict Priorities:\n"
-    "1. No mistranslation. When unsure, choose the simpler, safer rendering and set \"uncertain\": true instead of inventing meaning.\n"
+    "1. No mistranslation. When unsure, choose the simpler, safer rendering and categorize \"uncertain\" ('pronoun', 'referent', 'wordplay', 'archaic', 'term', 'other') instead of inventing meaning.\n"
     "2. Natural, readable spoken Vietnamese that sounds natural when read aloud (never word-for-word calques).\n"
     "3. Consistent names and pronouns within the episode.\n"
     "4. Format: Exactly ONE text line per cue (no line breaks). Soft cap: 80 characters.\n"
@@ -43,14 +43,63 @@ SYSTEM_INSTRUCTION = (
     "8. Addressing by proper name (Vocative): When Japanese dialogue addresses someone by their proper name (e.g. フラン -> Fran, ジャン -> Jean, ネルさん -> chị Nell / Nell, 玲琳 -> Reirin), ALWAYS KEEP the Romaji proper name directly in the Vietnamese dialogue line (e.g. 'Fran, em có sao không?', 'Jean, cẩn thận!', 'Cảm ơn chị Nell', 'Reirin, chuyện gì vậy?'). NEVER drop or replace the proper name with generic standalone pronouns ('anh/chị/em/cậu/cô/mày') to avoid wrong pronoun assumptions and preserve audio-subtitle sync.\n"
     "9. Register & pacing: Match character personality and pacing. For quiet/stoic characters (like Fran), keep lines short, direct, and natural. "
     "Differentiate internal monologues (tôi/mình) from telepathic/spoken dialogue based on the relationship table.\n"
+    "10. Context-First Reasoning (Chain-of-Thought): Prior to outputting 'vi', you MUST analyze and output:\n"
+    "    - 'speaker': character name speaking (e.g. Fran, Teacher, Reirin, or 'unknown').\n"
+    "    - 'addressee': character recipient being spoken to (or null if talking to self / general audience).\n"
+    "    - 'mode': dialogue mode ('spoken', 'inner', 'narration', 'spell', 'flashback', 'comm', 'lyrics', 'onscreen').\n"
+    "    - 'en_conflict': true if the English reference diverges significantly from or contradicts the authentic Japanese nuance, else false.\n"
+    "    - 'vi': the Vietnamese dialogue translation adhering strictly to the above rules.\n"
+    "    - 'uncertain': 'none' if confident; or 'pronoun', 'referent', 'wordplay', 'archaic', 'term', 'other' if unsure.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
+
+UncertainCategory = Literal[
+    "none", "pronoun", "referent", "wordplay", "archaic", "term", "other"
+]
 
 
 class SubtitleOutputItem(BaseModel):
     id: int
+    speaker: Optional[str] = "unknown"
+    addressee: Optional[str] = None
+    mode: Literal[
+        "spoken", "inner", "narration", "spell",
+        "flashback", "comm", "lyrics", "onscreen"
+    ] = "spoken"
+    en_conflict: bool = False
     vi: str
-    uncertain: bool = False
+    uncertain: UncertainCategory = "none"
+
+    @field_validator("uncertain", mode="before")
+    @classmethod
+    def normalize_uncertain(cls, v: Any) -> str:
+        if v is True:
+            return "other"
+        if v is False or v is None:
+            return "none"
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("none", "pronoun", "referent", "wordplay", "archaic", "term", "other"):
+                return s
+        return "other"
+
+
+def _apply_item_metadata_to_cue(cue: Cue, item: Dict[str, Any]) -> None:
+    """Applies inferred metadata (speaker, addressee, mode, en_conflict, uncertain) from LLM output to Cue."""
+    cue.speaker = item.get("speaker") or cue.speaker or "unknown"
+    cue.addressee = item.get("addressee") or cue.addressee
+    cue.mode = item.get("mode") or cue.mode or "spoken"
+    cue.en_conflict = bool(item.get("en_conflict", False))
+    unc = item.get("uncertain", "none")
+    if unc is True:
+        cue.uncertain = True
+        cue.uncertain_reason = "other"
+    elif isinstance(unc, str) and unc not in ("none", ""):
+        cue.uncertain = True
+        cue.uncertain_reason = unc
+    else:
+        cue.uncertain = False
+        cue.uncertain_reason = "none"
 
 
 def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> Dict[str, Any]:
@@ -454,7 +503,8 @@ class GeminiTranslator(BaseTranslator):
             is_valid, err_msg = validate_translations(expected_ids, items)
             if is_valid:
                 for c, it in zip(cues, items):
-                    c.uncertain = bool(it.get("uncertain", False))
+                    if isinstance(it, dict):
+                        _apply_item_metadata_to_cue(c, it)
                 return [it["vi"] for it in items]
             logger.warning(f"Batch validation failed on attempt 1 ({err_msg}).")
         except Exception as e:
@@ -489,7 +539,8 @@ class GeminiTranslator(BaseTranslator):
         is_valid, err_msg = validate_translations(expected_ids, items)
         if is_valid:
             for c, it in zip(cues, items):
-                c.uncertain = bool(it.get("uncertain", False))
+                if isinstance(it, dict):
+                    _apply_item_metadata_to_cue(c, it)
             return [it["vi"] for it in items]
 
         raise RuntimeError(f"Failed to translate cue ID {cues[0].id} with Gemini backend after retries and split.")
