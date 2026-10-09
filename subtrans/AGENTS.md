@@ -50,9 +50,8 @@ subtrans/
 ├── models.py               # Pydantic models: Cue (với CoT metadata), GlossaryTerm, AddressRules, Glossary
 ├── parser.py               # pysubs2: lọc OP/ED/Signs, gỡ tag ASS, align time overlap JA-EN (>=50%)
 ├── gemini_backend.py       # Primary: Google GenAI SDK (Schema "Suy luận trước, dịch sau", RAG context, CoT)
-├── local_backend.py        # [DEPRECATED theo chỉ đạo Người dùng: 100% Cloud API, không dùng model local]
 ├── throttle.py             # RateLimiter, Exponential Backoff + Jitter, phân loại lỗi 429
-├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256
+├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256 (hỗ trợ rag_hash và stage)
 ├── glossary.py             # Loader & Merger: Nạp Base glossary + Per-series Override
 ├── glossary.yaml           # Base glossary chuẩn: 13 style rules, address rules, 230+ anime terms
 ├── writer.py               # Xuất file .srt chuẩn mẫu (1 dòng/cue, soft cap 80, CPS auto-fix, zero-overlap)
@@ -61,9 +60,9 @@ subtrans/
 
 > **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.
 > **Schema "Suy luận trước, dịch sau":** `SubtitleOutputItem` đặt các trường `speaker`, `addressee`, `mode`, `en_conflict` lên TRƯỚC trường bản dịch `vi`, giúp mô hình giải quyết ngữ cảnh nhân vật và zero-pronouns trước khi sinh bản dịch tiếng Việt.
-> **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20, lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.
-> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 2000 RPD), tự động tính điểm độ khó $S(cue)$ và gom 5–15% số cue khó/nghi vấn gửi vào Repair Pass của `gemini-3.8-flash` dưới dạng biên tập viên trưởng.
-> **Lightweight RAG & Error Bank (P3):** Lưu trữ hơn 4.100+ câu mẫu song ngữ (`gold_units`) và 7 quy tắc bẫy lỗi (`error_bank`) trong SQLite để tự động trích xuất Few-shot và cảnh báo vào prompt dịch theo từng series.
+> **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20 (trần cứng > 25), lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.
+> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 2000 RPD), tự động tính điểm độ khó $S(cue)$ (sau khi chạy auto-fix) và gom tối đa 20% số cue khó (trần ngân sách $\le 25$ cues/lần, $\le 2$ requests/tập) gửi vào Repair Pass của `gemini-3.8-flash`. Cổng Re-lint so sánh theo danh tính vi phạm `_ident`, chặn trôi dạt ngữ nghĩa và lệch chữ số.
+> **Lightweight RAG & Error Bank (P3):** Lưu trữ 4.144 câu song ngữ (`gold_units` có status `draft`, `reviewed`, `gold`) và 7 quy tắc bẫy lỗi (`error_bank`). Chỉ nạp `gold`/`reviewed` vào prompt, loại trừ tập đang đo (`exclude_episode`), cách ly cache nháp bằng `rag_hash`.
 
 
 ---

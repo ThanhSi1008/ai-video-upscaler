@@ -34,13 +34,13 @@ def get_today_pt_str() -> str:
     return get_now_pt().strftime("%Y-%m-%d")
 
 
-def get_next_pt_reset() -> Tuple[datetime.datetime, datetime.datetime]:
+def get_next_pt_reset(now_pt: Optional[datetime.datetime] = None) -> Tuple[datetime.datetime, datetime.datetime]:
     """
     Tính toán chính xác thời điểm 00:00 ngày tiếp theo theo giờ Thái Bình Dương (PT)
     và thời điểm tương ứng theo giờ Việt Nam (VN: 14:00 khi daylight saving PDT, 15:00 sau 1/11 khi PST).
     """
-    now_pt = get_now_pt()
-    next_pt = (now_pt + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    current = now_pt or get_now_pt()
+    next_pt = (current + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     next_vn = next_pt.astimezone(VN_TZ)
     return next_pt, next_vn
 
@@ -60,8 +60,9 @@ def compute_cue_cache_key(
     cast_sheet_hash: str = "",
     prompt_version: str = "v2.0",
     stage: str = "draft",
+    rag_hash: str = "",
 ) -> str:
-    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, and stage."""
+    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, stage, and rag snapshot."""
     canonical = json.dumps({
         "model": model,
         "ja": ja.strip(),
@@ -70,6 +71,7 @@ def compute_cue_cache_key(
         "cast_sheet": cast_sheet_hash,
         "prompt_version": prompt_version,
         "stage": stage,
+        "rag_hash": rag_hash if stage == "draft" else "",
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -150,6 +152,14 @@ class TranslationCache:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN error_type TEXT")
             if "key_id" not in cols:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN key_id TEXT")
+            if "prompt_tokens" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
+            if "candidates_tokens" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN candidates_tokens INTEGER DEFAULT 0")
+            if "total_tokens" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN total_tokens INTEGER DEFAULT 0")
+            if "thinking_tokens" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN thinking_tokens INTEGER DEFAULT 0")
 
             # Backfill pt_date bằng ZoneInfo("America/Los_Angeles") cho các bản ghi cũ
             today_pt = get_today_pt_str()
@@ -216,15 +226,25 @@ class TranslationCache:
         error_type: str = "",
         quota_id: str = "",
         quota_value: str = "",
-        key_id: str = ""
+        key_id: str = "",
+        prompt_tokens: int = 0,
+        candidates_tokens: int = 0,
+        total_tokens: int = 0,
+        thinking_tokens: int = 0,
     ):
-        """Ghi nhận một lời gọi API vào cơ sở dữ liệu để theo dõi hạn mức theo ngày Thái Bình Dương."""
+        """Ghi nhận một lời gọi API vào cơ sở dữ liệu để theo dõi hạn mức và token sử dụng."""
         pt_date = get_today_pt_str()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
-                INSERT INTO api_requests (model, backend, cues_count, status, error_type, quota_id, quota_value, pt_date, key_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (model, backend, cues_count, status, error_type, quota_id, str(quota_value), pt_date, key_id))
+                INSERT INTO api_requests (
+                    model, backend, cues_count, status, error_type, quota_id, quota_value, pt_date, key_id,
+                    prompt_tokens, candidates_tokens, total_tokens, thinking_tokens
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                model, backend, cues_count, status, error_type, quota_id, str(quota_value), pt_date, key_id,
+                prompt_tokens, candidates_tokens, total_tokens, thinking_tokens
+            ))
             conn.commit()
 
     def mark_key_model_exhausted(
@@ -381,6 +401,37 @@ def execute_and_log_api_request(
     c = cache or TranslationCache()
     try:
         res = fn()
+        def _to_int(val) -> int:
+            try:
+                if isinstance(val, bool):
+                    return 0
+                if isinstance(val, (int, float)):
+                    return int(val)
+                if isinstance(val, str) and val.isdigit():
+                    return int(val)
+            except Exception:
+                pass
+            return 0
+
+        prompt_tokens = 0
+        candidates_tokens = 0
+        total_tokens = 0
+        thinking_tokens = 0
+        if hasattr(res, "usage_metadata") and res.usage_metadata:
+            meta = res.usage_metadata
+            prompt_tokens = _to_int(getattr(meta, "prompt_token_count", 0))
+            candidates_tokens = _to_int(getattr(meta, "candidates_token_count", 0))
+            total_tokens = _to_int(getattr(meta, "total_token_count", 0))
+            thinking_tokens = _to_int(getattr(meta, "thinking_token_count", 0))
+            if not thinking_tokens and hasattr(meta, "candidates_tokens_details"):
+                details = meta.candidates_tokens_details
+                if hasattr(details, "thinking_token_count"):
+                    thinking_tokens = _to_int(getattr(details, "thinking_token_count", 0))
+                elif isinstance(details, list):
+                    for d in details:
+                        if getattr(d, "modality", None) == "THINKING" or getattr(d, "type", None) == "THINKING":
+                            thinking_tokens = _to_int(getattr(d, "token_count", 0))
+
         c.log_request(
             model=model,
             backend=backend,
@@ -389,7 +440,11 @@ def execute_and_log_api_request(
             error_type="",
             quota_id="",
             quota_value="",
-            key_id=key_id
+            key_id=key_id,
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=total_tokens,
+            thinking_tokens=thinking_tokens,
         )
         return res
     except Exception as e:

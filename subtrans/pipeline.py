@@ -6,6 +6,7 @@ translation backends, caching, output generation (SRT single-line default),
 and Stage C QA audit reporting.
 """
 
+import re
 import time
 import logging
 import hashlib
@@ -22,8 +23,6 @@ from subtrans.models import Cue, Glossary
 from subtrans.parser import parse_and_align_subtitles, detect_auto_offset
 from subtrans.cache import TranslationCache, compute_cue_cache_key
 from subtrans.gemini_backend import GeminiTranslator
-from subtrans.local_backend import OllamaTranslator
-from subtrans.review import LocalReviewer
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError, DailyQuotaExhaustedError
 from subtrans.writer import write_subtitles
 from subtrans.report import generate_qa_report
@@ -57,6 +56,7 @@ class TranslationPipeline:
         dry_run: bool = False,
         batch_size: Optional[int] = None,
         subs_quality: str = "normal",  # "normal" (Lite first) | "high" (Flash first)
+        cache_db_path: Optional[Path] = None,
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
@@ -118,18 +118,16 @@ class TranslationPipeline:
 
         # Request timeouts
         self.request_timeout_ms = int(gemini_cfg.get("request_timeout_ms", 45000))
-        self.ollama_timeout = int(ollama_cfg.get("request_timeout", 60))
 
         # Cache & Rate Limiter
-        self.cache = TranslationCache()
+        self.cache = TranslationCache(db_path=cache_db_path)
         self.rate_limiter = RateLimiter(max_rpm=self.gemini_rpm)
 
         # Backends
         self.gemini_backends: Dict[str, GeminiTranslator] = {}
         self.gemini_backend: Optional[GeminiTranslator] = None
-        self.ollama_backend: Optional[OllamaTranslator] = None
-        self.reviewer: Optional[LocalReviewer] = None
         self.enable_cascade: bool = trans_cfg.get("cascade", True)
+        self.series: Optional[str] = None
 
     def _init_primary_backend(self):
         if not self.local_only and not self.gemini_backends:
@@ -160,23 +158,6 @@ class TranslationPipeline:
             else:
                 console.print("[yellow]⚠️  GEMINI_API_KEY not found in environment. Running in local-only mode.[/yellow]")
                 self.local_only = True
-
-        if self.ollama_backend is None:
-            self.ollama_backend = OllamaTranslator(
-                endpoint=self.ollama_endpoint,
-                model=self.ollama_model,
-                timeout=self.ollama_timeout,
-            )
-
-        if self.enable_review:
-            self.reviewer = LocalReviewer(
-                endpoint=self.ollama_endpoint,
-                model=self.ollama_review_model,
-            )
-            self.reviewer = LocalReviewer(
-                endpoint=self.ollama_endpoint,
-                model=self.ollama_review_model,
-            )
 
     def run(
         self,
@@ -224,14 +205,21 @@ class TranslationPipeline:
         console.print(f"  • Source (JA): [cyan]{ja_path}[/cyan]{f' (Offset: {sub_offset_ms}ms)' if sub_offset_ms != 0 else ''}")
         if en_path:
             console.print(f"  • Reference (EN): [cyan]{en_path}[/cyan] (Offset: {en_offset_ms}ms)")
-        console.print(f"  • Mode: [bold]{'100% Local (Ollama)' if self.local_only else f'Primary: Gemini ({self.gemini_model}) -> Local Fallback'}[/bold]")
+        console.print(f"  • Mode: [bold]100% Cloud API: Gemini ({self.gemini_model})[/bold]")
         if subs_upgrade:
-            console.print("[bold yellow]⚡ Cờ --subs-upgrade được kích hoạt: Bỏ qua cache các câu Lite/Local để nâng cấp dịch bằng model cao hơn.[/bold yellow]")
+            console.print("[bold yellow]⚡ Cờ --subs-upgrade được kích hoạt: Bỏ qua cache các câu Lite để nâng cấp dịch bằng model cao hơn.[/bold yellow]")
+
+        base_name = output_basename or ja_path.stem
+
+        # Extract series name and propagate to Gemini backends
+        series_match = re.search(r"^(.*?)(?:_S\d+|[ _]E\d+|\.\w+$)", base_name, re.IGNORECASE)
+        self.series = series_match.group(1).replace("_", " ").strip() if series_match else None
+        for b in self.gemini_backends.values():
+            b.exclude_episode = base_name
 
         base_glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH) if DEFAULT_BASE_GLOSSARY_PATH.exists() else None
         if not glossary_path:
-            cand_name = output_basename or ja_path.stem
-            auto_g = find_series_glossary(cand_name)
+            auto_g = find_series_glossary(base_name)
             if auto_g:
                 glossary_path = auto_g
                 console.print(f"  • [bold green]Tự động nhận diện Glossary riêng của series:[/bold green] [cyan]{auto_g.name}[/cyan]")
@@ -337,7 +325,9 @@ class TranslationPipeline:
         ]
 
         active_backend_mode = "local" if self.local_only else "gemini"
-        candidate_gemini_models = [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
+        candidate_gemini_models = getattr(self, "candidate_gemini_models", None) or (
+            [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
+        )
         curr_gemini_idx = 0
 
         # Compute cast sheet hash for cache keying
@@ -379,21 +369,37 @@ class TranslationPipeline:
                                 progress.advance(task, 1)
                     break
 
-                # 1. Check cache for cues in batch
+                # 1. Compute RAG snapshot hash for this batch (C0/C2 use 'no_rag', C1/C3 use few-shot hash)
+                rag_hash = "no_rag"
+                if self.enable_rag:
+                    try:
+                        import hashlib
+                        from subtrans.rag import KnowledgeBase
+                        kb = KnowledgeBase()
+                        fs = kb.retrieve_few_shots(batch, max_examples=3, exclude_episode=base_name)
+                        ca = kb.retrieve_cautions(batch, max_cautions=2)
+                        if fs or ca:
+                            rag_data = {"few_shots": fs, "cautions": ca}
+                            rag_hash = hashlib.sha256(json.dumps(rag_data, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+                    except Exception:
+                        pass
+
+                # Check cache for cues in batch
                 uncached_cues: List[Cue] = []
                 for cue in batch:
-                    # Model key for cache lookup
-                    target_m = self.ollama_model if active_backend_mode == "local" else candidate_gemini_models[curr_gemini_idx]
+                    target_m = candidate_gemini_models[curr_gemini_idx]
                     ckey = compute_cue_cache_key(
                         model=target_m,
                         ja=cue.ja,
                         en=cue.en,
                         glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
                         cast_sheet_hash=cast_sheet_hash,
-                        prompt_version=prompt_version
+                        prompt_version=prompt_version,
+                        stage="draft",
+                        rag_hash=rag_hash,
                     )
                     cached_val = self.cache.get_cue(ckey)
-                    is_lower_model = any(lm in target_m for lm in ["lite", "local", "translategemma"])
+                    is_lower_model = "lite" in target_m
                     if cached_val and not (subs_upgrade and is_lower_model):
                         cue.vi = cached_val
                         cue.backend_used = "cache"
@@ -414,7 +420,7 @@ class TranslationPipeline:
 
                 translated_texts: List[str] = []
                 backend_used = active_backend_mode
-                model_used = self.ollama_model
+                model_used = candidate_gemini_models[curr_gemini_idx] if candidate_gemini_models else "none"
 
                 if active_backend_mode == "gemini":
                     translated = False
@@ -449,70 +455,23 @@ class TranslationPipeline:
                                 next_model = candidate_gemini_models[curr_gemini_idx]
                                 console.print(f"[bold cyan]🔄 Chuyển sang model kế tiếp trong chuỗi: '{next_model}'...[/bold cyan]")
                             else:
-                                console.print("[bold yellow]🔄 Toàn bộ các model Gemini trong chuỗi đã hết hạn mức. Chuyển sang fallback local / chưa dịch...[/bold yellow]")
-                                active_backend_mode = "local"
+                                console.print("[bold yellow]🔄 Toàn bộ các model Gemini trong chuỗi đã hết hạn mức. Đánh dấu các câu là [Chưa dịch]...[/bold yellow]")
                                 break
                         except Exception as e:
                             stats["episode_requests"] = stats.get("episode_requests", 0) + 1
-                            self.cache.log_request(model=target_model, backend="gemini", cues_count=len(uncached_cues), status="error")
-                            console.print(f"\n[yellow]⚠️  Model '{target_model}' thất bại sau {self.max_retries_per_model} lần thử: {e}.[/yellow]")
+                            logger.warning(f"⚠️ Model '{target_model}' gặp lỗi sau các lượt thử ({e}). Chuyển sang model fallback kế tiếp...")
                             curr_gemini_idx += 1
                             if curr_gemini_idx < len(candidate_gemini_models):
                                 next_model = candidate_gemini_models[curr_gemini_idx]
-                                console.print(f"[bold cyan]🔄 Chuyển sang model kế tiếp trong chuỗi: '{next_model}'...[/bold cyan]")
+                                logger.info(f"🔄 Chuyển sang model kế tiếp: '{next_model}'...")
                             else:
-                                console.print("[bold yellow]🔄 Toàn bộ các model Gemini trong chuỗi đã thử hết. Chuyển sang fallback local / chưa dịch...[/bold yellow]")
-                                active_backend_mode = "local"
+                                logger.warning("🔄 Toàn bộ các model Gemini trong chuỗi đều thất bại. Đánh dấu các câu là [Chưa dịch]...")
                                 break
 
                     if not translated:
-                        # Fallback to local (chỉ khi không có upscale)
-                        if self.ollama_backend.is_upscale_running():
-                            console.print("[bold red]⚠️ Tiến trình Upscale đang chạy trên GPU. Không kích hoạt mô hình local để tránh tranh chấp VRAM! Đánh dấu các câu là [Chưa dịch].[/bold red]")
-                            translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
-                            backend_used = "untranslated"
-                            model_used = "none"
-                        elif not self.ollama_backend.is_available():
-                            console.print("[bold red]⚠️ Ollama local backend không khả dụng. Đánh dấu các câu là [Chưa dịch].[/bold red]")
-                            translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
-                            backend_used = "untranslated"
-                            model_used = "none"
-                        else:
-                            try:
-                                translated_texts = self.ollama_backend.translate_batch(uncached_cues, context, glossary)
-                                backend_used = "local"
-                                model_used = self.ollama_model
-                                stats["local"] += len(uncached_cues)
-                                stats["model_counts"][self.ollama_model] = stats["model_counts"].get(self.ollama_model, 0) + len(uncached_cues)
-                            except Exception as le:
-                                console.print(f"[bold red]⚠️ Local Ollama thất bại: {le}. Đánh dấu các câu là [Chưa dịch].[/bold red]")
-                                translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
-                                backend_used = "untranslated"
-                                model_used = "none"
-                else:
-                    # active_backend_mode == "local"
-                    if self.ollama_backend.is_upscale_running():
-                        console.print("[bold red]⚠️ Tiến trình Upscale đang chạy trên GPU. Không kích hoạt mô hình local để tránh tranh chấp VRAM! Đánh dấu các câu là [Chưa dịch].[/bold red]")
                         translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
                         backend_used = "untranslated"
                         model_used = "none"
-                    elif not self.ollama_backend.is_available():
-                        console.print("[bold red]⚠️ Ollama local backend không khả dụng. Đánh dấu các câu là [Chưa dịch].[/bold red]")
-                        translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
-                        backend_used = "untranslated"
-                        model_used = "none"
-                    else:
-                        try:
-                            translated_texts = self.ollama_backend.translate_batch(uncached_cues, context, glossary)
-                            backend_used = "local"
-                            model_used = self.ollama_model
-                            stats["local"] += len(uncached_cues)
-                            stats["model_counts"][self.ollama_model] = stats["model_counts"].get(self.ollama_model, 0) + len(uncached_cues)
-                        except Exception as le:
-                            console.print(f"[bold red]⚠️ Local Ollama thất bại: {le}. Đánh dấu các câu là [Chưa dịch].[/bold red]")
-                            translated_texts = ["[Chưa dịch]"] * len(uncached_cues)
-                            backend_used = "untranslated"
-                            model_used = "none"
 
                 # Store into cues and cache
                 for cue, vi in zip(uncached_cues, translated_texts):
@@ -529,17 +488,16 @@ class TranslationPipeline:
                             en=cue.en,
                             glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
                             cast_sheet_hash=cast_sheet_hash,
-                            prompt_version=prompt_version
+                            prompt_version=prompt_version,
+                            stage="draft",
+                            rag_hash=rag_hash,
                         )
                         self.cache.set_cue(ckey, backend_used, model_used, vi)
                     progress.advance(task, 1)
 
         stage_times["stage_2_translate"] = time.monotonic() - t_s2
 
-        if self.ollama_backend:
-            self.ollama_backend.unload()
-
-        # Optional review / Smart Cloud Cascade Repair Pass (100% Cloud API)
+        # Optional Smart Cloud Cascade Repair Pass (100% Cloud API)
         t_srev = time.monotonic()
         if getattr(self, "enable_cascade", True) and not self.local_only and self.gemini_backends:
             repair_backend = (
@@ -549,20 +507,18 @@ class TranslationPipeline:
             )
             if repair_backend:
                 from subtrans.cascade import run_cascade_repair_pass
+                from subtrans.linter import auto_fix_cues
+                # Run auto_fix_cues first to fix CPS and NFC deterministically before S(cue)
+                dialogue_cues, fixes_count = auto_fix_cues(dialogue_cues)
                 console.print(f"[bold cyan]🔍 [CASCADE PASS] Đánh giá và biên tập các câu khó bằng '{repair_backend.model}'...[/bold cyan]")
-                repair_stats = run_cascade_repair_pass(dialogue_cues, repair_translator=repair_backend, glossary=glossary)
+                repair_stats = run_cascade_repair_pass(
+                    dialogue_cues,
+                    repair_translator=repair_backend,
+                    glossary=glossary,
+                    series=self.series,
+                    episode_basename=base_name,
+                )
                 stats["cascade_repaired"] = repair_stats.get("repaired_count", 0)
-        elif self.enable_review and self.reviewer:
-            console.print("[bold cyan]🔍 Running optional review pass...[/bold cyan]")
-            reviewed_cues = [c for c in dialogue_cues if c.vi]
-            for i in range(0, len(reviewed_cues), self.local_batch_size):
-                chunk = reviewed_cues[i:i + self.local_batch_size]
-                refined = self.reviewer.review_batch(chunk, glossary)
-                for c, r_text in zip(chunk, refined):
-                    if r_text and r_text != c.vi:
-                        c.vi = r_text
-                        stats["reviewed"] += 1
-            self.reviewer.unload()
         stage_times["stage_review"] = time.monotonic() - t_srev
 
         # Stage 4: Writing output (Item 4b: Chốt chặn kiểm định chất lượng nội dung)
@@ -692,9 +648,6 @@ class TranslationPipeline:
         )
         console.print(f"  • Subtitle Output: [cyan]{saved_path}[/cyan]")
         console.print(f"  • Stage C Audit: [cyan]{audit_file}[/cyan]")
-        # Release local model from Unified Memory per AGENTS.md invariant
-        if self.ollama_backend and (stats["local"] > 0 or self.local_only):
-            self.ollama_backend.unload()
 
         return {
             "output_path": saved_path,

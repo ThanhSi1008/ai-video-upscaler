@@ -475,16 +475,25 @@ class GeminiTranslator(BaseTranslator):
             payload["glossary"] = rel_glossary
 
         # Add RAG few-shot examples and error cautions from KnowledgeBase
+        self.last_rag_hash = "no_rag"
         if self.enable_rag:
             try:
+                import hashlib
                 from subtrans.rag import KnowledgeBase
                 kb = KnowledgeBase()
-                few_shots = kb.retrieve_few_shots(cues, max_examples=3)
+                few_shots = kb.retrieve_few_shots(
+                    cues,
+                    max_examples=3,
+                    exclude_episode=getattr(self, "exclude_episode", None)
+                )
                 if few_shots:
                     payload["approved_reference_examples"] = few_shots
                 cautions = kb.retrieve_cautions(cues, max_cautions=2)
                 if cautions:
                     payload["error_prevention_cautions"] = cautions
+                if few_shots or cautions:
+                    rag_data = {"few_shots": few_shots, "cautions": cautions}
+                    self.last_rag_hash = hashlib.sha256(json.dumps(rag_data, sort_keys=True).encode("utf-8")).hexdigest()[:16]
             except Exception as e:
                 logger.debug(f"RAG retrieval skipped: {e}")
 

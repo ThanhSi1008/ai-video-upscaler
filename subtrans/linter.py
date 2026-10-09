@@ -32,6 +32,21 @@ RULE_BANNED_TERM = "LINT_BANNED_TERM"
 RULE_EMPTY_TEXT = "LINT_EMPTY_TEXT"
 RULE_ZERO_OVERLAP = "LINT_ZERO_OVERLAP"
 
+ALL_RULE_IDS = {
+    RULE_CJK_LEAK,
+    RULE_HIGH_CPS,
+    RULE_UNICODE_NOT_NFC,
+    RULE_ROMAJI_MISSING,
+    RULE_BANNED_TERM,
+    RULE_EMPTY_TEXT,
+    RULE_ZERO_OVERLAP,
+}
+
+CRITICAL_RULES = {
+    RULE_CJK_LEAK,
+    RULE_BANNED_TERM,
+}
+
 # Banned translationese / calques -> recommended replacement
 BANNED_TERMS_MAP: Dict[str, str] = {
     "Pháp Lạp": "Fran",
@@ -61,6 +76,8 @@ class LintViolation:
     cue_id: int
     message: str
     suggestion: Optional[str] = None
+    is_hard_ceiling: bool = False
+    span: Optional[Tuple[int, int]] = None
 
 
 def lint_cue(
@@ -123,6 +140,7 @@ def lint_cue(
                 cue_id=cue.id,
                 message=f"Cue {cue.id} reading speed is critically high ({cps:.1f} CPS > hard cap {max_hard_cps:.1f}).",
                 suggestion="Extend duration into adjacent gap or condense wording.",
+                is_hard_ceiling=True,
             )
         )
     elif cps > max_safe_cps:

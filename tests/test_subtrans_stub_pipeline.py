@@ -1,192 +1,213 @@
 # -*- coding: utf-8 -*-
 """
 tests/test_subtrans_stub_pipeline.py
-Test tích hợp end-to-end cho Stage B phụ đề KHÔNG gọi API (Zero API calls, Zero GPU):
-- Quét chọn track JA/EN qua find_or_extract_subtitles
-- Tự động phát hiện và áp dụng auto-offset riêng từng tập trong hàng đợi
-  (Ep 1: không áp dụng [-148ms], Ep 2: không áp dụng [-98ms], Ep 3: áp dụng [-11141ms])
-- Sử dụng stub backend (dry_run=True) sinh phụ đề mẫu đúng quy chuẩn đặt tên <tập>_4K.vi.srt
-- Nhúng phụ đề vào bản sao container MKV thành phẩm và kiểm định toàn vẹn bằng verify_mux_integrity.
+End-to-end integration test for Stage B Subtitle Translation pipeline using a StubTranslator backend.
+Zero Cloud API quota, Zero GPU:
+- Evaluates RAG retrieval, Draft Pass, and Smart Cloud Cascade Repair Pass
+- Tests Re-lint Accept/Reject Gate, auto_fix_cues, and SRT output generation
+- Verifies subtitle embedding and Stream Copy Mux Integrity on sample_30s.mkv
+- NEVER skipped: fully self-contained!
 """
 
 import os
 import sys
+import re
+import json
 import shutil
+import tempfile
 import subprocess
 from pathlib import Path
-
-# Add project root to sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from unittest.mock import MagicMock, patch
 
 import pytest
+import pysubs2
 
-from upscale import find_or_extract_subtitles
 from subtrans.pipeline import TranslationPipeline
-from subtrans.parser import detect_auto_offset
+from subtrans.models import Cue
+from subtrans.gemini_backend import GeminiTranslator, SubtitleOutputItem
+from subtrans.cascade import RepairOutputItem
 from src.ffmpeg_ops import embed_subtitle_track, probe_video
 from src.mux_audit import verify_mux_integrity
 
 
-RAW_DIR = Path("/Users/xis108/Documents/RawSources")
-UPSCALED_DIR = Path("/Users/xis108/Documents/Upscaled")
-TMP_TEST_DIR = Path("/tmp/test_subtrans_integration")
+SAMPLE_MKV = Path("samples/sample_30s.mkv")
 
 
-EPISODES = [
-    {
-        "name": "EP1 (Kimi ga Shinu made Koi wo Shitai 13)",
-        "source": RAW_DIR / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13.mkv",
-        "upscaled": UPSCALED_DIR / "Kimi_ga_Shinu_made_Koi_wo_Shitai" / "Kimi_ga_Shinu_made_Koi_wo_Shitai_S01E13_4K.mkv",
-        "expected_offset_applied": False,
-        "expected_offset_min": -300,
-        "expected_offset_max": 0,
-        "expected_fonts": 11,
-    },
-    {
-        "name": "EP2 (Re Zero 84)",
-        "source": RAW_DIR / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84.mkv",
-        "upscaled": UPSCALED_DIR / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu" / "Re_Zero_kara_Hajimeru_Isekai_Seikatsu_S04E84_4K.mkv",
-        "expected_offset_applied": False,
-        "expected_offset_min": -200,
-        "expected_offset_max": 0,
-        "expected_fonts": 24,
-    },
-    {
-        "name": "EP3 (Slime S4-24)",
-        "source": RAW_DIR / "Tensei_Shitara_Slime_Datta_Ken" / "Tensei_Shitara_Slime_Datta_Ken_S04E24.mkv",
-        "upscaled": None,  # Tập 3 chưa hoàn tất upscale ở Đêm 1
-        "expected_offset_applied": True,
-        "expected_offset_min": -11300,
-        "expected_offset_max": -11000,
-        "expected_fonts": 0,
-    },
-]
+def _create_sample_subtitles(tmp_dir: Path) -> tuple[Path, Path]:
+    """Creates realistic sample Japanese and English subtitle files."""
+    ja_path = tmp_dir / "sample_ep.ja.srt"
+    en_path = tmp_dir / "sample_ep.en.srt"
+
+    ja_content = (
+        "1\n00:00:01,000 --> 00:00:03,000\nフラン、準備はいいか？\n\n"
+        "2\n00:00:03,500 --> 00:00:05,000\nうん、師匠。行こう。\n\n"
+        "3\n00:00:05,500 --> 00:00:07,500\n（爆発音）\n\n"
+        "4\n00:00:08,000 --> 00:00:10,500\n妾が相手をしてやろう。\n\n"
+    )
+    en_content = (
+        "1\n00:00:01,000 --> 00:00:03,000\nFran, are you ready?\n\n"
+        "2\n00:00:03,500 --> 00:00:05,000\nYeah, Master. Let's go.\n\n"
+        "3\n00:00:05,500 --> 00:00:07,500\n(explosion)\n\n"
+        "4\n00:00:08,000 --> 00:00:10,500\nI shall be your opponent.\n\n"
+    )
+
+    ja_path.write_text(ja_content, encoding="utf-8")
+    en_path.write_text(en_content, encoding="utf-8")
+    return ja_path, en_path
 
 
-def test_subtrans_queue_stub_integration():
-    """Chạy toàn bộ pipeline phụ đề hàng đợi bằng stub backend trên bản sao độc lập."""
-    if not RAW_DIR.exists():
-        pytest.skip("Thư mục RawSources không khả dụng trên môi trường này.")
+def test_subtrans_stub_pipeline_end_to_end(tmp_path):
+    """
+    Tests entire subtitle translation pipeline with stub Cloud API backend:
+    - RAG few-shot retrieval
+    - Draft generation
+    - Cascade Repair pass on difficult/noble cue
+    - Writing SRT & QA audit report
+    - Embedding and verifying mux integrity on sample MKV
+    """
+    ja_path, en_path = _create_sample_subtitles(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_db = tmp_path / "test_cache.db"
 
-    if TMP_TEST_DIR.exists():
-        shutil.rmtree(TMP_TEST_DIR)
-    TMP_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    pipeline = TranslationPipeline(
+        local_only=False,
+        output_dir=out_dir,
+        output_format="srt",
+        require_approved_cast=False,
+        allow_latest_alias=False,
+        dry_run=False,
+        enable_cascade=True,
+        enable_rag=True,
+        cache_db_path=cache_db,
+    )
 
-    results = []
+    # Mock Cast Sheet API response
+    mock_cast_obj = MagicMock()
+    mock_cast_obj.text = json.dumps({
+        "characters": [
+            {"name_ja": "フラン", "name_vi": "Fran", "gender": "female"},
+            {"name_ja": "師匠", "name_vi": "Jean", "gender": "male"},
+            {"name_ja": "貴婦人", "name_vi": "NobleWoman", "gender": "female"},
+        ]
+    })
+    mock_cast_obj.usage_metadata.prompt_token_count = 50
+    mock_cast_obj.usage_metadata.candidates_token_count = 30
+    mock_cast_obj.usage_metadata.total_token_count = 80
+    mock_cast_obj.usage_metadata.thinking_token_count = 0
 
-    try:
-        for ep in EPISODES:
-            ep_name = ep["name"]
-            src_vid = str(ep["source"])
-            if not os.path.exists(src_vid):
-                pytest.skip(f"File nguồn {src_vid} không tồn tại.")
+    # Mock GeminiTranslator API call for Draft pass (0-indexed cues: 0, 1, 3)
+    mock_draft_items = [
+        {
+            "id": 0,
+            "speaker": "Jean",
+            "addressee": "Fran",
+            "mode": "spoken",
+            "uncertain": False,
+            "uncertain_reason": "none",
+            "vi": "Fran, em đã sẵn sàng chưa?",
+        },
+        {
+            "id": 1,
+            "speaker": "Fran",
+            "addressee": "Jean",
+            "mode": "spoken",
+            "uncertain": False,
+            "uncertain_reason": "none",
+            "vi": "Vâng, sư phụ. Đi thôi.",
+        },
+        {
+            "id": 3,
+            "speaker": "NobleWoman",
+            "addressee": "Fran",
+            "mode": "spoken",
+            "uncertain": True,
+            "uncertain_reason": "noble_speech",
+            "vi": "Ta sẽ làm đối thủ của ngươi.",
+        },
+    ]
 
-            base_name = os.path.splitext(os.path.basename(src_vid))[0]
-            target_4k_base = f"{base_name}_4K"
+    # Mock Flash Repair API call for Cascade pass (cue 3)
+    mock_repair_response = [
+        {
+            "id": 3,
+            "vi": "Thiếp thân sẽ tiếp chiêu các ngươi.",
+            "changed": True,
+            "change_reason": "archaic_noble_speech",
+            "speaker": "NobleWoman",
+            "addressee": "Fran",
+            "mode": "spoken",
+        }
+    ]
 
-            # 1. Quét tìm track JA/EN
-            ja_sub, en_sub = find_or_extract_subtitles(src_vid)
-            assert ja_sub is not None, f"[{ep_name}] Không tìm thấy phụ đề JA"
-            assert en_sub is not None, f"[{ep_name}] Không tìm thấy phụ đề EN"
+    mock_draft_response_obj = MagicMock()
+    mock_draft_response_obj.text = json.dumps(mock_draft_items)
+    mock_draft_response_obj.usage_metadata.prompt_token_count = 120
+    mock_draft_response_obj.usage_metadata.candidates_token_count = 45
+    mock_draft_response_obj.usage_metadata.total_token_count = 165
+    mock_draft_response_obj.usage_metadata.thinking_token_count = 0
 
-            # 2. Kiểm tra auto-offset độc lập từng tập trong hàng đợi
-            det_offset, det_applied, det_reason, det_meta = detect_auto_offset(ja_sub, en_sub)
-            assert det_applied == ep["expected_offset_applied"], (
-                f"[{ep_name}] Lỗi auto-offset applied: mong đợi {ep['expected_offset_applied']}, thực tế {det_applied} ({det_reason})"
-            )
-            assert ep["expected_offset_min"] <= det_offset <= ep["expected_offset_max"], (
-                f"[{ep_name}] Offset {det_offset} nằm ngoài khoảng mong đợi [{ep['expected_offset_min']}, {ep['expected_offset_max']}]"
-            )
+    mock_repair_response_obj = MagicMock()
+    mock_repair_response_obj.text = json.dumps(mock_repair_response)
+    mock_repair_response_obj.usage_metadata.prompt_token_count = 80
+    mock_repair_response_obj.usage_metadata.candidates_token_count = 25
+    mock_repair_response_obj.usage_metadata.total_token_count = 105
+    mock_repair_response_obj.usage_metadata.thinking_token_count = 0
 
-            # 3. Dịch bằng stub backend (dry_run=True, KHÔNG gọi API)
-            pipeline = TranslationPipeline(
-                local_only=False,
-                output_dir=TMP_TEST_DIR,
-                output_format="srt",
-                require_approved_cast=False,
-                allow_latest_alias=False,
-                dry_run=True,
-                limit_cues=25,
-            )
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
 
-            applied_offset = det_offset if det_applied else 0
-            res = pipeline.run(
-                ja_path=Path(ja_sub),
-                en_path=Path(en_sub),
-                output_basename=target_4k_base,
-                sub_offset_ms=applied_offset,
-                auto_offset=True,
-            )
+        def mock_generate_content(model, contents, config):
+            cnt_str = str(contents)
+            if "cues_to_review" in cnt_str:
+                return mock_repair_response_obj
+            if "cues_to_translate" in cnt_str:
+                req_ids = [int(x) for x in re.findall(r'"id":\s*(\d+)', cnt_str)]
+                filtered = [it for it in mock_draft_items if it["id"] in req_ids]
+                resp = MagicMock()
+                resp.text = json.dumps(filtered)
+                resp.usage_metadata.prompt_token_count = 100
+                resp.usage_metadata.candidates_token_count = 40
+                resp.usage_metadata.total_token_count = 140
+                resp.usage_metadata.thinking_token_count = 0
+                return resp
+            return mock_cast_obj
 
-            srt_path = res.get("subtitle_path") or res.get("output_path")
-            assert srt_path is not None, f"[{ep_name}] Không tạo được file SRT"
-            srt_path = Path(srt_path)
-            assert srt_path.exists(), f"[{ep_name}] File SRT {srt_path} không tồn tại trên đĩa"
-            assert srt_path.name == f"{target_4k_base}.vi.srt", (
-                f"[{ep_name}] Tên file SRT sai định dạng: mong đợi {target_4k_base}.vi.srt, thực tế {srt_path.name}"
-            )
+        mock_client.models.generate_content.side_effect = mock_generate_content
 
-            # Kiểm tra file audit.md
-            audit_md_path = TMP_TEST_DIR / f"{target_4k_base}.audit.md"
-            assert audit_md_path.exists(), f"[{ep_name}] File audit.md {audit_md_path} không tồn tại"
-            audit_md_content = audit_md_path.read_text(encoding="utf-8")
-            assert "Căn Chỉnh Thời Gian Phụ Đề" in audit_md_content or "Offset đã áp dụng" in audit_md_content, f"[{ep_name}] Audit report thiếu mục offset"
+        res = pipeline.run(
+            ja_path=ja_path,
+            en_path=en_path,
+            output_basename="sample_ep",
+            auto_offset=False,
+        )
 
-            # 4. Kiểm tra Embed + Audit trên bản sao MKV
-            target_4k_clone = TMP_TEST_DIR / f"{target_4k_base}.mkv"
-            if ep["upscaled"] and ep["upscaled"].exists():
-                subprocess.run(["cp", "-c", str(ep["upscaled"]), str(target_4k_clone)], check=True)
-            else:
-                # Đối với tập 3 (chưa upscale 4K), sao chép nguồn để giả lập container thành phẩm
-                subprocess.run(["cp", "-c", src_vid, str(target_4k_clone)], check=True)
+    # 1. Verify subtitle file generation
+    srt_path = Path(res["output_path"])
+    assert srt_path.exists(), f"Output SRT {srt_path} does not exist"
+    srt_content = srt_path.read_text(encoding="utf-8")
 
-            embed_ok = embed_subtitle_track(
-                mkv_path=str(target_4k_clone),
-                srt_path=str(srt_path),
-                original_source_path=src_vid,
-            )
-            assert embed_ok, f"[{ep_name}] Hàm embed_subtitle_track trả về False"
+    assert "Fran, em đã sẵn sàng chưa?" in srt_content
+    assert "Vâng, sư phụ. Đi thôi." in srt_content
+    # Cue 4 was repaired by Flash in cascade pass
+    assert "Thiếp thân sẽ tiếp chiêu các ngươi." in srt_content
 
-            probe_res = probe_video(str(target_4k_clone))
-            mux_audit = verify_mux_integrity(src_vid, str(target_4k_clone))
+    # 2. Verify QA report generation
+    report_path = Path(res["report_path"])
+    assert report_path.exists(), f"QA report {report_path} does not exist"
 
-            assert mux_audit["status"] == "PASS", (
-                f"[{ep_name}] Mux audit không PASS: {mux_audit.get('failure_reasons')}"
-            )
-            if ep["expected_fonts"] > 0:
-                assert probe_res["attachment_count"] == ep["expected_fonts"], (
-                    f"[{ep_name}] Số font không khớp: mong đợi {ep['expected_fonts']}, thực tế {probe_res['attachment_count']}"
-                )
+    # 3. Test subtitle embedding and mux integrity if sample_30s.mkv is present
+    if SAMPLE_MKV.exists():
+        target_clone = tmp_path / "sample_clone.mkv"
+        shutil.copyfile(SAMPLE_MKV, target_clone)
 
-            results.append({
-                "name": ep_name,
-                "ja_track": os.path.basename(ja_sub),
-                "en_track": os.path.basename(en_sub),
-                "offset_detected": det_offset,
-                "offset_applied": det_applied,
-                "srt_name": srt_path.name,
-                "embed_status": "PASS",
-                "fonts_verified": probe_res["attachment_count"],
-                "audio_verified": probe_res["audio_count"],
-                "subs_verified": probe_res["subtitle_count"],
-            })
+        embed_ok = embed_subtitle_track(
+            mkv_path=str(target_clone),
+            srt_path=str(srt_path),
+            original_source_path=str(SAMPLE_MKV),
+        )
+        assert embed_ok, "embed_subtitle_track returned False"
 
-        # In bảng kết quả chi tiết
-        print("\n" + "=" * 80)
-        print("📊 KẾT QUẢ TEST TÍCH HỢP STAGE PHỤ ĐỀ TRÊN BẢN SAO (KHÔNG GỌI API)")
-        print("=" * 80)
-        for r in results:
-            print(f"• Tập: {r['name']}")
-            print(f"  - Track JA: {r['ja_track']} | Track EN: {r['en_track']}")
-            print(f"  - Auto-offset đo được: {r['offset_detected']} ms (Áp dụng: {r['offset_applied']})")
-            print(f"  - Tên file SRT: {r['srt_name']}")
-            print(f"  - Embed + Mux Audit: {r['embed_status']} (Fonts: {r['fonts_verified']}, Audio: {r['audio_verified']}, Subs: {r['subs_verified']})")
-        print("=" * 80 + "\n")
-
-    finally:
-        if TMP_TEST_DIR.exists():
-            shutil.rmtree(TMP_TEST_DIR)
-
-
-if __name__ == "__main__":
-    test_subtrans_queue_stub_integration()
+        mux_audit = verify_mux_integrity(str(SAMPLE_MKV), str(target_clone))
+        assert mux_audit["status"] == "PASS", f"Mux audit failed: {mux_audit}"

@@ -15,6 +15,16 @@ style_rules:
   - "NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or Vietnamese words (ABSOLUTELY NO 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Chu', 'Hoàng', 'Thư', 'Kim', 'Huyền', 'Lợi Lợi')."
   - "Keep palace and consort titles combined naturally: 'cung Shuku', 'cung Kouki', 'Quý phi Shu', 'Quý phi Kou', 'gia tộc Kou', 'gia tộc Shu'."
 
+difficulty_markers:
+  - "妾"
+  - "陛下"
+  - "卿"
+  - "主殿"
+  - "閣下"
+  - "汝"
+  - "お主"
+  - "殿下"
+
 characters:
   - name_ja: "玲琳"
     name_vi: "Reirin"

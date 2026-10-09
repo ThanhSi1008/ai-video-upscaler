@@ -85,6 +85,7 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
         meta = data.get("meta", {})
         schema_ver = meta.get("schema", 2)
         style_rules = [str(r) for r in data.get("style_rules", [])]
+        difficulty_markers = [str(m) for m in data.get("difficulty_markers", [])]
 
         # Parse address_rules
         raw_addr = data.get("address_rules", {})
@@ -149,6 +150,7 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
         return Glossary(
             schema_ver=schema_ver,
             style_rules=style_rules,
+            difficulty_markers=difficulty_markers,
             address_rules=addr_rules,
             terms=terms,
             characters=characters,
@@ -178,6 +180,9 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
             seen_rules.add(r)
             combined_rules.append(r)
 
+    # Combine difficulty markers (deduplicated)
+    diff_markers = list(dict.fromkeys(override.difficulty_markers + base.difficulty_markers))
+
     # Address rules: prefer override's address rules if present, otherwise base
     addr = override.address_rules or base.address_rules
 
@@ -196,6 +201,7 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
     return Glossary(
         schema_ver=2,
         style_rules=combined_rules,
+        difficulty_markers=diff_markers,
         address_rules=addr,
         terms=merged_terms,
         characters=merged_characters,

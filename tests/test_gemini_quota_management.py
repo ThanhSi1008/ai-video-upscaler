@@ -94,6 +94,32 @@ class TestGeminiQuotaManagement(unittest.TestCase):
         else:
             self.assertEqual(next_vn.hour, 15, "Trong mùa đông PST, 00:00 PT phải tương ứng 15:00 giờ VN")
 
+    def test_2b_dst_transitions_pt_reset(self):
+        """Kiểm tra chính xác ngày chuyển giờ mùa hè/đông (1/11 và 14/3) của get_next_pt_reset."""
+        import datetime
+        # 1. Mùa hè PDT (ví dụ 2026-07-15 10:00 PT) -> reset hôm sau 00:00 PDT = 14:00 VN
+        dt_summer = datetime.datetime(2026, 7, 15, 10, 0, 0, tzinfo=PT_TZ)
+        next_pt, next_vn = get_next_pt_reset(now_pt=dt_summer)
+        self.assertEqual(next_pt.day, 16)
+        self.assertEqual(next_pt.hour, 0)
+        self.assertEqual(next_vn.hour, 14)
+
+        # 2. Ngày chuyển đổi sang giờ mùa đông PST: 1/11/2026 (sau khi lùi giờ)
+        # Giả sử thời điểm hiện tại là 2026-11-01 10:00 PST -> reset ngày 2026-11-02 00:00 PST = 15:00 VN
+        dt_winter = datetime.datetime(2026, 11, 1, 10, 0, 0, tzinfo=PT_TZ)
+        next_pt, next_vn = get_next_pt_reset(now_pt=dt_winter)
+        self.assertEqual(next_pt.day, 2)
+        self.assertEqual(next_pt.hour, 0)
+        self.assertEqual(next_vn.hour, 15)
+
+        # 3. Ngày chuyển đổi sang giờ mùa hè PDT: 14/03/2027 (sau khi tăng giờ lúc 2:00 sáng)
+        # Giả sử thời điểm hiện tại là 2027-03-14 10:00 PDT -> reset ngày 2027-03-15 00:00 PDT = 14:00 VN
+        dt_spring_dst = datetime.datetime(2027, 3, 14, 10, 0, 0, tzinfo=PT_TZ)
+        next_pt, next_vn = get_next_pt_reset(now_pt=dt_spring_dst)
+        self.assertEqual(next_pt.day, 15)
+        self.assertEqual(next_pt.hour, 0)
+        self.assertEqual(next_vn.hour, 14)
+
     def test_3_429_classification_per_day_vs_per_minute(self):
         """Kiểm tra phân loại lỗi 429 theo trường chi tiết (quotaId, quotaValue, retryDelay)."""
         # A. Lỗi PerDay

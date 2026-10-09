@@ -11,6 +11,7 @@ Stage P3: Lightweight Subtitle RAG & Error Bank.
 import os
 import re
 import sqlite3
+import hashlib
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -92,6 +93,16 @@ class KnowledgeBase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def get_db_sha256(self) -> str:
+        """Returns SHA-256 hash of the knowledge base file for experiment provenance tracking."""
+        if not self.db_path.exists():
+            return "empty"
+        hasher = hashlib.sha256()
+        with open(self.db_path, "rb") as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
@@ -104,7 +115,8 @@ class KnowledgeBase:
                     vi_text TEXT NOT NULL,
                     speaker TEXT,
                     addressee TEXT,
-                    status TEXT DEFAULT 'reviewed',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    lang_pair TEXT NOT NULL DEFAULT 'ja-vi',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -116,7 +128,9 @@ class KnowledgeBase:
             cursor.execute("PRAGMA table_info(gold_units)")
             cols = [r[1] for r in cursor.fetchall()]
             if "status" not in cols:
-                conn.execute("ALTER TABLE gold_units ADD COLUMN status TEXT DEFAULT 'reviewed'")
+                conn.execute("ALTER TABLE gold_units ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+            if "lang_pair" not in cols:
+                conn.execute("ALTER TABLE gold_units ADD COLUMN lang_pair TEXT NOT NULL DEFAULT 'ja-vi'")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS error_bank (
@@ -159,6 +173,7 @@ class KnowledgeBase:
         speaker: Optional[str] = None,
         addressee: Optional[str] = None,
         status: str = "reviewed",
+        lang_pair: str = "ja-vi",
     ) -> bool:
         """
         Inserts a verified subtitle unit if not already present.
@@ -180,8 +195,8 @@ class KnowledgeBase:
                 return False
 
             conn.execute("""
-                INSERT INTO gold_units (series, episode, ja_text, en_text, vi_text, speaker, addressee, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO gold_units (series, episode, ja_text, en_text, vi_text, speaker, addressee, status, lang_pair)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 series,
                 episode,
@@ -191,6 +206,7 @@ class KnowledgeBase:
                 speaker,
                 addressee,
                 status,
+                lang_pair,
             ))
             conn.commit()
             return True
@@ -286,12 +302,13 @@ class KnowledgeBase:
         series: Optional[str] = None,
         max_examples: int = 3,
         min_score: float = 0.05,
+        exclude_episode: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """
         Retrieves relevant few-shot examples from gold_units matching cues in the batch.
         Uses BM25 scoring over character bigrams with IDF weighting.
         Only retrieves units with status IN ('gold', 'reviewed') (NEVER retrieves 'draft').
-        Strictly isolates series when provided.
+        Strictly isolates series and excludes the current episode being evaluated to prevent test leakage.
         """
         if not cues:
             return []
@@ -313,14 +330,17 @@ class KnowledgeBase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             query = """
-                SELECT id, ja_text, en_text, vi_text, series
+                SELECT id, ja_text, en_text, vi_text, series, episode
                 FROM gold_units
-                WHERE (status IN ('reviewed', 'gold') OR status IS NULL)
+                WHERE status IN ('reviewed', 'gold')
             """
             params: List[Any] = []
             if series:
                 query += " AND (series = ? OR series IS NULL)"
                 params.append(series.lower())
+            if exclude_episode:
+                query += " AND (episode != ? OR episode IS NULL)"
+                params.append(exclude_episode)
             cursor.execute(query, params)
             candidates = cursor.fetchall()
 
@@ -329,7 +349,7 @@ class KnowledgeBase:
 
         # Build candidate document bigram representations
         doc_bigrams: Dict[int, List[str]] = {}
-        for cid, ja_text, en_text, vi_text, s_val in candidates:
+        for cid, ja_text, en_text, vi_text, s_val, ep_val in candidates:
             doc_bigrams[cid] = self._extract_bigrams(ja_text)
 
         # Compute document frequencies and BM25 IDF for query bigrams
@@ -346,7 +366,7 @@ class KnowledgeBase:
         # BM25 Scoring
         scored_candidates: List[Tuple[float, Dict[str, str]]] = []
         import math
-        for cid, ja_text, en_text, vi_text, s_val in candidates:
+        for cid, ja_text, en_text, vi_text, s_val, ep_val in candidates:
             d_bgs = doc_bigrams[cid]
             dl = len(d_bgs)
             if dl == 0:
@@ -371,6 +391,7 @@ class KnowledgeBase:
                 item = {"ja": ja_text, "vi": vi_text}
                 if en_text:
                     item["en"] = en_text
+                    item["en_ref"] = en_text
                 scored_candidates.append((score, item))
 
         # Sort by BM25 score descending
@@ -399,6 +420,7 @@ class KnowledgeBase:
         category: str = "human_correction",
         explanation: Optional[str] = None,
         series: Optional[str] = None,
+        episode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Feedback Loop ('subtrans learn'):
@@ -415,6 +437,7 @@ class KnowledgeBase:
             ja_text=ja_norm,
             vi_text=corr_norm,
             series=series,
+            episode=episode,
             status="gold"
         )
 
@@ -441,6 +464,7 @@ class KnowledgeBase:
             "wrong": wrong_norm,
             "corrected": corr_norm,
             "series": series,
+            "episode": episode,
         }
 
     def retrieve_cautions(

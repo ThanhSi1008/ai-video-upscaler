@@ -28,27 +28,23 @@ def test_score_cue_difficulty_components():
     c1 = Cue(id=1, start=0, end=2000, ja="A", vi="A", uncertain=True, uncertain_reason="pronoun")
     assert score_cue_difficulty(c1) == 6.0
 
-    # 2. English conflict (+3.0)
-    c2 = Cue(id=2, start=0, end=2000, ja="A", vi="A", en_conflict=True)
-    assert score_cue_difficulty(c2) == 3.0
+    # 2. Difficulty marker from series config (+2.0)
+    c2 = Cue(id=2, start=0, end=2000, ja="妾の願いを聞き届けよ", vi="A")
+    assert score_cue_difficulty(c2, difficulty_markers=["妾"]) == 2.0
+    assert c2.difficulty_features["marker_matched"] is True
 
-    # 3. Archaic Japanese words (+2.0)
-    c3 = Cue(id=3, start=0, end=2000, ja="妾の願いを聞き届けよ", vi="A")
-    assert score_cue_difficulty(c3) == 2.0
-
-    # 4. Long dialogue (+1.5, length > 35)
-    c4 = Cue(id=4, start=0, end=2000, ja="これは非常に長くて複雑なアニメのセリフであり、文構造が重層的であるのだよ", vi="A")
-    assert score_cue_difficulty(c4) == 1.5
-
-    # 5. Combined factors
+    # 3. Linter error (+4.0)
     violations = [
-        LintViolation(rule_id="LINT_ROMAJI_MISSING", severity="ERROR", cue_id=5, message="Missing Fran"),
-        LintViolation(rule_id="LINT_HIGH_CPS", severity="WARNING", cue_id=5, message="High CPS"),
+        LintViolation(rule_id="LINT_ROMAJI_MISSING", severity="ERROR", cue_id=3, message="Missing Fran"),
     ]
-    c5 = Cue(id=5, start=0, end=2000, ja="貴様、許さん！", vi="Mày, tao không tha!", uncertain=True, en_conflict=True)
-    score5 = score_cue_difficulty(c5, violations=violations)
-    # uncertain(4) + en_conflict(3) + archaic(2) + error(4) + warning(1.5) = 14.5
-    assert score5 >= 14.0
+    c3 = Cue(id=3, start=0, end=2000, ja="フラン、行くぞ", vi="Em, đi thôi")
+    assert score_cue_difficulty(c3, violations=violations) == 4.0
+
+    # 4. Combined factors
+    c4 = Cue(id=4, start=0, end=2000, ja="妾、許さん！", vi="Mày, tao không tha!", uncertain=True, uncertain_reason="archaic")
+    score4 = score_cue_difficulty(c4, violations=violations, difficulty_markers=["妾"])
+    # uncertain(4) + reason(2) + marker(2) + error(4) = 12.0
+    assert score4 == 12.0
 
 
 def test_find_cues_needing_repair_filtering():
@@ -71,13 +67,13 @@ def test_find_cues_needing_repair_filtering():
 
 def test_find_cues_needing_repair_custom_threshold():
     cues = [
-        # Cue with score 3.0 (en_conflict)
-        Cue(id=1, start=0, end=2000, ja="Hello", vi="Xin chào", en_conflict=True),
+        # Cue with marker score 2.0
+        Cue(id=1, start=0, end=2000, ja="妾はここにいる", vi="Tôi ở đây"),
     ]
     # Default threshold 4.0 -> not selected
-    assert len(find_cues_needing_repair(cues, difficulty_threshold=4.0)) == 0
-    # Lower threshold 2.5 -> selected
-    assert len(find_cues_needing_repair(cues, difficulty_threshold=2.5)) == 1
+    assert len(find_cues_needing_repair(cues, difficulty_threshold=4.0, difficulty_markers=["妾"])) == 0
+    # Lower threshold 1.5 -> selected
+    assert len(find_cues_needing_repair(cues, difficulty_threshold=1.5, difficulty_markers=["妾"])) == 1
 
 
 def test_run_cascade_repair_pass_all_clean():
@@ -260,4 +256,64 @@ def test_cascade_relint_gate_rejects_new_critical_violation():
     assert stats["rejected_count"] == 1
     assert cues[0].vi == "Cô bé"  # Preserved original draft
     assert cues[0].repair_reason_code == "rejected_critical_violation"
+
+
+def test_relint_gate_identity_comparison():
+    """Verifies that gate uses _ident and catches a newly introduced error even if error count is equal."""
+    from subtrans.cascade import accept_or_reject_repaired_cue
+    # Base has CJK leakage
+    cue = Cue(id=1, start=0, end=2000, ja="フラン", draft_vi="Fran 日本語", vi="Fran 日本語")
+    # Proposed fix removes Japanese but introduces banned Sino-Vietnamese calque "Pháp Lạp"
+    # Both base and fix have exactly 1 error, but identity is different!
+    is_accepted, reason_code, _ = accept_or_reject_repaired_cue(cue, fixed_vi="Pháp Lạp")
+    assert not is_accepted
+    assert reason_code in ("rejected_critical_violation", "rejected_new_error")
+
+
+def test_relint_gate_semantic_drift():
+    """Verifies that large edit distance (>0.5) and digit mismatches are flagged."""
+    from subtrans.cascade import accept_or_reject_repaired_cue
+    cue1 = Cue(id=1, start=0, end=3000, ja="待って", draft_vi="Đợi một chút nhé", vi="Đợi một chút nhé")
+    # Substantially rewritten text with edit distance > 0.5
+    is_accepted, reason_code, _ = accept_or_reject_repaired_cue(cue1, fixed_vi="Hãy dừng lại ngay lập tức tại đây hỡi người bạn")
+    assert is_accepted
+    assert reason_code == "accepted_large_edit"
+    assert cue1.is_large_edit is True
+
+    # Digit mismatch
+    cue2 = Cue(id=2, start=0, end=3000, ja="5階へ行く", draft_vi="Lên tầng 5 thôi", vi="Lên tầng 5 thôi")
+    is_accepted2, reason_code2, _ = accept_or_reject_repaired_cue(cue2, fixed_vi="Lên tầng 6 thôi")
+    assert is_accepted2
+    assert reason_code2 == "accepted_digit_mismatch"
+    assert cue2.is_digit_mismatch is True
+
+
+def test_relint_gate_cps_hard_ceiling():
+    """Verifies that extreme CPS overflow (>25 CPS) is rejected via is_hard_ceiling."""
+    from subtrans.cascade import accept_or_reject_repaired_cue
+    # Short 1.0 second duration
+    cue = Cue(id=1, start=0, end=1000, ja="短い", draft_vi="Ngắn thôi", vi="Ngắn thôi")
+    # Long text (35 chars in 1s = 35 CPS > 25 ceiling)
+    fixed_long = "Đây là một câu rất dài nhằm mục đích vượt trần cứng"
+    is_accepted, reason_code, _ = accept_or_reject_repaired_cue(cue, fixed_vi=fixed_long)
+    assert not is_accepted
+    assert reason_code == "rejected_cps_overflow"
+
+
+def test_cascade_metadata_disagreement_telemetry():
+    """Verifies that Flash disagreeing with Lite on speaker/addressee flags metadata_disagreement."""
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン", vi="Fran", speaker="Jean", addressee="Fran", uncertain=True),
+    ]
+    mock_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash")
+    mock_translator.client = MagicMock()
+    mock_res = MagicMock()
+    # Flash outputs a different speaker ("Urushi" instead of "Jean")
+    mock_res.text = '[{"id": 1, "vi": "Fran ơi", "speaker": "Urushi", "addressee": "Fran"}]'
+    mock_translator.client.models.generate_content.return_value = mock_res
+
+    stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
+    assert stats["repaired_count"] == 1
+    assert cues[0].metadata_disagreement is True
+
 

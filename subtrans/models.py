@@ -30,8 +30,12 @@ class Cue(BaseModel):
     uncertain_reason: Optional[str] = "none"
     raw_text: Optional[str] = None  # Original raw text for skipped cues
     draft_vi: Optional[str] = None  # Original draft from Lite before repair pass
-    repair_reason_code: Optional[str] = None  # accepted_improved | rejected_new_error | unrepaired_error | etc.
+    repair_reason_code: Optional[str] = None  # accepted_lint_clean | accepted_large_edit | rejected_new_error | etc.
     difficulty_score: Optional[float] = None  # S(cue) difficulty score
+    difficulty_features: Dict[str, Any] = Field(default_factory=dict)  # Feature breakdown for telemetry
+    metadata_disagreement: bool = False  # Flash disagreeing with Lite on speaker/addressee/mode
+    is_large_edit: bool = False  # Normalized edit distance > 0.5
+    is_digit_mismatch: bool = False  # Numbers in base draft altered or dropped
 
     @property
     def duration_ms(self) -> int:
@@ -90,6 +94,8 @@ class Character(BaseModel):
 class Glossary(BaseModel):
     schema_ver: int = 2
     style_rules: List[str] = Field(default_factory=list)
+    difficulty_markers: List[str] = Field(default_factory=list)
     address_rules: Optional[AddressRules] = None
     terms: List[GlossaryTerm] = Field(default_factory=list)
     characters: List[Character] = Field(default_factory=list)
+

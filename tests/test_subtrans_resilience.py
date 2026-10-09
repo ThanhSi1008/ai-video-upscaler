@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from subtrans.models import Cue, Glossary
-from subtrans.local_backend import OllamaTranslator
 from subtrans.gemini_backend import GeminiTranslator
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError
 from subtrans.pipeline import TranslationPipeline
@@ -65,27 +64,6 @@ class SilentServer(threading.Thread):
 
 
 class TestSubtransResilience(unittest.TestCase):
-
-    def test_a_silent_server_timeout_ollama(self):
-        """(a1) OllamaTranslator gặp máy chủ im lặng -> timeout theo đúng cấu hình (1s), không treo."""
-        server = SilentServer()
-        server.start()
-        try:
-            t0 = time.monotonic()
-            translator = OllamaTranslator(
-                endpoint=f"http://127.0.0.1:{server.port}",
-                timeout=1  # 1 giây timeout
-            )
-            with self.assertRaises(Exception) as ctx:
-                translator._call_chat([{"role": "user", "content": "hello"}])
-            elapsed = time.monotonic() - t0
-
-            # Phải kích hoạt timeout trong khoảng 1.0s - 2.5s, tuyệt đối không treo
-            self.assertGreaterEqual(elapsed, 0.9, "Timeout kích hoạt quá sớm")
-            self.assertLess(elapsed, 3.5, f"Client bị treo quá lâu: {elapsed:.2f}s")
-            print(f"\n✅ [Test A1 PASS] Ollama timeout ngắt kết nối chính xác sau {elapsed:.2f}s (cấu hình 1.0s).")
-        finally:
-            server.stop()
 
     def test_a_call_with_retry_timeout_bounding(self):
         """(a2) call_with_retry khi gặp hàm bị timeout -> thử lại có chặn trên và kết thúc đúng hạn."""
@@ -141,10 +119,6 @@ class TestSubtransResilience(unittest.TestCase):
             "gemini-3.7-flash": make_failing_backend("gemini-3.7-flash"),
             "gemini-3.6-flash": make_failing_backend("gemini-3.6-flash"),
         }
-        # Mock local backend cũng không khả dụng để test rơi về untranslated an toàn
-        pipeline.ollama_backend = MagicMock()
-        pipeline.ollama_backend.is_upscale_running.return_value = False
-        pipeline.ollama_backend.is_available.return_value = False
 
         # Tắt rate limiter delay trong test
         pipeline.rate_limiter = None
@@ -207,8 +181,7 @@ class TestSubtransResilience(unittest.TestCase):
             "gemini-3.8-flash": make_quota_backend("gemini-3.8-flash"),
             "gemini-3.7-flash": make_quota_backend("gemini-3.7-flash"),
         }
-        pipeline.ollama_backend = MagicMock()
-        pipeline.ollama_backend.is_upscale_running.return_value = True  # Upscale đang chạy -> cấm local
+
         pipeline.cache = MagicMock()
         pipeline.cache.get_cue.return_value = None
         pipeline.rate_limiter = None
@@ -240,14 +213,13 @@ class TestSubtransResilience(unittest.TestCase):
         ]
 
         pipeline = TranslationPipeline(
-            local_only=True,
+            local_only=False,
             output_dir=Path("out/test_subtrans"),
             output_format="srt"
         )
         # Đặt watchdog 0.05 giây
         pipeline.stage_watchdog_seconds = 0.05
         pipeline.batch_size = 1
-        pipeline.local_batch_size = 1
         pipeline.cache = MagicMock()
         pipeline.cache.get_cue.return_value = None
         pipeline.rate_limiter = None
@@ -256,10 +228,11 @@ class TestSubtransResilience(unittest.TestCase):
             time.sleep(0.08)  # Lâu hơn watchdog
             return ["Dịch dòng đầu"]
 
-        pipeline.ollama_backend = MagicMock()
-        pipeline.ollama_backend.is_upscale_running.return_value = False
-        pipeline.ollama_backend.is_available.return_value = True
-        pipeline.ollama_backend.translate_batch.side_effect = slow_translate
+        mock_backend = MagicMock()
+        mock_backend.translate_batch.side_effect = slow_translate
+        pipeline.gemini_backends = {
+            "gemini-3.5-flash-lite": mock_backend
+        }
 
         import pysubs2
         dummy_ssa = pysubs2.SSAFile()

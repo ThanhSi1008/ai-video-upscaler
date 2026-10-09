@@ -62,21 +62,7 @@ def check():
         except Exception as e:
             table.add_row("Gemini API", "[yellow]KEY ERROR[/yellow]", f"Invalid key or network failure: {e}")
     else:
-        table.add_row("Gemini API", "[yellow]NOT SET[/yellow]", "GEMINI_API_KEY missing in .env (will use local fallback)")
-
-    # 3. Check Ollama
-    cfg = load_config()
-    ollama_url = cfg.get("ollama", {}).get("endpoint", "http://localhost:11434")
-    try:
-        r = requests.get(f"{ollama_url}/api/tags", timeout=3)
-        if r.status_code == 200:
-            models = [m.get("name") for m in r.json().get("models", [])]
-            m_str = ", ".join(models) if models else "No models pulled yet"
-            table.add_row("Ollama Server", "[green]RUNNING[/green]", f"{ollama_url} (Found: {m_str})")
-        else:
-            table.add_row("Ollama Server", "[yellow]HTTP ERROR[/yellow]", f"Status {r.status_code}")
-    except Exception:
-        table.add_row("Ollama Server", "[red]OFFLINE[/red]", f"Cannot connect to {ollama_url}")
+        table.add_row("Gemini API", "[yellow]NOT SET[/yellow]", "GEMINI_API_KEY missing in .env")
 
     console.print(table)
     console.print("")
@@ -84,7 +70,7 @@ def check():
 
 @app.command()
 def models():
-    """Lists available Gemini models and locally installed Ollama models, verifying configured models."""
+    """Lists available Gemini models, verifying configured models."""
     console.print("\n[bold cyan]📋 Subtrans Translation Models Status[/bold cyan]\n")
 
     cfg = load_config()
@@ -93,25 +79,6 @@ def models():
     configured_fallbacks = gemini_cfg.get("fallback_models", ["gemini-3.7-flash", "gemini-3.6-flash"])
     configured_lite = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
 
-    # 1. Ollama Models
-    ollama_url = cfg.get("ollama", {}).get("endpoint", "http://localhost:11434")
-    console.print(f"[bold]Local Ollama Models ({ollama_url}):[/bold]")
-    try:
-        r = requests.get(f"{ollama_url}/api/tags", timeout=3)
-        if r.status_code == 200:
-            local_models = r.json().get("models", [])
-            if local_models:
-                for m in local_models:
-                    size_gb = m.get("size", 0) / (1024 ** 3)
-                    console.print(f"  • [green]{m.get('name')}[/green] ({size_gb:.1f} GB)")
-            else:
-                console.print("  [yellow]No models found. Run: ollama pull translategemma:12b[/yellow]")
-        else:
-            console.print(f"  [red]Failed to fetch models from Ollama (status {r.status_code})[/red]")
-    except Exception as e:
-        console.print(f"  [red]Ollama unreachable: {e}[/red]")
-
-    console.print("")
 
     # 2. Gemini Models
     api_key = get_gemini_api_key()
@@ -189,23 +156,12 @@ def run(
     auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
     no_rag: bool = typer.Option(False, "--no-rag", help="Tắt truy hồi RAG few-shot và error bank"),
     no_cascade: bool = typer.Option(False, "--no-cascade", help="Tắt phân hệ Smart Cloud Cascade Repair pass (Stage P2)"),
+    cache_db: Optional[Path] = typer.Option(None, "--cache-db", help="File SQLite cache riêng biệt phục vụ thí nghiệm đo lường"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
     cfg = load_config()
-
-    # Privacy check
-    if not local_only and not yes and not dry_run:
-        consent_given = cfg.get("privacy", {}).get("consent_given", False)
-        if not consent_given:
-            console.print("\n[bold yellow]⚠️  Privacy Notice[/bold yellow]")
-            console.print("You are using Google Gemini Cloud API to translate anime subtitles.")
-            console.print("Dialogue lines and glossary terms will be sent to Google API.")
-            confirm = typer.confirm("Do you agree to send subtitle text to Gemini API?", default=True)
-            if not confirm:
-                console.print("[bold cyan]Switched to 100% local translation mode.[/bold cyan]")
-                local_only = True
 
     pipeline = TranslationPipeline(
         local_only=local_only,
@@ -225,6 +181,7 @@ def run(
         dry_run=dry_run,
         batch_size=batch_size,
         subs_quality=subs_quality,
+        cache_db_path=cache_db,
     )
 
     try:
