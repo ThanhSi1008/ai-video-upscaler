@@ -142,7 +142,7 @@ def run(
     local_only: bool = typer.Option(False, "--local", "-l", help="Force 100% local translation using Ollama"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
     allow_latest_alias: bool = typer.Option(False, "--allow-latest-alias", help="Allow using mutable model alias like gemini-flash-latest"),
-    on_quota: str = typer.Option("local", "--on-quota", help="Action when Gemini quota exhausted ('local' or 'stop')"),
+    on_quota: str = typer.Option("stop", "--on-quota", help="Action when Gemini quota exhausted ('stop')"),
     review: bool = typer.Option(False, "--review", "-r", help="Run local post-editing review pass using gemma3:12b"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Limit translation to first N dialogue cues"),
     out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),

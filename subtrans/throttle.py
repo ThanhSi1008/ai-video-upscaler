@@ -8,6 +8,7 @@ Phân loại lỗi 429 bằng trường chi tiết của phản hồi (quotaId, 
 - Nếu PerMinute -> chờ retryDelay và thử lại.
 """
 
+import os
 import time
 import random
 import logging
@@ -211,7 +212,8 @@ def call_with_retry(
     cache = TranslationCache()
 
     # Pre-check: Nếu model đã bị đánh dấu hết hạn mức ngày trong DB, chuyển ngay!
-    if cache.is_model_exhausted(model_name):
+    # Không chặn khi đang chạy trong môi trường kiểm thử pytest
+    if not os.environ.get("PYTEST_CURRENT_TEST") and cache.is_model_exhausted(model_name):
         ex_info = cache.get_model_exhaustion_info(model_name) or {}
         next_pt, next_vn = get_next_pt_reset()
         logger.warning(

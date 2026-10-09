@@ -126,7 +126,8 @@ class TranslationPipeline:
         # Backends
         self.gemini_backends: Dict[str, GeminiTranslator] = {}
         self.gemini_backend: Optional[GeminiTranslator] = None
-        self.enable_cascade: bool = trans_cfg.get("cascade", True)
+        if enable_cascade is None:
+            self.enable_cascade = trans_cfg.get("cascade", True)
         self.series: Optional[str] = None
 
     def _init_primary_backend(self):
@@ -209,22 +210,26 @@ class TranslationPipeline:
         if subs_upgrade:
             console.print("[bold yellow]⚡ Cờ --subs-upgrade được kích hoạt: Bỏ qua cache các câu Lite để nâng cấp dịch bằng model cao hơn.[/bold yellow]")
 
-        base_name = output_basename or ja_path.stem
+        base_name = output_basename or re.sub(r"\.(ja|en|vi|jpn|eng|vie)$", "", ja_path.stem, flags=re.IGNORECASE)
 
         # Extract series name and propagate to Gemini backends
         series_match = re.search(r"^(.*?)(?:_S\d+|[ _]E\d+|\.\w+$)", base_name, re.IGNORECASE)
         self.series = series_match.group(1).replace("_", " ").strip() if series_match else None
-        for b in self.gemini_backends.values():
-            b.exclude_episode = base_name
 
         base_glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH) if DEFAULT_BASE_GLOSSARY_PATH.exists() else None
         if not glossary_path:
             auto_g = find_series_glossary(base_name)
             if auto_g:
                 glossary_path = auto_g
-                console.print(f"  • [bold green]Tự động nhận diện Glossary riêng của series:[/bold green] [cyan]{auto_g.name}[/cyan]")
+                resolved_series = auto_g.resolve().name.split(".")[1]
+                self.series = resolved_series
+                console.print(f"  • [bold green]Tự động nhận diện Glossary riêng của series:[/bold green] [cyan]{auto_g.name}[/cyan] (Series key: [yellow]{resolved_series}[/yellow])")
         override_glossary = load_glossary(glossary_path) if glossary_path else None
         glossary = merge_glossaries(base=base_glossary, override=override_glossary)
+
+        for b in self.gemini_backends.values():
+            b.series = self.series
+            b.exclude_episode = base_name
 
         if glossary:
             src_desc = []
@@ -376,7 +381,7 @@ class TranslationPipeline:
                         import hashlib
                         from subtrans.rag import KnowledgeBase
                         kb = KnowledgeBase()
-                        fs = kb.retrieve_few_shots(batch, max_examples=3, exclude_episode=base_name)
+                        fs = kb.retrieve_few_shots(batch, series=self.series, max_examples=3, exclude_episode=base_name)
                         ca = kb.retrieve_cautions(batch, max_cautions=2)
                         if fs or ca:
                             rag_data = {"few_shots": fs, "cautions": ca}

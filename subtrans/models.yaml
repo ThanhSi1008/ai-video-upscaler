@@ -6,6 +6,8 @@ models:
     rpd: 20
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
+    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
   gemini-3.7-flash:
     tier: free_tier
     rpm: 5

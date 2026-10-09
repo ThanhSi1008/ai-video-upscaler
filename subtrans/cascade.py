@@ -28,7 +28,7 @@ from subtrans.gemini_backend import GeminiTranslator, filter_relevant_glossary
 logger = logging.getLogger("subtrans.cascade")
 
 MAX_REPAIR_PERCENT = 0.20
-MAX_CUES_PER_REQUEST = 25
+MAX_CUES_PER_REQUEST = 15
 MAX_FLASH_REQUESTS = 2
 
 
@@ -421,19 +421,25 @@ def run_cascade_repair_pass(
         try:
             from google.genai import types
             from subtrans.cache import execute_and_log_api_request
+            from subtrans.throttle import call_with_retry
 
             config_kwargs = {
                 "system_instruction": REPAIR_SYSTEM_INSTRUCTION,
                 "response_mime_type": "application/json",
                 "response_schema": list[RepairOutputItem],
                 "temperature": 0.0,
+                "thinking_config": types.ThinkingConfig(thinking_budget=0),
             }
 
             def _send():
-                return repair_translator.client.models.generate_content(
-                    model=repair_translator.model,
-                    contents=prompt_str,
-                    config=types.GenerateContentConfig(**config_kwargs),
+                return call_with_retry(
+                    fn=lambda: repair_translator.client.models.generate_content(
+                        model=repair_translator.model,
+                        contents=prompt_str,
+                        config=types.GenerateContentConfig(**config_kwargs),
+                    ),
+                    model_name=repair_translator.model,
+                    max_retries=2,
                 )
 
             curr_kid = repair_translator.key_ids[repair_translator.current_key_idx] if repair_translator.key_ids else "none"

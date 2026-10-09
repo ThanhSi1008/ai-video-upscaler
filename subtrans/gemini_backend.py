@@ -483,6 +483,7 @@ class GeminiTranslator(BaseTranslator):
                 kb = KnowledgeBase()
                 few_shots = kb.retrieve_few_shots(
                     cues,
+                    series=getattr(self, "series", None),
                     max_examples=3,
                     exclude_episode=getattr(self, "exclude_episode", None)
                 )
