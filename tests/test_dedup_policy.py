@@ -50,11 +50,24 @@ shows:
             assert resolve_dedup_policy("Random_Anime.mkv", cli_policy=None) == "default"
 
 
+def _get_test_sample_video():
+    candidates = [
+        "samples/sample_1min_bd_420.mkv",
+        "samples/sample_1min_bd.mkv",
+        "samples/bd_test/sample_1min_bd.mkv",
+        "samples/sample_30s.mkv"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
 def test_dedup_policy_default_backward_compatible_hash():
     """Kiểm tra: không truyền policy vs policy='default' sinh ra chunks và runs giống hệt nhau."""
-    sample_video = "samples/bd_test/sample_1min_bd.mkv"
-    if not os.path.exists(sample_video):
-        pytest.skip(f"Không tìm thấy file mẫu {sample_video}")
+    sample_video = _get_test_sample_video()
+    if not sample_video:
+        pytest.skip("Không tìm thấy file video mẫu để kiểm tra hash backward compatible")
 
     with tempfile.TemporaryDirectory() as td:
         plan1_path = os.path.join(td, "plan_no_arg.json")
@@ -75,9 +88,9 @@ def test_dedup_policy_default_backward_compatible_hash():
 
 def test_dedup_policy_off():
     """Kiểm tra chính sách 'off': giữ tất cả các khung hình."""
-    sample_video = "samples/bd_test/sample_1min_bd.mkv"
-    if not os.path.exists(sample_video):
-        pytest.skip(f"Không tìm thấy file mẫu {sample_video}")
+    sample_video = _get_test_sample_video()
+    if not sample_video:
+        pytest.skip("Không tìm thấy file video mẫu để kiểm tra policy off")
 
     with tempfile.TemporaryDirectory() as td:
         plan_off_path = os.path.join(td, "plan_off.json")
@@ -94,6 +107,30 @@ def test_dedup_policy_off():
             assert len(chunk["runs"]) == chunk["total_frames"]
             for r in chunk["runs"]:
                 assert r["count"] == 1
+
+
+def test_dedup_policy_drift_schema_and_params():
+    """Kiểm tra chính sách 'drift' ghi nhận đúng delta và min_response vào plan.json."""
+    with tempfile.TemporaryDirectory() as td:
+        plan_path = os.path.join(td, "plan_drift.json")
+        dummy_plan = {
+            "source_file": "dummy.mkv",
+            "dedup_policy": "drift-0.75",
+            "dedup_params": {"drift_delta": 0.75, "drift_min_response": 0.10},
+            "total_frames": 100,
+            "chunks": [{"total_frames": 100, "runs": []}]
+        }
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump(dummy_plan, f)
+
+        # Resume với đúng policy drift-0.75 -> Thành công
+        cached = load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="drift-0.75")
+        assert cached["dedup_policy"] == "drift-0.75"
+        assert cached["dedup_params"]["drift_delta"] == 0.75
+
+        # Resume với drift delta khác (drift-0.5) -> Phải raise ValueError từ chối resume
+        with pytest.raises(ValueError, match="Từ chối resume"):
+            load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="drift-0.5")
 
 
 def test_dedup_policy_resume_mismatch_rejected():

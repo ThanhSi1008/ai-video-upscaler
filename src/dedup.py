@@ -36,6 +36,10 @@ DEDUP_POLICY_PARAMS = {
     "sensitive-a": {"hi": 512, "lo": 160, "frac": 0.15},
     "sensitive-b": {"hi": 384, "lo": 128, "frac": 0.10},
     "motion": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "tau": 0.3},
+    "drift": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 0.75, "min_response": 0.10},
+    "drift-0.5": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 0.5, "min_response": 0.10},
+    "drift-0.75": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 0.75, "min_response": 0.10},
+    "drift-1.0": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 1.0, "min_response": 0.10},
     "off": {"all_keep": True}
 }
 
@@ -150,6 +154,114 @@ def detect_global_motion_frames(
     return has_motion
 
 
+def detect_drift_policy_actions(
+    input_path: str,
+    base_actions: List[str],
+    forced_keep_indices: set,
+    delta: float = 0.75,
+    min_response: float = 0.10,
+    scale_w: int = 960,
+    scale_h: int = 540
+) -> List[str]:
+    """
+    Chính sách 'drift' (Đo độ dịch tích lũy từ frame được giữ gần nhất):
+    - Đo độ dịch tương quan pha (Phase Correlation) ở 960x540 (Hann window) giữa frame hiện tại
+      và frame được giữ GẦN NHẤT (reference frame).
+    - Toàn khung: median của toàn khung và 4 góc phần tư quy về px 1080p.
+    - 4 góc phần tư: kiểm tra phân kỳ zoom in/out giữa các góc đối nghịch (TL-BR, TR-BL).
+    - Nếu độ dịch toàn cục >= delta HOẶC phân kỳ zoom >= delta (kèm response >= min_response):
+      giữ frame và đặt lại frame tham chiếu = frame hiện tại.
+    - Nếu frame nằm trong forced_keep_indices (đầu chunk) hoặc base_actions giữ:
+      giữ frame và đặt lại tham chiếu.
+    """
+    import cv2
+    import numpy as np
+
+    frame_bytes = scale_w * scale_h
+    hann_full = cv2.createHanningWindow((scale_w, scale_h), cv2.CV_32F)
+    qw, qh = scale_w // 2, scale_h // 2
+    hann_quad = cv2.createHanningWindow((qw, qh), cv2.CV_32F)
+    scale_factor = 1080.0 / scale_h  # 2.0
+
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", input_path,
+        "-fps_mode", "passthrough",
+        "-vf", f"scale={scale_w}:{scale_h},format=gray",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-"
+    ]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 10)
+    actions = list(base_actions)
+    total_frames = len(actions)
+
+    ref_gray = None
+    curr_idx = 0
+
+    while True:
+        raw = proc.stdout.read(frame_bytes)
+        if len(raw) < frame_bytes:
+            break
+        curr_gray = np.frombuffer(raw, dtype=np.uint8).reshape((scale_h, scale_w)).astype(np.float32)
+
+        if curr_idx == 0 or curr_idx in forced_keep_indices or actions[curr_idx] == "keep" or ref_gray is None:
+            actions[curr_idx] = "keep"
+            ref_gray = curr_gray
+        else:
+            # 1. Đo toàn khung
+            (dx_full, dy_full), resp_full = cv2.phaseCorrelate(ref_gray, curr_gray, hann_full)
+
+            # 2. Đo 4 góc phần tư
+            tl = cv2.phaseCorrelate(ref_gray[:qh, :qw], curr_gray[:qh, :qw], hann_quad)
+            br = cv2.phaseCorrelate(ref_gray[qh:, qw:], curr_gray[qh:, qw:], hann_quad)
+            tr = cv2.phaseCorrelate(ref_gray[:qh, qw:], curr_gray[:qh, qw:], hann_quad)
+            bl = cv2.phaseCorrelate(ref_gray[qh:, :qw], curr_gray[qh:, :qw], hann_quad)
+
+            dx_full_1080 = dx_full * scale_factor
+            dy_full_1080 = dy_full * scale_factor
+
+            dx_tl, dy_tl = tl[0][0] * scale_factor, tl[0][1] * scale_factor
+            dx_br, dy_br = br[0][0] * scale_factor, br[0][1] * scale_factor
+            dx_tr, dy_tr = tr[0][0] * scale_factor, tr[0][1] * scale_factor
+            dx_bl, dy_bl = bl[0][0] * scale_factor, bl[0][1] * scale_factor
+
+            # Median toàn khung và 4 góc phần tư
+            all_dx = [dx_full_1080, dx_tl, dx_br, dx_tr, dx_bl]
+            all_dy = [dy_full_1080, dy_tl, dy_br, dy_tr, dy_bl]
+            med_dx = float(np.median(all_dx))
+            med_dy = float(np.median(all_dy))
+            disp_global_1080 = max(abs(med_dx), abs(med_dy))
+
+            # Phân kỳ zoom giữa các góc đối nghịch
+            zoom_tl_br = bool(
+                (dx_tl * dx_br < 0 or dy_tl * dy_br < 0) and
+                (abs(dx_tl - dx_br) >= delta or abs(dy_tl - dy_br) >= delta) and
+                tl[1] >= min_response and br[1] >= min_response
+            )
+            zoom_tr_bl = bool(
+                (dx_tr * dx_bl < 0 or dy_tr * dy_bl < 0) and
+                (abs(dx_tr - dx_bl) >= delta or abs(dy_tr - dy_bl) >= delta) and
+                tr[1] >= min_response and bl[1] >= min_response
+            )
+
+            is_motion = bool(
+                (disp_global_1080 >= delta and resp_full >= min_response) or
+                zoom_tl_br or zoom_tr_bl
+            )
+
+            if is_motion:
+                actions[curr_idx] = "keep"
+                ref_gray = curr_gray
+
+        curr_idx += 1
+
+    proc.stdout.close()
+    proc.wait()
+    return actions
+
+
 def scan_dedup_plan(
     input_path: str,
     plan_path: str,
@@ -161,13 +273,15 @@ def scan_dedup_plan(
     frac: float = DEFAULT_DEDUP_FRAC,
     chunk_frame_counts: Optional[List[int]] = None,
     policy: str = "default",
-    motion_tau: float = 0.3
+    motion_tau: float = 0.3,
+    drift_delta: Optional[float] = None,
+    drift_min_response: float = 0.10
 ) -> Dict[str, Any]:
     """
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
     Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
     Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp hoàn toàn với phân đoạn thực tế.
-    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, off.
+    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, drift, off.
     """
     # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
     ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -191,12 +305,22 @@ def scan_dedup_plan(
     if policy_clean not in DEDUP_POLICY_PARAMS:
         raise ValueError(f"Chính sách dedup không hợp lệ: '{policy}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}")
 
+    effective_drift_delta = 0.75
+    if drift_delta is not None:
+        effective_drift_delta = float(drift_delta)
+    elif policy_clean == "drift-0.5":
+        effective_drift_delta = 0.5
+    elif policy_clean == "drift-0.75":
+        effective_drift_delta = 0.75
+    elif policy_clean == "drift-1.0":
+        effective_drift_delta = 1.0
+
     # Áp dụng thông số theo chính sách nếu là giá trị mặc định
     if policy_clean in ["sensitive", "sensitive-a"]:
         hi, lo, frac = 512, 160, 0.15
     elif policy_clean == "sensitive-b":
         hi, lo, frac = 384, 128, 0.10
-    elif policy_clean == "motion":
+    elif policy_clean in ["motion", "default"] or policy_clean.startswith("drift"):
         hi, lo, frac = DEFAULT_DEDUP_HI, DEFAULT_DEDUP_LO, DEFAULT_DEDUP_FRAC
 
     frame_actions: List[str] = []
@@ -281,15 +405,33 @@ def scan_dedup_plan(
         for count in chunk_frame_counts:
             chunk_start_indices.add(curr_pos)
             curr_pos += count
+        num_chunks = len(chunk_frame_counts)
+        frames_per_chunk = chunk_frame_counts[0] if num_chunks > 0 else int(round(segment_seconds * fps_val))
+    else:
+        frames_per_chunk = int(round(segment_seconds * fps_val))
+        chunk_start_indices = set(range(0, total_frames, frames_per_chunk))
+        num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
 
-        for c_start in chunk_start_indices:
-            if c_start < total_frames:
-                frame_actions[c_start] = "keep"
+    # BẮT BUỘC ÉP GIỮ FRAME ĐẦU MỖI CHUNK per AGENTS.md Invariant:
+    for c_start in chunk_start_indices:
+        if c_start < total_frames:
+            frame_actions[c_start] = "keep"
 
-        chunks_meta = []
-        total_kept_count = 0
+    # Chính sách drift: đo độ dịch tích lũy từ frame được giữ gần nhất
+    if policy_clean.startswith("drift"):
+        frame_actions = detect_drift_policy_actions(
+            input_path=input_path,
+            base_actions=frame_actions,
+            forced_keep_indices=chunk_start_indices,
+            delta=effective_drift_delta,
+            min_response=drift_min_response
+        )
+
+    chunks_meta = []
+    total_kept_count = 0
+
+    if chunk_frame_counts is not None and len(chunk_frame_counts) > 0:
         curr_start = 0
-
         for c_idx, c_len in enumerate(chunk_frame_counts):
             c_start = curr_start
             c_end = c_start + c_len
@@ -325,23 +467,7 @@ def scan_dedup_plan(
                 "kept_indices": kept_indices,
                 "runs": runs
             })
-
-        num_chunks = len(chunk_frame_counts)
-        frames_per_chunk = chunk_frame_counts[0] if num_chunks > 0 else int(round(segment_seconds * fps_val))
     else:
-        # Số frame lý tưởng mỗi chunk 8s (chia đều)
-        frames_per_chunk = int(round(segment_seconds * fps_val))
-
-        # BẮT BUỘC ÉP GIỮ FRAME ĐẦU MỖI CHUNK per AGENTS.md Invariant:
-        chunk_start_indices = set(range(0, total_frames, frames_per_chunk))
-        for c_start in chunk_start_indices:
-            if c_start < total_frames:
-                frame_actions[c_start] = "keep"
-
-        chunks_meta = []
-        total_kept_count = 0
-        num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
-
         for c_idx in range(num_chunks):
             c_start = c_idx * frames_per_chunk
             c_end = min((c_idx + 1) * frames_per_chunk, total_frames)
@@ -389,7 +515,9 @@ def scan_dedup_plan(
             "hi": hi if policy_clean != "off" else None,
             "lo": lo if policy_clean != "off" else None,
             "frac": frac if policy_clean != "off" else None,
-            "motion_tau": motion_tau if policy_clean == "motion" else None
+            "motion_tau": motion_tau if policy_clean == "motion" else None,
+            "drift_delta": effective_drift_delta if policy_clean.startswith("drift") else None,
+            "drift_min_response": drift_min_response if policy_clean.startswith("drift") else None
         },
         "total_frames": total_frames,
         "raw_kept_frames": raw_keep,
@@ -422,7 +550,9 @@ def load_or_create_plan(
     resume: bool = True,
     chunk_frame_counts: Optional[List[int]] = None,
     policy: str = "default",
-    motion_tau: float = 0.3
+    motion_tau: float = 0.3,
+    drift_delta: Optional[float] = None,
+    drift_min_response: float = 0.10
 ) -> Dict[str, Any]:
     """
     Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
@@ -430,6 +560,16 @@ def load_or_create_plan(
     Từ chối resume nếu chính sách dedup_policy trong cache khác với chính sách yêu cầu.
     """
     policy_clean = policy.lower()
+    effective_drift_delta = 0.75
+    if drift_delta is not None:
+        effective_drift_delta = float(drift_delta)
+    elif policy_clean == "drift-0.5":
+        effective_drift_delta = 0.5
+    elif policy_clean == "drift-0.75":
+        effective_drift_delta = 0.75
+    elif policy_clean == "drift-1.0":
+        effective_drift_delta = 1.0
+
     if resume and os.path.exists(plan_path):
         try:
             with open(plan_path, "r", encoding="utf-8") as f:
@@ -442,6 +582,14 @@ def load_or_create_plan(
                         f"Từ chối resume: Kế hoạch trong {plan_path} sử dụng chính sách dedup '{cached_policy}' "
                         f"khác với chính sách yêu cầu '{policy_clean}'. Vui lòng dùng --force hoặc xóa file để quét lại."
                     )
+                if policy_clean.startswith("drift"):
+                    cached_params = data.get("dedup_params", {})
+                    cached_delta = cached_params.get("drift_delta")
+                    if cached_delta is not None and abs(cached_delta - effective_drift_delta) > 1e-4:
+                        raise ValueError(
+                            f"Từ chối resume: Kế hoạch drift trong {plan_path} sử dụng delta={cached_delta} "
+                            f"khác với delta yêu cầu={effective_drift_delta}."
+                        )
                 if chunk_frame_counts is None:
                     return data
                 cached_counts = [c["total_frames"] for c in chunks]
@@ -460,7 +608,9 @@ def load_or_create_plan(
         fps_den=fps_den,
         chunk_frame_counts=chunk_frame_counts,
         policy=policy_clean,
-        motion_tau=motion_tau
+        motion_tau=motion_tau,
+        drift_delta=effective_drift_delta,
+        drift_min_response=drift_min_response
     )
 
 
