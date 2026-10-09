@@ -58,16 +58,18 @@ def compute_cue_cache_key(
     en: Optional[str] = None,
     glossary_hash: str = "",
     cast_sheet_hash: str = "",
-    prompt_version: str = "v2.0"
+    prompt_version: str = "v2.0",
+    stage: str = "draft",
 ) -> str:
-    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, and prompt."""
+    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, and stage."""
     canonical = json.dumps({
         "model": model,
         "ja": ja.strip(),
         "en": (en or "").strip(),
         "glossary": glossary_hash,
         "cast_sheet": cast_sheet_hash,
-        "prompt_version": prompt_version
+        "prompt_version": prompt_version,
+        "stage": stage,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

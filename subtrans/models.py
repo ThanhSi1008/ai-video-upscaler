@@ -29,6 +29,9 @@ class Cue(BaseModel):
     en_conflict: bool = False
     uncertain_reason: Optional[str] = "none"
     raw_text: Optional[str] = None  # Original raw text for skipped cues
+    draft_vi: Optional[str] = None  # Original draft from Lite before repair pass
+    repair_reason_code: Optional[str] = None  # accepted_improved | rejected_new_error | unrepaired_error | etc.
+    difficulty_score: Optional[float] = None  # S(cue) difficulty score
 
     @property
     def duration_ms(self) -> int:

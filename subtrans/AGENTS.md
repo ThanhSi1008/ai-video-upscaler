@@ -84,10 +84,9 @@ subtrans/
 2. **Lỗi 429 PerDay (Daily Quota RPD cạn kiệt ngày):**
    * **Xoay vòng Key trước khi chuyển model (Multi-Key Rotation):** Nếu cấu hình nhiều key trong `.env` (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`), hệ thống tự động xoay sang key tiếp theo để tiếp tục dịch trên CÙNG model trước khi phải hạ cấp xuống model khác.
    * Khi TẤT CẢ các keys đều cạn kiệt trên model đó: Ngay lập tức ghi DB đánh dấu model cạn kiệt cho tới mốc reset giờ Thái Bình Dương (00:00 PT = 14:00 VN) và **chuyển sang model kế tiếp trong chuỗi**.
-3. **Fallback sang Ollama Local (`translategemma:12b`):**
-   * Chỉ kích hoạt khi TOÀN BỘ chuỗi Gemini cạn kiệt VÀ **không có tiến trình Upscale GPU nào đang chạy**.
-   * Nếu GPU đang bận upscale, hệ thống đánh dấu các câu là `[Chưa dịch]` để bảo vệ VRAM và checkpoint, chờ người dùng tiếp tục sau.
-   * Khi nạp Ollama, luôn giải phóng bộ nhớ bằng `keep_alive: 0` ngay khi dịch xong.
+3. **Không dùng Model Local & Dừng Chạy Êm (Graceful Exit):**
+   * **Tuyệt đối không dùng model local (Ollama / TranslateGemma):** Bỏ toàn bộ fallback cục bộ.
+   * Khi TOÀN BỘ chuỗi Gemini cạn kiệt hạn mức ngày (RPD): Hệ thống tự động dừng êm (Graceful Exit), in rõ thời gian reset (14:00 giờ VN PDT hoặc 15:00 giờ VN PST sau ngày 1/11). Toàn bộ câu thoại đã dịch được bảo toàn an toàn trong cache SQLite để phiên chạy kế tiếp tiếp tục ngay lập tức mà không tiêu tốn lại bất kỳ request nào.
 
 ### C. Cơ Chế Stage A Cast Sheet Unconditional Inclusion
 * Bảng quan hệ nhân vật và xưng hô sinh ra từ Stage A luôn được truyền vào prompt của mọi batch (kể cả khi câu thoại trong batch đó không nhắc tên nhân vật), giúp model giải quyết triệt để vấn đề zero-pronouns của tiếng Nhật.

@@ -209,6 +209,7 @@ class GeminiTranslator(BaseTranslator):
         timeout_ms: int = 45000,
         http_options: Optional[types.HttpOptions] = None,
         dry_run: bool = False,
+        enable_rag: bool = True,
     ):
         import datetime
         from subtrans.config import get_gemini_api_keys
@@ -240,6 +241,7 @@ class GeminiTranslator(BaseTranslator):
         self.allow_latest_alias = allow_latest_alias
         self.dry_run = dry_run
         self.timeout_ms = timeout_ms
+        self.enable_rag = enable_rag
         self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
 
         # Client-side rate limiting theo khóa (A4: Lite <= 12 RPM, Flash <= 4 RPM)
@@ -473,17 +475,18 @@ class GeminiTranslator(BaseTranslator):
             payload["glossary"] = rel_glossary
 
         # Add RAG few-shot examples and error cautions from KnowledgeBase
-        try:
-            from subtrans.rag import KnowledgeBase
-            kb = KnowledgeBase()
-            few_shots = kb.retrieve_few_shots(cues, max_examples=3)
-            if few_shots:
-                payload["approved_reference_examples"] = few_shots
-            cautions = kb.retrieve_cautions(cues, max_cautions=2)
-            if cautions:
-                payload["error_prevention_cautions"] = cautions
-        except Exception as e:
-            logger.debug(f"RAG retrieval skipped: {e}")
+        if self.enable_rag:
+            try:
+                from subtrans.rag import KnowledgeBase
+                kb = KnowledgeBase()
+                few_shots = kb.retrieve_few_shots(cues, max_examples=3)
+                if few_shots:
+                    payload["approved_reference_examples"] = few_shots
+                cautions = kb.retrieve_cautions(cues, max_cautions=2)
+                if cautions:
+                    payload["error_prevention_cautions"] = cautions
+            except Exception as e:
+                logger.debug(f"RAG retrieval skipped: {e}")
 
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",

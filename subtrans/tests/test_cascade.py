@@ -192,3 +192,72 @@ def test_run_cascade_repair_pass_partial_id_response():
     assert cues[1].vi == "Nó"  # Preserved draft
     assert cues[1].uncertain is True
 
+
+def test_cascade_fail_open_on_429_quota():
+    """Verifies that 429 Resource Exhausted fails open to Lite draft and sets unrepaired_quota_exceeded."""
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン", vi="Bản nháp Lite", uncertain=True),
+    ]
+    mock_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash")
+    mock_translator.client = MagicMock()
+    mock_translator.client.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+    stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
+    assert stats["repaired_count"] == 0
+    assert stats["fail_open_code"] == "unrepaired_quota_exceeded"
+    assert cues[0].vi == "Bản nháp Lite"
+    assert cues[0].repair_reason_code == "unrepaired_quota_exceeded"
+
+
+def test_cascade_fail_open_on_timeout():
+    """Verifies that network timeout fails open to Lite draft and sets unrepaired_timeout."""
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン", vi="Bản nháp Lite", uncertain=True),
+    ]
+    mock_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash")
+    mock_translator.client = MagicMock()
+    mock_translator.client.models.generate_content.side_effect = TimeoutError("Request timed out after 60s")
+
+    stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
+    assert stats["repaired_count"] == 0
+    assert stats["fail_open_code"] == "unrepaired_timeout"
+    assert cues[0].vi == "Bản nháp Lite"
+    assert cues[0].repair_reason_code == "unrepaired_timeout"
+
+
+def test_cascade_fail_open_on_invalid_json_schema():
+    """Verifies that malformed JSON response fails open to Lite draft and sets unrepaired_bad_schema."""
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン", vi="Bản nháp Lite", uncertain=True),
+    ]
+    mock_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash")
+    mock_translator.client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.text = "This is not valid JSON content at all"
+    mock_translator.client.models.generate_content.return_value = mock_res
+
+    stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
+    assert stats["repaired_count"] == 0
+    assert stats["fail_open_code"] == "unrepaired_bad_schema"
+    assert cues[0].vi == "Bản nháp Lite"
+    assert cues[0].repair_reason_code == "unrepaired_bad_schema"
+
+
+def test_cascade_relint_gate_rejects_new_critical_violation():
+    """Verifies that Re-lint gate rejects repair introducing critical violations (e.g. banned calque 'Pháp Lạp')."""
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン", vi="Cô bé", uncertain=True),
+    ]
+    mock_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash")
+    mock_translator.client = MagicMock()
+    mock_res = MagicMock()
+    # Flash returns a banned calque
+    mock_res.text = '[{"id": 1, "vi": "Pháp Lạp"}]'
+    mock_translator.client.models.generate_content.return_value = mock_res
+
+    stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
+    assert stats["repaired_count"] == 0
+    assert stats["rejected_count"] == 1
+    assert cues[0].vi == "Cô bé"  # Preserved original draft
+    assert cues[0].repair_reason_code == "rejected_critical_violation"
+

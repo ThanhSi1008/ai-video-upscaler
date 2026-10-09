@@ -311,3 +311,57 @@ def test_import_subtitles_triplet_without_en(tmp_path):
     assert len(shots) == 1
     assert shots[0]["vi"] == "Chiến thắng rồi!"
     assert "en" not in shots[0]
+
+
+def test_rag_status_filtering_draft_vs_gold(tmp_path):
+    """Verifies that 'draft' units are strictly ignored by retrieve_few_shots, while 'reviewed'/'gold' are used."""
+    db_file = tmp_path / "test_knowledge.db"
+    kb = KnowledgeBase(db_path=db_file)
+
+    # Add a draft unit (e.g. unverified pipeline output)
+    kb.add_gold_unit(
+        ja_text="強力な魔法",
+        vi_text="Phép thuật mạnh mẽ (bản nháp lỗi)",
+        series="tenken",
+        status="draft",
+    )
+    # Add a gold unit
+    kb.add_gold_unit(
+        ja_text="古代の魔法",
+        vi_text="Ma thuật cổ đại chuẩn xác",
+        series="tenken",
+        status="gold",
+    )
+
+    cues = [Cue(id=1, start=0, end=1000, ja="魔法を使う")]
+    shots = kb.retrieve_few_shots(cues, series="tenken")
+    assert len(shots) == 1
+    assert shots[0]["vi"] == "Ma thuật cổ đại chuẩn xác"
+    # Ensure draft text never leaked into few-shot context
+    assert not any("nháp lỗi" in s["vi"] for s in shots)
+
+
+def test_rag_learn_from_correction_feedback_loop(tmp_path):
+    """Verifies record_correction properly updates both Error Bank and Gold Units."""
+    db_file = tmp_path / "test_knowledge.db"
+    kb = KnowledgeBase(db_path=db_file)
+
+    res = kb.record_correction(
+        ja_text="ウルシ、伏せろ！",
+        wrong_vi="Ô Lỗ Thi, nằm xuống!",
+        corrected_vi="Urushi, nằm xuống!",
+        category="banned_transliteration",
+        explanation="Sửa âm Hán-Việt Ô Lỗ Thi thành Urushi",
+        series="tenken",
+    )
+    assert res["status"] == "success"
+    assert res["gold_added"] is True
+
+    # Check Error Bank caution retrieval
+    cues = [Cue(id=1, start=0, end=1000, ja="ウルシ、伏せろ！")]
+    cautions = kb.retrieve_cautions(cues, series="tenken")
+    assert any("Urushi" in c["prefer"] for c in cautions)
+
+    # Check gold few-shot retrieval
+    shots = kb.retrieve_few_shots(cues, series="tenken")
+    assert any("Urushi, nằm xuống!" in s["vi"] for s in shots)

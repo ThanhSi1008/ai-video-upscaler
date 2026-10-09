@@ -104,11 +104,19 @@ class KnowledgeBase:
                     vi_text TEXT NOT NULL,
                     speaker TEXT,
                     addressee TEXT,
+                    status TEXT DEFAULT 'reviewed',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_series ON gold_units(series)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_ja ON gold_units(ja_text)")
+
+            # Schema migration for existing DBs
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(gold_units)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "status" not in cols:
+                conn.execute("ALTER TABLE gold_units ADD COLUMN status TEXT DEFAULT 'reviewed'")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS error_bank (
@@ -125,7 +133,6 @@ class KnowledgeBase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_err_series ON error_bank(series)")
 
             # Seed error bank if empty
-            cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM error_bank")
             if cursor.fetchone()[0] == 0:
                 for seed in INITIAL_ERROR_BANK_SEEDS:
@@ -151,8 +158,13 @@ class KnowledgeBase:
         episode: Optional[str] = None,
         speaker: Optional[str] = None,
         addressee: Optional[str] = None,
+        status: str = "reviewed",
     ) -> bool:
-        """Inserts a verified gold subtitle unit if not already present."""
+        """
+        Inserts a verified subtitle unit if not already present.
+        status: 'gold' (human verified), 'reviewed' (archive aligned), 'draft' (unverified pipeline output).
+        Only 'gold' and 'reviewed' are ever retrieved as few-shots.
+        """
         ja_norm = normalize_nfc(ja_text).strip()
         vi_norm = normalize_nfc(vi_text).strip()
         if not ja_norm or not vi_norm:
@@ -168,8 +180,8 @@ class KnowledgeBase:
                 return False
 
             conn.execute("""
-                INSERT INTO gold_units (series, episode, ja_text, en_text, vi_text, speaker, addressee)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO gold_units (series, episode, ja_text, en_text, vi_text, speaker, addressee, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 series,
                 episode,
@@ -178,6 +190,7 @@ class KnowledgeBase:
                 vi_norm,
                 speaker,
                 addressee,
+                status,
             ))
             conn.commit()
             return True
@@ -189,6 +202,7 @@ class KnowledgeBase:
         vi_path: Path,
         series: str,
         episode: Optional[str] = None,
+        status: str = "reviewed",
     ) -> int:
         """
         Imports and aligns a triplet of subtitle files (JA, EN, VI) into gold_units.
@@ -251,52 +265,183 @@ class KnowledgeBase:
                 en_text=en_text,
                 series=series.lower(),
                 episode=ep_name,
+                status=status,
             ):
                 imported_count += 1
 
         logger.info(f"Imported {imported_count} gold units from {ja_path.name}")
         return imported_count
 
+    @staticmethod
+    def _extract_bigrams(text: str) -> List[str]:
+        """Extracts character bigrams from Japanese text, ignoring whitespace/punctuation."""
+        cleaned = re.sub(r"[\s\d\W]+", "", text)
+        if len(cleaned) < 2:
+            return [cleaned] if cleaned else []
+        return [cleaned[i:i+2] for i in range(len(cleaned) - 1)]
+
     def retrieve_few_shots(
         self,
         cues: List[Cue],
         series: Optional[str] = None,
         max_examples: int = 3,
+        min_score: float = 0.05,
     ) -> List[Dict[str, str]]:
         """
         Retrieves relevant few-shot examples from gold_units matching cues in the batch.
-        Extracts key Kanji/names to perform targeted keyword lookup.
+        Uses BM25 scoring over character bigrams with IDF weighting.
+        Only retrieves units with status IN ('gold', 'reviewed') (NEVER retrieves 'draft').
+        Strictly isolates series when provided.
         """
         if not cues:
             return []
 
-        # Extract Japanese keywords (Kanji words >= 2 chars, Katakana terms)
+        # Extract Japanese keywords (Kanji >= 2 chars, Katakana >= 2 chars) to check eligibility
         batch_ja = " ".join(c.ja for c in cues)
         keywords = set(re.findall(r"[\u4E00-\u9FAF]{2,}|[\u30A0-\u30FF]{2,}", batch_ja))
         if not keywords:
             return []
 
-        results: List[Dict[str, str]] = []
+        # Compute query bigrams
+        query_bigrams: List[str] = []
+        for kw in keywords:
+            query_bigrams.extend(self._extract_bigrams(kw))
+        if not query_bigrams:
+            return []
+
+        # Fetch candidate gold units (status must be 'reviewed' or 'gold', never 'draft')
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            for kw in list(keywords)[:8]:
-                query = "SELECT ja_text, en_text, vi_text FROM gold_units WHERE ja_text LIKE ?"
-                params = [f"%{kw}%"]
-                if series:
-                    query += " AND (series = ? OR series IS NULL)"
-                    params.append(series.lower())
-                query += " LIMIT 2"
-                cursor.execute(query, params)
-                for row in cursor.fetchall():
-                    item = {"ja": row[0], "vi": row[2]}
-                    if row[1]:
-                        item["en"] = row[1]
-                    if item not in results:
-                        results.append(item)
-                    if len(results) >= max_examples:
-                        return results
+            query = """
+                SELECT id, ja_text, en_text, vi_text, series
+                FROM gold_units
+                WHERE (status IN ('reviewed', 'gold') OR status IS NULL)
+            """
+            params: List[Any] = []
+            if series:
+                query += " AND (series = ? OR series IS NULL)"
+                params.append(series.lower())
+            cursor.execute(query, params)
+            candidates = cursor.fetchall()
 
-        return results[:max_examples]
+        if not candidates:
+            return []
+
+        # Build candidate document bigram representations
+        doc_bigrams: Dict[int, List[str]] = {}
+        for cid, ja_text, en_text, vi_text, s_val in candidates:
+            doc_bigrams[cid] = self._extract_bigrams(ja_text)
+
+        # Compute document frequencies and BM25 IDF for query bigrams
+        N = len(candidates)
+        avgdl = sum(len(bg) for bg in doc_bigrams.values()) / max(1, N)
+        k1 = 1.2
+        b = 0.75
+
+        unique_q_bigrams = set(query_bigrams)
+        df: Dict[str, int] = {}
+        for qb in unique_q_bigrams:
+            df[qb] = sum(1 for cid in doc_bigrams if qb in doc_bigrams[cid])
+
+        # BM25 Scoring
+        scored_candidates: List[Tuple[float, Dict[str, str]]] = []
+        import math
+        for cid, ja_text, en_text, vi_text, s_val in candidates:
+            d_bgs = doc_bigrams[cid]
+            dl = len(d_bgs)
+            if dl == 0:
+                continue
+
+            # TF count for this doc
+            tf: Dict[str, int] = {}
+            for bg in d_bgs:
+                tf[bg] = tf.get(bg, 0) + 1
+
+            score = 0.0
+            for qb in unique_q_bigrams:
+                if qb in tf:
+                    n_q = df[qb]
+                    idf = math.log(1.0 + (N - n_q + 0.5) / (n_q + 0.5))
+                    term_tf = tf[qb]
+                    num = term_tf * (k1 + 1.0)
+                    den = term_tf + k1 * (1.0 - b + b * (dl / max(1.0, avgdl)))
+                    score += idf * (num / den)
+
+            if score >= min_score:
+                item = {"ja": ja_text, "vi": vi_text}
+                if en_text:
+                    item["en"] = en_text
+                scored_candidates.append((score, item))
+
+        # Sort by BM25 score descending
+        scored_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Deduplicate and return top max_examples
+        results: List[Dict[str, str]] = []
+        for sc, item in scored_candidates:
+            if item not in results:
+                results.append(item)
+            if len(results) >= max_examples:
+                break
+
+        if results:
+            logger.info(
+                f"📚 [RAG BM25] Đã chọn {len(results)}/{len(candidates)} ví dụ gold/reviewed "
+                f"(top score={scored_candidates[0][0]:.2f}): {[r['ja'][:15] for r in results]}"
+            )
+        return results
+
+    def record_correction(
+        self,
+        ja_text: str,
+        wrong_vi: str,
+        corrected_vi: str,
+        category: str = "human_correction",
+        explanation: Optional[str] = None,
+        series: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Feedback Loop ('subtrans learn'):
+        Records a human-corrected subtitle into both Error Bank and gold_units (status='gold').
+        Prevents repeating the same mistake in future episodes.
+        """
+        ja_norm = normalize_nfc(ja_text).strip()
+        wrong_norm = normalize_nfc(wrong_vi).strip()
+        corr_norm = normalize_nfc(corrected_vi).strip()
+        expl = explanation or f"Sửa '{wrong_norm}' thành '{corr_norm}'"
+
+        # 1. Add to gold_units as gold
+        gold_added = self.add_gold_unit(
+            ja_text=ja_norm,
+            vi_text=corr_norm,
+            series=series,
+            status="gold"
+        )
+
+        # 2. Add rule to error_bank
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                category,
+                ja_norm,
+                re.escape(wrong_norm),
+                corr_norm,
+                expl,
+                series.lower() if series else None,
+            ))
+            conn.commit()
+
+        logger.info(f"💡 [LEARN] Đã nạp phản hồi sửa lỗi vào Error Bank và Gold Units: '{corr_norm}'")
+        return {
+            "status": "success",
+            "gold_added": gold_added,
+            "ja": ja_norm,
+            "wrong": wrong_norm,
+            "corrected": corr_norm,
+            "series": series,
+        }
 
     def retrieve_cautions(
         self,

@@ -187,6 +187,8 @@ def run(
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
     subs_quality: str = typer.Option("normal", "--subs-quality", help="Chất lượng dịch: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"),
     auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
+    no_rag: bool = typer.Option(False, "--no-rag", help="Tắt truy hồi RAG few-shot và error bank"),
+    no_cascade: bool = typer.Option(False, "--no-cascade", help="Tắt phân hệ Smart Cloud Cascade Repair pass (Stage P2)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
@@ -211,6 +213,8 @@ def run(
         allow_latest_alias=allow_latest_alias,
         on_quota=on_quota,
         enable_review=review,
+        enable_cascade=not no_cascade,
+        enable_rag=not no_rag,
         limit_cues=limit,
         output_dir=out_dir,
         output_format=format_,

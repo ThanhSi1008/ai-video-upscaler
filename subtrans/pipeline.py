@@ -42,8 +42,10 @@ class TranslationPipeline:
         config_path: Optional[Path] = None,
         local_only: bool = False,
         model_override: Optional[str] = None,
-        on_quota: str = "local",  # "local" | "stop"
+        on_quota: str = "stop",  # "stop" (Graceful exit on reset hour) | "local"
         enable_review: bool = False,
+        enable_cascade: bool = True,
+        enable_rag: bool = True,
         limit_cues: Optional[int] = None,
         output_dir: Optional[Path] = None,
         output_format: Optional[str] = "srt",
@@ -61,6 +63,8 @@ class TranslationPipeline:
         self.local_only = local_only or (self.cfg.get("privacy", {}).get("mode") == "local_only")
         self.on_quota = on_quota
         self.enable_review = enable_review
+        self.enable_cascade = enable_cascade
+        self.enable_rag = enable_rag
         self.limit_cues = limit_cues
         self.output_dir = output_dir or Path("out")
         self.output_format = output_format or "srt"
@@ -141,6 +145,7 @@ class TranslationPipeline:
                             allow_latest_alias=self.allow_latest_alias,
                             timeout_ms=self.request_timeout_ms,
                             dry_run=self.dry_run,
+                            enable_rag=self.enable_rag,
                         )
                     except Exception as e:
                         logger.warning(f"Could not initialize backend for {m_name}: {e}")
@@ -647,6 +652,13 @@ class TranslationPipeline:
         stats["real_rate"] = real_rate
         stats["uncertain_rate"] = uncertain_rate
         stats["key_rotations"] = list(GeminiTranslator.all_rotation_events)
+        stats["provenance"] = {
+            "rag_enabled": self.enable_rag,
+            "cascade_enabled": self.enable_cascade,
+            "primary_model": self.gemini_model,
+            "subs_quality": self.subs_quality,
+            "dry_run": self.dry_run,
+        }
         stats["offset_info"] = {
             "applied_offset_ms": sub_offset_ms,
             "detected_offset_ms": det_offset,
