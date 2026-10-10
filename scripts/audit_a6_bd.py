@@ -86,13 +86,15 @@ def main():
     print(f"\n5. Đang tạo clip chuẩn: {out_clip}...")
     cmd_clip = [
         "ffmpeg", "-y",
-        "-ss", "00:04:00", "-to", "00:05:00",
+        "-ss", "00:04:00", "-t", "60",
         "-i", bd_file,
+        "-map", "0:v:0", "-map", "0:a:1",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-g", "24",
         "-crf", "0",
         "-c:a", "copy",
+        "-sn", "-map_chapters", "-1",
         out_clip
     ]
     subprocess.run(cmd_clip, check=True)
