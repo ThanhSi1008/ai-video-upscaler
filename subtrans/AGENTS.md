@@ -20,6 +20,12 @@
 * **Bảo tồn tên riêng Romaji khi xưng hô gọi tên (Vocative Name Retention):**
   * Khi lời thoại tiếng Nhật gọi tên nhân vật, phụ đề tiếng Việt phải giữ nguyên tên Romaji (e.g. "Fran, cẩn thận!", "Jean, chạy đi!", "Cảm ơn chị Nell", "Reirin, chuyện gì vậy?").
   * Có thể kèm từ xưng hô thân mật/kính ngữ tự nhiên ("chị Nell", "bác Garrus"), nhưng **tên riêng Romaji bắt buộc phải xuất hiện**, không được triệt tiêu thành các đại từ chung chung ("cậu", "anh", "em", "mày").
+* **Tối ưu hóa hiển thị phụ đề đa thoại & chống trôi chữ (Dual Dialogue & Playback Optimization):**
+  * Tự động phát hiện 2 người nói cùng lúc / gần cùng lúc (start chênh <= 800ms, overlap >= 400ms) để gộp thành phụ đề song song 2 dòng (`- Lời 1\n- Lời 2`) kéo dài tối thiểu 2.2s.
+  * Tự động gộp các mảnh câu liên tiếp nói quá nhanh (< 1.2s/mảnh) thành một câu liền mạch; bảo đảm thời lượng đọc tối thiểu (>= 1.2s - 1.4s) và khoảng nghỉ 40ms chống giật flicker trên IINA, mpv, VLC và Apple TV.
+* **Bóc tách phụ đề đa người nói Closed Captions (Multi-Speaker CC Splitting):**
+  * Bóc tách các event CC dạng gộp `-（Người 1）Thoại 1\N-（Người 2）Thoại 2` thành các event độc lập có cùng timeline qua `split_multi_speaker_cc_events` trong `subtrans/parser.py`.
+  * Bóc tiền tố gạch ngang đầu dòng `^[-–—]\s*` qua `strip_speaker_prefix`. Mỗi câu được dịch riêng lẻ và tự động hợp nhất thành phụ đề song song 2 dòng qua bộ Dual Dialogue tại `subtrans/writer.py`.
 * **Chống dịch đúp tiếng cười & Triệt tiêu dị bản trùng lặp trong Dual Dialogue:**
   * Các từ tượng thanh tiếng cười anime (`ふはは+`, `ははは+`, `フハハ+`, `ククク+`, `ふふふ+`...) được nhận diện chính xác là interjection/sound cue trong `subtrans/parser.py`, tránh bị gán nhầm câu thoại tiếng Anh overlap của nhân vật khác.
   * Bộ `optimize_cues_for_playback` trong `subtrans/writer.py` tự động phát hiện các câu xuất hiện cùng lúc chia sẻ tiền tố chung dài (common prefix >= 15 chars) hoặc độ trùng lặp từ vựng >= 60% để chỉ giữ lại 1 câu hoàn chỉnh duy nhất, tuyệt đối không gộp thành 2 dòng Dual Dialogue lặp lại nhau.
