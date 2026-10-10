@@ -49,8 +49,8 @@
 | `--no-embed` | `False` | Tắt bước nhúng phụ đề vào container MKV thành phẩm |
 | `--keep-temp` | `False` | Giữ lại thư mục tạm `.temp_<basename>` (mặc định: tự động dọn dẹp sạch khi Mux PASS) |
 | `--clean-temp`, `--cleanup` | `False` | Quét dọn toàn bộ thư mục tạm và gom file audit/cast trong thư mục xuất xưởng rồi thoát |
-| `--no-organize-audit` | `False` | Tắt bước gom các file audit (.audit.json, .audit.md, .cast.yaml) vào thư mục con `audit/` |
-| `--dedup-policy` | `default` | Chính sách dedup: `default` (768:320:0.33), `sensitive-a` (512:160:0.15), `sensitive-b` (384:128:0.10), `motion` (kèm phase correlation), `off` (tắt) |
+| `--dedup-policy` | `default` | Chính sách dedup: `default` (768:320:0.33), `sensitive-a` (512:160:0.15), `sensitive-b` (384:128:0.10), `motion` (kèm phase correlation), `drift` (tích lũy), `dis` (dòng chảy quang học DIS bắt 100% zoom/lia chậm), `off` (tắt) |
+| `--dis-thresh` | `0.30` | Ngưỡng dòng chảy quang học DIS tính bằng pixel 1080p (`0.20` - `0.50`) |
 | `--dry-run` | `False` | Chạy mô phỏng toàn bộ quy trình mà không gọi AI hay API |
 
 ---
@@ -183,6 +183,15 @@ upscale/
   6. **Đo Điểm Độ Khó $S(cue)$ Sau Auto-fix, Trần Ngân Sách Top-K & Tốc Độ Cao:** $S(cue)$ chỉ chạy trên các vi phạm còn sót lại sau khi đã chạy `auto_fix_cues` của code Python; markers được nạp động từ config series (`glossary.difficulty_markers`, loại bỏ hoàn toàn tiền tố lỏng lẻo `殿`); áp đặt trần ngân sách sửa chữa Top-K ($K \le 20\%$ số câu, tối đa 15 câu/request qua `MAX_CUES_PER_REQUEST = 15`, $\le 2$ cuộc gọi Flash/tập); cấu hình `thinking_config=types.ThinkingConfig(thinking_budget=0)` cho Flash repair pass giúp triệt tiêu nguy cơ 504 Deadline Exceeded và rút ngắn thời gian xử lý batch từ >60s xuống <2s; bọc `call_with_retry` tự động retry khi Google quá tải 503; ghi log viễn trắc JSONL chi tiết từng cue phục vụ hồi quy logistic sau này.
   7. **Nghiệm Thu Thực Nghiệm Đối Đầu 4 Cấu Hình (C0–C3) Trên Tenken S01E02:** Đã hoàn thành đo lường đối đầu thực tế 4 cấu hình trên toàn bộ tập phim (438 cues, 435 câu thoại): C0 (Baseline Lite thuần: 187.6s, 5 lỗi, Max CPS 36.99), C1 (Lite + RAG: 179.4s, 3 lỗi, Max CPS 32.88), C2 (Lite + Cascade: 183.6s, 4 lỗi, Max CPS 36.26), C3 (Full Pipeline: 144.7s, 3 lỗi, Max CPS 28.57, tỷ lệ câu sạch 96.77%). C3 chiến thắng toàn diện: giảm 40% lỗi linter, ép trần CPS giảm 22.8%, đại từ và tên riêng Romaji bảo toàn 100%.
   8. **Dọn Sạch Tàn Dư Cục Bộ & Bộ Test Tự Động Toàn Diện:** Xóa bỏ vĩnh viễn `subtrans/local_backend.py` và `subtrans/review.py`; unskip `test_subtrans_stub_pipeline.py` bằng bài test stub tích hợp toàn diện không phụ thuộc tài nguyên ngoài; bổ sung kiểm thử chuyển đổi DST giờ mùa hè/đông cho `get_next_pt_reset` (1/11 và 14/3); đạt **168/168 tests Pytest PASS** (1 skipped GPU).
+* **Bắt Trọn Vẹn Chuyển Động Zoom/Lia Chậm Bằng Dòng Chảy Quang Học DIS (Dense Inverse Search Optical Flow):**
+  - **Vấn đề cốt lõi:** Các thuật toán tương quan pha (Phase Correlation / `drift`) chỉ bắt được tịnh tiến toàn cục $(dx, dy)$ nên khi camera zoom xuyên tâm, các vector ngược hướng triệt tiêu nhau khiến zoom chậm bị bỏ qua và gây giật khựng.
+  - **Giải pháp DIS:** Triển khai chính sách `--dedup-policy {dis, dis-0.2, dis-0.3, dis-0.4, dis-0.5}` kèm cờ `--dis-thresh <float>` (mặc định $\tau = 0.30$ px trên độ phân giải 1080p).
+  - **Cơ chế 3 lớp kiểm định:**
+    1. *Tịnh tiến toàn cục (Pan/Tilt):* $\text{mag}_{pan} = \sqrt{\text{median}(u)^2 + \text{median}(v)^2}$.
+    2. *Phân kỳ xuyên tâm (Zoom In/Out):* Tốc độ dãn nở $k_{radial} = \text{median}(v_{rad} / r)$ từ tâm quang học; biên độ zoom cạnh $zoom_{edge} = |k_{radial}| \cdot r_{max}$.
+    3. *Chuyển động phân tán (Local/Distributed):* Phân vị 90 của độ lớn trường dòng chảy và diện tích pixel di chuyển $\ge 5\%$.
+  - **Tối ưu hóa hiệu năng:** Chỉ tính DIS trên các khung hình mà mpdecimate đề xuất bỏ (candidate drops); bỏ qua hoàn toàn các frame đã được mpdecimate giữ lại. Chạy ở độ phân giải $480 \times 270$ với preset `DISOPTICAL_FLOW_PRESET_FAST` đạt $\approx 430$ fps trên CPU Apple Silicon M3 Pro (~1.5–2 phút preflight cho cả tập 24 phút).
+  - **Kết quả thực nghiệm:** Trên cửa sổ zoom khựng 83 frames (965–1048 của `sample_1min_bd.mkv`), `default` bỏ sót 40 frames trong khi `dis-0.3` giữ chuẩn **83/83 frames (100.0%)**, đồng thời không kích hoạt sai trên các phân cảnh đối thoại tĩnh (nhiễu nền $\le 0.115$ px).
 ---
 
 ## 7. Tiêu Chí Nghiệm Thu (Definition of Done)

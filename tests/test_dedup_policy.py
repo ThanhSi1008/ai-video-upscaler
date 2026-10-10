@@ -153,3 +153,48 @@ def test_dedup_policy_resume_mismatch_rejected():
         # Resume với policy='sensitive-a' -> Phải raise ValueError từ chối resume
         with pytest.raises(ValueError, match="Từ chối resume"):
             load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="sensitive-a")
+
+
+def test_dedup_policy_dis_schema_and_params():
+    """Kiểm tra chính sách 'dis' ghi nhận đúng dis_thresh vào plan.json và từ chối khi lệch thresh."""
+    with tempfile.TemporaryDirectory() as td:
+        plan_path = os.path.join(td, "plan_dis.json")
+        dummy_plan = {
+            "source_file": "dummy.mkv",
+            "dedup_policy": "dis-0.3",
+            "dedup_params": {"dis_thresh": 0.30},
+            "total_frames": 100,
+            "chunks": [{"total_frames": 100, "runs": []}]
+        }
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump(dummy_plan, f)
+
+        # Resume với đúng policy dis-0.3 -> Thành công
+        cached = load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="dis-0.3")
+        assert cached["dedup_policy"] == "dis-0.3"
+        assert cached["dedup_params"]["dis_thresh"] == 0.30
+
+        # Resume với thresh khác (dis-0.5) -> Phải raise ValueError từ chối resume
+        with pytest.raises(ValueError, match="Từ chối resume"):
+            load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="dis-0.5")
+
+
+def test_dedup_policy_dis_scan_and_catch_zoom():
+    """Kiểm tra quét DIS trên video mẫu: dis bắt được nhiều frame hơn default ở các đoạn chuyển động mịn."""
+    sample_video = _get_test_sample_video()
+    if not sample_video:
+        pytest.skip("Không tìm thấy file video mẫu để kiểm tra scan dis")
+
+    with tempfile.TemporaryDirectory() as td:
+        plan_dis_path = os.path.join(td, "plan_dis.json")
+        plan_def_path = os.path.join(td, "plan_def.json")
+
+        p_dis = scan_dedup_plan(sample_video, plan_dis_path, policy="dis-0.3")
+        p_def = scan_dedup_plan(sample_video, plan_def_path, policy="default")
+
+        assert p_dis["dedup_policy"] == "dis-0.3"
+        assert p_dis["dedup_params"]["dis_thresh"] == 0.30
+        assert p_dis["total_frames"] == p_def["total_frames"]
+        # DIS optical flow bắt thêm frame zoom/pan chuyển động mịn -> số frame giữ lại phải >= default
+        assert p_dis["total_kept_frames"] >= p_def["total_kept_frames"]
+

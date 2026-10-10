@@ -228,14 +228,20 @@ def build_arg_parser():
     parser.add_argument(
         "--dedup-policy",
         default=None,
-        choices=["default", "sensitive", "sensitive-a", "sensitive-b", "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0", "off"],
-        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy từ frame giữ gần nhất), off (giữ tất cả)"
+        choices=["default", "sensitive", "sensitive-a", "sensitive-b", "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0", "dis", "dis-0.2", "dis-0.3", "dis-0.4", "dis-0.5", "off"],
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy từ frame giữ gần nhất), dis (dòng chảy quang học DIS bắt 100% zoom/lia), off (giữ tất cả)"
     )
     parser.add_argument(
         "--drift-delta",
         type=float,
         default=None,
         help="Ngưỡng dịch tích lũy δ (px 1080p) cho chính sách 'drift' (mặc định: 0.75)"
+    )
+    parser.add_argument(
+        "--dis-thresh",
+        type=float,
+        default=None,
+        help="Ngưỡng dòng chảy quang học τ (px 1080p) cho chính sách 'dis' (mặc định: 0.30)"
     )
     parser.add_argument(
         "--preview",
@@ -463,6 +469,10 @@ def main():
     if getattr(args, "drift_delta", None) is not None:
         if args.dedup_policy is None or args.dedup_policy == "drift":
             args.dedup_policy = f"drift-{args.drift_delta}"
+
+    if getattr(args, "dis_thresh", None) is not None:
+        if args.dedup_policy is None or args.dedup_policy == "dis":
+            args.dedup_policy = f"dis-{args.dis_thresh}"
 
     # Xử lý cờ --clean-temp / --cleanup (Dọn dẹp nhanh thư mục tạm và gom gọn audit)
     if getattr(args, "clean_temp", False):

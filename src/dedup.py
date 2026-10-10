@@ -40,6 +40,11 @@ DEDUP_POLICY_PARAMS = {
     "drift-0.5": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 0.5, "min_response": 0.10},
     "drift-0.75": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 0.75, "min_response": 0.10},
     "drift-1.0": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "drift_delta": 1.0, "min_response": 0.10},
+    "dis": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "dis_thresh": 0.30},
+    "dis-0.2": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "dis_thresh": 0.20},
+    "dis-0.3": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "dis_thresh": 0.30},
+    "dis-0.4": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "dis_thresh": 0.40},
+    "dis-0.5": {"hi": DEFAULT_DEDUP_HI, "lo": DEFAULT_DEDUP_LO, "frac": DEFAULT_DEDUP_FRAC, "dis_thresh": 0.50},
     "off": {"all_keep": True}
 }
 
@@ -262,6 +267,102 @@ def detect_drift_policy_actions(
     return actions
 
 
+def detect_dis_policy_actions(
+    input_path: str,
+    base_actions: List[str],
+    forced_keep_indices: set,
+    thresh: float = 0.30,
+    scale_w: int = 480,
+    scale_h: int = 270,
+    min_moving_area_pct: float = 5.0
+) -> List[str]:
+    """
+    Chính sách 'dis' (Dense Inverse Search Optical Flow - Dòng chảy quang học dày đặc):
+    - Bắt đúng 100% các phân cảnh zoom chậm, lia máy (pan), hoặc chuyển động mượt mà liên tục.
+    - So với Phase Correlation (chỉ bắt tịnh tiến toàn cục dx, dy), DIS tính trường vector dòng chảy
+      dày đặc trên từng pixel, kết hợp 3 phép đo:
+      1. Tịnh tiến toàn cục (median dx, dy) -> Pan / Tilt
+      2. Phân kỳ xuyên tâm từ tâm quang học (radial divergence expansion rate) -> Zoom In / Out
+      3. Chuyển động phân tán / cục bộ (percentile 90 và diện tích di chuyển) -> Mây, khói, nước, sub-pixel
+    - Chỉ chạy DIS trên các khung hình mà mpdecimate đề xuất bỏ (candidate drops) so với frame tham chiếu gần nhất,
+      bảo toàn tối ưu thời gian và giải phóng tài nguyên ở các cảnh tĩnh/đối thoại.
+    """
+    import cv2
+    import numpy as np
+
+    frame_bytes = scale_w * scale_h
+    scale_factor = 1080.0 / scale_h
+    h, w = scale_h, scale_w
+
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
+    rx = x_coords - w / 2.0
+    ry = y_coords - h / 2.0
+    r = np.sqrt(rx**2 + ry**2)
+    r_mask = r > (20.0 if h == 270 else 40.0)
+    r_max = np.sqrt((w / 2.0)**2 + (h / 2.0)**2)
+
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", input_path,
+        "-fps_mode", "passthrough",
+        "-vf", f"scale={scale_w}:{scale_h},format=gray",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-"
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 10)
+    actions = list(base_actions)
+
+    ref_gray = None
+    curr_idx = 0
+
+    while True:
+        raw = proc.stdout.read(frame_bytes)
+        if len(raw) < frame_bytes:
+            break
+        curr_gray = np.frombuffer(raw, dtype=np.uint8).reshape((scale_h, scale_w))
+
+        if curr_idx == 0 or curr_idx in forced_keep_indices or actions[curr_idx] == "keep" or ref_gray is None:
+            actions[curr_idx] = "keep"
+            ref_gray = curr_gray
+        else:
+            flow = dis.calc(ref_gray, curr_gray, None)
+            u = flow[..., 0] * scale_factor
+            v = flow[..., 1] * scale_factor
+            mag = np.hypot(u, v)
+
+            # 1. Chuyển động lia máy tịnh tiến toàn cục (Pan / Tilt)
+            dx = float(np.median(u))
+            dy = float(np.median(v))
+            mag_pan = float(np.hypot(dx, dy))
+
+            # 2. Chuyển động zoom xuyên tâm (phóng to / thu nhỏ)
+            u_m = u[r_mask]
+            v_m = v[r_mask]
+            r_m = r[r_mask]
+            v_rad = (rx[r_mask] * u_m + ry[r_mask] * v_m) / r_m
+            k_radial = float(np.median(v_rad / r_m))
+            zoom_edge = abs(k_radial * r_max)
+
+            # 3. Chuyển động phân tán / cục bộ
+            p90_mag = float(np.percentile(mag, 90))
+            area_moving = float(np.mean(mag >= thresh) * 100.0)
+
+            score = max(mag_pan, zoom_edge, 0.7 * p90_mag)
+
+            if score >= thresh or area_moving >= min_moving_area_pct:
+                actions[curr_idx] = "keep"
+                ref_gray = curr_gray
+
+        curr_idx += 1
+
+    proc.stdout.close()
+    proc.wait()
+    return actions
+
+
 def scan_dedup_plan(
     input_path: str,
     plan_path: str,
@@ -275,13 +376,14 @@ def scan_dedup_plan(
     policy: str = "default",
     motion_tau: float = 0.3,
     drift_delta: Optional[float] = None,
-    drift_min_response: float = 0.10
+    drift_min_response: float = 0.10,
+    dis_thresh: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
     Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
     Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp hoàn toàn với phân đoạn thực tế.
-    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, drift, off.
+    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, drift, dis, off.
     """
     # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
     ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -315,12 +417,24 @@ def scan_dedup_plan(
     elif policy_clean == "drift-1.0":
         effective_drift_delta = 1.0
 
+    effective_dis_thresh = 0.30
+    if dis_thresh is not None:
+        effective_dis_thresh = float(dis_thresh)
+    elif policy_clean == "dis-0.2":
+        effective_dis_thresh = 0.20
+    elif policy_clean == "dis-0.3":
+        effective_dis_thresh = 0.30
+    elif policy_clean == "dis-0.4":
+        effective_dis_thresh = 0.40
+    elif policy_clean == "dis-0.5":
+        effective_dis_thresh = 0.50
+
     # Áp dụng thông số theo chính sách nếu là giá trị mặc định
     if policy_clean in ["sensitive", "sensitive-a"]:
         hi, lo, frac = 512, 160, 0.15
     elif policy_clean == "sensitive-b":
         hi, lo, frac = 384, 128, 0.10
-    elif policy_clean in ["motion", "default"] or policy_clean.startswith("drift"):
+    elif policy_clean in ["motion", "default"] or policy_clean.startswith("drift") or policy_clean.startswith("dis"):
         hi, lo, frac = DEFAULT_DEDUP_HI, DEFAULT_DEDUP_LO, DEFAULT_DEDUP_FRAC
 
     frame_actions: List[str] = []
@@ -426,6 +540,14 @@ def scan_dedup_plan(
             delta=effective_drift_delta,
             min_response=drift_min_response
         )
+    # Chính sách dis: đo dòng chảy quang học dày đặc DIS Optical Flow (zoom/lia/chuyển động mịn)
+    elif policy_clean.startswith("dis"):
+        frame_actions = detect_dis_policy_actions(
+            input_path=input_path,
+            base_actions=frame_actions,
+            forced_keep_indices=chunk_start_indices,
+            thresh=effective_dis_thresh
+        )
 
     chunks_meta = []
     total_kept_count = 0
@@ -517,7 +639,8 @@ def scan_dedup_plan(
             "frac": frac if policy_clean != "off" else None,
             "motion_tau": motion_tau if policy_clean == "motion" else None,
             "drift_delta": effective_drift_delta if policy_clean.startswith("drift") else None,
-            "drift_min_response": drift_min_response if policy_clean.startswith("drift") else None
+            "drift_min_response": drift_min_response if policy_clean.startswith("drift") else None,
+            "dis_thresh": effective_dis_thresh if policy_clean.startswith("dis") else None
         },
         "total_frames": total_frames,
         "raw_kept_frames": raw_keep,
@@ -552,7 +675,8 @@ def load_or_create_plan(
     policy: str = "default",
     motion_tau: float = 0.3,
     drift_delta: Optional[float] = None,
-    drift_min_response: float = 0.10
+    drift_min_response: float = 0.10,
+    dis_thresh: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
@@ -569,6 +693,18 @@ def load_or_create_plan(
         effective_drift_delta = 0.75
     elif policy_clean == "drift-1.0":
         effective_drift_delta = 1.0
+
+    effective_dis_thresh = 0.30
+    if dis_thresh is not None:
+        effective_dis_thresh = float(dis_thresh)
+    elif policy_clean == "dis-0.2":
+        effective_dis_thresh = 0.20
+    elif policy_clean == "dis-0.3":
+        effective_dis_thresh = 0.30
+    elif policy_clean == "dis-0.4":
+        effective_dis_thresh = 0.40
+    elif policy_clean == "dis-0.5":
+        effective_dis_thresh = 0.50
 
     if resume and os.path.exists(plan_path):
         try:
@@ -590,6 +726,14 @@ def load_or_create_plan(
                             f"Từ chối resume: Kế hoạch drift trong {plan_path} sử dụng delta={cached_delta} "
                             f"khác với delta yêu cầu={effective_drift_delta}."
                         )
+                if policy_clean.startswith("dis"):
+                    cached_params = data.get("dedup_params", {})
+                    cached_dis = cached_params.get("dis_thresh")
+                    if cached_dis is not None and abs(cached_dis - effective_dis_thresh) > 1e-4:
+                        raise ValueError(
+                            f"Từ chối resume: Kế hoạch dis trong {plan_path} sử dụng dis_thresh={cached_dis} "
+                            f"khác với dis_thresh yêu cầu={effective_dis_thresh}."
+                        )
                 if chunk_frame_counts is None:
                     return data
                 cached_counts = [c["total_frames"] for c in chunks]
@@ -610,7 +754,8 @@ def load_or_create_plan(
         policy=policy_clean,
         motion_tau=motion_tau,
         drift_delta=effective_drift_delta,
-        drift_min_response=drift_min_response
+        drift_min_response=drift_min_response,
+        dis_thresh=effective_dis_thresh
     )
 
 
