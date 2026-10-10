@@ -26,8 +26,8 @@ Bảng tra cứu tham số trong [`src/dedup.py:DEDUP_POLICY_PARAMS`](file:///Us
 | **`sensitive-a`** | `hi=512 : lo=160 : frac=0.15` | Nhạy hơn với chuyển động nhỏ của nhân vật/khuôn mặt |
 | **`sensitive-b`** | `hi=384 : lo=128 : frac=0.10` | Khắc phục chuyển động camera pan/zoom với chi phí preflight cực thấp (~96s CPU/tập) |
 | **`motion`** | `hi=768 : lo=320 : frac=0.33`, $\tau = 0.30$ | Bổ sung tương quan pha Phase Correlation trên 4 góc phần tư độc lập |
-| **`drift` / `drift-0.5`** | `drift_delta = 0.5 – 1.0 px` | Đo độ dịch tích lũy Phase Correlation từ frame giữ gần nhất; bắt lia máy tịnh tiến |
-| **`dis` / `dis-0.3`** | `dis_thresh = 0.30 px` (1080p) | **Dòng chảy quang học DIS 3 tầng**: Bắt đúng 100% các đoạn zoom chậm, lia máy pan/tilt và chuyển động mịn |
+| **`drift` / `drift-0.5`** | `drift_delta = 0.5 – 1.0 px` | Đo độ dịch tích lũy Phase Correlation từ frame giữ gần nhất; bắt lia máy tịnh tiến nhưng **thất bại trên zoom** do triệt tiêu vector |
+| **`dis` / `dis-0.3`** | `dis_thresh = 0.30 px` (1080p) | **Dòng chảy quang học DIS 3 tầng**: Bắt các phân đoạn zoom chậm, lia máy pan/tilt và chuyển động mịn |
 | **`off`** | Giữ 100% tất cả khung hình | Tắt hoàn toàn deduplication, chạy AI SR trên toàn bộ frame nguồn |
 
 ---

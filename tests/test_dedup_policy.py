@@ -179,22 +179,109 @@ def test_dedup_policy_dis_schema_and_params():
             load_or_create_plan("dummy.mkv", plan_path, resume=True, policy="dis-0.5")
 
 
-def test_dedup_policy_dis_scan_and_catch_zoom():
-    """Kiểm tra quét DIS trên video mẫu: dis bắt được nhiều frame hơn default ở các đoạn chuyển động mịn."""
-    sample_video = _get_test_sample_video()
-    if not sample_video:
-        pytest.skip("Không tìm thấy file video mẫu để kiểm tra scan dis")
+def _make_synthetic_clip(frames_bgr, out_path, crf=22):
+    """Tạo video nén x264 CRF từ chuỗi frame BGR."""
+    import subprocess
+    h, w = frames_bgr[0].shape[:2]
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}",
+        "-r", "24000/1001",
+        "-i", "-",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", str(crf),
+        "-preset", "ultrafast",
+        "-g", "24",
+        out_path
+    ]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for f in frames_bgr:
+        p.stdin.write(f.tobytes())
+    p.stdin.close()
+    p.wait()
+
+
+def test_dedup_policy_dis_synthetic_pan():
+    """B7(1): Chuỗi tổng hợp lia 0.4 px/frame -> dis-0.3 giữ >= 95% frame."""
+    import cv2
+    import numpy as np
+    base_path = "test_frames/frame_action.png"
+    if not os.path.exists(base_path):
+        pytest.skip(f"Không tìm thấy {base_path}")
+    base_img = cv2.imread(base_path)
+    h, w = base_img.shape[:2]
+    frames = []
+    for i in range(60):
+        M = np.float32([[1, 0, i * 0.4], [0, 1, 0]])
+        frames.append(cv2.warpAffine(base_img, M, (w, h), borderMode=cv2.BORDER_REFLECT))
 
     with tempfile.TemporaryDirectory() as td:
+        clip_path = os.path.join(td, "pan_04.mp4")
+        plan_path = os.path.join(td, "plan_pan.json")
+        _make_synthetic_clip(frames, clip_path, crf=22)
+
+        plan = scan_dedup_plan(clip_path, plan_path, policy="dis-0.3")
+        kept = plan["total_kept_frames"]
+        total = plan["total_frames"]
+        # Yêu cầu B7: giữ >= 95% frames
+        assert kept >= int(0.95 * total), f"dis-0.3 phải giữ >= 95% frames khi lia 0.4 px/f, thực tế giữ {kept}/{total} ({kept/total*100:.1f}%)"
+
+
+def test_dedup_policy_dis_synthetic_noise_rejection():
+    """B7(2): Chuỗi tĩnh + nhiễu CRF 26 -> dis-0.3 giữ thêm <= 2% so với default."""
+    import cv2
+    base_path = "test_frames/frame_close_up.png"
+    if not os.path.exists(base_path):
+        pytest.skip(f"Không tìm thấy {base_path}")
+    base_img = cv2.imread(base_path)
+    frames = [base_img.copy() for _ in range(60)]
+
+    with tempfile.TemporaryDirectory() as td:
+        clip_path = os.path.join(td, "static_crf26.mp4")
         plan_dis_path = os.path.join(td, "plan_dis.json")
         plan_def_path = os.path.join(td, "plan_def.json")
+        _make_synthetic_clip(frames, clip_path, crf=26)
 
-        p_dis = scan_dedup_plan(sample_video, plan_dis_path, policy="dis-0.3")
-        p_def = scan_dedup_plan(sample_video, plan_def_path, policy="default")
+        p_def = scan_dedup_plan(clip_path, plan_def_path, policy="default")
+        p_dis = scan_dedup_plan(clip_path, plan_dis_path, policy="dis-0.3")
 
-        assert p_dis["dedup_policy"] == "dis-0.3"
-        assert p_dis["dedup_params"]["dis_thresh"] == 0.30
-        assert p_dis["total_frames"] == p_def["total_frames"]
-        # DIS optical flow bắt thêm frame zoom/pan chuyển động mịn -> số frame giữ lại phải >= default
-        assert p_dis["total_kept_frames"] >= p_def["total_kept_frames"]
+        extra_kept = p_dis["total_kept_frames"] - p_def["total_kept_frames"]
+        total = p_def["total_frames"]
+        extra_pct = (extra_kept / total) * 100.0
+        # Yêu cầu B7: giữ thêm <= 2% so với default
+        assert extra_pct <= 2.0, f"dis-0.3 kích hoạt nhầm quá mức trên nhiễu CRF 26: giữ thêm {extra_kept}/{total} ({extra_pct:.1f}% > 2%)"
+
+
+def test_dedup_policy_dis_synthetic_offcenter_zoom():
+    """B7(3): Zoom lệch tâm (1/3 khung hình) -> dis-0.3 giữ >= 90% frame."""
+    import cv2
+    import numpy as np
+    base_path = "test_frames/frame_action.png"
+    if not os.path.exists(base_path):
+        pytest.skip(f"Không tìm thấy {base_path}")
+    base_img = cv2.imread(base_path)
+    h, w = base_img.shape[:2]
+    cx, cy = w / 3.0, h / 3.0
+    frames = []
+    for i in range(60):
+        scale = (1.0 + 0.0005) ** i  # rate 0.05%/frame
+        M = np.float32([
+            [scale, 0, cx * (1.0 - scale)],
+            [0, scale, cy * (1.0 - scale)]
+        ])
+        frames.append(cv2.warpAffine(base_img, M, (w, h), borderMode=cv2.BORDER_REFLECT))
+
+    with tempfile.TemporaryDirectory() as td:
+        clip_path = os.path.join(td, "zoom_offcenter.mp4")
+        plan_path = os.path.join(td, "plan_zoom.json")
+        _make_synthetic_clip(frames, clip_path, crf=22)
+
+        plan = scan_dedup_plan(clip_path, plan_path, policy="dis-0.3")
+        kept = plan["total_kept_frames"]
+        total = plan["total_frames"]
+        # Yêu cầu B7: zoom lệch tâm giữ >= 90%
+        assert kept >= int(0.90 * total), f"dis-0.3 phải giữ >= 90% frames khi zoom lệch tâm, thực tế giữ {kept}/{total} ({kept/total*100:.1f}%)"
 

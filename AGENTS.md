@@ -155,8 +155,9 @@ upscale/
 ### B. Phân Hệ Deduplication Preflight & Dòng Chảy Quang Học DIS — [docs/dedup-architecture.md](file:///Users/xis108/Desktop/upscale/docs/dedup-architecture.md)
 * **Ngưỡng mặc định:** `hi=768:lo=320:frac=0.33` (giảm 60.86% thời gian GPU; 0% lỗi khẩu hình/chớp mắt trên mẫu kiểm tra; chi tiết: [docs/engineering-log.md#3](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md#3)).
 * **Khắc phục lệch khung hình BD Remux GOP dài:** `split_video_segments` stream copy trước, `get_segments_frame_counts` đo frame thực tế theo Keyframe GOP, ép giữ frame đầu mỗi chunk, tái tạo `runs` khớp 100% số frame.
-* **Bắt 100% Zoom/Lia Chậm Qua DIS Optical Flow:** Thuật toán 3 tầng (Pan/Tilt translation, Radial expansion zoom in/out, Local/diffuse $P_{90}$ và $\ge 5\%$ diện tích) kết hợp Candidate Drop Gating đạt ~430 fps trên CPU M3 Pro. Bắt chuẩn 83/83 frames (100%) tại cửa sổ zoom mà `mpdecimate` bỏ sót. Hỗ trợ cờ `--dedup-policy dis` và `--dis-thresh 0.30`.
-* **Tái tạo khung hình 4K (Re-expansion):** FFmpeg Concat Demuxer theo thời lượng `runs` đại diện + `fps=24000/1001` (triệt tiêu 100% chi phí đĩa của hardlinks).
+* **Thất Bại Của Drift Trên Zoom:** Chính sách `drift` (dựa trên Phase Correlation) **thất bại trên chuyển động thu phóng (zoom)** do các vector dãn nở xuyên tâm đối xứng qua tâm triệt tiêu lẫn nhau về 0; con số báo cáo 0% đứng hình trước đây là sai lệch do đo nhầm cửa sổ hoặc kích hoạt nhầm trên nhiễu.
+* **Nhận Diện Chuyển Động Qua DIS Optical Flow:** Thuật toán dòng chảy quang học DIS (Pan/Tilt translation, Radial expansion zoom in/out, Local/diffuse $P_{90}$ và $\ge 5\%$ diện tích) kết hợp Candidate Drop Gating đạt ~430 fps trên CPU M3 Pro. Khắc phục các đoạn lia máy và zoom mà `mpdecimate` bỏ sót. Hỗ trợ cờ `--dedup-policy dis` và `--dis-thresh 0.30`.
+* **Tái tạo khung hình 4K (Re-expansion):** FFmpeg Concat Demuxer theo thời lượng `runs` đại diện + `fps=24000/1001` (triệt tiêu toàn bộ chi phí đĩa của hardlinks).
 * **Chốt chặn Resume Cache:** `src/dedup.py:load_or_create_plan` từ chối resume nếu chính sách (`dedup_policy`), `dis_thresh`, `drift_delta` hoặc phân bố chunk trong cache không khớp với phiên chạy hiện tại.
 
 ### C. Phân Hệ Dịch Thuật Phụ Đề Subtrans — [subtrans/AGENTS.md](file:///Users/xis108/Desktop/upscale/subtrans/AGENTS.md)
