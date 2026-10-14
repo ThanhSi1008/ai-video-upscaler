@@ -20,29 +20,45 @@ from src.logger import format_bytes
 
 class CaffeinateContext:
     """
-    Context manager tự động ngăn máy tính sleep khi đang chạy tác vụ nặng trên macOS.
-    Tự động thoát khi tiến trình hoàn tất hoặc bị ngắt (Ctrl+C).
+    Context manager tự động ngăn máy tính sleep khi đang chạy tác vụ nặng:
+    - macOS: caffeinate -dims -w <pid>
+    - Windows: ctypes.windll.kernel32.SetThreadExecutionState
+    Tự động thoát và phục hồi trạng thái khi tiến trình hoàn tất hoặc bị ngắt (Ctrl+C).
     """
 
     def __init__(self, enabled: bool = True):
-        self.enabled = enabled and (sys.platform == "darwin")
+        self.enabled = enabled
         self.process: Optional[subprocess.Popen] = None
+        self._win_prev = None
 
     def __enter__(self):
         if not self.enabled:
             return self
 
-        try:
-            # -d: chống display sleep, -i: chống idle sleep, -m: chống disk sleep, -s: chống system sleep
-            # -w <pid>: tự động hủy khi PID của Python kết thúc
-            self.process = subprocess.Popen(
-                ["caffeinate", "-dims", "-w", str(os.getpid())],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            atexit.register(self.cleanup)
-        except Exception:
-            self.process = None
+        if sys.platform == "darwin":
+            try:
+                # -d: chống display sleep, -i: chống idle sleep, -m: chống disk sleep, -s: chống system sleep
+                # -w <pid>: tự động hủy khi PID của Python kết thúc
+                self.process = subprocess.Popen(
+                    ["caffeinate", "-dims", "-w", str(os.getpid())],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                atexit.register(self.cleanup)
+            except Exception:
+                self.process = None
+        elif sys.platform == "win32":
+            try:
+                import ctypes
+                ES_CONTINUOUS = 0x80000000
+                ES_SYSTEM_REQUIRED = 0x00000001
+                ES_DISPLAY_REQUIRED = 0x00000002
+                self._win_prev = ctypes.windll.kernel32.SetThreadExecutionState(
+                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+                )
+                atexit.register(self.cleanup)
+            except Exception:
+                pass
 
         return self
 
@@ -50,7 +66,7 @@ class CaffeinateContext:
         self.cleanup()
 
     def cleanup(self):
-        """Dừng tiến trình caffeinate an toàn"""
+        """Dừng tiến trình caffeinate hoặc khôi phục trạng thái power trên Windows an toàn"""
         if self.process and self.process.poll() is None:
             try:
                 self.process.terminate()
@@ -62,31 +78,49 @@ class CaffeinateContext:
                     pass
             self.process = None
 
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ES_CONTINUOUS = 0x80000000
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            except Exception:
+                pass
+
 
 def check_power_source() -> Dict[str, Any]:
     """Kiểm tra nguồn điện máy tính (đang cắm sạc AC hay dùng Pin)"""
-    if sys.platform != "darwin":
-        return {"is_ac": True, "details": "Non-macOS"}
+    if sys.platform == "darwin":
+        try:
+            res = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, check=True)
+            output = res.stdout
+            is_ac = "AC Power" in output
+            percent = None
+            for token in output.split():
+                if "%" in token:
+                    percent = token.replace(";", "").replace("%", "")
+                    break
+            return {
+                "is_ac": is_ac,
+                "percent": percent,
+                "raw": output.strip().splitlines()[0] if output else ""
+            }
+        except Exception:
+            return {"is_ac": True, "details": "Unknown"}
 
+    # Trên Windows / Linux: kiểm tra qua psutil.sensors_battery
     try:
-        res = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, check=True)
-        output = res.stdout
-        is_ac = "AC Power" in output
-
-        # Tìm tỷ lệ % pin nếu có
-        percent = None
-        for token in output.split():
-            if "%" in token:
-                percent = token.replace(";", "").replace("%", "")
-                break
-
+        import psutil
+        batt = psutil.sensors_battery()
+        if batt is None:
+            # Máy tính để bàn (như PC Intel i5-12600K) không có pin -> Luôn là AC Power
+            return {"is_ac": True, "percent": None, "raw": "AC Desktop Power"}
         return {
-            "is_ac": is_ac,
-            "percent": percent,
-            "raw": output.strip().splitlines()[0] if output else ""
+            "is_ac": bool(batt.power_plugged),
+            "percent": str(int(batt.percent)) if batt.percent is not None else None,
+            "raw": f"{'AC Power' if batt.power_plugged else 'Battery'} ({batt.percent}%)"
         }
     except Exception:
-        return {"is_ac": True, "details": "Unknown"}
+        return {"is_ac": True, "details": "Desktop/Unknown"}
 
 
 def check_disk_space(output_dir: str, duration_seconds: float, bitrate_str: str = "28M") -> Dict[str, Any]:
@@ -116,20 +150,25 @@ def check_disk_space(output_dir: str, duration_seconds: float, bitrate_str: str 
 
 
 def send_macos_notification(title: str, message: str, sound: str = "Glass"):
-    """Gửi thông báo native lên macOS Notification Center kèm âm thanh"""
-    if sys.platform != "darwin":
-        return
+    """Gửi thông báo hệ thống khi hoàn thành (macOS / Windows)"""
+    if sys.platform == "darwin":
+        script = f'display notification "{message}" with title "{title}" sound name "{sound}"'
+        try:
+            subprocess.run(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            )
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
 
-    script = f'display notification "{message}" with title "{title}" sound name "{sound}"'
-    try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5
-        )
-    except Exception:
-        pass
 
 
 def run_preflight_checks(output_dir: str, duration_seconds: float, bitrate: str, logger=None) -> bool:

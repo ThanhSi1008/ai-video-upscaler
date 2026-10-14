@@ -103,8 +103,8 @@ def run_upscale_pipeline(
     keep_temp: bool = False,
     dedup_policy: Optional[str] = None
 ) -> str:
-    """Điều phối toàn bộ quy trình Upscale 4K trên Apple Silicon M3 Pro"""
-    validate_environment()
+    """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA / Apple Silicon"""
+    validate_environment(engine=engine)
 
     # Chuẩn hóa đường dẫn đầu vào
     input_path = os.path.abspath(os.path.expanduser(input_path))
@@ -864,10 +864,6 @@ def run_upscale_pipeline(
             mux_final_container(merged_video, input_path, output_path)
             stage_timings["Đóng gói Container gốc (Muxing)"] = time.time() - t_mux_start
 
-            # Xóa file tạm đoạn xem trước (preview) nếu có
-            if preview_temp_input and os.path.exists(preview_temp_input):
-                os.remove(preview_temp_input)
-
             total_elapsed = time.time() - start_total_time
             final_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
             avg_fps = (total_frames_processed / total_elapsed) if total_elapsed > 0 and total_frames_processed > 0 else 0.0
@@ -962,10 +958,12 @@ def run_upscale_pipeline(
                     cleanup_checkpoint_dir(work_dir, output_dir=os.path.dirname(output_path), logger=logger)
                 else:
                     logger.info(f"ℹ️ Cờ --keep-temp được bật: Giữ lại thư mục tạm '{work_dir}'.", to_console=True)
-            except Exception as e:
-                logger.warn(f"Lỗi kiểm định audit.json: {e}")
-                if "Mux audit container thất bại" in str(e):
-                    raise
+            finally:
+                if preview_temp_input and os.path.exists(preview_temp_input):
+                    try:
+                        os.remove(preview_temp_input)
+                    except OSError:
+                        pass
 
             # Gửi thông báo hệ thống macOS khi hoàn thành
             send_macos_notification(
@@ -974,8 +972,14 @@ def run_upscale_pipeline(
                 sound="Glass"
             )
 
-            # Tự động mở IINA nếu đang chạy chế độ preview
+            # Tự động mở trình phát nếu đang chạy chế độ preview
             if is_preview:
-                subprocess.run(["open", "-a", "IINA", output_path], check=False)
+                if sys.platform == "darwin":
+                    subprocess.run(["open", "-a", "IINA", output_path], check=False)
+                elif sys.platform == "win32":
+                    try:
+                        os.startfile(output_path)
+                    except Exception:
+                        pass
 
     return output_path

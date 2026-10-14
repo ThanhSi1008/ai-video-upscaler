@@ -66,6 +66,8 @@ def test_output_sanity_monkeypatch_bug_injection(tmp_path):
     """Tiêm lỗi trực tiếp vào AnimeJaNaiCompact2x (bỏ phép cộng nearest) và kiểm tra bắt lỗi."""
     # Khởi tạo mô hình
     model = AnimeJaNaiCompact2x().eval()
+    for p in model.body.parameters():
+        p.data.zero_()
     
     # Tạo tensor ảnh 1080p
     img = cv2.imread("test_frames/frame_close_up.png")

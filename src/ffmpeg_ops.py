@@ -227,6 +227,7 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
         "-i", frame_pattern,
         "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv",
         "-c:v", HEVC_ENCODER,
+        *(["-preset", "p5"] if HEVC_ENCODER == "hevc_nvenc" else []),
         "-b:v", bitrate,
         "-profile:v", HEVC_PROFILE,
         "-pix_fmt", HEVC_PIX_FMT,

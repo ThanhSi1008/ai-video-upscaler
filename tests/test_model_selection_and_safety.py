@@ -48,7 +48,7 @@ def test_d10_a_default_model_resolution():
 
 def test_d10_b_output_resolution_tensor():
     """Kiểm tra (b): Mỗi model cho đúng kích thước 3840x2160 từ 1920x1080."""
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
     # 1. RealESRAnimeVideoV3
     m_v3 = RealESRAnimeVideoV3().to(device).half()
@@ -56,7 +56,9 @@ def test_d10_b_output_resolution_tensor():
     dummy_1080p = torch.rand(1, 3, 1080, 1920, device=device).half()
     with torch.inference_mode():
         out_v3 = m_v3(dummy_1080p)
-        if device.type == "mps":
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "mps":
             torch.mps.synchronize()
     assert out_v3.shape == (1, 3, 2160, 3840), f"RealESRAnimeVideoV3 cho shape sai: {out_v3.shape}"
 
@@ -65,7 +67,9 @@ def test_d10_b_output_resolution_tensor():
     m_aj.eval()
     with torch.inference_mode():
         out_aj = m_aj(dummy_1080p)
-        if device.type == "mps":
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "mps":
             torch.mps.synchronize()
     assert out_aj.shape == (1, 3, 2160, 3840), f"AnimeJaNaiCompact2x cho shape sai: {out_aj.shape}"
 

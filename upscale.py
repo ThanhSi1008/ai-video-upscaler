@@ -11,6 +11,17 @@ Công cụ Upscale Video Anime lên 4K chuyên dụng trên Terminal cho macOS (
 
 import os
 import sys
+
+# Đảm bảo console Windows xuất UTF-8 an toàn với emoji và tiếng Việt có dấu
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 import json
 import argparse
 import subprocess
@@ -169,8 +180,8 @@ def build_arg_parser():
     parser.add_argument(
         "--engine",
         default=DEFAULT_ENGINE,
-        choices=["mps", "ncnn"],
-        help=f"Động cơ suy luận AI (Mặc định: {DEFAULT_ENGINE} - PyTorch MPS FP16)"
+        choices=["cuda", "mps", "ncnn", "cpu"],
+        help=f"Động cơ suy luận AI (Mặc định: {DEFAULT_ENGINE} - PyTorch {DEFAULT_ENGINE.upper()} FP16)"
     )
     parser.add_argument(
         "--precision",
@@ -636,8 +647,15 @@ def main():
         print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào hoặc dùng cờ --queue.")
         sys.exit(1)
 
-    fps_median = 1.61 if args.engine == "mps" else 1.35
-    fps_p5 = 1.62 if args.engine == "mps" else 1.25
+    if args.engine == "cuda":
+        fps_median = 12.0
+        fps_p5 = 10.0
+    elif args.engine == "mps":
+        fps_median = 1.61
+        fps_p5 = 1.62
+    else:
+        fps_median = 1.35
+        fps_p5 = 1.25
     video_overhead = 930.0  # Hiệu chỉnh theo 2 tập đêm 1 [691s, 1166s], cỡ mẫu n=2
     subtitles_overhead = 300.0
 

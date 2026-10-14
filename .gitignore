@@ -22,6 +22,7 @@ wheels/
 
 # Virtual Environment
 venv/
+.venv/
 ENV/
 env.bak/
 venv.bak/
@@ -30,10 +31,14 @@ venv.bak/
 *.mp4
 *.mkv
 !samples/sample_30s.mkv
+!samples/sample_sword_3min.mkv
 *.mov
 *.avi
 *.tmp
+*.lock
 .temp_*
+vid_probe.json
+temp_sub.ass
 logs/*
 !logs/.gitkeep
 tests/**/*.png

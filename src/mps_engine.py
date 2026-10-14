@@ -85,15 +85,17 @@ class MPSError(Exception):
 
 class MPSPersistentWorker:
     """
-    Worker PyTorch MPS bền: nạp mô hình vào Unified Memory một lần duy nhất,
-    tự động khởi động lại sau mỗi max_chunks để giải phóng driver pool fragments.
+    Worker PyTorch GPU bền: nạp mô hình vào VRAM / Unified Memory một lần duy nhất,
+    hỗ trợ CUDA (NVIDIA Tensor Cores), MPS (Apple Silicon) và CPU;
+    tự động khởi động lại sau mỗi max_chunks để giải phóng bộ nhớ.
     """
     def __init__(
         self,
         model_id: str = "animevideov3",
         weights_path: str = "models_bench/realesr-animevideov3.pth",
         precision: str = "fp16",
-        max_chunks_before_restart: int = 10
+        max_chunks_before_restart: int = 10,
+        device: Optional[str] = None
     ):
         self.model_id = model_id
         self.weights_path = weights_path
@@ -101,15 +103,33 @@ class MPSPersistentWorker:
         self.max_chunks_before_restart = max_chunks_before_restart
         self.chunks_processed = 0
         self.total_restarts = 0
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        
+        # Nhận diện device ưu tiên: Tham số truyền vào > CUDA > MPS > CPU
+        if device:
+            self.device = torch.device(device)
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
         self.model = None
         self._load_model()
 
     def _load_model(self):
-        """Nạp trọng số và khởi tạo mô hình trên device MPS."""
+        """Nạp trọng số và khởi tạo mô hình trên device (CUDA/MPS/CPU)."""
         t0 = time.time()
         if not os.path.exists(self.weights_path):
-            raise FileNotFoundError(f"Không tìm thấy file trọng số mô hình: {self.weights_path}")
+            # Tự động tải trọng số chính thức nếu chưa có file cục bộ
+            if self.model_id == "animevideov3":
+                os.makedirs(os.path.dirname(os.path.abspath(self.weights_path)), exist_ok=True)
+                url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
+                print(f"📥 Đang tự động tải trọng số RealESR-AnimeVideoV3 từ {url}...")
+                import urllib.request
+                urllib.request.urlretrieve(url, self.weights_path)
+            else:
+                raise FileNotFoundError(f"Không tìm thấy file trọng số mô hình: {self.weights_path}")
 
         sd = torch.load(self.weights_path, map_location="cpu", weights_only=False)
         weights = sd.get("params_ema", sd.get("params", sd))
@@ -136,7 +156,9 @@ class MPSPersistentWorker:
             dummy = dummy.half()
         with torch.inference_mode():
             _ = model(dummy)
-            if self.device.type == "mps":
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            elif self.device.type == "mps":
                 torch.mps.synchronize()
 
         self.model = model
@@ -148,14 +170,16 @@ class MPSPersistentWorker:
         if self.chunks_processed >= self.max_chunks_before_restart:
             t0 = time.time()
             self.model = None
-            if self.device.type == "mps":
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            elif self.device.type == "mps":
                 torch.mps.empty_cache()
             self._load_model()
             restart_elapsed = time.time() - t0
             self.chunks_processed = 0
             self.total_restarts += 1
             msg = (
-                f"♻️ [MPS Worker Restart] Đã làm mới worker sau {self.max_chunks_before_restart} chunks "
+                f"♻️ [GPU Worker Restart] Đã làm mới worker sau {self.max_chunks_before_restart} chunks "
                 f"(Chi phí nạp lại: {restart_elapsed*1000:.1f} ms | Tổng lần restart: {self.total_restarts})"
             )
             if logger:
@@ -191,7 +215,8 @@ class MPSPersistentWorker:
         proc = psutil.Process()
 
         # Thread pool để ghi PNG song song (mức nén 1 tối ưu tốc độ)
-        writer_executor = ThreadPoolExecutor(max_workers=4)
+        writer_workers = min(8, max(2, os.cpu_count() or 4))
+        writer_executor = ThreadPoolExecutor(max_workers=writer_workers)
         write_futures = []
 
         try:
@@ -206,10 +231,12 @@ class MPSPersistentWorker:
                 if self.precision == "fp16":
                     tensor = tensor.half()
 
-                # 2. Suy luận GPU Metal
+                # 2. Suy luận GPU (CUDA / MPS / CPU)
                 with torch.inference_mode():
                     out_tensor = self.model(tensor)
-                    if self.device.type == "mps":
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize(self.device)
+                    elif self.device.type == "mps":
                         torch.mps.synchronize()
 
                 if idx == 0:
@@ -220,7 +247,14 @@ class MPSPersistentWorker:
                     raise MPSError(f"Phát hiện giá trị bất thường (NaN/Inf) tại khung hình: '{fname}'")
 
                 # 4. Ghi nhận đỉnh VRAM
-                if self.device.type == "mps":
+                if self.device.type == "cuda":
+                    c_alloc = torch.cuda.memory_allocated(self.device) / (1024 * 1024)
+                    if c_alloc > curr_alloc_peak:
+                        curr_alloc_peak = c_alloc
+                    d_alloc = torch.cuda.max_memory_allocated(self.device) / (1024 * 1024)
+                    if d_alloc > driver_alloc_peak:
+                        driver_alloc_peak = d_alloc
+                elif self.device.type == "mps":
                     c_alloc = torch.mps.current_allocated_memory() / (1024 * 1024)
                     if c_alloc > curr_alloc_peak:
                         curr_alloc_peak = c_alloc
@@ -252,7 +286,7 @@ class MPSPersistentWorker:
 
         except Exception as e:
             writer_executor.shutdown(wait=False)
-            raise MPSError(f"Lỗi suy luận MPS tại frame: {e}") from e
+            raise MPSError(f"Lỗi suy luận GPU tại frame: {e}") from e
         finally:
             writer_executor.shutdown(wait=True)
 
@@ -286,9 +320,10 @@ def get_mps_worker(
     model_id: str,
     weights_path: str,
     precision: str = "fp16",
-    max_chunks_before_restart: int = 10
+    max_chunks_before_restart: int = 10,
+    device: Optional[str] = None
 ) -> MPSPersistentWorker:
-    """Lấy hoặc khởi tạo instance Singleton cho MPSPersistentWorker."""
+    """Lấy hoặc khởi tạo instance Singleton cho MPSPersistentWorker / GPUPersistentWorker."""
     global _GLOBAL_MPS_WORKER
     if (_GLOBAL_MPS_WORKER is None
         or _GLOBAL_MPS_WORKER.model_id != model_id
@@ -297,7 +332,8 @@ def get_mps_worker(
             model_id=model_id,
             weights_path=weights_path,
             precision=precision,
-            max_chunks_before_restart=max_chunks_before_restart
+            max_chunks_before_restart=max_chunks_before_restart,
+            device=device
         )
     return _GLOBAL_MPS_WORKER
 
@@ -306,7 +342,7 @@ def upscale_frames_with_fallback(
     input_dir: str,
     output_dir: str,
     model_info: Dict[str, Any],
-    engine: str = "mps",
+    engine: Optional[str] = None,
     precision: str = "fp16",
     fmt: str = "png",
     logger=None,
@@ -314,12 +350,17 @@ def upscale_frames_with_fallback(
 ) -> Dict[str, Any]:
     """
     Hàm giao tiếp chính thực hiện suy luận khung hình cho 1 chunk:
-    - Mặc định: PyTorch MPS FP16
+    - Mặc định: PyTorch CUDA / MPS FP16
     - Tự động fallback khi gặp lỗi (A1, D6):
-      + animevideov3: fallback sang NCNN Vulkan (-t 540 -j 1:2:2)
-      + animejanai: fallback sang MPS FP32
+      + CUDA FP16 -> CUDA FP32
+      + animevideov3: fallback sang NCNN Vulkan (-t 540 -j 1:2:2) nếu có NCNN binary
+      + animejanai: fallback sang FP32
     - Bảo đảm KHÔNG tự ý đổi sang model khác!
     """
+    if engine is None:
+        from src.config import DEFAULT_ENGINE
+        engine = DEFAULT_ENGINE
+
     model_id = model_info["id"]
     weights_path = model_info["weights_path"]
 
@@ -337,12 +378,13 @@ def upscale_frames_with_fallback(
             thread_cfg="1:2:2"
         )
 
-    # 2. Thử nghiệm trên PyTorch MPS FP16
+    # 2. Thử nghiệm trên PyTorch (CUDA / MPS)
     try:
         worker = get_mps_worker(
             model_id=model_id,
             weights_path=weights_path,
-            precision=precision
+            precision=precision,
+            device=engine if engine in ["cuda", "mps", "cpu"] else None
         )
         res = worker.upscale_directory(
             input_dir=input_dir,
@@ -352,38 +394,19 @@ def upscale_frames_with_fallback(
             mid_chunk_callback=mid_chunk_callback
         )
         worker.restart_if_needed(logger=logger)
-        res["engine_used"] = f"mps_{precision}"
+        res["engine_used"] = f"{engine}_{precision}"
         return res
 
     except Exception as e:
-        warn_msg = f"⚠️ [MPS Fallback Activated] Gặp lỗi khi suy luận MPS {precision.upper()}: {e}."
+        warn_msg = f"⚠️ [GPU Fallback Activated] Gặp lỗi khi suy luận {engine} {precision.upper()}: {e}."
         if logger:
             logger.warn(warn_msg, to_console=True)
         else:
             print(warn_msg)
 
-        # Fallback theo quy chuẩn D6: chỉ đổi engine / độ chính xác của CÙNG model
-        if model_id == "animevideov3":
-            fallback_msg = "🔄 Chuyển sang NCNN Vulkan (-t 540 -j 1:2:2) cho RealESR-AnimeVideoV3..."
-            if logger:
-                logger.info(fallback_msg, to_console=True)
-            else:
-                print(fallback_msg)
-            from src.ai_engine import upscale_frames as ncnn_upscale
-            res = ncnn_upscale(
-                input_dir=input_dir,
-                output_dir=output_dir,
-                model="realesr-animevideov3",
-                scale=2,
-                fmt=fmt,
-                tile_size=540,
-                thread_cfg="1:2:2"
-            )
-            res["engine_used"] = "ncnn_fallback"
-            return res
-
-        elif model_id == "animejanai-hd-v3-compact":
-            fallback_msg = "🔄 Chuyển sang MPS FP32 cho AnimeJaNai HD V3 Compact..."
+        # Fallback 1: Nếu lỗi FP16 trên GPU (CUDA/MPS), thử fallback sang FP32 của chính device đó
+        if precision == "fp16":
+            fallback_msg = f"🔄 Chuyển sang {engine.upper()} FP32 cho model {model_id}..."
             if logger:
                 logger.info(fallback_msg, to_console=True)
             else:
@@ -391,7 +414,8 @@ def upscale_frames_with_fallback(
             worker_fp32 = get_mps_worker(
                 model_id=model_id,
                 weights_path=weights_path,
-                precision="fp32"
+                precision="fp32",
+                device=engine if engine in ["cuda", "mps", "cpu"] else None
             )
             res = worker_fp32.upscale_directory(
                 input_dir=input_dir,
@@ -400,8 +424,36 @@ def upscale_frames_with_fallback(
                 logger=logger
             )
             worker_fp32.restart_if_needed(logger=logger)
-            res["engine_used"] = "mps_fp32_fallback"
+            res["engine_used"] = f"{engine}_fp32_fallback"
             return res
 
-        else:
-            raise RuntimeError(f"Lỗi suy luận và không có đường fallback khả dụng cho model '{model_id}': {e}")
+        # Fallback 2: Nếu có NCNN binary trên hệ thống thì fallback sang NCNN
+        from src.config import REALESRGAN_BIN
+        if os.path.exists(REALESRGAN_BIN):
+            if model_id == "animevideov3":
+                fallback_msg = "🔄 Chuyển sang NCNN Vulkan (-t 540 -j 1:2:2) cho RealESR-AnimeVideoV3..."
+                if logger:
+                    logger.info(fallback_msg, to_console=True)
+                else:
+                    print(fallback_msg)
+                from src.ai_engine import upscale_frames as ncnn_upscale
+                res = ncnn_upscale(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    model="realesr-animevideov3",
+                    scale=2,
+                    fmt=fmt,
+                    tile_size=540,
+                    thread_cfg="1:2:2"
+                )
+                res["engine_used"] = "ncnn_fallback"
+                return res
+
+        raise RuntimeError(f"Lỗi suy luận và không có đường fallback khả dụng cho model '{model_id}': {e}")
+
+
+# Aliases tương thích ngược
+GPUEngineError = MPSError
+GPUPersistentWorker = MPSPersistentWorker
+get_gpu_worker = get_mps_worker
+

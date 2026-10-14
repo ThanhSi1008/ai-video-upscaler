@@ -41,7 +41,10 @@ def test_cleanup_symlink_checkpoint_dir(tmp_path: Path):
 
     # Tạo symlink trong output_dir
     symlink_path = tmp_path / ".temp_actual_ep"
-    os.symlink(str(actual_dir), str(symlink_path))
+    try:
+        os.symlink(str(actual_dir), str(symlink_path))
+    except OSError as e:
+        pytest.skip(f"Bỏ qua kiểm tra symlink trên Windows (thiếu quyền Administrator/Developer Mode): {e}")
 
     assert symlink_path.is_symlink()
     assert actual_dir.exists()
@@ -64,9 +67,12 @@ def test_cleanup_orphan_symlinks_in_output_dir(tmp_path: Path):
 
     # Tạo symlink trỏ tới real_temp và một broken symlink
     link1 = tmp_path / ".temp_target"
-    os.symlink(str(real_temp), str(link1))
     broken_link = tmp_path / ".temp_target_broken"
-    os.symlink("/nonexistent/path/temp", str(broken_link))
+    try:
+        os.symlink(str(real_temp), str(link1))
+        os.symlink("/nonexistent/path/temp", str(broken_link))
+    except OSError as e:
+        pytest.skip(f"Bỏ qua kiểm tra symlink trên Windows: {e}")
 
     cleanup_checkpoint_dir(str(link1), output_dir=str(tmp_path))
 

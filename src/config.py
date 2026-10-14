@@ -86,10 +86,23 @@ atexit.register(release_gpu_lock)
 
 
 # -----------------------------------------------------------------------------
-# THAM SỐ UPSCALE MẶC ĐỊNH CHO ANIME & APPLE SILICON (M3 PRO)
+# THAM SỐ UPSCALE MẶC ĐỊNH (TỰ ĐỘNG NHẬN DIỆN NVIDIA CUDA / APPLE MPS)
 # -----------------------------------------------------------------------------
+def _detect_default_engine() -> str:
+    """Tự động chọn engine suy luận tốt nhất theo phần cứng hiện có."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
 DEFAULT_MODEL = "realesr-animevideov3"
-DEFAULT_ENGINE = "mps"  # Mặc định: PyTorch MPS FP16 (A1)
+DEFAULT_ENGINE = _detect_default_engine()  # Mặc định: 'cuda' trên NVIDIA, 'mps' trên Apple Silicon
 DEFAULT_PRECISION = "fp16"
 DEFAULT_MPS_RESTART_CHUNKS = 10  # Khởi động lại worker mỗi N chunks để giải phóng driver pool (A2)
 DEFAULT_SCALE = 2
@@ -109,15 +122,36 @@ DEFAULT_DEDUP_FRAC = 0.33
 DEFAULT_DEDUP_ENABLED = True
 
 # -----------------------------------------------------------------------------
-# CẤU HÌNH RAM DISK (ZERO NVME SSD WEAR)
+# CẤU HÌNH BỘ NHỚ ĐỆM RAM (ZERO NVME SSD WEAR)
 # -----------------------------------------------------------------------------
 DEFAULT_RAMDISK_SIZE_MB = 5120  # 5 GB RAM Disk ảo trong Unified Memory (đủ đệm an toàn chunk 192 frames 4K ~3.1GB + input)
 DEFAULT_PNG_UNIT_SIZE_MB = 16.0  # Sàn ước tính an toàn dung lượng frame 4K PNG (RGB24 3840x2160 cho Anime ~14-16MB)
 
 # -----------------------------------------------------------------------------
-# CẤU HÌNH APPLE MEDIA ENGINE (VIDEOTOOLBOX HARDWARE ENCODER 10-BIT)
+# CẤU HÌNH BỘ MÃ HÓA PHẦN CỨNG HEVC 10-BIT (NVENC / VIDEOTOOLBOX / QSV / X265)
 # -----------------------------------------------------------------------------
-HEVC_ENCODER = "hevc_videotoolbox"
+def _detect_hevc_encoder() -> str:
+    """Tự động nhận diện bộ mã hóa phần cứng HEVC 10-bit tốt nhất."""
+    if sys.platform == "darwin":
+        return "hevc_videotoolbox"
+    # Trên Windows / Linux: ưu tiên NVIDIA NVENC, sau đó Intel QSV, cuối cùng libx265
+    try:
+        import subprocess
+        res = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
+        out = res.stdout or ""
+        if "hevc_nvenc" in out:
+            return "hevc_nvenc"
+        if "hevc_qsv" in out:
+            return "hevc_qsv"
+        if "libx265" in out:
+            return "libx265"
+    except Exception:
+        pass
+    return "hevc_nvenc" if sys.platform == "win32" else "hevc_videotoolbox"
+
+
+HEVC_ENCODER = _detect_hevc_encoder()
+HEVC_PRESET = "p5"  # Preset chất lượng cao cho hevc_nvenc (p1-p7)
 HEVC_PROFILE = "main10"
 HEVC_PIX_FMT = "p010le"
 HEVC_COLOR_RANGE = "tv"
@@ -127,25 +161,28 @@ HEVC_COLOR_TRC = "bt709"
 HEVC_TAG = "hvc1"
 
 
-def validate_environment():
-    """Kiểm tra sự hiện diện của FFmpeg, FFprobe và binary realesrgan-ncnn-vulkan"""
+def validate_environment(engine: str = DEFAULT_ENGINE):
+    """Kiểm tra sự hiện diện của FFmpeg, FFprobe và binary/engine tương ứng."""
     if shutil.which("ffmpeg") is None:
         print("❌ Lỗi: Không tìm thấy 'ffmpeg' trên hệ thống!")
-        print("💡 Cài đặt qua Homebrew: brew install ffmpeg")
+        print("💡 Cài đặt qua Homebrew: brew install ffmpeg (macOS) hoặc tải từ gyan.dev (Windows)")
         sys.exit(1)
 
     if shutil.which("ffprobe") is None:
         print("❌ Lỗi: Không tìm thấy 'ffprobe' trên hệ thống!")
-        print("💡 Cài đặt qua Homebrew: brew install ffmpeg")
+        print("💡 Cài đặt qua Homebrew: brew install ffmpeg (macOS) hoặc tải từ gyan.dev (Windows)")
         sys.exit(1)
 
-    if not os.path.exists(REALESRGAN_BIN):
-        print(f"❌ Lỗi: Không tìm thấy binary tại: {REALESRGAN_BIN}")
-        sys.exit(1)
-
-    if not os.access(REALESRGAN_BIN, os.X_OK):
-        try:
-            os.chmod(REALESRGAN_BIN, 0o755)
-        except Exception as e:
-            print(f"❌ Không thể cấp quyền thực thi cho binary: {e}")
+    # Chỉ kiểm tra binary NCNN nếu người dùng chủ động chọn engine ncnn
+    if engine == "ncnn":
+        if not os.path.exists(REALESRGAN_BIN):
+            print(f"❌ Lỗi: Không tìm thấy binary NCNN tại: {REALESRGAN_BIN}")
             sys.exit(1)
+
+        if sys.platform != "win32" and not os.access(REALESRGAN_BIN, os.X_OK):
+            try:
+                os.chmod(REALESRGAN_BIN, 0o755)
+            except Exception as e:
+                print(f"❌ Không thể cấp quyền thực thi cho binary: {e}")
+                sys.exit(1)
+
