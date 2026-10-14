@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 src/ramdisk.py
-Quản lý RAM Disk ảo trên macOS để đệm khung hình trung gian (Zero NVMe SSD Wear).
-Tự động dọn dẹp và unmount ngay cả khi gặp lỗi hoặc người dùng bấm Ctrl+C.
+Quản lý bộ nhớ đệm RAM Disk ảo / thư mục đệm trung gian (Zero NVMe SSD Wear).
+Tự động dọn dẹp ngay cả khi gặp lỗi hoặc người dùng bấm Ctrl+C.
 """
 
 import os
@@ -57,7 +57,7 @@ def cleanup_orphan_ramdisks():
 
 class RAMDisk:
     """
-    Context manager quản lý RAM Disk HFS+ trên macOS.
+    Context manager quản lý RAM Disk (macOS) hoặc thư mục đệm nhanh trên SSD/RAM (Windows).
     Nếu hệ thống không cho phép hoặc người dùng tắt cờ, tự động fallback về thư mục tạm trên SSD.
     """
 

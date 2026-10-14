@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from src.ffmpeg_ops import probe_video
 from src.dedup import scan_dedup_plan, load_or_create_plan
+from src.config import DEVICE_NAME
 
 
 def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -477,7 +478,7 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
     lines.append(f"• Thời điểm bắt đầu    : {sched['start_time']}")
     lines.append(f"• Mốc hạn chót          : {sched['deadline_str'] or 'Không đặt'} ({sched['deadline_time'] or 'N/A'})")
     lines.append(f"• Quỹ thời gian có sẵn : {sched['available_time_formatted']}")
-    lines.append(f"• Tốc độ AI cơ sở       : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (đo thực tế trong pipeline M3 Pro C1)")
+    lines.append(f"• Tốc độ AI cơ sở       : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (đo thực tế trên {DEVICE_NAME})")
     lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video [đo đêm 1: 691s–1166s, n=2] + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
     lines.append(f"• Biên an toàn ETA      : +{sched['eta_margin_pct']*100:.1f}% trên ETA P5 để ra quyết định hạn chót")
     lines.append(f"• Cho phép dở dang      : --allow-partial = {'BẬT' if sched.get('allow_partial') else 'TẮT'}")

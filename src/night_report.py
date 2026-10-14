@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional
 
 
 CHUNK_LOG_REGEX = re.compile(
-    r"\[CHUNK (\d+)/(\d+)\] Hoàn tất (\d+) frames \(AI Metal: ([\d\.]+)s @ ([\d\.]+) fps \| "
+    r"\[CHUNK (\d+)/(\d+)\] Hoàn tất (\d+) frames \(AI (?:Metal|GPU): ([\d\.]+)s @ ([\d\.]+) fps \| "
     r"Steady: ([\d\.]+) fps, Peak RSS: ([\d\.]+) MB \| Encode: ([\d\.]+)s \| Tổng: ([\d\.]+)s \| File: (\S+) ([\d\.]+) MB\)"
 )
 
@@ -353,11 +353,11 @@ def generate_night_report_text(session_name: str = "night1") -> str:
         if c_data:
             lines.append(f"* **Số phân đoạn đã xử lý:** {c_data['chunks_completed']}/{c_data['total_chunks']}")
             lines.append(f"* **Tốc độ AI:** Trung vị **{c_data['median_ai_fps']:.2f} fps** | P5 **{c_data['p5_ai_fps']:.2f} fps**")
-            lines.append(f"* **So sánh tốc độ giờ đầu vs giờ cuối:** Giờ đầu: **{c_data['first_hour_fps']:.2f} fps** ➔ Giờ cuối: **{c_data['last_hour_fps']:.2f} fps** (Hiệu năng Metal hoàn toàn phẳng)")
+            lines.append(f"* **So sánh tốc độ giờ đầu vs giờ cuối:** Giờ đầu: **{c_data['first_hour_fps']:.2f} fps** ➔ Giờ cuối: **{c_data['last_hour_fps']:.2f} fps** (Hiệu năng GPU duy trì ổn định)")
 
             # GPU Active Ratio = total_ai_time / episode_actual_wall_time
             gpu_active_ratio = (c_data["total_ai_time_sec"] / ep["actual_wall_sec"]) * 100.0 if ep["actual_wall_sec"] > 0 else 0.0
-            lines.append(f"* **GPU Active Ratio:** **{gpu_active_ratio:.2f}%** (Tổng AI Metal: {c_data['total_ai_time_sec']:,.1f}s ÷ Thời gian thực tế: {ep['actual_wall_sec']:,.1f}s)")
+            lines.append(f"* **GPU Active Ratio:** **{gpu_active_ratio:.2f}%** (Tổng AI GPU: {c_data['total_ai_time_sec']:,.1f}s ÷ Thời gian thực tế: {ep['actual_wall_sec']:,.1f}s)")
 
             lines.append("* **10 Phân đoạn chậm nhất (chờ RAM disk / cảnh hành động phức tạp):**")
             for s in c_data["slowest_10"][:10]:

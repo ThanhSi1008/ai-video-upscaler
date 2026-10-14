@@ -7,7 +7,7 @@ Bộ điều phối chính (Orchestrator) cho toàn bộ quy trình Upscale 4K:
 - Cơ chế chống ngủ máy tự động (caffeinate)
 - Kiểm tra an toàn trước khi chạy (Pre-flight Health Checks: Pin, Ổ đĩa)
 - Tự động tiếp tục từ phân đoạn dở (Checkpoint Resume)
-- Thông báo hệ thống macOS khi hoàn tất
+- Thông báo hệ thống khi hoàn tất
 - Thu thập viễn trắc và lưu log có cấu trúc tại logs/
 """
 
@@ -80,7 +80,7 @@ from src.logger import (
 from src.preflight import (
     CaffeinateContext,
     run_preflight_checks,
-    send_macos_notification
+    send_system_notification
 )
 from src.cleanup import cleanup_checkpoint_dir, organize_output_artifacts
 
@@ -273,7 +273,7 @@ def run_upscale_pipeline(
             start_total_time = time.time()
             stage_timings = {}
             swap_before = get_swap_usage()
-            logger.info(f"📊 Trạng thái Swap macOS ban đầu: {swap_before}")
+            logger.info(f"📊 Trạng thái Bộ nhớ/Swap ban đầu: {swap_before}")
 
             # -----------------------------------------------------------------
             # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
@@ -326,7 +326,7 @@ def run_upscale_pipeline(
                     to_console=True
                 )
 
-            logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU Metal...", to_console=True)
+            logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU ({get_device_name()})...", to_console=True)
             print()
 
             # -----------------------------------------------------------------
@@ -392,7 +392,7 @@ def run_upscale_pipeline(
                     }
 
                 def worker_encode(item, ai_res):
-                    """Media Engine Encode Worker: Nén VideoToolbox 10-bit và dọn sạch RAM Disk ngay lập tức."""
+                    """Hardware Encode Worker: Nén HEVC 10-bit và dọn sạch thư mục tạm ngay lập tức."""
                     c_idx, _, c_seg_out = item["target"]
                     c_in_dir = item["extracted"]["in_dir"]
                     c_out_dir = item["out_dir"]
@@ -970,8 +970,8 @@ def run_upscale_pipeline(
                     except OSError:
                         pass
 
-            # Gửi thông báo hệ thống macOS khi hoàn thành
-            send_macos_notification(
+            # Gửi thông báo hệ thống khi hoàn thành
+            send_system_notification(
                 title="🎬 AI Video Upscaler 4K",
                 message=f"Hoàn tất thành công {meta['width']}x{meta['height']} ➔ 4K ({format_time(total_elapsed)})",
                 sound="Glass"

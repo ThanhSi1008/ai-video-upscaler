@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 🎬 AI Video Upscaler 4K - CLI Entry Point
-Công cụ Upscale Video Anime lên 4K chuyên dụng trên Terminal cho macOS (Apple Silicon M3 Pro).
-- Tăng độ phân giải 2x bằng NCNN Vulkan Metal API (realesr-animevideov3).
-- Mã hóa phần cứng 10-bit HEVC qua Apple Media Engine (VideoToolbox).
-- Bảo vệ tối đa ổ cứng NVMe SSD với bộ nhớ đệm RAM Disk ảo.
+Công cụ Upscale Video Anime lên 4K chuyên dụng trên Terminal:
+- Tăng độ phân giải 2x bằng PyTorch FP16 / Tensor Cores (NVIDIA CUDA / Apple Silicon).
+- Mã hóa phần cứng 10-bit HEVC qua NVENC (Windows) hoặc VideoToolbox (macOS).
+- Bảo vệ tối đa ổ cứng NVMe SSD với bộ nhớ đệm RAM Disk ảo / bộ nhớ đệm tạm.
 - Bảo toàn 100% âm thanh đa kênh, phụ đề đa ngôn ngữ, font chữ và chapters gốc.
 """
 

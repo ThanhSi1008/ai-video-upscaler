@@ -5,7 +5,7 @@ Hệ thống kiểm tra an toàn trước khi chạy (Pre-flight Health Checks) 
 1. Cơ chế chống ngủ máy tự động (caffeinate -dims)
 2. Kiểm tra nguồn điện sạc (AC Power vs Battery)
 3. Kiểm tra dung lượng ổ đĩa trống an toàn (Free Disk Space)
-4. Gửi thông báo hệ thống macOS qua Notification Center và chuông báo khi hoàn thành
+4. Gửi thông báo hệ thống và âm báo khi hoàn thành
 """
 
 import os
@@ -169,6 +169,8 @@ def send_macos_notification(title: str, message: str, sound: str = "Glass"):
         except Exception:
             pass
 
+send_system_notification = send_macos_notification
+
 
 
 def run_preflight_checks(output_dir: str, duration_seconds: float, bitrate: str, logger=None) -> bool:
@@ -190,7 +192,7 @@ def run_preflight_checks(output_dir: str, duration_seconds: float, bitrate: str,
         msg_power = (
             f"⚠️  CẢNH BÁO NGUỒN ĐIỆN: Máy đang chạy bằng PIN{pct_info}!\n"
             f"   Phiên upscale AI tiêu tốn nhiều GPU và có thể làm cạn pin sập nguồn.\n"
-            f"   💡 Khuyến nghị: Hãy cắm sạc MagSafe / USB-C trước khi chạy dài."
+            f"   💡 Khuyến nghị: Hãy cắm sạc nguồn AC trước khi chạy dài."
         )
         print(msg_power)
         if logger:

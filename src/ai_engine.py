@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 src/ai_engine.py
-Điều phối việc suy luận AI Super-Resolution bằng realesrgan-ncnn-vulkan trên Apple GPU Metal / Vulkan.
+Điều phối việc suy luận AI Super-Resolution bằng realesrgan-ncnn-vulkan trên GPU (Vulkan).
 Đo lường chính xác thời gian suy luận và tốc độ FPS thực tế cho từng phân đoạn.
 """
 
@@ -26,8 +26,8 @@ def upscale_frames(
     thread_cfg: str = "1:2:2"
 ) -> Dict[str, Any]:
     """
-    Chạy suy luận NCNN Vulkan trên GPU M3 Pro cho một thư mục chứa khung hình.
-    Mặc định tối ưu: -t 540 -j 1:2:2 triệt tiêu 19.5% chi phí prepadding auto-tile, đạt >= 1.43 fps.
+    Chạy suy luận NCNN Vulkan trên GPU cho một thư mục chứa khung hình.
+    Mặc định tối ưu: -t 540 -j 1:2:2 triệt tiêu chi phí prepadding auto-tile.
     Trả về thời gian suy luận và tốc độ FPS thực tế.
     """
     start_time = time.time()

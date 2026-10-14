@@ -4,7 +4,7 @@ src/dedup.py
 Module quản lý cơ chế Deduplication & Concat Re-expansion cho Anime Video Upscale:
 - Phân tích toàn tập bằng bộ lọc mpdecimate (Preflight Scan lập plan.json 1 lần duy nhất)
 - Bắt buộc ép giữ frame đầu mỗi chunk (bảo toàn 100% tính độc lập và Checkpoint Resume)
-- Lọc bỏ khung hình trùng lặp trước khi đưa vào NCNN Vulkan Metal (giảm ~50% tải GPU)
+- Lọc bỏ khung hình trùng lặp trước khi đưa vào GPU AI Upscaler (giảm ~50% tải GPU)
 - Tái tạo khung hình 4K (Re-expansion) bằng FFmpeg Concat Demuxer không tốn RAM/Disk
 - Xác minh giao dịch phân đoạn (Transactional Segment verification) chuẩn xác từng frame
 """

@@ -48,21 +48,39 @@ def render_progress(current: int, total: int, prefix: str = "", suffix: str = ""
 
 
 import subprocess
+import shutil
 
 def get_swap_usage() -> str:
-    """Lấy thông số swap memory hiện tại từ macOS kernel"""
+    """Lấy thông số bộ nhớ RAM và swap/pagefile hiện tại"""
+    try:
+        import psutil
+        v = psutil.virtual_memory()
+        s = psutil.swap_memory()
+        return f"RAM: {v.percent}% used ({v.used // (1024*1024)}MB/{v.total // (1024*1024)}MB) | Pagefile: {s.percent}% used ({s.used // (1024*1024)}MB/{s.total // (1024*1024)}MB)"
+    except Exception:
+        pass
     try:
         res = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True, text=True, check=True)
         return res.stdout.strip()
     except Exception:
-        return "vm.swapusage: N/A"
+        return "Memory/Swap: N/A"
 
 def get_thermal_state() -> str:
-    """Lấy trạng thái nhiệt và throttle từ pmset"""
+    """Lấy trạng thái nhiệt và throttle từ phần cứng"""
+    try:
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True
+        )
+        temp = res.stdout.strip()
+        if temp:
+            return f"GPU {temp}°C (Nominal)"
+    except Exception:
+        pass
     try:
         res = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, check=True)
         lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip() and not line.startswith("Note:")]
-        return " | ".join(lines) if lines else "Nominal (Bình thường - Không nghẽn nhiệt)"
+        return " | ".join(lines) if lines else "Nominal"
     except Exception:
         return "Nominal"
 
@@ -70,7 +88,7 @@ def get_thermal_state() -> str:
 class RunLogger:
     """
     Quản lý luồng log song song ra Console và File log có cấu trúc.
-    Tự động cập nhật symlink logs/latest.log để dễ dàng kiểm tra.
+    Tự động cập nhật file logs/latest.log để dễ dàng kiểm tra.
     """
 
     def __init__(self, video_name: str):
@@ -87,13 +105,16 @@ class RunLogger:
             f.write(f"# Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Video: {video_name}\n\n")
 
-        # Tạo/cập nhật symlink latest.log
+        # Tạo/cập nhật symlink hoặc file copy latest.log
         try:
             if os.path.lexists(self.latest_symlink):
                 os.remove(self.latest_symlink)
             os.symlink(self.log_filename, self.latest_symlink)
         except Exception:
-            pass
+            try:
+                shutil.copyfile(self.log_filepath, self.latest_symlink)
+            except Exception:
+                pass
 
     def _write_file(self, message: str):
         """Ghi dòng log kèm timestamp vào file"""
@@ -101,6 +122,13 @@ class RunLogger:
         try:
             with open(self.log_filepath, "a", encoding="utf-8") as f:
                 f.write(f"[{now}] {message}\n")
+            # Đồng bộ sang latest.log nếu latest.log là regular file (Windows không có symlink)
+            if os.path.exists(self.latest_symlink) and not os.path.islink(self.latest_symlink):
+                try:
+                    with open(self.latest_symlink, "a", encoding="utf-8") as lf:
+                        lf.write(f"[{now}] {message}\n")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -126,12 +154,12 @@ class RunLogger:
         """In banner ra Terminal và ghi đầy đủ vào file log"""
         banner_lines = [
             "=" * 72,
-            "🎬  AI VIDEO UPSCALER 4K — APPLE SILICON METAL & VIDEOTOOLBOX",
+            f"🎬  AI VIDEO UPSCALER 4K — {DEVICE_NAME.upper()} & {HEVC_ENCODER.upper()}",
             "=" * 72,
             f"📁 Video nguồn:    {info['filename']} ({format_bytes(info['size_bytes'])})",
             f"📐 Độ phân giải:   {info['width']}x{info['height']} ➔ {info['target_w']}x{info['target_h']} (Chuẩn 4K UHD)",
             f"⏱️  Thời lượng:     {format_time(info['duration'])} ({info['duration']:.2f}s) @ {info['fps']:.3f} fps",
-            f"🧠 AI Engine:      {info['model']} (NCNN Vulkan / Metal API 2x Anime)",
+            f"🧠 AI Engine:      {info['model']} ({DEVICE_NAME} FP16)",
             f"🖼️  Định dạng đệm:  {info['frame_format'].upper()} (Lossless RGB24)",
             f"💾 Bộ nhớ đệm:     {info['storage_info']}",
             f"🎞️  Mã hóa video:   {HEVC_ENCODER} (10-bit Main 10 @ {info['bitrate']}, BT.709 Limited)",

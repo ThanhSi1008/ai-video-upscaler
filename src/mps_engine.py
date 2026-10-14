@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 src/mps_engine.py
-Động cơ suy luận PyTorch MPS FP16 trên Apple Silicon GPU Metal:
+Động cơ suy luận PyTorch FP16 trên GPU (NVIDIA CUDA / Apple Silicon MPS):
 - Worker bền (persistent): Nạp model một lần, tái sử dụng qua các chunk, tự động khởi động lại mỗi N chunk (A2).
 - Hỗ trợ đa mô hình (D3): animevideov3 (x4 + bicubic 0.5) và animejanai-hd-v3-compact (x2 native).
-- Giám sát độ an toàn: Phát hiện NaN/Inf, lỗi Metal/OOM để tự động kích hoạt fallback cùng model (A1, D6).
+- Giám sát độ an toàn: Phát hiện NaN/Inf, lỗi GPU/OOM để tự động kích hoạt fallback cùng model (A1, D6).
 - Ghi nhận viễn trắc chi tiết: current_allocated, driver_allocated_memory và process RSS.
 """
 
@@ -75,7 +75,7 @@ class AnimeJaNaiCompact2x(nn.Module):
 
 
 class MPSError(Exception):
-    """Lỗi suy luận trên động cơ PyTorch MPS (NaN, Inf, OOM hoặc Metal error)."""
+    """Lỗi suy luận trên động cơ PyTorch GPU (NaN, Inf, OOM hoặc lỗi GPU runtime)."""
     pass
 
 
