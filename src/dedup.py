@@ -22,6 +22,8 @@ from src.config import (
     DEFAULT_DEDUP_FRAC,
     ROOT_DIR,
     HEVC_ENCODER,
+    HEVC_PRESET,
+    HEVC_CQ_LEVEL,
     HEVC_PROFILE,
     HEVC_PIX_FMT,
     HEVC_COLOR_RANGE,
@@ -843,6 +845,20 @@ def encode_chunk_reexpanded(
     if os.path.exists(tmp_output):
         os.remove(tmp_output)
 
+    if HEVC_ENCODER == "hevc_nvenc":
+        rate_args = [
+            "-preset", HEVC_PRESET,
+            "-rc", "vbr",
+            "-cq", HEVC_CQ_LEVEL,
+            "-b:v", "0",
+            "-spatial-aq", "1",
+            "-temporal-aq", "1",
+        ]
+    else:
+        rate_args = [
+            "-b:v", bitrate
+        ]
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
@@ -854,8 +870,7 @@ def encode_chunk_reexpanded(
         "-pix_fmt", HEVC_PIX_FMT,
         "-c:v", HEVC_ENCODER,
         "-profile:v", HEVC_PROFILE,
-        "-b:v", bitrate,
-        *(["-preset", "p5"] if HEVC_ENCODER == "hevc_nvenc" else []),
+        *rate_args,
         "-color_range", HEVC_COLOR_RANGE,
         "-colorspace", HEVC_COLORSPACE,
         "-color_primaries", HEVC_COLOR_PRIMARIES,

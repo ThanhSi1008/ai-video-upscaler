@@ -35,6 +35,9 @@ from src.config import (
     DEFAULT_BITRATE,
     DEFAULT_SEGMENT_TIME,
     DEFAULT_FRAME_FORMAT,
+    DEFAULT_BATCH_SIZE,
+    DEVICE_NAME,
+    HEVC_ENCODER,
     load_pending_subs,
     remove_pending_sub,
 )
@@ -136,7 +139,7 @@ def check_deadline_and_eta(
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
-        description="🎬 AI Video Upscaler 4K - Tối ưu hóa cho Apple Silicon M3 Pro (PyTorch MPS / NCNN Metal + VideoToolbox 10-bit)",
+        description=f"🎬 AI Video Upscaler 4K - Tối ưu hóa chuyên sâu cho {DEVICE_NAME} ({DEFAULT_ENGINE.upper()} + {HEVC_ENCODER} 10-bit)",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
@@ -170,7 +173,13 @@ def build_arg_parser():
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="Đường dẫn file hoặc thư mục xuất 4K (Mặc định: ~/Documents/Upscaled/<tên>_4K.mkv)"
+        help="Đường dẫn file hoặc thư mục xuất 4K (Mặc định: out/<tên>_4K.mkv trên Windows, ~/Documents/Upscaled/ trên macOS)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Kích thước lô xử lý khung hình (Mặc định: {DEFAULT_BATCH_SIZE} cho {DEVICE_NAME})"
     )
     parser.add_argument(
         "-m", "--model",
@@ -240,7 +249,7 @@ def build_arg_parser():
         "--dedup-policy",
         default=None,
         choices=["default", "sensitive", "sensitive-a", "sensitive-b", "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0", "dis", "dis-0.2", "dis-0.3", "dis-0.4", "dis-0.5", "off"],
-        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy từ frame giữ gần nhất), dis (dòng chảy quang học DIS bắt 100% zoom/lia), off (giữ tất cả)"
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy từ frame giữ gần nhất), dis (dòng chảy quang học DIS bắt 100%% zoom/lia), off (giữ tất cả)"
     )
     parser.add_argument(
         "--drift-delta",
@@ -261,7 +270,7 @@ def build_arg_parser():
         const=10,
         default=None,
         metavar="SECONDS",
-        help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng IINA"
+        help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng trình phát video"
     )
     parser.add_argument(
         "--dry-run",
@@ -782,7 +791,8 @@ def main():
                 allow_partial=args.allow_partial,
                 deadline_dt=deadline_dt,
                 keep_temp=args.keep_temp,
-                dedup_policy=args.dedup_policy
+                dedup_policy=args.dedup_policy,
+                batch_size=args.batch_size
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
             if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):

@@ -10,6 +10,7 @@ Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
 """
 
 import os
+import sys
 import json
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.config import (
     HEVC_ENCODER,
+    HEVC_PRESET,
+    HEVC_CQ_LEVEL,
     HEVC_PROFILE,
     HEVC_PIX_FMT,
     HEVC_COLOR_RANGE,
@@ -170,6 +173,8 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
     os.makedirs(frames_dir, exist_ok=True)
     ext = "png" if fmt == "png" else "jpg"
 
+    hwaccel_args = ["-hwaccel", "cuda"] if (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc") else []
+
     if kept_indices is not None and len(kept_indices) > 0:
         tmp_pattern = os.path.join(frames_dir, f"tmp_%08d.{ext}")
         select_expr = _build_balanced_select_expr(kept_indices)
@@ -179,7 +184,7 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
             else f"select='{select_expr}'"
         )
 
-        extract_cmd = ["ffmpeg", "-y", "-i", seg_path, "-vf", vf_filter, "-vsync", "0"]
+        extract_cmd = ["ffmpeg", "-y", *hwaccel_args, "-i", seg_path, "-vf", vf_filter, "-vsync", "0"]
         if fmt != "png":
             extract_cmd.extend(["-qscale:v", "1", "-qmin", "1", "-qmax", "1"])
         extract_cmd.append(tmp_pattern)
@@ -195,7 +200,7 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
         return len(kept_indices)
     else:
         frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
-        extract_cmd = ["ffmpeg", "-y", "-i", seg_path]
+        extract_cmd = ["ffmpeg", "-y", *hwaccel_args, "-i", seg_path]
         if fmt == "png":
             extract_cmd.extend([
                 "-vf", "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc",
@@ -215,11 +220,26 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
 
 def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: str = "28M", fmt: str = "png"):
     """
-    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng Apple Media Engine.
+    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng NVIDIA NVENC (Windows) hoặc VideoToolbox (macOS).
     Ánh xạ ngược ma trận màu RGB24 sang BT.709 Limited Range (tv) p010le chuẩn xác.
     """
     ext = "png" if fmt == "png" else "jpg"
     frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
+
+    if HEVC_ENCODER == "hevc_nvenc":
+        rate_args = [
+            "-preset", HEVC_PRESET,
+            "-rc", "vbr",
+            "-cq", HEVC_CQ_LEVEL,
+            "-b:v", "0",
+            "-spatial-aq", "1",
+            "-temporal-aq", "1",
+        ]
+    else:
+        rate_args = [
+            "-b:v", bitrate,
+            "-spatial_aq", "1"
+        ]
 
     encode_cmd = [
         "ffmpeg", "-y",
@@ -227,8 +247,7 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
         "-i", frame_pattern,
         "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv",
         "-c:v", HEVC_ENCODER,
-        *(["-preset", "p5"] if HEVC_ENCODER == "hevc_nvenc" else []),
-        "-b:v", bitrate,
+        *rate_args,
         "-profile:v", HEVC_PROFILE,
         "-pix_fmt", HEVC_PIX_FMT,
         "-color_range", HEVC_COLOR_RANGE,
@@ -236,7 +255,6 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
         "-color_primaries", HEVC_COLOR_PRIMARIES,
         "-color_trc", HEVC_COLOR_TRC,
         "-tag:v", HEVC_TAG,
-        "-spatial_aq", "1",
         output_path
     ]
     subprocess.run(encode_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

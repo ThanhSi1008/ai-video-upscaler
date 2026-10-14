@@ -35,6 +35,8 @@ from src.config import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RAMDISK_SIZE_MB,
     DEFAULT_PNG_UNIT_SIZE_MB,
+    DEVICE_NAME,
+    HEVC_ENCODER,
     acquire_gpu_lock,
     release_gpu_lock,
 )
@@ -101,7 +103,8 @@ def run_upscale_pipeline(
     allow_partial: bool = False,
     deadline_dt: Optional[datetime] = None,
     keep_temp: bool = False,
-    dedup_policy: Optional[str] = None
+    dedup_policy: Optional[str] = None,
+    batch_size: Optional[int] = None
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA / Apple Silicon"""
     validate_environment(engine=engine)
@@ -575,12 +578,12 @@ def run_upscale_pipeline(
                                             free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
                                 try:
-                                    # 2.2 Độc quyền suy luận AI NCNN Vulkan / PyTorch MPS trên GPU M3 Pro (Main thread)
+                                    # 2.2 Độc quyền suy luận AI (GPU Main thread)
                                     dedup_info = f" (Deduplication: {extracted['ai_frames']}/{extracted['frame_count']} frames)" if extracted["chunk_plan"] else ""
                                     render_progress(
                                         c_idx, total_segs,
                                         prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
-                                        suffix=f"AI Metal Inferencing{dedup_info}..."
+                                        suffix=f"AI Inferencing ({engine.upper()}){dedup_info}..."
                                     )
                                     ai_result = upscale_frames_with_fallback(
                                         input_dir=c_in_dir,
@@ -588,6 +591,7 @@ def run_upscale_pipeline(
                                         model_info=model_info,
                                         engine=engine,
                                         precision=precision,
+                                        batch_size=batch_size,
                                         fmt=fmt,
                                         logger=logger,
                                         mid_chunk_callback=_mid_chunk_bp_check
@@ -877,8 +881,8 @@ def run_upscale_pipeline(
                 dedup_desc = "Tắt (Tính toán 100% khung hình)"
 
             stage_timings["Trích xuất ảnh đệm (Extract)"] = total_ext_time
-            stage_timings["Suy luận AI Metal (NCNN Vulkan)"] = total_ai_time
-            stage_timings["Nén HEVC 10-bit VideoToolbox"] = total_enc_time
+            stage_timings[f"Suy luận AI ({engine.upper()})"] = total_ai_time
+            stage_timings[f"Nén HEVC 10-bit ({HEVC_ENCODER})"] = total_enc_time
 
             swap_after = get_swap_usage()
             thermal_info = get_thermal_state()
@@ -891,8 +895,9 @@ def run_upscale_pipeline(
                 "avg_fps": avg_fps,
                 "ai_fps": ai_fps,
                 "dedup_info": dedup_desc,
+                "device_name": DEVICE_NAME,
                 "ssd_protection": "100% An toàn (Frame trung gian chỉ chạy trên RAM Disk)"
-                if use_ramdisk else "Ghi tạm trên SSD",
+                if use_ramdisk else "Rolling Segments Cleanup (Xóa cuốn chiếu sau từng chunk)",
                 "swap_info": f"{swap_before} ➔ {swap_after}",
                 "thermal_info": thermal_info,
                 "stage_timings": stage_timings

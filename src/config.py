@@ -93,6 +93,10 @@ def _detect_default_engine() -> str:
     try:
         import torch
         if torch.cuda.is_available():
+            # Kích hoạt tối ưu hóa NVIDIA Tensor Cores & cuDNN benchmark
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
             return "cuda"
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
@@ -101,17 +105,31 @@ def _detect_default_engine() -> str:
     return "cpu"
 
 
+def get_device_name() -> str:
+    """Lấy tên card đồ họa hoặc thiết bị đang được sử dụng."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "Apple Silicon GPU (Metal)"
+    except Exception:
+        pass
+    return "CPU"
+
+
 DEFAULT_MODEL = "realesr-animevideov3"
 DEFAULT_ENGINE = _detect_default_engine()  # Mặc định: 'cuda' trên NVIDIA, 'mps' trên Apple Silicon
+DEVICE_NAME = get_device_name()
 DEFAULT_PRECISION = "fp16"
+DEFAULT_BATCH_SIZE = 4 if DEFAULT_ENGINE == "cuda" else 1  # Lô 4 frames tối ưu cho 12GB VRAM RTX 3060
 DEFAULT_MPS_RESTART_CHUNKS = 10  # Khởi động lại worker mỗi N chunks để giải phóng driver pool (A2)
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"
 # Phân đoạn 8s (~192 frames) là kích thước lý tưởng cho PNG Lossless:
-# 192 frames 1080p (~480MB) + 192 frames 4K (~1.6GB) = ~2.1GB, vừa vặn trong 4GB RAM Disk
 DEFAULT_SEGMENT_TIME = 8  # giây
 DEFAULT_FRAME_FORMAT = "png"  # Mặc định PNG Lossless (RGB24, không nén suy hao)
-DEFAULT_OUTPUT_DIR = os.path.expanduser("~/Documents/Upscaled")
+DEFAULT_OUTPUT_DIR = os.path.join(ROOT_DIR, "out") if sys.platform == "win32" else os.path.expanduser("~/Documents/Upscaled")
 
 # -----------------------------------------------------------------------------
 # CẤU HÌNH DEDUPLICATION (PREFLIGHT SCAN & CONCAT RE-EXPANSION - MỤC TIÊU 4 GIỜ)
@@ -151,7 +169,8 @@ def _detect_hevc_encoder() -> str:
 
 
 HEVC_ENCODER = _detect_hevc_encoder()
-HEVC_PRESET = "p5"  # Preset chất lượng cao cho hevc_nvenc (p1-p7)
+HEVC_PRESET = "p6" if HEVC_ENCODER == "hevc_nvenc" else "p5"  # Preset p6 (Slower/Better Quality) cho RTX NVENC
+HEVC_CQ_LEVEL = "19"  # Constant Quality cho NVENC (visually lossless, thích ứng theo cảnh phim)
 HEVC_PROFILE = "main10"
 HEVC_PIX_FMT = "p010le"
 HEVC_COLOR_RANGE = "tv"

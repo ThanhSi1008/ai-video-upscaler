@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from src.config import LOGS_DIR, HEVC_ENCODER
+from src.config import LOGS_DIR, HEVC_ENCODER, DEVICE_NAME
 
 
 def format_time(seconds: float) -> str:
@@ -175,13 +175,14 @@ class RunLogger:
         extra_str = f" | {', '.join(extra_info)}" if extra_info else ""
         log_entry = (
             f"[CHUNK {chunk_idx + 1:02d}/{total_chunks:02d}] Hoàn tất {frames} frames "
-            f"(AI Metal: {ai_time:.2f}s @ {ai_fps:.2f} fps{extra_str} | Encode: {enc_time:.2f}s | "
+            f"(AI GPU: {ai_time:.2f}s @ {ai_fps:.2f} fps{extra_str} | Encode: {enc_time:.2f}s | "
             f"Tổng: {total_chunk_time:.2f}s | File: {os.path.basename(output_seg)} {format_bytes(seg_size)})"
         )
         self._write_file(log_entry)
 
     def print_benchmark_summary(self, stats: Dict[str, Any]):
         """In bảng tổng kết Benchmark ra console và lưu vĩnh viễn vào file log"""
+        dev_name = stats.get('device_name') or DEVICE_NAME
         summary_lines = [
             "=" * 72,
             "🎉  UPSCALE 4K HOÀN TẤT THÀNH CÔNG!",
@@ -191,12 +192,12 @@ class RunLogger:
             f"⏱️  Tổng thời gian:       {format_time(stats['total_seconds'])} ({stats['total_seconds']:.1f}s)",
             f"🎞️  Tổng số khung hình:   {stats['total_frames']} frames",
             f"🚀 Tốc độ trung bình:    {stats['avg_fps']:.2f} fps",
-            f"⚡ Tốc độ suy luận AI:   {stats['ai_fps']:.2f} fps (Apple M3 Pro GPU Metal)",
+            f"⚡ Tốc độ suy luận AI:   {stats['ai_fps']:.2f} fps ({dev_name})",
             f"🎯 Tối ưu Deduplication: {stats.get('dedup_info', 'Không kích hoạt')}",
             f"🛡️  Độ bền ổ cứng SSD:   {stats['ssd_protection']}",
         ]
         if "swap_info" in stats:
-            summary_lines.append(f"📊 macOS Swap:           {stats['swap_info']}")
+            summary_lines.append(f"📊 System Swap:          {stats['swap_info']}")
         if "thermal_info" in stats:
             summary_lines.append(f"🌡️  Nhiệt độ / Throttle:  {stats['thermal_info']}")
         if "stage_timings" in stats:
@@ -210,8 +211,12 @@ class RunLogger:
         ])
 
         print("\n" + "\n".join(summary_lines))
-        print(f"\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")
-        print(f"   open -a IINA \"{stats['output_path']}\"\n")
+        if sys.platform == "win32":
+            print(f"\n💡 Thưởng thức ngay video 4K chất lượng cao:")
+            print(f"   start \"\" \"{stats['output_path']}\"\n")
+        else:
+            print(f"\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")
+            print(f"   open -a IINA \"{stats['output_path']}\"\n")
 
         with open(self.log_filepath, "a", encoding="utf-8") as f:
             f.write("\n" + "\n".join(summary_lines) + "\n")
