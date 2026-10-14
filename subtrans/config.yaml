@@ -2,12 +2,13 @@
 # Configuration for anime subtitle translation (Verified against Google official docs 2026-10-01)
 
 gemini:
-  model: "gemini-3.8-flash"  # Primary cloud model (Stable 3.x Flash)
+  model: "gemini-3.5-flash-lite"  # Primary cloud model mặc định (500 RPD/key, tốc độ cực nhanh, không nghẽn 503)
+  high_quality_model: "gemini-3.8-flash"  # Model chất lượng cao khi bật cờ --subs-quality high
   fallback_models:
+    - "gemini-3.8-flash"
     - "gemini-3.7-flash"
     - "gemini-3.6-flash"
     - "gemini-3.5-flash"
-    - "gemini-3.5-flash-lite"
   lite_model: "gemini-3.5-flash-lite"
   max_rpm: "chưa biết (cần đo)"  # RPM chưa biết, cần đo thực tế
   max_rpd: 20  # Chưa xác minh (nguồn bên thứ ba)

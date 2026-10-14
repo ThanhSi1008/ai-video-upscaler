@@ -132,19 +132,22 @@ class TranslationPipeline:
 
     def _init_primary_backend(self):
         if not self.local_only and not self.gemini_backends:
-            api_key = get_gemini_api_key()
-            if api_key or self.dry_run:
+            from subtrans.config import get_gemini_api_keys
+            api_keys = get_gemini_api_keys()
+            primary_key = api_keys[0] if api_keys else None
+            if primary_key or self.dry_run:
                 all_gemini = [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
                 for m_name in all_gemini:
                     try:
                         self.gemini_backends[m_name] = GeminiTranslator(
-                            api_key=api_key or "DRY_RUN_KEY",
+                            api_keys=api_keys if api_keys else [primary_key or "DRY_RUN_KEY"],
                             model=m_name,
                             gloss_skill_names=self.gloss_skill_names,
                             allow_latest_alias=self.allow_latest_alias,
                             timeout_ms=self.request_timeout_ms,
                             dry_run=self.dry_run,
                             enable_rag=self.enable_rag,
+                            round_robin=True,
                         )
                     except Exception as e:
                         logger.warning(f"Could not initialize backend for {m_name}: {e}")

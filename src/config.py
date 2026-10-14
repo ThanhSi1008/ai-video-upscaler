@@ -122,7 +122,7 @@ DEFAULT_MODEL = "realesr-animevideov3"
 DEFAULT_ENGINE = _detect_default_engine()  # Mặc định: 'cuda' trên NVIDIA, 'mps' trên Apple Silicon
 DEVICE_NAME = get_device_name()
 DEFAULT_PRECISION = "fp16"
-DEFAULT_BATCH_SIZE = 4 if DEFAULT_ENGINE == "cuda" else 1  # Lô 4 frames tối ưu cho 12GB VRAM RTX 3060
+DEFAULT_BATCH_SIZE = 6 if DEFAULT_ENGINE == "cuda" else 1  # Lô 6 frames tối ưu cho 12GB VRAM RTX 3060 (đo thực nghiệm 1.37 fps @ 6.20 GB VRAM)
 DEFAULT_MPS_RESTART_CHUNKS = 10  # Khởi động lại worker mỗi N chunks để giải phóng driver pool (A2)
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"

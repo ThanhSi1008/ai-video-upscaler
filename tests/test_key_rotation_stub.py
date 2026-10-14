@@ -196,3 +196,32 @@ def test_midnight_pt_rollover_resets_exhaustion(temp_cache):
     # On day 2 (after midnight PT), querying with day2_str must NOT be exhausted
     with patch("subtrans.cache.get_today_pt_str", return_value=day2_str):
         assert temp_cache.is_key_model_exhausted(key_id, model) is False
+
+
+def test_round_robin_cycles_keys_on_success(temp_cache):
+    """(6) Verify that when round_robin=True, keys cycle across successive successful calls."""
+    keys = ["KEY_A_111111111", "KEY_B_222222222", "KEY_C_333333333"]
+    translator = GeminiTranslator(
+        api_keys=keys,
+        model="gemini-3.5-flash-lite",
+        dry_run=False,
+        round_robin=True,
+    )
+    translator.cache = temp_cache
+    mock_cli = MagicMock()
+    success_resp = MagicMock()
+    success_resp.text = '[{"id": 1, "vi": "Đã dịch"}]'
+    mock_cli.models.generate_content.return_value = success_resp
+    translator.client = mock_cli
+
+    with patch("google.genai.Client", return_value=mock_cli):
+        assert translator.current_key_idx == 0
+        cues = [Cue(id=1, start=0, end=1000, ja="テスト")]
+        translator.translate_batch(cues, [])
+        assert translator.current_key_idx == 1
+        translator.translate_batch(cues, [])
+        assert translator.current_key_idx == 2
+        translator.translate_batch(cues, [])
+        assert translator.current_key_idx == 0
+
+

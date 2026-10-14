@@ -210,6 +210,7 @@ class GeminiTranslator(BaseTranslator):
         http_options: Optional[types.HttpOptions] = None,
         dry_run: bool = False,
         enable_rag: bool = True,
+        round_robin: bool = False,
     ):
         import datetime
         from subtrans.config import get_gemini_api_keys
@@ -234,6 +235,7 @@ class GeminiTranslator(BaseTranslator):
         self.api_keys: List[str] = collected_keys
         self.key_ids: List[str] = [compute_key_id(k) for k in self.api_keys]
         self.cache = TranslationCache()
+        self.round_robin = round_robin
 
         self.model = model
         self.temperature = temperature
@@ -263,7 +265,7 @@ class GeminiTranslator(BaseTranslator):
         if not self.api_key and not dry_run:
             raise ValueError("GEMINI_API_KEY is required for GeminiTranslator.")
 
-        if self.api_key:
+        if self.api_key and not dry_run:
             self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
         else:
             self.client = None
@@ -281,6 +283,41 @@ class GeminiTranslator(BaseTranslator):
                 f"Model alias '{self.model}' is prohibited by default because its underlying version can change silently. "
                 f"Please specify an explicit versioned model (e.g. gemini-3.8-flash) or set allow_latest_alias=True."
             )
+
+    def select_next_round_robin_key(self, reason: str = "") -> bool:
+        """
+        Luân phiên (Round-Robin) sang API Key kế tiếp trong danh sách chưa bị cạn kiệt.
+        Giúp phân bổ đều request giữa các key, nhân số RPM khả dụng và tránh nghẽn.
+        """
+        if not self.api_keys or len(self.api_keys) <= 1:
+            return False
+        import datetime
+        old_idx = self.current_key_idx
+        old_kid = self.key_ids[old_idx] if self.key_ids else "none"
+        n_keys = len(self.api_keys)
+
+        for offset in range(1, n_keys + 1):
+            cand_idx = (old_idx + offset) % n_keys
+            cand_kid = self.key_ids[cand_idx]
+            if not self.cache.is_key_model_exhausted(cand_kid, self.model):
+                self.current_key_idx = cand_idx
+                self.api_key = self.api_keys[cand_idx]
+                self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+                if cand_idx != old_idx and reason:
+                    event = {
+                        "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                        "model": self.model,
+                        "from_key_id": old_kid,
+                        "to_key_id": cand_kid,
+                        "reason": reason,
+                    }
+                    self.rotation_events.append(event)
+                    GeminiTranslator.all_rotation_events.append(event)
+                    logging.getLogger("subtrans.gemini").info(
+                        f"🔄 [ROUND-ROBIN] Luân phiên khóa '{self.model}': {old_kid} ➔ {cand_kid} ({reason})"
+                    )
+                return True
+        return False
 
     def rotate_key(self, reason: str = "") -> bool:
         """
@@ -373,6 +410,9 @@ class GeminiTranslator(BaseTranslator):
                 )
                 raw_text = response.text.strip()
                 data = json.loads(raw_text)
+                # Sau khi batch hoàn tất thành công, xoay vòng Round-Robin sang key tiếp theo (nếu bật round_robin)
+                if getattr(self, "round_robin", False) and len(self.api_keys) > 1:
+                    self.select_next_round_robin_key(reason="Round-Robin sau batch thành công")
                 return data
             except Exception as e:
                 err_str = str(e).lower()

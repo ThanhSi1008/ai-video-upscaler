@@ -232,6 +232,8 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
             "-rc", "vbr",
             "-cq", HEVC_CQ_LEVEL,
             "-b:v", "0",
+            "-multipass", "qres",
+            "-rc-lookahead", "24",
             "-spatial-aq", "1",
             "-temporal-aq", "1",
         ]

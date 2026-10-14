@@ -383,6 +383,54 @@ def parse_args(args=None):
     return build_arg_parser().parse_args(args)
 
 
+def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str = "base") -> bool:
+    """
+    Trích xuất audio tiếng Nhật và chạy Whisper Speech-to-Text để tạo file phụ đề .ja.srt dự phòng.
+    Giúp tận dụng triệt để mọi nguồn video không có sẵn track phụ đề tiếng Nhật.
+    """
+    try:
+        import whisper
+        import pysubs2
+        import torch
+        print(f"\n🎙️ [WHISPER STT] Không tìm thấy track phụ đề tiếng Nhật. Đang trích xuất audio và nhận diện giọng nói (Whisper {model_size})...")
+        audio_tmp = os.path.splitext(output_srt)[0] + ".temp.wav"
+        ext_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            audio_tmp
+        ]
+        res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode != 0 or not os.path.exists(audio_tmp):
+            return False
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = whisper.load_model(model_size, device=device)
+        result = model.transcribe(audio_tmp, language="ja", task="transcribe")
+
+        subs = pysubs2.SSAFile()
+        for seg in result.get("segments", []):
+            start_ms = int(seg["start"] * 1000)
+            end_ms = int(seg["end"] * 1000)
+            text = seg["text"].strip()
+            if text:
+                subs.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=text))
+
+        subs.save(output_srt)
+        try:
+            if os.path.exists(audio_tmp):
+                os.remove(audio_tmp)
+        except Exception:
+            pass
+        if os.path.exists(output_srt) and len(subs) > 0:
+            print(f"✅ [WHISPER STT] Đã tạo thành công {len(subs)} câu thoại tiếng Nhật dự phòng: {os.path.basename(output_srt)}")
+            return True
+        return False
+    except Exception as e:
+        print(f"⚠️ [WHISPER STT] Lỗi nhận diện giọng nói: {e}")
+        return False
+
+
 def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[str]]:
     """Tìm hoặc trích xuất phụ đề tiếng Nhật (ja) và tiếng Anh (en) cho video."""
     base_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -479,6 +527,20 @@ def find_or_extract_subtitles(video_path: str) -> tuple[Optional[str], Optional[
                         ja_sub = extracted_ja
     except Exception:
         pass
+
+    # 3. Cơ chế dự phòng Whisper Speech-to-Text: Nếu không có track tiếng Nhật thì tự động nhận diện giọng nói
+    if not ja_sub:
+        whisper_ja = os.path.join(tmp_dir, f"{base_name}.whisper_ja.srt")
+        if os.path.exists(whisper_ja) and os.path.getsize(whisper_ja) > 100:
+            ja_sub = whisper_ja
+        else:
+            try:
+                os.makedirs(tmp_dir, exist_ok=True)
+                ok = transcribe_japanese_audio(video_path, whisper_ja)
+                if ok and os.path.exists(whisper_ja):
+                    ja_sub = whisper_ja
+            except Exception as e_whisper:
+                print(f"⚠️ [WHISPER FALLBACK] Không thể tạo phụ đề JA từ giọng nói: {e_whisper}")
 
     return ja_sub, en_sub
 

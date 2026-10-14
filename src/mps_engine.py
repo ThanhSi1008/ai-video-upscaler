@@ -17,6 +17,7 @@ import shutil
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -240,12 +241,16 @@ class MPSPersistentWorker:
         loader_executor = ThreadPoolExecutor(max_workers=loader_workers) if loader_workers > 1 else None
 
         def _read_img(p: str) -> np.ndarray:
+            im_bgr = cv2.imread(p, cv2.IMREAD_COLOR)
+            if im_bgr is not None:
+                im_rgb = cv2.cvtColor(im_bgr, cv2.COLOR_BGR2RGB)
+                return (im_rgb.transpose((2, 0, 1)) / 255.0).astype(np.float32)
             im = Image.open(p).convert("RGB")
             return (np.array(im).transpose((2, 0, 1)) / 255.0).astype(np.float32)
 
         def _save_task(path: str, array: np.ndarray):
-            out_img = Image.fromarray(array)
-            out_img.save(path, format="PNG", compress_level=1)
+            bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(path, bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
         total_frames = len(img_files)
 

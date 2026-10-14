@@ -12,6 +12,18 @@ from rich.console import Console
 from rich.table import Table
 import requests
 
+# Configure Windows console to UTF-8 to prevent charmap encoding errors
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from subtrans.config import load_config, get_gemini_api_key
 from subtrans.pipeline import TranslationPipeline
 
@@ -20,7 +32,7 @@ app = typer.Typer(
     help="Local-first CLI tool for translating anime subtitles (Japanese + English) into Vietnamese.",
     add_completion=False,
 )
-console = Console()
+console = Console(force_terminal=True, legacy_windows=False)
 
 
 @app.command()
@@ -75,8 +87,9 @@ def models():
 
     cfg = load_config()
     gemini_cfg = cfg.get("gemini", {})
-    configured_primary = gemini_cfg.get("model", "gemini-3.8-flash")
-    configured_fallbacks = gemini_cfg.get("fallback_models", ["gemini-3.7-flash", "gemini-3.6-flash"])
+    configured_primary = gemini_cfg.get("model", "gemini-3.5-flash-lite")
+    configured_high = gemini_cfg.get("high_quality_model", "gemini-3.8-flash")
+    configured_fallbacks = gemini_cfg.get("fallback_models", ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"])
     configured_lite = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
 
 
