@@ -4,7 +4,7 @@ src/pipeline.py
 Bộ điều phối chính (Orchestrator) cho toàn bộ quy trình Upscale 4K:
 - Kiến trúc phân đoạn cuốn chiếu (Rolling Segments)
 - Bộ nhớ đệm RAM Disk ảo (Zero NVMe SSD wear)
-- Cơ chế chống ngủ máy tự động (caffeinate)
+- Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState)
 - Kiểm tra an toàn trước khi chạy (Pre-flight Health Checks: Pin, Ổ đĩa)
 - Tự động tiếp tục từ phân đoạn dở (Checkpoint Resume)
 - Thông báo hệ thống khi hoàn tất
@@ -78,7 +78,7 @@ from src.logger import (
     get_thermal_state
 )
 from src.preflight import (
-    CaffeinateContext,
+    AntiSleepContext,
     run_preflight_checks,
     send_system_notification
 )
@@ -106,7 +106,7 @@ def run_upscale_pipeline(
     dedup_policy: Optional[str] = None,
     batch_size: Optional[int] = None
 ) -> str:
-    """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA / Apple Silicon"""
+    """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
 
     # Chuẩn hóa đường dẫn đầu vào
@@ -176,13 +176,10 @@ def run_upscale_pipeline(
         logger=logger
     )
 
-    # Kích hoạt Caffeinate để chống Sleep máy trong suốt phiên chạy
-    with CaffeinateContext(enabled=caffeinate):
+    # Kích hoạt AntiSleep để chống Sleep máy trong suốt phiên chạy
+    with AntiSleepContext(enabled=caffeinate):
         if caffeinate:
-            if sys.platform == "win32":
-                logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
-            elif sys.platform == "darwin":
-                logger.info("Cơ chế chống ngủ máy (caffeinate -dims) đã được kích hoạt thành công.")
+            logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
 
         target_w = meta["width"] * DEFAULT_SCALE
         target_h = meta["height"] * DEFAULT_SCALE
@@ -248,7 +245,7 @@ def run_upscale_pipeline(
 
             storage_desc = (
                 f"RAM Disk {ramdisk_size}MB ảo (Zero SSD Wear 🛡️)"
-                if getattr(cache_root, "is_ramdisk", False) or "RAM" in cache_root or "/Volumes/" in cache_root
+                if getattr(cache_root, "is_ramdisk", False) or "RAM" in cache_root
                 else "Thư mục tạm NVMe SSD"
             )
 
@@ -761,7 +758,7 @@ def run_upscale_pipeline(
                                 )
                                 future_encode = None
 
-                            # Khởi động mã hóa phần cứng (NVENC / VideoToolbox) cho chunk hiện tại ở luồng nền
+                            # Khởi động mã hóa phần cứng NVENC cho chunk hiện tại ở luồng nền
                             encode_item = {
                                 "target": target_chunk,
                                 "extracted": extracted,
@@ -838,7 +835,7 @@ def run_upscale_pipeline(
                             f"• Thư mục lưu phân đoạn: '{up_segs_dir}' (đã giữ an toàn {prev_c_idx+1} file up_*.mp4)\n"
                             f"• Phân đoạn tiếp theo: {prev_c_idx+2}/{total_segs}\n"
                             f"💡 CÁCH TIẾP TỤC: Chạy lại lệnh sau (hệ thống sẽ tự động resume từ đoạn {prev_c_idx+2}):\n"
-                            f"   ./upscale.sh \"{input_path}\" -o \"{resume_out_dir}\"\n"
+                            f"   python upscale.py \"{input_path}\" -o \"{resume_out_dir}\"\n"
                             f"{'='*75}\n",
                             to_console=True
                         )
@@ -982,12 +979,9 @@ def run_upscale_pipeline(
 
             # Tự động mở trình phát nếu đang chạy chế độ preview
             if is_preview:
-                if sys.platform == "darwin":
-                    subprocess.run(["open", "-a", "IINA", output_path], check=False)
-                elif sys.platform == "win32":
-                    try:
-                        os.startfile(output_path)
-                    except Exception:
-                        pass
+                try:
+                    os.startfile(output_path)
+                except Exception:
+                    pass
 
     return output_path

@@ -3,8 +3,8 @@
 """
 🎬 AI Video Upscaler 4K - CLI Entry Point
 Công cụ Upscale Video Anime lên 4K chuyên dụng trên Terminal:
-- Tăng độ phân giải 2x bằng PyTorch FP16 / Tensor Cores (NVIDIA CUDA / Apple Silicon).
-- Mã hóa phần cứng 10-bit HEVC qua NVENC (Windows) hoặc VideoToolbox (macOS).
+- Tăng độ phân giải 2x bằng PyTorch FP16 / Tensor Cores (NVIDIA CUDA).
+- Mã hóa phần cứng 10-bit HEVC qua NVENC (Windows).
 - Bảo vệ tối đa ổ cứng NVMe SSD với bộ nhớ đệm RAM Disk ảo / bộ nhớ đệm tạm.
 - Bảo toàn 100% âm thanh đa kênh, phụ đề đa ngôn ngữ, font chữ và chapters gốc.
 """
@@ -174,7 +174,7 @@ def build_arg_parser():
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="Đường dẫn file hoặc thư mục xuất 4K (Mặc định: out/<tên>_4K.mkv trên Windows, ~/Documents/Upscaled/ trên macOS)"
+        help="Đường dẫn file hoặc thư mục xuất 4K (Mặc định: out/<tên>_4K.mkv)"
     )
     parser.add_argument(
         "--batch-size",
@@ -190,7 +190,7 @@ def build_arg_parser():
     parser.add_argument(
         "--engine",
         default=DEFAULT_ENGINE,
-        choices=["cuda", "mps", "ncnn", "cpu"],
+        choices=["cuda", "cpu"],
         help=f"Động cơ suy luận AI (Mặc định: {DEFAULT_ENGINE} - PyTorch {DEFAULT_ENGINE.upper()} FP16)"
     )
     parser.add_argument(
@@ -237,9 +237,10 @@ def build_arg_parser():
         help="Không tiếp tục từ phân đoạn đã làm dở mà chạy lại từ đầu"
     )
     parser.add_argument(
-        "--no-caffeinate",
+        "--no-anti-sleep", "--no-caffeinate",
+        dest="no_caffeinate",
         action="store_true",
-        help="Không tự động kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows / caffeinate trên macOS)"
+        help="Không tự động kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows)"
     )
     parser.add_argument(
         "--no-dedup",
@@ -573,9 +574,6 @@ def main():
     if args.engine == "cuda":
         fps_median = 12.0
         fps_p5 = 10.0
-    elif args.engine == "mps":
-        fps_median = 1.61
-        fps_p5 = 1.62
     else:
         fps_median = 1.35
         fps_p5 = 1.25

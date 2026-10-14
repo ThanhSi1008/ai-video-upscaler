@@ -5,7 +5,7 @@ Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
 - Trích xuất metadata chuyên sâu (độ phân giải, fps, audio, subs, font attachments)
 - Phân đoạn video không giải mã (Lossless Stream Copy)
 - Trích xuất khung hình PNG Lossless với chuyển đổi ma trận màu BT.709 chuẩn xác
-- Nén phần cứng Apple VideoToolbox HEVC 10-bit (Main 10, p010le, BT.709 TV Limited Range, Spatial AQ)
+- Nén phần cứng NVIDIA NVENC HEVC 10-bit (Main 10, p010le, BT.709 TV Limited Range, Spatial AQ)
 - Ghép nối phân đoạn và Muxing bảo toàn 100% dữ liệu gốc
 """
 
@@ -220,7 +220,7 @@ def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indice
 
 def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: str = "28M", fmt: str = "png"):
     """
-    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng NVIDIA NVENC (Windows) hoặc VideoToolbox (macOS).
+    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng NVIDIA NVENC.
     Ánh xạ ngược ma trận màu RGB24 sang BT.709 Limited Range (tv) p010le chuẩn xác.
     """
     ext = "png" if fmt == "png" else "jpg"

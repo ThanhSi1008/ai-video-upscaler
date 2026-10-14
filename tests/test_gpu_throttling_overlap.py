@@ -3,7 +3,7 @@
 """
 tests/test_gpu_throttling_overlap.py
 Kiểm tra xem GPU AI FPS có bị sụt giảm khi chạy chồng gối đầu (Pipelined Double-Buffering)
-với CPU Decode (FFmpeg) và Hardware Encode (NVENC/VideoToolbox 10-bit) hay không.
+với CPU Decode (FFmpeg) và Hardware Encode (NVENC 10-bit) hay không.
 Chạy trên 3 phân đoạn đầu tiên của sample_3min.mkv.
 """
 

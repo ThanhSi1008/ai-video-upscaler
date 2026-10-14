@@ -9,53 +9,48 @@
 ## 1. Mục Tiêu & Ràng Buộc Cốt Lõi (Core Invariants)
 
 * **Thiết bị vận hành mục tiêu:**
-  * **Windows Workstation:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T), NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6), 32GB RAM, FFmpeg 8.1+ hỗ trợ `hevc_nvenc`.
-  * **Apple Silicon:** macOS Sonoma/Sequoia, MacBook Pro M3 Pro (11-core CPU, 14-core GPU, 18GB Unified Memory), Apple Media Engine `hevc_videotoolbox`.
-* **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows / macOS)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
+  * **Windows Workstation:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T, tăng tốc AVX2), NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6, CUDA Cores & Tensor Cores), 32GB RAM, FFmpeg hỗ trợ `hevc_nvenc`.
+* **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows 11)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
 * **Tôn chỉ Pareto:** Chất lượng hình ảnh cân bằng với thời gian. Không hy sinh nét vẽ anime lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
   * Trên RTX 3060 (PyTorch CUDA FP16 Batch Inference `batch_size=6` đạt ~4.8–5.2 fps suy luận thuần, ~10–12+ fps hiệu dụng với Dedup & `cv2.imwrite`): **~6–8 tập mỗi đêm** (~45 phút – 1 giờ/tập với ~17.000 unique frames).
-  * Trên M3 Pro (PyTorch MPS FP16 ~1.68 fps): **~2 tập mỗi đêm** (~3 giờ/tập).
 
 ---
 
 ## 2. Lệnh CLI Cơ Bản & Bảng Cờ (Commands & Flags)
 
-### A. Lệnh Vận Hành Thường Dùng
+### A. Lệnh Vận Hành Thường Dùng (PowerShell / CMD)
 
-**Trên Windows (PowerShell):**
 ```powershell
 # Nâng cấp 1 tập video đơn lẻ:
 python upscale.py path/to/source.mkv -o out/
+
+# Chạy nhanh qua launcher tiện ích Windows:
+.\upscale.bat path/to/source.mkv
 
 # Xem trước nhanh 10 giây ở 30% phim:
 python upscale.py path/to/source.mkv --preview 10
 
 # Chạy hàng đợi nhiều tập qua đêm (tự động bật auto-offset và lập lịch deadline):
-python upscale.py --queue ep1.mkv ep2.mkv -o out/
+python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-partial
 
 # Tiếp tục tập bị gián đoạn (tự động nhận checkpoint .temp):
 python upscale.py path/to/source.mkv -o out/
+
+# Dịch phụ đề riêng lẻ:
+python subtrans.py path/to/source.mkv -o out/
+.\subtrans.bat path/to/source.mkv
 
 # Chạy kiểm thử tự động toàn diện:
 pytest
 ```
 
-**Trên macOS (Terminal):**
-```bash
-# Chạy nhanh bằng shell launcher:
-./scripts/upscale.sh path/to/source.mkv -o ~/Documents/Upscaled/
-
-# Xem trước nhanh 10 giây:
-python3 upscale.py path/to/source.mkv --preview 10
-```
-
 ### B. Bảng Cờ CLI Chính (`upscale.py`)
 | Cờ CLI | Mặc định | Ý nghĩa & Hành vi |
 | :--- | :--- | :--- |
-| `-o`, `--output` | `~/Documents/Upscaled/` hoặc `out/` | Thư mục hoặc file đích xuất video 4K |
+| `-o`, `--output` | `out/<tên>_4K.mkv` | Thư mục hoặc file đích xuất video 4K |
 | `--queue` | `None` | Danh sách các file video chạy nối tiếp qua đêm |
-| `--engine` | Auto (`cuda` / `mps` / `cpu`) | Engine suy luận: `cuda` (NVIDIA CUDA FP16), `mps` (Apple Metal), `ncnn` (Vulkan) hoặc `cpu` |
+| `--engine` | `cuda` | Engine suy luận: `cuda` (NVIDIA CUDA FP16) hoặc `cpu` |
 | `--model` | `animevideov3` | Model Super-Resolution đăng ký trong `models/models.yaml` |
 | `--batch-size` | `6` (CUDA RTX 3060) | Kích thước batch cho AI Inference GPU (tối ưu hóa Tensor Cores) |
 | `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite` 500 RPD) hoặc `high` (`gemini-3.8-flash`) |
@@ -87,20 +82,20 @@ ai-video-upscaler/
 ├── shows.yaml              # Ánh xạ mô hình SR theo từng bộ anime (người dùng cấu hình)
 ├── pytest.ini              # Cấu hình Pytest (testpaths = tests subtrans/tests)
 ├── requirements.txt        # Danh sách thư viện Python phụ thuộc
-├── README.md               # Hướng dẫn sử dụng & CLI options (Windows & macOS)
+├── README.md               # Hướng dẫn sử dụng & CLI options (Windows 11 & NVIDIA RTX)
 ├── LICENSE                 # Giấy phép mã nguồn mở
 ├── AGENTS.md               # Kim chỉ nam kiến trúc & các bất biến kỹ thuật
-├── src/                    # Pipeline phóng to video (CUDA/MPS, NVENC/VideoToolbox, FFmpeg)
-│   ├── config.py           # Single source of truth: Auto-detect platform, encoder (hevc_nvenc/videotoolbox), params
+├── src/                    # Pipeline phóng to video (CUDA FP16, NVENC 10-bit, FFmpeg)
+│   ├── config.py           # Single source of truth: cấu hình Windows, NVENC, batch size, paths
 │   ├── subtitles.py        # Trích xuất phụ đề rời/container, Whisper STT fallback
-│   ├── ramdisk.py          # RAMDisk Context Manager: macOS HFS+ RAM Disk ảo; Windows fallback/rolling cleanup
-│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (NVENC/VideoToolbox BT.709 10-bit, Mux, Embed Subs)
-│   ├── mps_engine.py       # Multi-platform PyTorch Engine: CUDA FP16/FP32, Apple Metal MPS, CPU
-│   ├── ai_engine.py        # NCNN Vulkan via MoltenVK (Metal API) inference worker (Engine fallback trên Mac)
+│   ├── ramdisk.py          # RAMDisk Context Manager: Quản lý bộ đệm khung hình và rolling cleanup
+│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (NVENC BT.709 10-bit, Mux, Embed Subs)
+│   ├── mps_engine.py       # PyTorch GPU Engine: Hỗ trợ CUDA FP16/FP32 Native, Tensor Cores, batch inference
+│   ├── ai_engine.py        # Super-Resolution Interface abstraction
 │   ├── models_resolver.py  # SR Models Registry resolver & weights loader (SHA-256 verification)
 │   ├── mux_audit.py        # Stream copy integrity audit & font count verifier
-│   ├── dedup.py            # Deduplication Engine: Preflight mpdecimate scan & Concat Re-expansion
-│   ├── preflight.py        # Win32 SetThreadExecutionState / CaffeinateContext, Check AC/Pin, Check đĩa trống
+│   ├── dedup.py            # Deduplication Engine: Preflight mpdecimate scan, DIS Optical Flow & Concat Re-expansion
+│   ├── preflight.py        # Win32 SetThreadExecutionState (AntiSleep), kiểm tra sạc & dung lượng đĩa trống
 │   ├── pipeline.py         # Orchestrator: Triple-buffering, Rolling Segments, Checkpoint Resume
 │   ├── scheduler.py        # Dynamic overnight queue scheduler & ETA predictor
 │   ├── night_report.py     # Báo cáo viễn trắc tổng kết phiên chạy qua đêm Markdown
@@ -108,17 +103,17 @@ ai-video-upscaler/
 │   ├── cleanup.py          # Auto-cleanup: Dọn dẹp thư mục tạm (.temp_*), symlinks & gom gọn audit/
 │   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
 ├── subtrans/               # Engine dịch thuật phụ đề (xem subtrans/AGENTS.md)
-├── benchmarks/             # Kịch bản đo lường hiệu năng, Soak Tests & Blind AB Evaluations
+├── benchmarks/             # Kịch bản đo lường hiệu năng, Soak Tests & Khảo sát thuật toán
 │   ├── upscale/            # Benchmarks hiệu năng GPU, VRAM, tốc độ suy luận, Dedup
 │   ├── subtrans/           # Đánh giá độ ổn định xưng hô (Golden Pronoun Evaluations)
 │   └── research/           # Kịch bản hiệu chuẩn và nghiên cứu chuyên sâu
-├── scripts/                # Tiện ích vận hành (organize subs, soak monitor, upscale.sh)
-├── bin/realesrgan/         # Universal Mach-O binary & NCNN models (.param / .bin)
+├── scripts/                # Tiện ích vận hành (organize subs, batch launchers)
 ├── models/                 # Super-Resolution models registry (models.yaml)
+├── models_bench/           # Trọng số mô hình AI PyTorch (.pth)
 ├── glossaries/             # Bảng thuật ngữ riêng từng bộ anime (glossary.<anime>.yaml)
-├── samples/                # Video mẫu phục vụ kiểm thử
+├── samples/                # Video mẫu phục vụ kiểm thử (Mushoku, Slime, Sword)
 ├── test_frames/            # 3 frame ảnh mẫu chuẩn (Action, Close-up, Scenery)
-├── tests/                  # Bộ kiểm thử tự động (Unit & Integration Tests)
+├── tests/                  # Bộ kiểm thử tự động (100% Pytest Unit & Integration Tests)
 ├── docs/                   # Tài liệu chuyên sâu: video-pipeline.md, dedup-architecture.md, audit-and-safety.md...
 └── logs/                   # Log chi tiết có cấu trúc & báo cáo tổng kết đêm
 ```
@@ -128,9 +123,9 @@ ai-video-upscaler/
 ## 4. Những Bất Biến Kỹ Thuật (Do NOT Break)
 
 1. **Bảo vệ Bộ Nhớ & Ổ Cứng (Storage & RAM Discipline):**
-   * Trên macOS: Mọi khung hình trung gian dạng PNG bắt buộc ghi trên RAM Disk ảo HFS+ (`/Volumes/RAMDisk`).
-   * Trên Windows: Khung hình trung gian của từng chunk 8s phải được xóa cuốn chiếu (Rolling Segments Cleanup) ngay khi chunk được mã hóa xong sang file HEVC `.mp4`.
+   * Khung hình trung gian của từng chunk 8s phải được xóa cuốn chiếu (Rolling Segments Cleanup) ngay khi chunk được mã hóa xong sang file HEVC `.mp4`.
    * Thư mục SSD chỉ lưu trữ các segment HEVC đã nén (`up_*.mp4`) trong `.temp_<basename>` để phục vụ resume.
+   * Tối ưu I/O khung hình qua OpenCV C++ `cv2.imwrite` tận dụng AVX2 của CPU Core i5-12600K.
 2. **Bit-exact Stream Copy & Cờ Mux Phòng Thu:**
    * Video 4K thành phẩm **bắt buộc Stream Copy nguyên bản**: Audio đa kênh, Phụ đề mềm (ASS/SRT), Font chữ nhúng (TTF/OTF) và Chapters.
    * Lệnh mux bắt buộc dùng cờ:
@@ -140,15 +135,14 @@ ai-video-upscaler/
    * Trích xuất: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (YUV Limited -> RGB24 Full).
    * Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full -> YUV Limited `p010le`).
    * Metadata gắn cờ: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
-4. **Mã hóa phần cứng 10-bit theo nền tảng:**
-   * **Windows:** Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng pixel `p010le`, preset `p6` (chất lượng cao), multipass `qres`, lookahead `24` và `spatial-aq 1`.
-   * **macOS:** Bắt buộc dùng `hevc_videotoolbox` với profile `main10`, định dạng pixel `p010le`, spatial AQ.
+4. **Mã hóa phần cứng 10-bit NVENC:**
+   * Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng pixel `p010le`, preset `p6` (chất lượng cao), multipass `qres`, lookahead `24` và `spatial-aq 1`.
 5. **Vòng đời an toàn (Process Lifecycle & Anti-Sleep):**
-   * **Windows:** Sử dụng Win32 API native `SetThreadExecutionState` ngăn hệ thống đi vào chế độ ngủ (sleep/suspend) trong suốt quá trình chạy.
-   * **macOS:** `caffeinate` và `hdiutil` (RAM Disk) phải luôn nằm trong `try...finally` hoặc Context Manager với `atexit` để thu hồi sạch sẽ kể cả khi bị `Ctrl+C` (SIGINT).
+   * Sử dụng Win32 API native `SetThreadExecutionState` ngăn hệ thống đi vào chế độ ngủ (sleep/suspend) trong suốt quá trình chạy.
+   * Tất cả tài nguyên đệm tạm và tiến trình con phải nằm trong Context Manager với `atexit` để thu hồi sạch sẽ kể cả khi bị `Ctrl+C` (SIGINT).
 6. **Độc quyền GPU & Điều phối tài nguyên:**
    * Tại một thời điểm chỉ duy nhất 1 tiến trình infer GPU được hoạt động.
-   * Pipeline chạy gối đầu 3 tầng: CPU Decode (chunk N+1) và Encoder phần cứng (chunk N-1) chạy song song với GPU Infer (chunk N).
+   * Pipeline chạy gối đầu 3 tầng: CPU Decode (chunk N+1) và NVENC Encoder (chunk N-1) chạy song song với GPU Infer (chunk N).
    * Tuyệt đối không nạp mô hình cục bộ LLM khi tiến trình Upscale GPU đang hoạt động.
 
 ---
@@ -166,7 +160,7 @@ ai-video-upscaler/
 * **Bảo toàn Checkpoint Resume:** Tuyệt đối không xóa hay sửa đổi các file trong thư mục `.temp_<basename>` trên SSD khi chưa có sự xác nhận của người dùng.
 * **Hỏi Ý Kiến Trước Khi Thực Hiện:**
   * Chạy các tác vụ GPU/AI dài (> 100 frames).
-  * Thay đổi model SR mặc định hoặc các tham số chất lượng mã hóa NVENC/VideoToolbox.
+  * Thay đổi model SR mặc định hoặc các tham số chất lượng mã hóa NVENC.
 
 ---
 
@@ -174,14 +168,9 @@ ai-video-upscaler/
 
 ### A. Phân Hệ Phóng To Video AI & GPU Engine — [docs/video-pipeline.md](docs/video-pipeline.md)
 * **Mô hình Super-Resolution:** Chọn `realesr-animevideov3` (kiến trúc mạng `SRVGGNetCompact` 4x kết hợp Bicubic 0.5 để xuất 2x).
-* **Động cơ suy luận chính:**
-  * **Windows:** PyTorch CUDA FP16 Native (`src/mps_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=6` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
-  * **macOS:** PyTorch MPS FP16 Native (1.68 fps sustained soak).
-  * NCNN Vulkan đóng vai trò fallback.
+* **Động cơ suy luận chính:** PyTorch CUDA FP16 Native (`src/mps_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=6` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
 * **Đính chính mô hình AnimeJaNai:** Thêm phép cộng nearest $\times 2$ residual tại tag `janai-fix` (`F.interpolate(x, scale_factor=2.0, mode='nearest')`), khớp bit-exact 0.0 với spandrel CPU chuẩn (PSNR 75–158 dB).
-* **Mã hóa phần cứng 10-bit:**
-  * Windows: `hevc_nvenc` Main 10 Profile (`p010le`, preset `p6`, multipass `qres`, lookahead `24`, spatial AQ).
-  * macOS: `hevc_videotoolbox` Main 10 Profile (`p010le`, spatial AQ).
+* **Mã hóa phần cứng 10-bit:** `hevc_nvenc` Main 10 Profile (`p010le`, preset `p6`, multipass `qres`, lookahead `24`, spatial AQ).
 * **Màu sắc & Stream Copy:** Ma trận BT.709 hai chiều (Limited YUV $\leftrightarrow$ Full RGB24), gắn cờ `-tag:v hvc1`, cờ mux bắt buộc `-max_interleave_delta 0` copy nguyên bản audio, subtitle, fonts và chapters.
 
 ### B. Phân Hệ Deduplication Preflight & Dòng Chảy Quang Học DIS — [docs/dedup-architecture.md](docs/dedup-architecture.md)
@@ -201,7 +190,7 @@ ai-video-upscaler/
 * **Output Sanity Guard:** `src/output_sanity.py` kiểm tra sau chunk 1 và mỗi 10 chunks sau ($|\Delta Y| \le 6/255$, tương quan $\ge 0.98$ so với bicubic); dừng khẩn cấp và cấm mux nếu rớt.
 * **Cổng Kiểm Toán Mux Audit:** `src/mux_audit.py` đối soát bit-exact stream copy, MD5 track âm thanh, số lượng phụ đề, font chữ đính kèm và tổng số khung hình `video_frame_count`.
 * **Tự Động Dọn Dẹp:** `src/cleanup.py` tự động kích hoạt khi Mux Audit PASS; xóa sạch `.temp_<basename>`, gom file báo cáo vào thư mục con `audit/`.
-* **Vòng Đời An Toàn:** Win32 API native / Caffeinate chống sleep máy trong suốt tiến trình.
+* **Vòng Đời An Toàn:** Win32 API native `SetThreadExecutionState` chống sleep máy trong suốt tiến trình.
 
 ### E. Nhật Ký Kỹ Thuật & Số Đo Benchmarks Chi Tiết — [docs/engineering-log.md](docs/engineering-log.md)
 * Lưu trữ chi tiết các thử nghiệm kiểm chứng, benchmark soak test và phân tích viễn trắc.
@@ -215,4 +204,3 @@ Một phiên làm việc hoặc mã nguồn được coi là hoàn tất khi th�
 2. **Kiểm định Mux:** Hàm `verify_mux_integrity` trả về `status: "PASS"` (khớp số kênh audio, số luồng sub, và số lượng font chữ đính kèm).
 3. **Bảo toàn khung hình:** `ffprobe -count_frames` trên video 4K thành phẩm khớp chính xác từng khung hình so với video nguồn gốc.
 4. **Trạng thái Git & Kỷ luật Commit:** Mỗi yêu cầu hoàn thành đều được commit riêng biệt với thông điệp rõ nguồn, nội dung làm/fix và số liệu; `git status` sạch hoàn toàn, không có file tạm bị bỏ sót; tag phiên bản được cập nhật tương ứng.
-

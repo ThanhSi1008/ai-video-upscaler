@@ -836,7 +836,7 @@ def encode_chunk_reexpanded(
     bitrate: str = "28M"
 ) -> None:
     """
-    Mã hóa phân đoạn 4K qua FFmpeg Concat Demuxer + VideoToolbox HEVC 10-bit:
+    Mã hóa phân đoạn 4K qua FFmpeg Concat Demuxer + NVENC HEVC 10-bit:
     - Chốt cờ CFR: -video_track_timescale fps_num -frames:v expected_frames
     - Chuỗi ma trận màu sắc BT.709 Full RGB ➔ Limited YUV p010le
     - Giao dịch an toàn: ghi ra .tmp.mp4, xác minh đủ số frame rồi mới rename

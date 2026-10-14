@@ -2,7 +2,7 @@
 """
 src/preflight.py
 Hệ thống kiểm tra an toàn trước khi chạy (Pre-flight Health Checks) và quản lý năng lượng:
-1. Cơ chế chống ngủ máy tự động (caffeinate -dims)
+1. Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState)
 2. Kiểm tra nguồn điện sạc (AC Power vs Battery)
 3. Kiểm tra dung lượng ổ đĩa trống an toàn (Free Disk Space)
 4. Gửi thông báo hệ thống và âm báo khi hoàn thành
@@ -18,36 +18,22 @@ from typing import Dict, Any, Optional
 from src.logger import format_bytes
 
 
-class CaffeinateContext:
+class AntiSleepContext:
     """
-    Context manager tự động ngăn máy tính sleep khi đang chạy tác vụ nặng:
-    - macOS: caffeinate -dims -w <pid>
-    - Windows: ctypes.windll.kernel32.SetThreadExecutionState
+    Context manager tự động ngăn Windows sleep khi đang chạy tác vụ nặng:
+    Sử dụng Windows API native ctypes.windll.kernel32.SetThreadExecutionState.
     Tự động thoát và phục hồi trạng thái khi tiến trình hoàn tất hoặc bị ngắt (Ctrl+C).
     """
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
-        self.process: Optional[subprocess.Popen] = None
         self._win_prev = None
 
     def __enter__(self):
         if not self.enabled:
             return self
 
-        if sys.platform == "darwin":
-            try:
-                # -d: chống display sleep, -i: chống idle sleep, -m: chống disk sleep, -s: chống system sleep
-                # -w <pid>: tự động hủy khi PID của Python kết thúc
-                self.process = subprocess.Popen(
-                    ["caffeinate", "-dims", "-w", str(os.getpid())],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                atexit.register(self.cleanup)
-            except Exception:
-                self.process = None
-        elif sys.platform == "win32":
+        if sys.platform == "win32":
             try:
                 import ctypes
                 ES_CONTINUOUS = 0x80000000
@@ -66,18 +52,7 @@ class CaffeinateContext:
         self.cleanup()
 
     def cleanup(self):
-        """Dừng tiến trình caffeinate hoặc khôi phục trạng thái power trên Windows an toàn"""
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2)
-            except Exception:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
-            self.process = None
-
+        """Khôi phục trạng thái power trên Windows an toàn"""
         if sys.platform == "win32":
             try:
                 import ctypes
@@ -87,32 +62,17 @@ class CaffeinateContext:
                 pass
 
 
-def check_power_source() -> Dict[str, Any]:
-    """Kiểm tra nguồn điện máy tính (đang cắm sạc AC hay dùng Pin)"""
-    if sys.platform == "darwin":
-        try:
-            res = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, check=True)
-            output = res.stdout
-            is_ac = "AC Power" in output
-            percent = None
-            for token in output.split():
-                if "%" in token:
-                    percent = token.replace(";", "").replace("%", "")
-                    break
-            return {
-                "is_ac": is_ac,
-                "percent": percent,
-                "raw": output.strip().splitlines()[0] if output else ""
-            }
-        except Exception:
-            return {"is_ac": True, "details": "Unknown"}
+# Alias tương thích ngược
+CaffeinateContext = AntiSleepContext
 
-    # Trên Windows / Linux: kiểm tra qua psutil.sensors_battery
+
+def check_power_source() -> Dict[str, Any]:
+    """Kiểm tra nguồn điện máy tính qua psutil.sensors_battery"""
     try:
         import psutil
         batt = psutil.sensors_battery()
         if batt is None:
-            # Máy tính để bàn (như PC Intel i5-12600K) không có pin -> Luôn là AC Power
+            # Máy tính để bàn Workstation (Intel Core i5-12600K) -> Luôn là AC Power
             return {"is_ac": True, "percent": None, "raw": "AC Desktop Power"}
         return {
             "is_ac": bool(batt.power_plugged),
@@ -149,27 +109,16 @@ def check_disk_space(output_dir: str, duration_seconds: float, bitrate_str: str 
     }
 
 
-def send_macos_notification(title: str, message: str, sound: str = "Glass"):
-    """Gửi thông báo hệ thống khi hoàn thành (macOS / Windows)"""
-    if sys.platform == "darwin":
-        script = f'display notification "{message}" with title "{title}" sound name "{sound}"'
-        try:
-            subprocess.run(
-                ["osascript", "-e", script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5
-            )
-        except Exception:
-            pass
-    elif sys.platform == "win32":
+def send_system_notification(title: str, message: str, sound: str = "Glass"):
+    """Gửi âm báo hệ thống Windows khi hoàn thành"""
+    if sys.platform == "win32":
         try:
             import winsound
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
         except Exception:
             pass
 
-send_system_notification = send_macos_notification
+send_macos_notification = send_system_notification
 
 
 

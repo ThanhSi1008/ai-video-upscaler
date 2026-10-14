@@ -1,5 +1,5 @@
 # AI Video Upscaler 4K & TriSub AI Dependencies
-# Core upscaler uses FFmpeg (NVENC on Windows / VideoToolbox on macOS) and PyTorch (CUDA / MPS)
+# Core upscaler uses FFmpeg (NVENC on Windows) and PyTorch (CUDA)
 torch>=2.0.0
 torchvision>=0.15.0
 pillow>=9.5.0

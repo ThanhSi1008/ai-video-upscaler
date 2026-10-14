@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 src/mps_engine.py
-Động cơ suy luận PyTorch FP16 trên GPU (NVIDIA CUDA / Apple Silicon MPS):
+Động cơ suy luận PyTorch FP16 trên GPU (NVIDIA CUDA / Tensor Cores):
 - Worker bền (persistent): Nạp model một lần, tái sử dụng qua các chunk, tự động khởi động lại mỗi N chunk (A2).
 - Hỗ trợ đa mô hình (D3): animevideov3 (x4 + bicubic 0.5) và animejanai-hd-v3-compact (x2 native).
 - Giám sát độ an toàn: Phát hiện NaN/Inf, lỗi GPU/OOM để tự động kích hoạt fallback cùng model (A1, D6).
@@ -86,8 +86,8 @@ class MPSError(Exception):
 
 class MPSPersistentWorker:
     """
-    Worker PyTorch GPU bền: nạp mô hình vào VRAM / Unified Memory một lần duy nhất,
-    hỗ trợ CUDA (NVIDIA Tensor Cores), MPS (Apple Silicon) và CPU;
+    Worker PyTorch GPU bền: nạp mô hình vào VRAM một lần duy nhất,
+    hỗ trợ CUDA (NVIDIA Tensor Cores) và CPU fallback;
     tự động khởi động lại sau mỗi max_chunks để giải phóng bộ nhớ.
     """
     def __init__(
@@ -106,13 +106,11 @@ class MPSPersistentWorker:
         self.chunks_processed = 0
         self.total_restarts = 0
         
-        # Nhận diện device ưu tiên: Tham số truyền vào > CUDA > MPS > CPU
-        if device:
+        # Nhận diện device: Ưu tiên CUDA trên NVIDIA RTX, fallback CPU
+        if device and device != "mps":
             self.device = torch.device(device)
         elif torch.cuda.is_available():
             self.device = torch.device("cuda")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            self.device = torch.device("mps")
         else:
             self.device = torch.device("cpu")
 
@@ -172,8 +170,6 @@ class MPSPersistentWorker:
             _ = model(dummy)
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
-            elif self.device.type == "mps":
-                torch.mps.synchronize()
 
         self.model = model
         self.last_load_time = time.time() - t0
@@ -186,8 +182,6 @@ class MPSPersistentWorker:
             self.model = None
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
-            elif self.device.type == "mps":
-                torch.mps.empty_cache()
             self._load_model()
             restart_elapsed = time.time() - t0
             self.chunks_processed = 0
@@ -269,13 +263,11 @@ class MPSPersistentWorker:
                 if self.precision == "fp16":
                     tensor = tensor.half()
 
-                # 2. Suy luận GPU (CUDA / MPS / CPU)
+                # 2. Suy luận GPU (CUDA / CPU)
                 with torch.inference_mode():
                     out_tensor = self.model(tensor)
                     if self.device.type == "cuda":
                         torch.cuda.synchronize(self.device)
-                    elif self.device.type == "mps":
-                        torch.mps.synchronize()
 
                 if b_start == 0:
                     steady_start = time.time()
@@ -293,14 +285,6 @@ class MPSPersistentWorker:
                     d_alloc = torch.cuda.max_memory_allocated(self.device) / (1024 * 1024)
                     if d_alloc > driver_alloc_peak:
                         driver_alloc_peak = d_alloc
-                elif self.device.type == "mps":
-                    c_alloc = torch.mps.current_allocated_memory() / (1024 * 1024)
-                    if c_alloc > curr_alloc_peak:
-                        curr_alloc_peak = c_alloc
-                    if hasattr(torch.mps, "driver_allocated_memory"):
-                        d_alloc = torch.mps.driver_allocated_memory() / (1024 * 1024)
-                        if d_alloc > driver_alloc_peak:
-                            driver_alloc_peak = d_alloc
 
                 # 5. Xuất ảnh 4K (async writer)
                 out_batch_np = (out_tensor.clamp(0, 1).float().cpu().numpy().transpose((0, 2, 3, 1)) * 255.0).round().astype(np.uint8)
@@ -452,7 +436,7 @@ def upscale_frames_with_fallback(
         else:
             print(warn_msg)
 
-        # Fallback 1: Nếu lỗi FP16 trên GPU (CUDA/MPS), thử fallback sang FP32 của chính device đó
+        # Fallback 1: Nếu lỗi FP16 trên GPU (CUDA), thử fallback sang FP32 của chính device đó
         if precision == "fp16":
             fallback_msg = f"🔄 Chuyển sang {engine.upper()} FP32 cho model {model_id}..."
             if logger:
@@ -463,7 +447,7 @@ def upscale_frames_with_fallback(
                 model_id=model_id,
                 weights_path=weights_path,
                 precision="fp32",
-                device=engine if engine in ["cuda", "mps", "cpu"] else None,
+                device=engine if engine in ["cuda", "cpu"] else None,
                 batch_size=batch_size
             )
             res = worker_fp32.upscale_directory(

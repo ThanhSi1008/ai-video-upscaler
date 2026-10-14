@@ -4,7 +4,7 @@ src/logger.py
 Quản lý hiển thị terminal và ghi file log có cấu trúc:
 - Tự động tạo file log chuyên dụng theo tên video và timestamp: logs/<name>_<timestamp>.log
 - Tự động duy trì symlink logs/latest.log trỏ tới lần chạy mới nhất
-- Lưu chi tiết viễn trắc từng chunk (thời gian trích xuất, FPS AI, VideoToolbox encode)
+- Lưu chi tiết viễn trắc từng chunk (thời gian trích xuất, FPS AI, NVENC encode)
 - Thu thập và lưu bảng tổng kết Benchmark thực tế
 """
 
@@ -59,14 +59,10 @@ def get_swap_usage() -> str:
         return f"RAM: {v.percent}% used ({v.used // (1024*1024)}MB/{v.total // (1024*1024)}MB) | Pagefile: {s.percent}% used ({s.used // (1024*1024)}MB/{s.total // (1024*1024)}MB)"
     except Exception:
         pass
-    try:
-        res = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True, text=True, check=True)
-        return res.stdout.strip()
-    except Exception:
-        return "Memory/Swap: N/A"
+    return "Memory/Swap: N/A"
 
 def get_thermal_state() -> str:
-    """Lấy trạng thái nhiệt và throttle từ phần cứng"""
+    """Lấy trạng thái nhiệt và throttle từ phần cứng NVIDIA GPU"""
     try:
         res = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
@@ -77,12 +73,7 @@ def get_thermal_state() -> str:
             return f"GPU {temp}°C (Nominal)"
     except Exception:
         pass
-    try:
-        res = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, check=True)
-        lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip() and not line.startswith("Note:")]
-        return " | ".join(lines) if lines else "Nominal"
-    except Exception:
-        return "Nominal"
+    return "Nominal"
 
 
 class RunLogger:

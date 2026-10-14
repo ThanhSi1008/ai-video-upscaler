@@ -25,7 +25,7 @@
   * Thuật toán 3-pass snapping trong `subtrans/parser.py`: Direct Containment (câu JA nằm trọn trong câu EN), Max Overlap >= 60%, và Nearest Neighbor (cửa sổ tìm kiếm ±300ms).
 * **Tối ưu hóa hiển thị phụ đề đa thoại & chống trôi chữ (Dual Dialogue & Playback Optimization):**
   * Tự động phát hiện 2 người nói cùng lúc / gần cùng lúc (start chênh <= 800ms, overlap >= 400ms) để gộp thành phụ đề song song 2 dòng (`- Lời 1\n- Lời 2`) kéo dài tối thiểu 2.2s.
-  * Tự động gộp các mảnh câu liên tiếp nói quá nhanh (< 1.2s/mảnh) thành một câu liền mạch; bảo đảm thời lượng đọc tối thiểu (>= 1.2s - 1.4s) và khoảng nghỉ 40ms chống giật flicker trên IINA, mpv, VLC và Apple TV.
+  * Tự động gộp các mảnh câu liên tiếp nói quá nhanh (< 1.2s/mảnh) thành một câu liền mạch; bảo đảm thời lượng đọc tối thiểu (>= 1.2s - 1.4s) và khoảng nghỉ 40ms chống giật flicker trên các trình phát video (mpv, VLC, v.v.).
 * **Bóc tách phụ đề đa người nói Closed Captions (Multi-Speaker CC Splitting):**
   * Bóc tách các event CC dạng gộp `-（Người 1）Thoại 1\N-（Người 2）Thoại 2` thành các event độc lập có cùng timeline qua `split_multi_speaker_cc_events` trong `subtrans/parser.py`.
   * Bóc tiền tố gạch ngang đầu dòng `^[-–—]\s*` qua `strip_speaker_prefix`. Mỗi câu được dịch riêng lẻ và tự động hợp nhất thành phụ đề song song 2 dòng qua bộ Dual Dialogue tại `subtrans/writer.py`.

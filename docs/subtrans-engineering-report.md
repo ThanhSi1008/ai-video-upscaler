@@ -1,7 +1,7 @@
 # BÁO CÁO KỸ THUẬT TOÀN DIỆN: PHÂN HỆ DỊCH THUẬT PHỤ ĐỀ ANIME TIẾNG VIỆT (`subtrans`)
 **Dự án:** AI Video Upscaler & Subtitle Translation Engine (`ai-video-upscaler`)  
-**Thiết bị vận hành:** Apple Silicon MacBook Pro M3 Pro (11-core CPU, 14-core GPU, 18GB Unified Memory)  
-**Môi trường:** 100% CỤC BỘ trên macOS (Python 3.12, PyTorch Metal MPS, FFmpeg, Google GenAI SDK, SQLite)  
+**Thiết bị vận hành:** Windows Workstation (Intel Core i5-12600K, NVIDIA RTX 3060 12GB, 32GB RAM)  
+**Môi trường:** 100% CỤC BỘ trên Windows 11 (Python 3.11, PyTorch CUDA, FFmpeg, Google GenAI SDK, SQLite)  
 **Mục tiêu tài liệu:** Cung cấp đầy đủ bối cảnh hệ thống, kiến trúc thực thi, toàn bộ các bài toán kỹ thuật đã giải quyết, các lỗi thực nghiệm đã gặp và phương án khắc phục, cùng các vấn đề mở để AI Nghiên cứu mới đề xuất lộ trình tối ưu hóa chuyên sâu.
 
 ---
@@ -9,7 +9,7 @@
 ## 1. Bối Cảnh Hệ Thống & Triết Lý Thiết Kế Cốt Lõi
 
 ### 1.1. Mục Tiêu của Phân Hệ `subtrans`
-Phân hệ `subtrans` có nhiệm vụ tự động hóa toàn bộ quy trình dịch phụ đề anime từ tiếng Nhật (JA) sang tiếng Việt (VI) với độ chuẩn xác cao, văn phong tự nhiên khi đọc to, đồng nhất tuyệt đối về đại từ xưng hô vai vế, và bảo toàn tương thích định dạng hiển thị với các trình phát video hiện đại (IINA, mpv, VLC, Apple TV).
+Phân hệ `subtrans` có nhiệm vụ tự động hóa toàn bộ quy trình dịch phụ đề anime từ tiếng Nhật (JA) sang tiếng Việt (VI) với độ chuẩn xác cao, văn phong tự nhiên khi đọc to, đồng nhất tuyệt đối về đại từ xưng hô vai vế, và bảo toàn tương thích định dạng hiển thị với các trình phát video hiện đại (mpv, VLC, v.v.).
 
 ### 1.2. Triết Lý 2 Nguồn Đầu Vào (Dual-track Input Paradigm)
 Dịch phụ đề anime có một đặc thù ngôn ngữ cực kỳ phức tạp: **Hiện tượng lược bỏ đại từ và chủ ngữ trong tiếng Nhật (Zero-Pronouns)**.
@@ -18,8 +18,8 @@ Dịch phụ đề anime có một đặc thù ngôn ngữ cực kỳ phức t�
 * **Quy tắc phối hợp:** Hệ thống lấy câu tiếng Nhật làm gốc để dịch, nhưng truyền song song câu tiếng Anh tương ứng để LLM xác định chính xác "ai đang nói với ai", triệt tiêu lỗi suy diễn sai đại từ do tiếng Nhật lược bỏ.
 
 ### 1.3. Hạ Tầng & Ràng Buộc Kỹ Thuật
-1. **Thiết bị:** Chạy trên macOS M3 Pro 18GB RAM. Không dùng Cloud GPU, không dùng Colab.
-2. **Tiến trình độc quyền tài nguyên:** Khi tiến trình Video Upscale đang chiếm dụng GPU Metal (`/tmp/upscale_gpu.lock`), phân hệ dịch phụ đề ưu tiên gọi Gemini API đám mây (qua mạng) hoặc tạm dừng Ollama Local để tránh tràn VRAM.
+1. **Thiết bị:** Chạy trên Windows 11 Workstation (Core i5-12600K, RTX 3060 12GB, 32GB RAM).
+2. **Tiến trình độc quyền tài nguyên:** Khi tiến trình Video Upscale đang chiếm dụng GPU CUDA, phân hệ dịch phụ đề ưu tiên gọi Gemini API đám mây (qua mạng) để tối ưu tài nguyên và tránh xung đột VRAM.
 3. **Bảo toàn Quota API ban ngày:** Sử dụng cơ chế xoay vòng nhiều API Key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`,...) để mở rộng hạn ngạch, kèm bộ nhớ đệm SQLite SHA-256 (`translations.db`) để không bao giờ dịch lại một câu đã có trong kho.
 
 ---

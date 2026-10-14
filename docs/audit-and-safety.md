@@ -12,7 +12,7 @@
 | [`src/output_sanity.py`](../src/output_sanity.py) | Output Sanity Guard: Chốt chặn kiểm định độ sáng $|\Delta Y| \le 6/255$ và tương quan $\ge 0.98$, chống video đen/mờ |
 | [`src/mux_audit.py`](../src/mux_audit.py) | Stream Copy Integrity Audit: Đối soát bit-exact audio, sub, font đính kèm và tổng số khung hình video |
 | [`src/cleanup.py`](../src/cleanup.py) | Auto Cleanup: Dọn sạch `.temp_<basename>` (thu hồi ~6.6GB/tập) và gom file báo cáo vào thư mục con `audit/` |
-| [`src/preflight.py`](../src/preflight.py) | Preflight Checks: Kiểm tra nguồn sạc AC, dung lượng đĩa trống, Caffeinate chống sleep máy, thông báo macOS |
+| [`src/preflight.py`](../src/preflight.py) | Preflight Checks: Kiểm tra nguồn sạc AC, dung lượng đĩa trống, Win32 SetThreadExecutionState chống sleep máy, âm báo Windows |
 | [`src/night_report.py`](../src/night_report.py) | Night Telemetry Reporter: Tổng hợp số đo ca đêm, phân tích GPU active, tỷ lệ dedup và xuất báo cáo Markdown |
 
 ---
@@ -79,18 +79,18 @@ Trong [`src/pipeline.py`](../src/pipeline.py):
 * **Sàn An Toàn Kích Thước PNG:** `DEFAULT_PNG_UNIT_SIZE_MB = 16.0 MB` (đo đạc thực tế frame 4K phức tạp đạt tối đa 13.77 MB).
 * **Công thức Ước Tính Dung Lượng Cần Thiết:**
   $$\text{need} = n_{unique} \times \max(\text{recent}, \; P_{95}, \; 16.0) \times 1.2$$
-* **Kiểm Tra Giữa Chunk:** Trước khi trích xuất khung hình mới lên RAM Disk ảo, hệ thống kiểm tra dung lượng còn trống. Nếu không đủ:
-  - Tạm dừng và đợi chunk trước đó hoàn tất encode HEVC để dọn dẹp frame giải phóng RAM Disk.
+* **Kiểm Tra Giữa Chunk:** Trước khi trích xuất khung hình mới lên bộ đệm, hệ thống kiểm tra dung lượng còn trống. Nếu không đủ:
+  - Tạm dừng và đợi chunk trước đó hoàn tất encode HEVC để dọn dẹp frame giải phóng dung lượng đệm.
   - Cơ chế retry tối đa **2 lần**; nếu vẫn thiếu tài nguyên, đánh dấu `failed-resumable` và chuyển sang tập tiếp theo, sau đó tự thử lại ở cuối hàng đợi.
   - Thoát mã non-zero và in rõ bảng báo cáo chưa hoàn tất.
 
 ---
 
-## 6. Vòng Đời Tiến Trình & Khóa GPU Độc Quyền
+## 6. Vòng Đời Tiến Trình & Quản Trị Tài Nguyên
 
-1. **Khóa Độc Quyền GPU Metal (`/tmp/upscale_gpu.lock`):**
-   - Chỉ duy nhất 1 tiến trình infer GPU Metal được phép hoạt động tại một thời điểm.
-   - Giải phóng khóa GPU sau khi hoàn tất bước AI SR của video, cho phép phân hệ dịch phụ đề (subtrans) có thể sử dụng tài nguyên mà không gây xung đột.
-2. **Chống Sleep Máy Tuyệt Đối (`CaffeinateContext`):**
-   - [`src/preflight.py`](../src/preflight.py) khởi chạy `caffeinate -dimsu` trong Context Manager (trên Windows sử dụng `SetThreadExecutionState`).
-   - Luôn nằm trong khối `try...finally` để thu hồi sạch sẽ tiến trình con khi bị ngắt bởi `SIGINT` (`Ctrl+C`).
+1. **Độc Quyền GPU NVIDIA:**
+   - Chỉ duy nhất 1 tiến trình infer GPU NVIDIA được phép hoạt động tại một thời điểm.
+   - Giải phóng bộ nhớ VRAM sau khi hoàn tất bước AI SR của video, cho phép phân hệ dịch phụ đề (subtrans) có thể sử dụng tài nguyên mà không gây xung đột.
+2. **Chống Sleep Máy Tuyệt Đối (`AntiSleepContext`):**
+   - [`src/preflight.py`](../src/preflight.py) gọi Win32 API native `SetThreadExecutionState` trong Context Manager.
+   - Tự động hoàn trả trạng thái ban đầu của hệ thống kể cả khi tiến trình bị ngắt bởi `SIGINT` (`Ctrl+C`).

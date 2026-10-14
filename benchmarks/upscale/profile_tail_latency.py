@@ -64,7 +64,7 @@ def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
     upsampler = model.upsampler
 
     # Warm-up 5 iterations
-    print("🔥 Đang warm-up GPU Metal (5 frames)...")
+    print(f"🔥 Đang warm-up GPU {device} (5 frames)...")
     for _ in range(5):
         with torch.inference_mode():
             feat = input_tensor
@@ -74,8 +74,8 @@ def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
             base = F.interpolate(input_tensor, scale_factor=4.0, mode='nearest')
             out_4x = out + base
             out_2x = F.interpolate(out_4x, scale_factor=0.5, mode='bicubic', align_corners=False)
-            if device.type == "mps":
-                torch.mps.synchronize()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
 
     t_body_times = []
     t_tail_times = []
@@ -85,8 +85,8 @@ def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
     with torch.inference_mode():
         for i in range(num_iters):
             # Đo Part 1: Thân mô hình 1080p -> 8K
-            if device.type == "mps":
-                torch.mps.synchronize()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             t0 = time.perf_counter()
 
             feat = input_tensor
@@ -96,15 +96,15 @@ def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
             base = F.interpolate(input_tensor, scale_factor=4.0, mode='nearest')
             out_4x = out + base
 
-            if device.type == "mps":
-                torch.mps.synchronize()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             t1 = time.perf_counter()
 
             # Đo Part 2: Đuôi hạ mẫu 8K -> 4K Bicubic 0.5x
             out_2x = F.interpolate(out_4x, scale_factor=0.5, mode='bicubic', align_corners=False)
 
-            if device.type == "mps":
-                torch.mps.synchronize()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             t2 = time.perf_counter()
 
             dt_body = (t1 - t0) * 1000.0  # ms

@@ -69,7 +69,7 @@ Nếu $\text{Score} \ge \tau$ (mặc định 0.30 px 1080p) hoặc $\text{Area}_
 ### B. Cổng Sàng Lọc Candidate Drop Gating
 * DIS **chỉ tính toán** trên các khung hình mà `mpdecimate` muốn bỏ (`drop`).
 * Các khung hình `mpdecimate` đã giữ (`keep`) được chấp nhận ngay lập tức, bỏ qua tính toán dòng chảy.
-* Nhờ đó, tốc độ đo đạc đạt **$\approx 430$ fps trên CPU Apple Silicon M3 Pro**, chỉ thêm ~1.5–2 phút CPU cho toàn bộ tập anime 24 phút.
+* Nhờ đó, tốc độ đo đạc đạt **$\approx 550$ fps trên CPU Intel Core i5-12600K (AVX2)**, chỉ thêm ~1 phút CPU cho toàn bộ tập anime 24 phút.
 
 ---
 
@@ -78,12 +78,12 @@ Nếu $\text{Score} \ge \tau$ (mặc định 0.30 px 1080p) hoặc $\text{Area}_
 * Sau khi GPU upscale các khung hình độc lập, hệ thống không dùng hardlinks trên ổ cứng (tiết kiệm 100% dung lượng SSD).
 * Thay vào đó, FFmpeg Concat Demuxer sử dụng danh sách `runs` từ `plan.json`:
   ```text
-  file '/Volumes/RAMDisk/frame_0001.png'
+  file 'chunk_out/frame_0001.png'
   duration 0.0834167
-  file '/Volumes/RAMDisk/frame_0003.png'
+  file 'chunk_out/frame_0003.png'
   duration 0.0417083
   ```
-* Kết hợp với bộ lọc `-vf fps=24000/1001` khi nạp vào Apple Media Engine, video 4K được tái tạo chính xác từng millisecond và khớp hoàn toàn số khung hình của video nguồn.
+* Kết hợp với bộ lọc `-vf fps=24000/1001` khi nạp vào NVIDIA NVENC, video 4K được tái tạo chính xác từng millisecond và khớp hoàn toàn số khung hình của video nguồn.
 
 ---
 

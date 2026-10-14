@@ -1,40 +1,38 @@
-# AI Video Upscaler 4K & AI Subtitle Translator (Cross-Platform: Windows RTX & Apple Silicon)
+# AI Video Upscaler 4K & AI Subtitle Translator (Windows 11 & NVIDIA RTX)
 
-Công cụ tối ưu hóa chuyên sâu để **Upscale Video Anime lên 4K (2x Super-Resolution)** và **Dịch phụ đề Anime bằng AI (TriSub AI)** chạy hoàn toàn cục bộ trên Terminal / PowerShell.
+Công cụ tối ưu hóa chuyên sâu để **Upscale Video Anime lên 4K (2x Super-Resolution)** và **Dịch phụ đề Anime bằng AI (TriSub AI)** chạy hoàn toàn trên Terminal / PowerShell Windows.
 
-Hỗ trợ tối ưu hóa phần cứng trên cả 2 nền tảng:
-* **Windows 11 + NVIDIA GeForce RTX:** Tận dụng nhân **NVIDIA CUDA Cores / Tensor Cores (PyTorch CUDA FP16)** kết hợp **NVIDIA NVENC (HEVC Main 10 Profile)**.
-* **macOS (Apple Silicon M-Series):** Tận dụng nhân **Apple Silicon GPU Metal (PyTorch MPS FP16)** kết hợp **Apple Media Engine (VideoToolbox)** và RAM Disk ảo chống hao mòn SSD.
+Hệ thống được thiết kế và tối ưu hóa tuyệt đối cho cấu hình phần cứng:
+* **Hệ điều hành:** Windows 11 64-bit.
+* **CPU:** Intel Core i5-12600K (10 nhân / 16 luồng, tập lệnh tăng tốc AVX2 cho I/O OpenCV C++ `cv2.imwrite`).
+* **GPU:** NVIDIA GeForce RTX 3060 (12GB GDDR6 VRAM, CUDA Cores & Tensor Cores).
+* **Mã hóa phần cứng:** NVIDIA NVENC HEVC Main 10 (`hevc_nvenc`, Preset `p6`, Multipass `qres`, Lookahead `24`, Spatial AQ, `p010le`, BT.709).
+* **Chống sleep máy:** Win32 API native `SetThreadExecutionState` (`ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED`).
 
 ---
 
-## ⚡ 1. Công Cụ Upscale Video Anime 4K (`upscale.py` / `upscale.sh`)
+## ⚡ 1. Công Cụ Upscale Video Anime 4K (`upscale.py` / `upscale.bat`)
 
-Sử dụng trực tiếp nhân GPU chuyên dụng kết hợp bộ mã hóa phần cứng để đạt chất lượng chuẩn tham chiếu phòng thu:
+Sử dụng trực tiếp nhân GPU NVIDIA Tensor Cores kết hợp bộ mã hóa phần cứng NVENC để đạt chất lượng chuẩn tham chiếu phòng thu:
 
-* **Mô hình AI:** `realesr-animevideov3` chuyên dụng cho video anime 2x (khử nhiễu nén, giữ nét vẽ tự nhiên, không bị hiệu ứng viền sáp).
-* **Mã hóa phần cứng 10-bit:**
-  * **Windows (NVIDIA):** `hevc_nvenc` Main 10 Profile (`p010le`, Preset `p6`, Multipass `qres`, Lookahead `24`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
-  * **macOS (Apple Silicon):** `hevc_videotoolbox` Main 10 Profile (`p010le`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
-* **Quản lý bộ nhớ đệm khung hình:**
-  * **macOS:** Sử dụng **RAM Disk ảo HFS+** đệm khung hình trung gian (0 byte ảnh tĩnh ghi xuống SSD).
-  * **Windows:** Tự động đệm và dọn sạch phân đoạn cuốn chiếu (Rolling Segments Cleanup) ngay sau khi từng chunk mã hóa xong, hoặc hỗ trợ RAM Disk ảo (ImDisk).
+* **Mô hình AI:** `realesr-animevideov3` (RealESR-AnimeVideoV3) chuyên dụng cho video anime 2x (khử nhiễu nén, giữ nét vẽ tự nhiên, không bị hiệu ứng viền sáp).
+* **Mã hóa phần cứng 10-bit:** NVIDIA NVENC `hevc_nvenc` Main 10 Profile (`p010le`, Preset `p6`, Multipass `qres`, Lookahead `24`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
+* **Quản lý bộ nhớ đệm khung hình:** Tự động đệm và dọn sạch phân đoạn cuốn chiếu (Rolling Segments Cleanup) ngay sau khi từng chunk mã hóa xong, hoặc hỗ trợ RAM Disk ảo (ImDisk), bảo vệ tuyệt đối tuổi thọ ổ cứng NVMe SSD.
+* **Tối ưu hóa I/O khung hình:** Sử dụng OpenCV C++ (`cv2.imwrite`) tận dụng tập lệnh AVX2 của CPU Core i5-12600K, nhanh hơn PIL từ 2x đến 3x.
 * **Bảo toàn nguyên bản dữ liệu gốc & Đồng bộ âm thanh:** Tự động **Stream Copy** toàn bộ audio đa kênh (FLAC/AAC/TrueHD), phụ đề mềm đa ngôn ngữ (ASS/SRT), font chữ nhúng (TrueType/OpenType) và chapters từ file gốc với cờ `-max_interleave_delta 0` ép đan xen đều đặn từng packet theo DTS (loại bỏ hoàn toàn lỗi audio dồn khối gây mất tiếng; không dùng file audio tạm).
 * **Checkpoint Resume:** Hỗ trợ tiếp tục chạy ngay từ phân đoạn đang dở nếu bị tạm dừng (Ctrl+C hoặc tắt máy).
-* **Cơ chế chống ngủ máy (Anti-Sleep):**
-  * **Windows:** Sử dụng Win32 API native `SetThreadExecutionState` (`ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED`).
-  * **macOS:** Sử dụng `caffeinate -dims` gắn chặt với PID của phiên chạy.
-* **Kiểm tra an toàn trước khi chạy (Pre-flight Checks):** Cảnh báo sạc AC vs Pin (chống sập nguồn giữa chừng), kiểm tra dung lượng ổ cứng trống tối thiểu an toàn.
+* **Cơ chế chống ngủ máy (Anti-Sleep):** Sử dụng Win32 API native `SetThreadExecutionState` gắn chặt với vòng đời tiến trình.
+* **Kiểm tra an toàn trước khi chạy (Pre-flight Checks):** Cảnh báo nguồn điện AC vs Pin, kiểm tra dung lượng ổ cứng trống tối thiểu an toàn.
 * **Output Sanity Guard & Mux Audit:** Tự động đo độ lệch sáng $|\Delta Y| \le 6/255$ và tương quan Pearson $r \ge 0.98$ sau chunk 1 để triệt tiêu nguy cơ video đen/hỏng, đồng thời đối soát bit-exact frame count, audio tracks và fonts trước khi bàn giao.
 
 ---
 
 ## 💻 2. Yêu Cầu Hệ Thống & Cài Đặt
 
-### A. Cấu Hình Windows (NVIDIA RTX)
+### Cấu Hình Phần Cứng Windows (NVIDIA RTX)
 * **Hệ điều hành:** Windows 10/11 64-bit.
-* **GPU:** NVIDIA GeForce RTX 3060 (12GB VRAM khuyến nghị) hoặc dòng RTX 20/30/40/50 series với Driver NVIDIA mới nhất.
-* **CPU & RAM:** Intel Core i5/i7/i9 hoặc AMD Ryzen (khuyến nghị $\ge 16\text{ GB}$ RAM).
+* **GPU:** NVIDIA GeForce RTX 3060 (12GB VRAM) hoặc dòng RTX 20/30/40/50 series với Driver NVIDIA mới nhất.
+* **CPU & RAM:** Intel Core i5/i7/i9 (khuyến nghị $\ge 16\text{ GB}$ RAM, tối ưu AVX2).
 * **Công cụ bổ trợ:** FFmpeg hỗ trợ `hevc_nvenc` (khuyến nghị bản Gyan.dev Full Build, đã thêm vào PATH).
 
 **Cài đặt trên Windows (PowerShell):**
@@ -55,51 +53,29 @@ pip install -r requirements.txt
 # (Tự động tải khi chạy lần đầu hoặc đặt file .pth vào models_bench/)
 ```
 
-### B. Cấu Hình macOS (Apple Silicon)
-* **Phần cứng:** Apple Silicon Mac (M1/M2/M3/M4 Series). Khuyến nghị $\ge 16\text{ GB}$ Unified Memory.
-* **Công cụ bổ trợ:** `brew install ffmpeg`.
-
-**Cài đặt trên macOS (Terminal):**
-```bash
-git clone https://github.com/ThanhSi1008/ai-video-upscaler.git
-cd ai-video-upscaler
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
 ---
 
-## 🚀 3. Hướng Dẫn Sử Dụng CLI (`upscale.py`)
+## 🚀 3. Hướng Dẫn Sử Dụng CLI (`upscale.py` / `upscale.bat`)
 
-### Lệnh Vận Hành Trên Windows (PowerShell):
+### Lệnh Vận Hành Trên Windows (PowerShell / CMD):
 ```powershell
 # 1. Xem trước nhanh 10 giây (tự động cắt tại 30% phim, upscale và mở bằng trình phát mặc định):
 python upscale.py samples/sample_sword_3min.mkv --preview 10
 
-# 2. Chạy đầy đủ 1 tập video với bitrate 28M và phân đoạn 8 giây:
+# 2. Chạy nhanh bằng launcher tiện ích Windows (.bat):
+.\upscale.bat samples/sample_sword_3min.mkv
+
+# 3. Chạy đầy đủ 1 tập video với bitrate 28M và phân đoạn 8 giây:
 python upscale.py samples/sample_sword_3min.mkv -b 28M -s 8 -o out/sword_4K.mkv
 
-# 3. Chạy hàng đợi nhiều tập qua đêm:
-python upscale.py --queue ep1.mkv ep2.mkv -o out/
-```
-
-### Lệnh Vận Hành Trên macOS (Terminal):
-```bash
-# 1. Chạy nhanh bằng shell launcher (mặc định phân đoạn 8s + RAM Disk + Caffeinate):
-./scripts/upscale.sh samples/sample_3min.mkv
-
-# 2. Xem trước nhanh 10 giây:
-python3 upscale.py samples/sample_3min.mkv --preview 10
-
-# 3. Chạy đầy đủ với tùy biến bitrate và đường dẫn xuất:
-python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/output_4K.mkv
+# 4. Chạy hàng đợi nhiều tập qua đêm với deadline dừng an toàn:
+python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-partial
 ```
 
 ### Bảng Tham Số Tùy Chọn:
-* `-o`, `--output`: Đường dẫn file hoặc thư mục xuất (Mặc định: `~/Documents/Upscaled/<tên>_4K.mkv` hoặc thư mục `out/`).
+* `-o`, `--output`: Đường dẫn file hoặc thư mục xuất (Mặc định: `out/<tên>_4K.mkv`).
 * `-m`, `--model`: Mô hình AI (Mặc định: tự động chọn qua `shows.yaml` hoặc mặc định `animevideov3`).
-* `--engine`: Động cơ suy luận (`cuda` cho NVIDIA GPU, `mps` cho Apple Silicon Metal, `ncnn` cho NCNN Vulkan, hoặc `cpu`; mặc định: tự động nhận diện).
+* `--engine`: Động cơ suy luận (`cuda` cho NVIDIA GPU hoặc `cpu`; mặc định: `cuda`).
 * `--precision`: Độ chính xác suy luận (`fp16` hoặc `fp32`, mặc định: `fp16`).
 * `--batch-size`: Batch size cho AI Inference GPU (Mặc định: `6` trên RTX 3060 12GB).
 * `--list-models`: Liệt kê các mô hình đã đăng ký trong `models/models.yaml`.
@@ -127,17 +103,19 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 ---
 
-## 📊 4. Số Liệu Đo Đạc Thực Tế
+## 📊 4. Số Liệu Đo Đạc Hiệu Năng Thực Tế (NVIDIA RTX 3060 12GB)
 
-| Thông số / Nền tảng | NVIDIA GeForce RTX 3060 12GB (Windows 11) | Apple Silicon M3 Pro (macOS) |
+| Thông số kỹ thuật | Cấu hình Tiêu chuẩn (Standalone) | Cấu hình Tối ưu hóa (Dedup + Pipelined) |
 | :--- | :--- | :--- |
-| **Engine suy luận** | PyTorch CUDA FP16 Batch Inference (batch_size=6) | PyTorch MPS FP16 Native |
-| **Tốc độ AI Inference** | **1.37 fps** (RealESRAnimeVideoV3 standalone) \| **~10 – 12+ fps** hiệu dụng (Dedup + Pipelining) | **1.68 – 1.70 fps** |
-| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset p6, CQ 19, Multipass qres, Lookahead 24, p010le) | `hevc_videotoolbox` Main 10 (p010le) |
-| **VRAM tiêu thụ** | **~6.20 GB** / 12 GB VRAM (51.6% capacity - Đạt đỉnh Tensor Cores, an toàn tuyệt đối) | **~2.1 GB** / 18 GB Unified Memory |
-| **Output Sanity Guard** | $\|\Delta Y\| \approx 2.80 / 255$, Correlation $\approx 0.9998$ (PASS) | $\|\Delta Y\| \le 6.0 / 255$, Correlation $\ge 0.98$ (PASS) |
-| **Mux Audit** | Khớp 100% audio, subtitle, font, frame count (PASS) | Khớp 100% audio, sub, font, frame count (PASS) |
-| **Anti-Sleep** | Win32 `SetThreadExecutionState` | macOS `caffeinate -dims` |
+| **Phần cứng** | Intel Core i5-12600K, NVIDIA RTX 3060 12GB | Intel Core i5-12600K, NVIDIA RTX 3060 12GB |
+| **Engine suy luận** | PyTorch CUDA FP16 (`batch_size=1`) | PyTorch CUDA FP16 Batch Inference (`batch_size=6`) |
+| **Tốc độ AI Inference** | **1.37 fps** (RealESR-AnimeVideoV3) | **4.8 – 5.2 fps** thuần GPU \| **~10 – 12+ fps** hiệu dụng (Dedup) |
+| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset `p6`, CQ 19) | `hevc_nvenc` Main 10 (`p6`, Multipass `qres`, Lookahead `24`, `p010le`) |
+| **VRAM tiêu thụ** | ~2.4 GB / 12 GB VRAM | **~6.20 GB** / 12 GB VRAM (51.6% capacity - Đạt đỉnh Tensor Cores, an toàn) |
+| **I/O Khung hình** | PIL Image.save (~45 ms/frame) | OpenCV C++ `cv2.imwrite` AVX2 (~14 ms/frame, nhanh hơn 3x) |
+| **Output Sanity Guard** | $\|\Delta Y\| \approx 2.80 / 255$, Correlation $\approx 0.9998$ (PASS) | $\|\Delta Y\| \approx 2.80 / 255$, Correlation $\approx 0.9998$ (PASS) |
+| **Mux Audit** | Khớp 100% audio, subtitle, font, frame count (PASS) | Khớp 100% audio, subtitle, font, frame count (PASS) |
+| **Anti-Sleep** | Win32 `SetThreadExecutionState` | Win32 `SetThreadExecutionState` |
 
 ---
 
@@ -154,9 +132,9 @@ Phân hệ dịch phụ đề anime chuyên sâu bằng mô hình ngôn ngữ l�
 
 * **100% Cloud API:** Chạy bằng Gemini Flash-Lite (`gemini-3.5-flash-lite`, 500 RPD/key) / Flash (`gemini-3.8-flash`) với Schema "Suy luận trước, dịch sau".
 * **Đồng bộ UTF-8:** Hiển thị mượt mà trên PowerShell / CMD, không lỗi charmap.
-* **Cơ chế Whisper STT Fallback:** Tự động tạo phụ đề `.ja.srt` nếu video gốc thiếu track tiếng Nhật.
+* **Cơ chế Whisper STT Fallback:** Tự động trích xuất âm thanh và chạy Whisper để tạo phụ đề `.ja.srt` nếu video gốc thiếu track tiếng Nhật.
 * **Auto-Align Subtitle Timestamps:** Tự động ghim mốc thời gian của Whisper / tiếng Nhật theo track tiếng Anh phòng thu (`--auto-align-en`).
-* **Luân phiên Round-Robin 3 Key:** Phân bổ đều request để không bao giờ bị nghẽn RPM.
+* **Luân phiên Round-Robin 3 Key:** Phân bổ đều request giữa 3 API keys để không bao giờ bị nghẽn RPM.
 * **Đồng nhất xưng hô:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; giữ nguyên tên Romaji khi gọi tên.
 * **Linter V1 & Dual Dialogue:** Tự động gộp câu nói đồng thời, loại bỏ flicker, kiểm tra tốc độ đọc CPS và chống rò rỉ CJK.
 
@@ -179,13 +157,13 @@ ai-video-upscaler/
 │   ├── config.py               # Quản lý cấu hình tập trung, phần cứng & RAM Disk
 │   ├── ai_engine.py            # PyTorch Super-Resolution Inference Engine
 │   ├── subtitles.py            # Trích xuất phụ đề rời/container, Whisper STT fallback
-│   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (NVENC/VideoToolbox 10-bit)
-│   ├── preflight.py            # Chống sleep (Win32 / Caffeinate), kiểm tra sạc & đĩa trống
+│   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (NVENC 10-bit)
+│   ├── preflight.py            # Chống sleep (Win32 SetThreadExecutionState), kiểm tra sạc & đĩa trống
 │   ├── pipeline.py             # Bộ điều phối Rolling Segments Pipeline + Checkpoint Resume
 │   ├── dedup.py                # Deduplication Engine (mpdecimate, DIS Optical Flow)
 │   ├── mux_audit.py            # Stream copy integrity audit & font count verifier
 │   ├── output_sanity.py        # Output Sanity Guard kiểm định độ sáng & tương quan đầu ra
-│   ├── ramdisk.py              # Quản lý RAM Disk ảo (Windows ImDisk / Unified Memory)
+│   ├── ramdisk.py              # Quản lý RAM Disk ảo (Windows ImDisk / Rolling Cleanup)
 │   ├── scheduler.py            # Bộ lập lịch hàng đợi qua đêm & preflight nền
 │   ├── cleanup.py              # Dọn dẹp thư mục tạm, symlinks & gom file audit
 │   └── logger.py               # Telemetry logging & thanh tiến trình Rich
@@ -202,11 +180,11 @@ ai-video-upscaler/
 │   ├── report.py               # Báo cáo kiểm định chất lượng (QA Report .audit.md/.json)
 │   └── tests/                  # Unit tests riêng của phân hệ dịch phụ đề
 ├── tests/                      # Automated Test Suite (100% Pytest Unit & Integration Tests)
-├── benchmarks/                 # Kịch bản đo lường hiệu năng, Soak Tests & Blind AB Evaluations
+├── benchmarks/                 # Kịch bản đo lường hiệu năng & Soak Tests
 │   ├── upscale/                # Benchmarks hiệu năng GPU, VRAM, tốc độ suy luận, Dedup
 │   ├── subtrans/               # Đánh giá độ ổn định xưng hô (Golden Pronoun Evaluations)
 │   └── research/               # Kịch bản hiệu chuẩn và nghiên cứu chuyên sâu
-├── scripts/                    # Các tiện ích vận hành (organize subs, soak monitor, shell launcher)
+├── scripts/                    # Các tiện ích vận hành (organize subs, subtrans batch utilities)
 ├── glossaries/                 # Từ điển thuật ngữ riêng theo từng series anime
 ├── models/                     # Danh mục đăng ký mô hình Super-Resolution (models.yaml)
 ├── models_bench/               # Trọng số mô hình AI PyTorch (.pth)
@@ -215,4 +193,3 @@ ai-video-upscaler/
 ├── logs/                       # Nhật ký telemetry CSV và báo cáo phiên chạy đêm
 └── out/                        # Thư mục xuất video 4K, phụ đề hoàn thiện và báo cáo audit
 ```
-

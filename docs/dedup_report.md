@@ -2,7 +2,7 @@
 
 > **Gửi:** AI Nghiên Cứu / Cố Vấn Kiến Trúc Kỹ Thuật  
 > **Người thực hiện:** Antigravity Engineering Agent & Người dùng (Chủ trì nghiệm thu thị giác)  
-> **Thiết bị vận hành:** Apple Silicon MacBook Pro M3 Pro (11-core CPU, 14-core GPU, 18GB Unified Memory), macOS 15.  
+> **Thiết bị vận hành ban đầu:** Nghiên cứu thuật toán và đo đạc chuyển tiếp tối ưu cho Windows Workstation (Intel Core i5-12600K, NVIDIA RTX 3060 12GB).  
 > **Tôn chỉ bất biến:** Pareto (Chất lượng phòng thu / Thời gian tối ưu 2 tập mỗi đêm); Số đo thực nghiệm độc lập; Phân tách tuyệt đối giữa **[SỐ ĐO THỰC TẾ]**, **[ƯỚC LƯỢNG]** và **[NGHIỆM THU THỊ GIÁC]**.
 
 ---
@@ -29,7 +29,7 @@
 * **Mã băm SHA256 AnimeJaNai Compact:** Đo thực tế trên đĩa đạt `af7307eee19e5982a8014dd0e4650d3bde2e25aa78d2105a4bdfd947636e4c8f`, **khớp 100% với `models/models.yaml`**. Xác nhận chuỗi sai trong nhật ký trước là do AI tiền nhiệm ghi nhầm từ trí nhớ, file gốc hoàn toàn toàn vẹn.
 * **Đo sai số độc lập 5 frame chuẩn:**
   * **Spandrel CPU FP32 vs Reference:** Sai lệch tuyệt đối = `0.0` (PSNR đạt $\infty$ / 999 dB).
-  * **PyTorch MPS FP16 vs Reference:** PSNR đạt **`75.74 – 76.70 dB`** (vượt xa ngưỡng an toàn $\ge 45\text{ dB}$); max float diff = $0.00102 – 0.00162$ (sai số làm tròn chuẩn FP16 của Apple Silicon); $|\Delta Y| \le 0.0114/255$.
+  * **PyTorch FP16 vs Reference:** PSNR đạt **`75.74 – 76.70 dB`** (vượt xa ngưỡng an toàn $\ge 45\text{ dB}$); max float diff = $0.00102 – 0.00162$ (sai số làm tròn chuẩn FP16); $|\Delta Y| \le 0.0114/255$.
 * **Stream Copy trên BD thật (Fate Apocrypha E02 - 34.213 frames):** Phân đoạn thành công 177 segments theo đúng ranh giới GOP nguồn, khớp bit-exact **34.213 / 34.213 frames (+0 frame)**. Đã trích xuất mẫu chuẩn 1 phút [sample_1min_bd_420.mkv](../samples/sample_1min_bd_420.mkv) (1.439 frames, GOP 24, YUV420p).
 
 ### B. Hiệu chuẩn nhiễu & Phân tích nguyên nhân tỷ lệ 88.7% / 76.3% (Phần B)
@@ -42,7 +42,7 @@
   * `motion-0.30`: Giữ **26.613 frames (77.79%)**, **tăng vọt +37.87% frames (+7.310 frames)**, làm đội thời gian thêm **+1.26 giờ GPU/tập** do bị bẫy trong nhiễu.
   * `drift-0.5` ($\delta^*$): Giữ **19.737 frames (57.69%)**, **chỉ tăng +2.25% frames (+434 frames)**, chỉ tốn thêm **~4.5 phút GPU/tập**, nhưng **triệt tiêu 100% hiện tượng đứng hình zoom về 0.0%**.
 
-### C. Đo đạc thực tế trên Apple Silicon Metal GPU (Phần C)
+### C. Đo đạc thực tế kích thước khung hình và tải GPU (Phần C)
 * **Kích thước khung hình PNG 4K thực tế trên RAM Disk (C1):**
   * BD Remux (120 frames): $p50 = 12.27\text{ MB}$, $p95 = 13.76\text{ MB}$, $\text{max} = 13.76\text{ MB}$.
   * WEB-DL (120 frames): $p50 = 13.43\text{ MB}$, $p95 = 13.61\text{ MB}$, $\text{max} = 13.77\text{ MB}$.

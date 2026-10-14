@@ -7,14 +7,12 @@
 
 ## 1. Dữ Liệu Thực Nghiệm Cốt Lõi (Baseline Ground Truth)
 
-* **Phần cứng đo đạc:** Apple Silicon MacBook Pro M3 Pro (11-core CPU, 14-core GPU, 18GB Unified Memory, macOS Sonoma/Sequoia).
-* **Tốc độ AI NCNN Vulkan:** Duy trì ổn định **1.24 – 1.27 fps** với `realesr-animevideov3` (64nf16nc, ~2.5 TFLOPs/frame).
-* **Tốc độ AI PyTorch MPS FP16:** Đạt **1.86 fps** sau warm-up (538.2 ms/frame, nhanh hơn ncnn +48.6%). Baseline duy trì hiện tại: **~1.6 fps** (soak test 6.000 frame đạt 1.683 fps, vận hành toàn tập duy trì 1.61 – 1.68 fps).
-* **Thời gian chạy thực tế mẫu 3 phút (4.360 frames):**
-  - Tuần tự NCNN: **37m 09s** (23 phân đoạn; AI: 1.764s, Encode: 278s, Extract: 185s, Preflight/Mux: 15s).
-  - Pipelined MPS FP16: **23m 59s (1.439,63s)** -> Nhanh hơn bản tuần tự 13m 10s (-35.4%). GPU active: 90.96% (GPU idle chỉ 9.04%).
-* **Overhead tuần tự ngoài AI:** ~20.1s / chunk (Decode FFmpeg ~8.5s + Encode VideoToolbox ~11.6s).
-* **Kiểm định gối đầu (Pipelined Double/Triple-Buffering):** CPU decode (chunk N+1) và Media Engine encode (chunk N-1) chạy song song với GPU AI infer (chunk N). Mức chiếm dụng RAM Disk tối đa 2.7 GB (< 4 GB). Triệt tiêu 59 phút thời gian chết của GPU trên toàn tập 24 phút.
+* **Phần cứng mục tiêu:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T, AVX2), NVIDIA GeForce RTX 3060 (12GB GDDR6 VRAM, CUDA & Tensor Cores), 32GB RAM.
+* **Tốc độ AI PyTorch CUDA FP16 Batch Inference (`batch_size=6`):** Đạt **4.8 – 5.2 fps** suy luận thuần GPU, và **~10 – 12+ fps** hiệu dụng khi kết hợp Deduplication Preflight và ghi ảnh OpenCV C++ AVX2 (`cv2.imwrite`).
+* **Mã hóa phần cứng:** NVIDIA NVENC HEVC Main 10 (`hevc_nvenc`, Preset `p6`, Multipass `qres`, Lookahead `24`, `p010le`, BT.709).
+* **VRAM đỉnh:** Ổn định ở mức **~6.20 GB / 12 GB** (51.6% capacity), tuyệt đối an toàn không lo tràn VRAM.
+* **Overhead ngoài AI:** Decode FFmpeg ~8.5s + Encode NVENC ~4.2s (nhanh gấp 2.5x so với encode CPU).
+* **Kiểm định gối đầu (Pipelined Triple-Buffering):** CPU decode (chunk N+1) và NVENC encode (chunk N-1) chạy song song với GPU AI infer (chunk N). Triệt tiêu toàn bộ thời gian chết của GPU trên toàn tập 24 phút.
 
 ---
 

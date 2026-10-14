@@ -88,8 +88,8 @@ def main():
     clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
     our_cpu.load_state_dict(clean_weights, strict=True)
 
-    # 3. Nạp Our AnimeJaNai MPS FP16
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # 3. Nạp Our AnimeJaNai GPU FP16
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     our_mps = AnimeJaNaiCompact2x().eval().to(device).half()
     our_mps.load_state_dict(clean_weights, strict=True)
 
@@ -138,8 +138,8 @@ def main():
             # Our MPS FP16
             t_in_mps = t_in_cpu.to(device).half()
             out_mps = torch.clamp(our_mps(t_in_mps), 0.0, 1.0)
-            if device.type == "mps":
-                torch.mps.synchronize()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             arr_mps = out_mps.to("cpu", dtype=torch.float32).squeeze(0).permute(1, 2, 0).numpy()
 
         # So sánh 1: Our CPU FP32 vs Spandrel CPU FP32

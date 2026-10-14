@@ -67,8 +67,8 @@ def upscale_single_frame_mps(worker, img_path: str) -> np.ndarray:
 
     with torch.inference_mode():
         out_tensor = worker.model(tensor)
-        if worker.device.type == "mps":
-            torch.mps.synchronize()
+        if worker.device.type == "cuda":
+            torch.cuda.synchronize()
 
     out_np = (out_tensor.squeeze(0).clamp(0, 1).float().cpu().numpy().transpose((1, 2, 0)) * 255.0).round().astype(np.uint8)
     return out_np
