@@ -309,7 +309,7 @@ def main():
     print("\n" + "=" * 72)
     print("🎉 ĐÃ XUẤT TOÀN BỘ ẢNH MÙ VÀO THƯ MỤC: out/true_blind/")
     print("=" * 72)
-    print("Tốc độ trung bình thực đo trên GPU Metal M3 Pro:")
+    print("Tốc độ trung bình thực đo trên GPU:")
     for m, times in speed_stats.items():
         avg_t = sum(times) / len(times)
         print(f"  • {m:26s}: {avg_t:.3f} s/frame ({1.0/avg_t:.2f} fps)")

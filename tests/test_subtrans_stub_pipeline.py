@@ -70,17 +70,18 @@ def test_subtrans_stub_pipeline_end_to_end(tmp_path):
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_db = tmp_path / "test_cache.db"
 
-    pipeline = TranslationPipeline(
-        local_only=False,
-        output_dir=out_dir,
-        output_format="srt",
-        require_approved_cast=False,
-        allow_latest_alias=False,
-        dry_run=False,
-        enable_cascade=True,
-        enable_rag=True,
-        cache_db_path=cache_db,
-    )
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "AIzaSyMockKeyForTesting12345"}):
+        pipeline = TranslationPipeline(
+            local_only=False,
+            output_dir=out_dir,
+            output_format="srt",
+            require_approved_cast=False,
+            allow_latest_alias=False,
+            dry_run=False,
+            enable_cascade=True,
+            enable_rag=True,
+            cache_db_path=cache_db,
+        )
 
     # Mock Cast Sheet API response
     mock_cast_obj = MagicMock()
@@ -154,7 +155,8 @@ def test_subtrans_stub_pipeline_end_to_end(tmp_path):
     mock_repair_response_obj.usage_metadata.total_token_count = 105
     mock_repair_response_obj.usage_metadata.thinking_token_count = 0
 
-    with patch("google.genai.Client") as mock_client_cls:
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "AIzaSyMockKeyForTesting12345"}), \
+         patch("google.genai.Client") as mock_client_cls:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 

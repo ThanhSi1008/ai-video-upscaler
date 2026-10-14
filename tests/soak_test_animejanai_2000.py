@@ -57,13 +57,14 @@ def run_soak_test_2000():
     print(f"🚀 BẮT ĐẦU SOAK TEST 2.000 FRAMES ANIMEJANAI HD V3 COMPACT (D8 LÀM LẠI)")
     print(f"   • Tổng số frames: {total_frames} frames end-to-end")
     print(f"   • Số lượng batch: {num_batches} batches ({batch_size} frames/batch)")
-    print(f"   • Động cơ: PyTorch Metal Performance Shaders (MPS FP16)")
+    from src.config import DEVICE_NAME
+    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+    if device.type not in ["cuda", "mps"]:
+        raise RuntimeError("Yêu cầu GPU (CUDA / MPS) để chạy soak test này!")
+
+    print(f"   • Động cơ: PyTorch GPU ({device.type.upper()} FP16)")
     print(f"   • File trọng số: {weights_path}")
     print(f"{'='*75}")
-
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    if device.type != "mps":
-        raise RuntimeError("Yêu cầu Apple Silicon MPS để chạy soak test này!")
 
     # Chuẩn bị pool 100 frames
     scratch_dir = Path("scratch/soak_animejanai_2000")
@@ -197,7 +198,7 @@ def run_soak_test_2000():
     report_data = {
         "model_id": "animejanai-hd-v3-compact",
         "precision": "fp16",
-        "device": "Apple Silicon M3 Pro (MPS Metal)",
+        "device": DEVICE_NAME,
         "total_frames": total_frames,
         "batch_size": batch_size,
         "num_batches": num_batches,

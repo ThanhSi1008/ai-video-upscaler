@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#  AI VIDEO UPSCALER 4K - SHELL LAUNCHER CHO MACOS (APPLE SILICON M3 PRO)
+#  AI VIDEO UPSCALER 4K - SHELL LAUNCHER CHO MACOS / LINUX
 # ==============================================================================
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

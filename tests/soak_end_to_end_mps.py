@@ -73,10 +73,11 @@ def run_soak_test(
     report_path: str = "out/mps_soak_6000_report.json",
     video_source: str = "samples/sample_3min.mkv"
 ):
+    from src.config import DEVICE_NAME
     print(f"\n{'='*80}")
-    print(f"🚀 BẮT ĐẦU SOAK TEST END-TO-END MPS FP16: {model_id.upper()} ({total_frames} FRAMES)")
+    print(f"🚀 BẮT ĐẦU SOAK TEST END-TO-END GPU FP16: {model_id.upper()} ({total_frames} FRAMES)")
     print(f"{'='*80}")
-    print(f"• Thiết bị: Apple Silicon GPU Metal ({torch.backends.mps.is_available()})")
+    print(f"• Thiết bị: {DEVICE_NAME}")
     print(f"• Batch size ghi nhận viễn trắc: {batch_size} frames")
     print(f"• Báo cáo xuất ra: {report_path}")
 
@@ -136,19 +137,30 @@ def run_soak_test(
             arr = (np.array(img).transpose((2, 0, 1)) / 255.0).astype(np.float32)
             tensor = torch.from_numpy(arr).unsqueeze(0).to(worker.device).half()
 
-            # B. Suy luận MPS Metal
+            # B. Suy luận GPU
             with torch.inference_mode():
                 out_tensor = worker.model(tensor)
-                torch.mps.synchronize()
+                if worker.device.type == "cuda":
+                    torch.cuda.synchronize()
+                elif worker.device.type == "mps":
+                    torch.mps.synchronize()
 
             # Ghi nhận VRAM peak trong infer
-            c_alloc = torch.mps.current_allocated_memory() / (1024 * 1024)
-            if c_alloc > curr_alloc_peak:
-                curr_alloc_peak = c_alloc
-            if hasattr(torch.mps, "driver_allocated_memory"):
-                d_alloc = torch.mps.driver_allocated_memory() / (1024 * 1024)
+            if worker.device.type == "cuda":
+                c_alloc = torch.cuda.memory_allocated() / (1024 * 1024)
+                if c_alloc > curr_alloc_peak:
+                    curr_alloc_peak = c_alloc
+                d_alloc = torch.cuda.max_memory_allocated() / (1024 * 1024)
                 if d_alloc > driver_alloc_peak:
                     driver_alloc_peak = d_alloc
+            elif worker.device.type == "mps":
+                c_alloc = torch.mps.current_allocated_memory() / (1024 * 1024)
+                if c_alloc > curr_alloc_peak:
+                    curr_alloc_peak = c_alloc
+                if hasattr(torch.mps, "driver_allocated_memory"):
+                    d_alloc = torch.mps.driver_allocated_memory() / (1024 * 1024)
+                    if d_alloc > driver_alloc_peak:
+                        driver_alloc_peak = d_alloc
 
             # C. Ghi PNG mức nén 1 qua thread pool riêng vào RAM Disk
             out_np = (out_tensor.squeeze(0).clamp(0, 1).float().cpu().numpy().transpose((1, 2, 0)) * 255.0).round().astype(np.uint8)

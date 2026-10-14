@@ -47,12 +47,13 @@ def main():
     print("🔬 SOAK TEST 600 FRAMES PYTORCH MPS FP16 (KIỂM CHỨNG HIỆN TƯỢNG SỤT TỐC A4)")
     print("=" * 80)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    if device.type != "mps":
-        print("❌ Lỗi: MPS không khả dụng!")
+    from src.config import DEVICE_NAME
+    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+    if device.type not in ["cuda", "mps"]:
+        print("❌ Lỗi: GPU (CUDA / MPS) không khả dụng!")
         sys.exit(1)
 
-    print(f"• Thiết bị: Apple Silicon MPS ({torch.backends.mps.is_available()})")
+    print(f"• Thiết bị: {DEVICE_NAME} ({device.type.upper()})")
     print(f"• Weights: {PTH_PATH}")
 
     sd = torch.load(PTH_PATH, map_location="cpu", weights_only=False)
@@ -126,8 +127,8 @@ def main():
     print("=" * 80)
 
     report = {
-        "test": "mps_soak_600_frames",
-        "device": "Apple Silicon M3 Pro (MPS)",
+        "test": "gpu_soak_600_frames",
+        "device": DEVICE_NAME,
         "precision": "fp16",
         "total_frames": total_frames,
         "total_duration_seconds": round(total_duration, 2),

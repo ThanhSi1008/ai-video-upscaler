@@ -14,7 +14,7 @@
 * **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows / macOS)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
 * **Tôn chỉ Pareto:** Chất lượng hình ảnh cân bằng với thời gian. Không hy sinh nét vẽ anime lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
-  * Trên RTX 3060 (PyTorch CUDA FP16 single-frame ~2.2–2.5 fps): **~2–3 tập mỗi đêm** (~2.5–3 giờ/tập với ~17.000 unique frames). Khi nâng cấp batch inference có thể đạt 4–6+ tập/đêm.
+  * Trên RTX 3060 (PyTorch CUDA FP16 Batch Inference `batch_size=4` đạt 4.31 fps, ~6.75–7.20 fps hiệu dụng với Dedup): **~5–6 tập mỗi đêm** (~1.5 giờ/tập với ~17.000 unique frames).
   * Trên M3 Pro (PyTorch MPS FP16 ~1.68 fps): **~2 tập mỗi đêm** (~3 giờ/tập).
 
 ---
@@ -75,6 +75,7 @@ python3 upscale.py path/to/source.mkv --preview 10
 ```text
 ai-video-upscaler/
 ├── upscale.py              # CLI Entrypoint (Argparse, UTF-8 console, Queue orchestrator, Checkpoint Resume)
+├── upscale.bat             # Windows batch launcher (One-click chạy trên Windows)
 ├── upscale.sh              # Shell launcher native cho macOS/Linux
 ├── subtrans.py             # Subtitle Translation CLI Runner
 ├── shows.yaml              # Ánh xạ mô hình SR theo từng bộ anime (người dùng cấu hình)

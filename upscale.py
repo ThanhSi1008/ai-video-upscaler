@@ -238,7 +238,7 @@ def build_arg_parser():
     parser.add_argument(
         "--no-caffeinate",
         action="store_true",
-        help="Không tự động kích hoạt caffeinate để chống sleep máy trong khi chạy"
+        help="Không tự động kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows / caffeinate trên macOS)"
     )
     parser.add_argument(
         "--no-dedup",
@@ -626,12 +626,12 @@ def main():
                             print("⚠️ Không thể nhúng phụ đề vào container 4K (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
                         print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container 4K, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
-            # Luôn đồng bộ file phụ đề .vi.srt cùng tên ngay cạnh video gốc để IINA tự động nhận
+            # Luôn đồng bộ file phụ đề .vi.srt cùng tên ngay cạnh video gốc để các trình phát video tự động nhận
             raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
             if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
                 import shutil
                 shutil.copy2(str(srt_path), raw_side_srt)
-                print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho IINA: {os.path.basename(raw_side_srt)}")
+                print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
         cleanup_subtitle_extracts(vid_dir, base_vid_name)
         if not getattr(args, "no_organize_audit", False):
             organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)

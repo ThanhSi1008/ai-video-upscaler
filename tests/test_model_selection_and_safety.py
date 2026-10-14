@@ -153,7 +153,7 @@ def test_d10_d_animejanai_mps_error_does_not_switch_to_animevideov3(tmp_path):
     with patch("src.mps_engine.get_mps_worker") as mock_get_worker:
         # Mock worker đầu tiên (FP16) bị lỗi
         mock_fp16_worker = MagicMock()
-        mock_fp16_worker.upscale_directory.side_effect = MPSError("Simulated Metal Error in FP16")
+        mock_fp16_worker.upscale_directory.side_effect = MPSError("Simulated GPU Error in FP16")
 
         # Mock worker thứ hai (FP32) thành công
         mock_fp32_worker = MagicMock()

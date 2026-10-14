@@ -21,13 +21,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.mps_engine import RealESRAnimeVideoV3
+from src.config import DEVICE_NAME
 
 
 def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"\n{'='*70}")
-    print(f"🔬 BẮT ĐẦU PROFILE ĐUÔI 8K TRÊN APPLE SILICON MPS ({precision.upper()})")
-    print(f"   • Thiết bị: {device} (Apple Silicon GPU)")
+    print(f"🔬 BẮT ĐẦU PROFILE ĐUÔI 8K TRÊN {DEVICE_NAME.upper()} ({precision.upper()})")
+    print(f"   • Thiết bị: {device} ({DEVICE_NAME})")
     print(f"   • Số lần lặp đo đạc: {num_iters} iterations (sau 5 iterations warm-up)")
     print(f"{'='*70}")
 
@@ -158,7 +159,7 @@ if __name__ == "__main__":
     results_fp32 = run_tail_profiling("fp32", num_iters=30)
 
     combined = {
-        "device": "Apple Silicon M3 Pro (MPS Metal)",
+        "device": DEVICE_NAME,
         "model": "realesr-animevideov3 (SRVGGNetCompact 64f16c x4)",
         "input_resolution": "1920x1080",
         "intermediate_resolution": "7680x4320 (8K)",

@@ -124,12 +124,12 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 | Thông số / Nền tảng | NVIDIA GeForce RTX 3060 12GB (Windows 11) | Apple Silicon M3 Pro (macOS) |
 | :--- | :--- | :--- |
-| **Engine suy luận** | PyTorch CUDA FP16 Native | PyTorch MPS FP16 Native |
-| **Tốc độ AI Inference** | **2.2 – 2.5 fps** (Single-frame, chưa batch) | **1.68 – 1.70 fps** |
-| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset p5, p010le) | `hevc_videotoolbox` Main 10 (p010le) |
-| **VRAM tiêu thụ** | **~1.1 GB** / 12 GB VRAM (Dư dồi dào cho batch) | **~2.1 GB** / 18 GB Unified Memory |
-| **Output Sanity Guard** | $|\Delta Y| \approx 1.84 / 255$, Correlation $\approx 0.9996$ (PASS) | $|\Delta Y| \le 6.0 / 255$, Correlation $\ge 0.98$ (PASS) |
-| **Mux Audit** | Khớp 100% audio, subtitle, frame count (PASS) | Khớp 100% audio, sub, font, frame count (PASS) |
+| **Engine suy luận** | PyTorch CUDA FP16 Batch Inference (batch_size=4) | PyTorch MPS FP16 Native |
+| **Tốc độ AI Inference** | **4.31 fps** (Batch 4) \| **~6.75 – 7.20 fps** hiệu dụng (Dedup) | **1.68 – 1.70 fps** |
+| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset p6, CQ 19, p010le) | `hevc_videotoolbox` Main 10 (p010le) |
+| **VRAM tiêu thụ** | **~2.9 – 4.1 GB** / 12 GB VRAM (An toàn, không OOM) | **~2.1 GB** / 18 GB Unified Memory |
+| **Output Sanity Guard** | $\|\Delta Y\| \approx 2.80 / 255$, Correlation $\approx 0.9998$ (PASS) | $\|\Delta Y\| \le 6.0 / 255$, Correlation $\ge 0.98$ (PASS) |
+| **Mux Audit** | Khớp 100% audio, subtitle, font, frame count (PASS) | Khớp 100% audio, sub, font, frame count (PASS) |
 | **Anti-Sleep** | Win32 `SetThreadExecutionState` | macOS `caffeinate -dims` |
 
 ---
@@ -154,6 +154,7 @@ python subtrans.py samples/sample_sword_3min.mkv -o out/
 ```text
 ai-video-upscaler/
 ├── upscale.py                  # CLI Entrypoint với đầy đủ tùy chọn (Windows & macOS)
+├── upscale.bat                 # Windows batch launcher (One-click chạy trên Windows)
 ├── upscale.sh                  # Shell launcher tiện lợi cho macOS/Linux
 ├── subtrans.py                 # Subtitle Translation CLI Runner
 ├── shows.yaml                  # Cấu hình model SR theo từng bộ anime
