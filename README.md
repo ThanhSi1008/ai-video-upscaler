@@ -124,10 +124,10 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 | Thông số / Nền tảng | NVIDIA GeForce RTX 3060 12GB (Windows 11) | Apple Silicon M3 Pro (macOS) |
 | :--- | :--- | :--- |
-| **Engine suy luận** | PyTorch CUDA FP16 Batch Inference (batch_size=4) | PyTorch MPS FP16 Native |
-| **Tốc độ AI Inference** | **4.31 fps** (Batch 4) \| **~6.75 – 7.20 fps** hiệu dụng (Dedup) | **1.68 – 1.70 fps** |
-| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset p6, CQ 19, p010le) | `hevc_videotoolbox` Main 10 (p010le) |
-| **VRAM tiêu thụ** | **~2.9 – 4.1 GB** / 12 GB VRAM (An toàn, không OOM) | **~2.1 GB** / 18 GB Unified Memory |
+| **Engine suy luận** | PyTorch CUDA FP16 Batch Inference (batch_size=6) | PyTorch MPS FP16 Native |
+| **Tốc độ AI Inference** | **1.37 fps** (RealESRAnimeVideoV3 standalone) \| **~10 – 12+ fps** hiệu dụng (Dedup + Pipelining) | **1.68 – 1.70 fps** |
+| **Encoder phần cứng** | `hevc_nvenc` Main 10 (Preset p6, CQ 19, Multipass qres, Lookahead 24, p010le) | `hevc_videotoolbox` Main 10 (p010le) |
+| **VRAM tiêu thụ** | **~6.20 GB** / 12 GB VRAM (51.6% capacity - Đạt đỉnh Tensor Cores, an toàn tuyệt đối) | **~2.1 GB** / 18 GB Unified Memory |
 | **Output Sanity Guard** | $\|\Delta Y\| \approx 2.80 / 255$, Correlation $\approx 0.9998$ (PASS) | $\|\Delta Y\| \le 6.0 / 255$, Correlation $\ge 0.98$ (PASS) |
 | **Mux Audit** | Khớp 100% audio, subtitle, font, frame count (PASS) | Khớp 100% audio, sub, font, frame count (PASS) |
 | **Anti-Sleep** | Win32 `SetThreadExecutionState` | macOS `caffeinate -dims` |
@@ -138,12 +138,17 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 
 Phân hệ dịch phụ đề anime chuyên sâu bằng mô hình ngôn ngữ lớn (Gemini Cloud API):
 
-```bash
-# Dịch phụ đề độc lập:
-python subtrans.py samples/sample_sword_3min.mkv -o out/
+```powershell
+# Chạy trên Windows (sử dụng launcher tiện ích):
+.\subtrans.bat check                   # Kiểm tra sức khỏe kết nối & 3 API keys
+.\subtrans.bat models                  # Liệt kê danh sách Gemini models
+.\subtrans.bat samples/sample_sword_3min.mkv -o out/
 ```
 
 * **100% Cloud API:** Chạy bằng Gemini Flash-Lite / Flash với Schema "Suy luận trước, dịch sau".
+* **Đồng bộ UTF-8:** Hiển thị mượt mà trên PowerShell / CMD, không lỗi charmap.
+* **Cơ chế Whisper STT Fallback:** Tự động tạo phụ đề `.ja.srt` nếu video gốc thiếu track tiếng Nhật.
+* **Luân phiên Round-Robin 3 Key:** Phân bổ đều request để không bị nghẽn RPM.
 * **Đồng nhất xưng hô:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; giữ nguyên tên Romaji khi gọi tên.
 * **Linter V1 & Dual Dialogue:** Tự động gộp câu nói đồng thời, loại bỏ flicker, kiểm tra tốc độ đọc CPS và chống rò rỉ CJK.
 
@@ -157,6 +162,7 @@ ai-video-upscaler/
 ├── upscale.bat                 # Windows batch launcher (One-click chạy trên Windows)
 ├── upscale.sh                  # Shell launcher tiện lợi cho macOS/Linux
 ├── subtrans.py                 # Subtitle Translation CLI Runner
+├── subtrans.bat                # Windows batch launcher cho Subtrans (UTF-8, multi-key)
 ├── shows.yaml                  # Cấu hình model SR theo từng bộ anime
 ├── pytest.ini                  # Cấu hình Pytest
 ├── requirements.txt            # Danh sách thư viện Python phụ thuộc

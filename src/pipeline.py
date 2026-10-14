@@ -178,8 +178,11 @@ def run_upscale_pipeline(
 
     # Kích hoạt Caffeinate để chống Sleep máy trong suốt phiên chạy
     with CaffeinateContext(enabled=caffeinate):
-        if caffeinate and sys.platform == "darwin":
-            logger.info("Cơ chế chống ngủ máy (caffeinate -dims) đã được kích hoạt thành công.")
+        if caffeinate:
+            if sys.platform == "win32":
+                logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
+            elif sys.platform == "darwin":
+                logger.info("Cơ chế chống ngủ máy (caffeinate -dims) đã được kích hoạt thành công.")
 
         target_w = meta["width"] * DEFAULT_SCALE
         target_h = meta["height"] * DEFAULT_SCALE
@@ -758,7 +761,7 @@ def run_upscale_pipeline(
                                 )
                                 future_encode = None
 
-                            # Khởi động mã hóa VideoToolbox cho chunk hiện tại ở luồng nền (Media Engine)
+                            # Khởi động mã hóa phần cứng (NVENC / VideoToolbox) cho chunk hiện tại ở luồng nền
                             encode_item = {
                                 "target": target_chunk,
                                 "extracted": extracted,

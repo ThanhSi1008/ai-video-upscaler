@@ -4,13 +4,14 @@ tests/test_auto_offset.py
 Unit tests for automatic subtitle offset detection and application.
 """
 
+import os
 from pathlib import Path
 import pytest
 from subtrans.parser import detect_auto_offset, compute_alignment_match_rate
 
 
 def test_detect_auto_offset_on_real_episodes():
-    base_dir = Path("/Users/xis108/Documents/RawSources")
+    base_dir = Path(os.environ.get("RAW_SOURCES_DIR", "samples/raw_sources"))
     if not base_dir.exists():
         pytest.skip("RawSources directory not available")
 
