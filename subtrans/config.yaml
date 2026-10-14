@@ -33,12 +33,13 @@ translation:
   local_batch_size: 20
   stage_watchdog_seconds: 1500  # Watchdog timeout for whole stage (25 mins per episode)
   max_retries_per_model: 3
-  skip_styles: "(?i)(op|ed|sign|song|karaoke|title|credit)"
+  skip_styles: '(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_\s\-]|$)'
   en_overlap_threshold: 0.5
   en_match_warning_pct: 0.8
   line_max_chars: 42
   allow_silent_fallback: false  # Do NOT silently switch models mid-episode on 429 quota; pause and wait instead
   validate_batch_pronouns: true # Assert pronoun consistency across batches
+  auto_align_whisper_to_en: true # Tự động ghim mốc thời gian Whisper theo track EN phòng thu
 
 privacy:
   mode: "allow_cloud"  # "allow_cloud" or "local_only"

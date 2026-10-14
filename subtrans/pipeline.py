@@ -57,6 +57,7 @@ class TranslationPipeline:
         batch_size: Optional[int] = None,
         subs_quality: str = "normal",  # "normal" (Lite first) | "high" (Flash first)
         cache_db_path: Optional[Path] = None,
+        auto_align_whisper_to_en: Optional[bool] = None,
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
@@ -75,6 +76,10 @@ class TranslationPipeline:
         self.allow_latest_alias = allow_latest_alias
         self.dry_run = dry_run
         self.subs_quality = subs_quality
+        if auto_align_whisper_to_en is None:
+            self.auto_align_whisper_to_en = bool(self.cfg.get("translation", {}).get("auto_align_whisper_to_en", True))
+        else:
+            self.auto_align_whisper_to_en = auto_align_whisper_to_en
 
         # Chuỗi model: Nạp từ models.yaml, tuyệt đối không dùng model preview
         # A6: Lite làm model chính theo mặc định. Cờ --subs-quality high đảo thứ tự (Flash trước, Lite sau).
@@ -261,6 +266,7 @@ class TranslationPipeline:
                 en_offset_ms=en_offset_ms,
                 ja_offset_ms=sub_offset_ms,
                 sound_cues=sound_cues,
+                auto_align_whisper_to_en=self.auto_align_whisper_to_en,
             )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
 

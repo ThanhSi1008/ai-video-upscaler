@@ -9,13 +9,14 @@ import copy
 import logging
 import statistics
 from collections import Counter
-from typing import List, Tuple, Optional, Any
+from pathlib import Path
+from typing import List, Tuple, Optional, Any, Dict
 import pysubs2
 from subtrans.models import Cue
 
 logger = logging.getLogger("subtrans.parser")
 
-DEFAULT_SKIP_STYLES = r"(?i)(op|ed|sign|song|karaoke|title|credit)"
+DEFAULT_SKIP_STYLES = r"(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_\s\-]|$)"
 TYPESET_TAG_REGEX = re.compile(r"\\(pos|move)\b", re.IGNORECASE)
 ASS_TAG_REGEX = re.compile(r"\{[^\}]*\}")
 
@@ -192,6 +193,147 @@ def deduplicate_consecutive_cc_events(events: List[pysubs2.SSAEvent]) -> List[py
     return deduped
 
 
+def snap_whisper_cues_to_en(
+    cues: List[Cue],
+    en_events: List[Any],
+    min_gap_ms: int = 50,
+    skip_styles_regex: str = DEFAULT_SKIP_STYLES,
+) -> int:
+    """
+    Auto-Align Subtitle Timestamps:
+    Ghim mốc thời gian của Whisper (chứa jitter ±200–500ms) theo track phụ đề tiếng Anh phòng thu.
+
+    Thuật toán 3-Pass:
+      - Pass 1: Ghép cặp tối ưu (Best Overlap >= 200ms hoặc >= 20% thời lượng; Fallback khoảng cách tâm <= 500ms).
+      - Pass 2: Phân tách vùng thời gian dùng chung khi 2 câu thoại Whisper liên tiếp cùng thuộc về 1 câu EN.
+      - Pass 3: Đảm bảo tính đơn điệu nghiêm ngặt (Monotonicity & Gap >= 50ms, thời lượng tối thiểu 250ms).
+
+    Returns:
+      Số lượng cue thoại đã được ghim thành công theo mốc thời gian phòng thu.
+    """
+    if not cues or not en_events:
+        return 0
+
+    clean_en_cues: List[Dict[str, Any]] = []
+    for idx, e in enumerate(en_events):
+        if isinstance(e, dict):
+            clean_en_cues.append(e)
+        else:
+            raw_text = getattr(e, "text", "")
+            style = getattr(e, "style", "Default")
+            if should_skip_cue(style, raw_text, skip_styles_regex):
+                continue
+            cleaned = clean_subtitle_text(raw_text)
+            if not cleaned or MUSIC_OR_SYMBOL_REGEX.match(cleaned):
+                continue
+            start = getattr(e, "start", 0)
+            end = getattr(e, "end", 0)
+            if end <= start:
+                continue
+            clean_en_cues.append({
+                "id": idx,
+                "start": start,
+                "end": end,
+                "duration": max(1, end - start),
+                "text": cleaned,
+            })
+
+    if not clean_en_cues:
+        return 0
+
+    dialogue_cues = [c for c in cues if not c.is_skipped and not c.is_dropped_sound]
+    if not dialogue_cues:
+        return 0
+
+    snapped_matches: Dict[int, Dict[str, Any]] = {}
+
+    # Pass 1: Ghép cặp tối ưu theo Overlap hoặc khoảng cách tâm
+    for c in dialogue_cues:
+        w_start, w_end = c.start, c.end
+        w_dur = max(1, w_end - w_start)
+        w_mid = (w_start + w_end) / 2.0
+
+        best_cand = None
+        best_overlap = -1
+
+        for ec in clean_en_cues:
+            overlap = max(0, min(w_end, ec["end"]) - max(w_start, ec["start"]))
+            if overlap > best_overlap and overlap >= min(200, 0.2 * w_dur):
+                best_overlap = overlap
+                best_cand = ec
+
+        if not best_cand:
+            # Fallback khoảng cách tâm thoại trong phạm vi sai số Whisper <= 500ms
+            best_dist = float("inf")
+            for ec in clean_en_cues:
+                ec_mid = (ec["start"] + ec["end"]) / 2.0
+                dist = abs(w_mid - ec_mid)
+                if dist <= 500 and dist < best_dist:
+                    best_dist = dist
+                    best_cand = ec
+
+        if best_cand:
+            snapped_matches[id(c)] = best_cand
+            c.start = best_cand["start"]
+            c.end = best_cand["end"]
+            if not c.en:
+                c.en = best_cand["text"]
+
+    snapped_count = len(snapped_matches)
+
+    # Pass 2: Phân tách vùng thời gian khi nhiều câu Whisper liên tiếp cùng map vào 1 câu EN
+    i = 0
+    while i < len(dialogue_cues):
+        m_i = snapped_matches.get(id(dialogue_cues[i]))
+        if not m_i:
+            i += 1
+            continue
+        j = i + 1
+        while (
+            j < len(dialogue_cues)
+            and snapped_matches.get(id(dialogue_cues[j]))
+            and snapped_matches[id(dialogue_cues[j])]["id"] == m_i["id"]
+        ):
+            j += 1
+        count = j - i
+        if count > 1:
+            span_start = m_i["start"]
+            span_end = m_i["end"]
+            total_span = max(count * 300, span_end - span_start)
+            span_end = span_start + total_span
+            sub_dur = (total_span - (count - 1) * min_gap_ms) // count
+            sub_dur = max(200, sub_dur)
+            curr_s = span_start
+            for k in range(i, j):
+                dialogue_cues[k].start = curr_s
+                dialogue_cues[k].end = curr_s + sub_dur
+                curr_s = dialogue_cues[k].end + min_gap_ms
+        i = j
+
+    # Pass 3: Đảm bảo tính đơn điệu và khoảng cách tối thiểu giữa các cue liên tiếp
+    cues.sort(key=lambda c: (c.start, c.end))
+    for i in range(len(cues) - 1):
+        c1 = cues[i]
+        c2 = cues[i + 1]
+        if c1.end <= c1.start:
+            c1.end = c1.start + 300
+        if c2.start < c1.start + min_gap_ms:
+            c2.start = c1.start + min_gap_ms
+        if c1.end >= c2.start:
+            if c2.start - min_gap_ms >= c1.start + 250:
+                c1.end = c2.start - min_gap_ms
+            else:
+                c1.end = max(c1.end, c1.start + 250)
+                c2.start = c1.end + min_gap_ms
+                if c2.end <= c2.start:
+                    c2.end = c2.start + 300
+
+    if cues and cues[-1].end <= cues[-1].start:
+        cues[-1].end = cues[-1].start + 300
+
+    return snapped_count
+
+
 def parse_and_align_subtitles(
     ja_path: str,
     en_path: Optional[str] = None,
@@ -201,6 +343,8 @@ def parse_and_align_subtitles(
     overlap_threshold: float = 0.5,
     match_warning_pct: float = 0.8,
     sound_cues: str = "drop",
+    auto_align_whisper_to_en: bool = True,
+    is_whisper: Optional[bool] = None,
 ) -> Tuple[List[Cue], pysubs2.SSAFile, Optional[pysubs2.SSAFile]]:
     """
     Parses Japanese and optional English subtitles, cleans text, and aligns them by time overlap.
@@ -214,6 +358,8 @@ def parse_and_align_subtitles(
     ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
     ja_ssa.events = split_multi_speaker_cc_events(ja_ssa.events)
     en_ssa = pysubs2.load(en_path) if en_path else None
+    if is_whisper is None:
+        is_whisper = "whisper" in Path(ja_path).name.lower()
 
     # Pre-process EN cues if available
     en_cues = []
@@ -317,6 +463,28 @@ def parse_and_align_subtitles(
         if cues[i].start == cues[i + 1].start:
             cues[i + 1].start += 10
             cues[i + 1].end = max(cues[i + 1].end, cues[i + 1].start + 300)
+
+    # Tự động ghim mốc thời gian Whisper theo track phụ đề EN phòng thu (Auto-Align Subtitle Timestamps)
+    if auto_align_whisper_to_en and is_whisper and en_ssa and en_cues:
+        clean_en_dialogues = [
+            ec for ec in en_cues
+            if not should_skip_cue(en_ssa[ec["id"]].style, en_ssa[ec["id"]].text, skip_styles_regex)
+        ]
+        snapped_count = snap_whisper_cues_to_en(
+            cues=cues,
+            en_events=clean_en_dialogues if clean_en_dialogues else en_cues,
+            min_gap_ms=50,
+            skip_styles_regex=skip_styles_regex,
+        )
+        if snapped_count > 0:
+            logger.info(
+                f"Auto-Align Subtitle Timestamps: Đã ghim thành công mốc thời gian {snapped_count}/{dialogue_cue_count} "
+                f"câu thoại Whisper theo track phụ đề EN phòng thu."
+            )
+            print(
+                f"🎯 [AUTO-ALIGN] Đã tự động ghim mốc thời gian {snapped_count}/{dialogue_cue_count} "
+                f"câu Whisper theo keyframe phụ đề EN phòng thu."
+            )
 
     dropped_count = sum(1 for c in cues if c.is_dropped_sound)
     if dropped_count > 0:

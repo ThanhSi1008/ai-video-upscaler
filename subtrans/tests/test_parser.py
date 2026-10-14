@@ -172,3 +172,111 @@ def test_laughter_sound_cue_detection():
     assert is_pure_sound_cue("まさに偉大な死霊術師 素敵ですー!") is False
 
 
+def test_skip_styles_boundary_regex():
+    from subtrans.parser import should_skip_cue
+    # Subtitle chứa 'title' nhưng không được phép bị skip
+    assert should_skip_cue("Subtitle", "Regular text") is False
+    assert should_skip_cue("Subtitles", "Regular text") is False
+    assert should_skip_cue("MainDialogue", "Regular text") is False
+    assert should_skip_cue("Default", "Regular text") is False
+
+    # Các style cần skip
+    assert should_skip_cue("OP", "Music lyrics") is True
+    assert should_skip_cue("ED", "Music lyrics") is True
+    assert should_skip_cue("ED_Theme", "Music lyrics") is True
+    assert should_skip_cue("Sign", "On-screen text") is True
+    assert should_skip_cue("Song", "Insert song") is True
+    assert should_skip_cue("Karaoke", "Sing along") is True
+    assert should_skip_cue("Title_Card", "Episode title") is True
+    assert should_skip_cue("Credit", "Staff credit") is True
+
+
+def test_snap_whisper_cues_to_en_1_to_1():
+    from subtrans.models import Cue
+    from subtrans.parser import snap_whisper_cues_to_en
+
+    # Whisper cue có sai số bắt đầu trễ 200ms và kết thúc sớm 150ms
+    cues = [
+        Cue(id=0, start=1200, end=2850, ja="おはよう", style="Default", is_skipped=False)
+    ]
+    en_events = [
+        {"id": 0, "start": 1000, "end": 3000, "text": "Good morning.", "duration": 2000}
+    ]
+
+    snapped = snap_whisper_cues_to_en(cues, en_events)
+    assert snapped == 1
+    assert cues[0].start == 1000
+    assert cues[0].end == 3000
+    assert cues[0].en == "Good morning."
+
+
+def test_snap_whisper_cues_to_en_2_to_1_partition():
+    from subtrans.models import Cue
+    from subtrans.parser import snap_whisper_cues_to_en
+
+    # Hai câu Whisper tách rời nhưng tương ứng 1 câu EN dài phòng thu
+    cues = [
+        Cue(id=0, start=1050, end=2400, ja="待って！", style="Default", is_skipped=False),
+        Cue(id=1, start=2450, end=4800, ja="行かないで！", style="Default", is_skipped=False),
+    ]
+    en_events = [
+        {"id": 0, "start": 1000, "end": 5000, "text": "Wait, don't leave me!", "duration": 4000}
+    ]
+
+    snapped = snap_whisper_cues_to_en(cues, en_events, min_gap_ms=50)
+    assert snapped == 2
+    # Cả hai cue phải được định vị trong khoảng [1000, 5000], có gap >= 50ms và không đè nhau
+    assert cues[0].start == 1000
+    assert cues[0].end < cues[1].start
+    assert cues[1].start - cues[0].end >= 50
+    assert cues[1].end == 5000
+
+
+def test_snap_whisper_cues_to_en_ignores_typesetting_and_signs():
+    from subtrans.models import Cue
+    from subtrans.parser import snap_whisper_cues_to_en
+    import pysubs2
+
+    cues = [
+        Cue(id=0, start=5050, end=6450, ja="見ろよ", style="Default", is_skipped=False)
+    ]
+    # EN events gồm: 1 sign typeset kéo dài 15 giây và 1 thoại thực tế
+    en_events = [
+        pysubs2.SSAEvent(start=5000, end=20000, text=r"{\pos(192,108)}Stats Screen", style="Sign"),
+        pysubs2.SSAEvent(start=5000, end=6500, text="Look at that.", style="Default"),
+    ]
+
+    snapped = snap_whisper_cues_to_en(cues, en_events)
+    assert snapped == 1
+    # Phải bắt theo câu thoại Default [5000, 6500], không được bắt theo Sign [5000, 20000]
+    assert cues[0].start == 5000
+    assert cues[0].end == 6500
+    assert cues[0].en == "Look at that."
+
+
+def test_parse_and_align_whisper_auto_detection(tmp_path):
+    # Test tự động kích hoạt Auto-Align khi tên file chứa 'whisper'
+    whisper_file = tmp_path / "sample.whisper_ja.srt"
+    en_file = tmp_path / "sample.en.ass"
+
+    w_ssa = pysubs2.SSAFile()
+    w_ssa.events.append(pysubs2.SSAEvent(start=1250, end=2750, text="こんにちは"))
+    w_ssa.save(str(whisper_file))
+
+    en_ssa = pysubs2.SSAFile()
+    en_ssa.events.append(pysubs2.SSAEvent(start=1000, end=3000, text="Hello there.", style="Default"))
+    en_ssa.save(str(en_file))
+
+    # Với file whisper, timestamps tự động được snap theo EN
+    cues, _, _ = parse_and_align_subtitles(str(whisper_file), str(en_file), auto_align_whisper_to_en=True)
+    assert len(cues) == 1
+    assert cues[0].start == 1000
+    assert cues[0].end == 3000
+
+    # Với file studio JA thông thường (không có 'whisper'), start time giữ nguyên gốc
+    studio_ja_file = tmp_path / "sample.ja.srt"
+    w_ssa.save(str(studio_ja_file))
+    cues_studio, _, _ = parse_and_align_subtitles(str(studio_ja_file), str(en_file), auto_align_whisper_to_en=True)
+    assert cues_studio[0].start == 1250  # Giữ nguyên mốc phòng thu gốc của tiếng Nhật
+
+

@@ -327,6 +327,18 @@ def build_arg_parser():
         help="Tắt cơ chế tự động bù lệch thời gian phụ đề trong hàng đợi"
     )
     parser.add_argument(
+        "--auto-align-en",
+        action="store_true",
+        default=True,
+        help="Tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu (Mặc định: Bật)"
+    )
+    parser.add_argument(
+        "--no-auto-align-en",
+        dest="auto_align_en",
+        action="store_false",
+        help="Tắt tính năng tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu"
+    )
+    parser.add_argument(
         "--no-embed",
         action="store_true",
         default=False,
@@ -655,6 +667,7 @@ def main():
             require_approved_cast=False,
             allow_latest_alias=False,
             subs_quality=getattr(args, "subs_quality", "normal"),
+            auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
         )
         base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
         use_auto_offset = bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False
@@ -973,6 +986,8 @@ def main():
                 sub_cmd.append("--subs-upgrade")
             if getattr(args, "no_embed", False):
                 sub_cmd.append("--no-embed")
+            if not getattr(args, "auto_align_en", True):
+                sub_cmd.append("--no-auto-align-en")
 
             # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi / tập đơn lẻ:
             manual_offset_applied = False

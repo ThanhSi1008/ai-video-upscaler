@@ -171,6 +171,7 @@ def run(
     no_cascade: bool = typer.Option(False, "--no-cascade", help="Tắt phân hệ Smart Cloud Cascade Repair pass (Stage P2)"),
     cache_db: Optional[Path] = typer.Option(None, "--cache-db", help="File SQLite cache riêng biệt phục vụ thí nghiệm đo lường"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
+    auto_align_en: bool = typer.Option(True, "--auto-align-en/--no-auto-align-en", help="Tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu (Mặc định: Bật)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
@@ -195,6 +196,7 @@ def run(
         batch_size=batch_size,
         subs_quality=subs_quality,
         cache_db_path=cache_db,
+        auto_align_whisper_to_en=auto_align_en,
     )
 
     try:

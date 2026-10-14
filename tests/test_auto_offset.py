@@ -69,3 +69,16 @@ def test_queue_auto_offset_cli_flags():
     assert args3.sub_offset_ms == -11154
     assert args3.sub_offset_target == "b.mkv"
 
+
+def test_auto_align_en_cli_flags():
+    from upscale import build_arg_parser
+    parser = build_arg_parser()
+
+    # Mặc định auto_align_en là True
+    args_default = parser.parse_args(["video.mkv"])
+    assert args_default.auto_align_en is True
+
+    # Cờ tắt chủ động
+    args_disabled = parser.parse_args(["video.mkv", "--no-auto-align-en"])
+    assert args_disabled.auto_align_en is False
+
