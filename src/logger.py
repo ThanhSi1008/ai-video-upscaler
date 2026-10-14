@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from src.config import LOGS_DIR
+from src.config import LOGS_DIR, HEVC_ENCODER
 
 
 def format_time(seconds: float) -> str:
@@ -134,7 +134,7 @@ class RunLogger:
             f"🧠 AI Engine:      {info['model']} (NCNN Vulkan / Metal API 2x Anime)",
             f"🖼️  Định dạng đệm:  {info['frame_format'].upper()} (Lossless RGB24)",
             f"💾 Bộ nhớ đệm:     {info['storage_info']}",
-            f"🎞️  Mã hóa video:   hevc_videotoolbox (10-bit Main 10 @ {info['bitrate']}, BT.709 Limited)",
+            f"🎞️  Mã hóa video:   {HEVC_ENCODER} (10-bit Main 10 @ {info['bitrate']}, BT.709 Limited)",
             f"🔊 Streams gốc:    {info['audio_count']} Audio, {info['sub_count']} Subtitles, {info['attach_count']} Fonts, {info['chap_count']} Chapters (100% Stream Copy)",
             f"🎯 File xuất:      {info['output_path']}",
             f"📝 File log:       logs/{self.log_filename} (Symlink: logs/latest.log)",
