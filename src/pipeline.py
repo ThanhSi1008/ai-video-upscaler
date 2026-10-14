@@ -326,7 +326,7 @@ def run_upscale_pipeline(
                     to_console=True
                 )
 
-            logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU ({get_device_name()})...", to_console=True)
+            logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU ({DEVICE_NAME})...", to_console=True)
             print()
 
             # -----------------------------------------------------------------
