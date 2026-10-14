@@ -30,7 +30,7 @@
 * **Đo sai số độc lập 5 frame chuẩn:**
   * **Spandrel CPU FP32 vs Reference:** Sai lệch tuyệt đối = `0.0` (PSNR đạt $\infty$ / 999 dB).
   * **PyTorch MPS FP16 vs Reference:** PSNR đạt **`75.74 – 76.70 dB`** (vượt xa ngưỡng an toàn $\ge 45\text{ dB}$); max float diff = $0.00102 – 0.00162$ (sai số làm tròn chuẩn FP16 của Apple Silicon); $|\Delta Y| \le 0.0114/255$.
-* **Stream Copy trên BD thật (Fate Apocrypha E02 - 34.213 frames):** Phân đoạn thành công 177 segments theo đúng ranh giới GOP nguồn, khớp bit-exact **34.213 / 34.213 frames (+0 frame)**. Đã trích xuất mẫu chuẩn 1 phút [sample_1min_bd_420.mkv](file:///Users/xis108/Desktop/upscale/samples/sample_1min_bd_420.mkv) (1.439 frames, GOP 24, YUV420p).
+* **Stream Copy trên BD thật (Fate Apocrypha E02 - 34.213 frames):** Phân đoạn thành công 177 segments theo đúng ranh giới GOP nguồn, khớp bit-exact **34.213 / 34.213 frames (+0 frame)**. Đã trích xuất mẫu chuẩn 1 phút [sample_1min_bd_420.mkv](../samples/sample_1min_bd_420.mkv) (1.439 frames, GOP 24, YUV420p).
 
 ### B. Hiệu chuẩn nhiễu & Phân tích nguyên nhân tỷ lệ 88.7% / 76.3% (Phần B)
 * **Thực nghiệm B1 trên frame tĩnh (MAE < 0.3):**
@@ -66,7 +66,7 @@
 ## 3. NHỮNG GÌ NGƯỜI DÙNG ĐÃ NGHIỆM THU THỰC TẾ (User Blind Sensory Validation)
 
 ### A. Quá trình kiểm định mù (Blind Test Protocol)
-* Đã xuất xưởng gói mù tại `/Users/xis108/Documents/BDModelTest/PACK_DEDUP/` gồm:
+* Đã xuất xưởng gói mù tại thư mục nghiệm thu `PACK_DEDUP/` gồm:
   * 4 clip 4K 1 phút: `Clip_A.mkv`, `Clip_B.mkv`, `Clip_C.mkv`, `Clip_D.mkv`.
   * 12 clip trích xuất 10s: Cảnh camera zoom từ từ (`01_zoom10s`), cảnh lia máy (`02_pan10s`), cảnh hành động dồn dập (`03_action10s`).
   * Khóa giải mã được niêm phong bảo mật tại `~/bd_model_test/.key/dedup_key.json` (chmod 600).

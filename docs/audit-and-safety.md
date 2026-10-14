@@ -1,7 +1,7 @@
 # AUDIT-AND-SAFETY.MD — Kiểm Định Toàn Vẹn, Output Sanity Guard & Vận Hành An Toàn
 
 > **Chuyên đề phân hệ kiểm định chất lượng xuất xưởng, chốt chặn an toàn và tự động dọn dẹp.**  
-> **Tham chiếu chính:** [AGENTS.md](file:///Users/xis108/Desktop/upscale/AGENTS.md) | **Đo đạc thực nghiệm:** [docs/engineering-log.md](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md)
+> **Tham chiếu chính:** [AGENTS.md](../AGENTS.md) | **Đo đạc thực nghiệm:** [docs/engineering-log.md](engineering-log.md)
 
 ---
 
@@ -9,15 +9,15 @@
 
 | File mã nguồn | Vai trò & Trách nhiệm chính |
 | :--- | :--- |
-| [`src/output_sanity.py`](file:///Users/xis108/Desktop/upscale/src/output_sanity.py) | Output Sanity Guard: Chốt chặn kiểm định độ sáng $|\Delta Y| \le 6/255$ và tương quan $\ge 0.98$, chống video đen/mờ |
-| [`src/mux_audit.py`](file:///Users/xis108/Desktop/upscale/src/mux_audit.py) | Stream Copy Integrity Audit: Đối soát bit-exact audio, sub, font đính kèm và tổng số khung hình video |
-| [`src/cleanup.py`](file:///Users/xis108/Desktop/upscale/src/cleanup.py) | Auto Cleanup: Dọn sạch `.temp_<basename>` (thu hồi ~6.6GB/tập) và gom file báo cáo vào thư mục con `audit/` |
-| [`src/preflight.py`](file:///Users/xis108/Desktop/upscale/src/preflight.py) | Preflight Checks: Kiểm tra nguồn sạc AC, dung lượng đĩa trống, Caffeinate chống sleep máy, thông báo macOS |
-| [`src/night_report.py`](file:///Users/xis108/Desktop/upscale/src/night_report.py) | Night Telemetry Reporter: Tổng hợp số đo ca đêm, phân tích GPU active, tỷ lệ dedup và xuất báo cáo Markdown |
+| [`src/output_sanity.py`](../src/output_sanity.py) | Output Sanity Guard: Chốt chặn kiểm định độ sáng $|\Delta Y| \le 6/255$ và tương quan $\ge 0.98$, chống video đen/mờ |
+| [`src/mux_audit.py`](../src/mux_audit.py) | Stream Copy Integrity Audit: Đối soát bit-exact audio, sub, font đính kèm và tổng số khung hình video |
+| [`src/cleanup.py`](../src/cleanup.py) | Auto Cleanup: Dọn sạch `.temp_<basename>` (thu hồi ~6.6GB/tập) và gom file báo cáo vào thư mục con `audit/` |
+| [`src/preflight.py`](../src/preflight.py) | Preflight Checks: Kiểm tra nguồn sạc AC, dung lượng đĩa trống, Caffeinate chống sleep máy, thông báo macOS |
+| [`src/night_report.py`](../src/night_report.py) | Night Telemetry Reporter: Tổng hợp số đo ca đêm, phân tích GPU active, tỷ lệ dedup và xuất báo cáo Markdown |
 
 ---
 
-## 2. Output Sanity Guard ([`src/output_sanity.py`](file:///Users/xis108/Desktop/upscale/src/output_sanity.py))
+## 2. Output Sanity Guard ([`src/output_sanity.py`](../src/output_sanity.py))
 
 ### A. Vấn Đề Lịch Sử Cần Triệt Tiêu
 Trong các thử nghiệm model trước đây (AnimeJaNai thiếu phép cộng residual nearest $\times 2$), video 4K đầu ra bị đen toàn bộ (luma chỉ đạt 0.04–0.35) nhưng pipeline vẫn chạy hết và xuất xưởng file hỏng.
@@ -40,7 +40,7 @@ Hàm `verify_output_sanity` được kích hoạt tự động:
 
 ---
 
-## 3. Cổng Kiểm Toán Xuất Xưởng Mux Audit ([`src/mux_audit.py`](file:///Users/xis108/Desktop/upscale/src/mux_audit.py))
+## 3. Cổng Kiểm Toán Xuất Xưởng Mux Audit ([`src/mux_audit.py`](../src/mux_audit.py))
 
 Sau khi mux xong file video 4K thành phẩm (`.mkv`), hàm `verify_mux_integrity` quét toàn bộ container:
 1. **Khớp Số Lượng Khung Hình Video (`video_frame_count`):**
@@ -58,7 +58,7 @@ Sau khi mux xong file video 4K thành phẩm (`.mkv`), hàm `verify_mux_integrit
 
 ---
 
-## 4. Tự Động Dọn Dẹp & Thu Hồi Ổ Cứng SSD ([`src/cleanup.py`](file:///Users/xis108/Desktop/upscale/src/cleanup.py))
+## 4. Tự Động Dọn Dẹp & Thu Hồi Ổ Cứng SSD ([`src/cleanup.py`](../src/cleanup.py))
 
 Kích hoạt tự động ngay sau khi Mux Audit xác nhận `PASS`:
 1. **Xóa Sạch Thư Mục Tạm `.temp_<basename>`:**
@@ -75,7 +75,7 @@ Kích hoạt tự động ngay sau khi Mux Audit xác nhận `PASS`:
 
 ## 5. Cổng Backpressure & Chống Lỗi Tràn Đĩa ENOSPC
 
-Trong [`src/pipeline.py`](file:///Users/xis108/Desktop/upscale/src/pipeline.py):
+Trong [`src/pipeline.py`](../src/pipeline.py):
 * **Sàn An Toàn Kích Thước PNG:** `DEFAULT_PNG_UNIT_SIZE_MB = 16.0 MB` (đo đạc thực tế frame 4K phức tạp đạt tối đa 13.77 MB).
 * **Công thức Ước Tính Dung Lượng Cần Thiết:**
   $$\text{need} = n_{unique} \times \max(\text{recent}, \; P_{95}, \; 16.0) \times 1.2$$
@@ -92,5 +92,5 @@ Trong [`src/pipeline.py`](file:///Users/xis108/Desktop/upscale/src/pipeline.py):
    - Chỉ duy nhất 1 tiến trình infer GPU Metal được phép hoạt động tại một thời điểm.
    - Giải phóng khóa GPU sau khi hoàn tất bước AI SR của video, cho phép phân hệ dịch phụ đề (subtrans) có thể sử dụng tài nguyên mà không gây xung đột.
 2. **Chống Sleep Máy Tuyệt Đối (`CaffeinateContext`):**
-   - [`src/preflight.py`](file:///Users/xis108/Desktop/upscale/src/preflight.py) khởi chạy `caffeinate -dimsu` trong Context Manager.
+   - [`src/preflight.py`](../src/preflight.py) khởi chạy `caffeinate -dimsu` trong Context Manager (trên Windows sử dụng `SetThreadExecutionState`).
    - Luôn nằm trong khối `try...finally` để thu hồi sạch sẽ tiến trình con khi bị ngắt bởi `SIGINT` (`Ctrl+C`).

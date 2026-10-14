@@ -14,9 +14,14 @@ import os
 import re
 import shutil
 
-BASE_DIR = "/Users/xis108/Documents/RawSources"
+BASE_DIR = os.environ.get("RAW_SOURCES_DIR", os.path.expanduser("~/Documents/RawSources"))
 
 def organize():
+    if not os.path.exists(BASE_DIR):
+        print(f"⚠️ Thư mục nguồn BASE_DIR không tồn tại: {BASE_DIR}")
+        print("💡 Vui lòng thiết lập biến môi trường RAW_SOURCES_DIR hoặc tạo thư mục tương ứng.")
+        return
+
     stats = {}
     copied = []
 

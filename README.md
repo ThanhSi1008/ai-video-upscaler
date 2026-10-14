@@ -14,7 +14,7 @@ Sử dụng trực tiếp nhân GPU chuyên dụng kết hợp bộ mã hóa ph�
 
 * **Mô hình AI:** `realesr-animevideov3` chuyên dụng cho video anime 2x (khử nhiễu nén, giữ nét vẽ tự nhiên, không bị hiệu ứng viền sáp).
 * **Mã hóa phần cứng 10-bit:**
-  * **Windows (NVIDIA):** `hevc_nvenc` Main 10 Profile (`p010le`, Preset `p5`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
+  * **Windows (NVIDIA):** `hevc_nvenc` Main 10 Profile (`p010le`, Preset `p6`, Multipass `qres`, Lookahead `24`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
   * **macOS (Apple Silicon):** `hevc_videotoolbox` Main 10 Profile (`p010le`, Spatial AQ, Tag `hvc1`, BT.709 Limited Range TV).
 * **Quản lý bộ nhớ đệm khung hình:**
   * **macOS:** Sử dụng **RAM Disk ảo HFS+** đệm khung hình trung gian (0 byte ảnh tĩnh ghi xuống SSD).
@@ -87,7 +87,7 @@ python upscale.py --queue ep1.mkv ep2.mkv -o out/
 ### Lệnh Vận Hành Trên macOS (Terminal):
 ```bash
 # 1. Chạy nhanh bằng shell launcher (mặc định phân đoạn 8s + RAM Disk + Caffeinate):
-./upscale.sh samples/sample_3min.mkv
+./scripts/upscale.sh samples/sample_3min.mkv
 
 # 2. Xem trước nhanh 10 giây:
 python3 upscale.py samples/sample_3min.mkv --preview 10
@@ -101,10 +101,17 @@ python3 upscale.py samples/sample_3min.mkv -b 28M -s 8 -o ~/Documents/Upscaled/o
 * `-m`, `--model`: Mô hình AI (Mặc định: tự động chọn qua `shows.yaml` hoặc mặc định `animevideov3`).
 * `--engine`: Động cơ suy luận (`cuda` cho NVIDIA GPU, `mps` cho Apple Silicon Metal, `ncnn` cho NCNN Vulkan, hoặc `cpu`; mặc định: tự động nhận diện).
 * `--precision`: Độ chính xác suy luận (`fp16` hoặc `fp32`, mặc định: `fp16`).
+* `--batch-size`: Batch size cho AI Inference GPU (Mặc định: `6` trên RTX 3060 12GB).
 * `--list-models`: Liệt kê các mô hình đã đăng ký trong `models/models.yaml`.
 * `--force`: Bắt buộc chạy và ghi đè/xóa phân đoạn cũ nếu phát hiện xung đột mô hình.
 * `--subs-after-upscale`: Tự động chạy dịch phụ đề sau khi toàn bộ hàng đợi upscale hoàn tất (Mặc định: Bật).
 * `--no-subs`: Tắt giai đoạn dịch phụ đề sau upscale.
+* `--subs-only`: Chỉ trích xuất và dịch phụ đề, bỏ qua giai đoạn upscale video.
+* `--subs-upgrade`: Nâng cấp phụ đề tiếng Việt hiện có lên bản dịch chất lượng cao (Gemini).
+* `--subs-quality {fast,high}`: Chất lượng dịch phụ đề (`fast`: `gemini-3.5-flash-lite` 500 RPD mặc định; `high`: `gemini-3.8-flash`).
+* `--auto-align-en` / `--no-auto-align-en`: Tự động ghim mốc thời gian của Whisper / tiếng Nhật theo track tiếng Anh phòng thu (Mặc định: Bật).
+* `--auto-offset` / `--no-auto-offset`: Tự động nhận diện và bù trừ độ lệch thời gian (time-offset) giữa track JA và EN.
+* `--sub-offset-ms [ms]`: Bù trừ độ lệch thời gian phụ đề thủ công theo mili-giây.
 * `--queue`: Danh sách nhiều tập video cần chạy tuần tự trong ca qua đêm.
 * `--deadline HH:MM`: Mốc hạn chót dừng hàng đợi an toàn nếu tập kế tiếp dự kiến không kịp.
 * `--allow-partial`: Cho phép tập không kịp deadline chạy đến hạn chót, dừng sạch ở ranh giới chunk và bảo toàn segment để chạy tiếp lần sau.
@@ -145,10 +152,11 @@ Phân hệ dịch phụ đề anime chuyên sâu bằng mô hình ngôn ngữ l�
 .\subtrans.bat samples/sample_sword_3min.mkv -o out/
 ```
 
-* **100% Cloud API:** Chạy bằng Gemini Flash-Lite / Flash với Schema "Suy luận trước, dịch sau".
+* **100% Cloud API:** Chạy bằng Gemini Flash-Lite (`gemini-3.5-flash-lite`, 500 RPD/key) / Flash (`gemini-3.8-flash`) với Schema "Suy luận trước, dịch sau".
 * **Đồng bộ UTF-8:** Hiển thị mượt mà trên PowerShell / CMD, không lỗi charmap.
 * **Cơ chế Whisper STT Fallback:** Tự động tạo phụ đề `.ja.srt` nếu video gốc thiếu track tiếng Nhật.
-* **Luân phiên Round-Robin 3 Key:** Phân bổ đều request để không bị nghẽn RPM.
+* **Auto-Align Subtitle Timestamps:** Tự động ghim mốc thời gian của Whisper / tiếng Nhật theo track tiếng Anh phòng thu (`--auto-align-en`).
+* **Luân phiên Round-Robin 3 Key:** Phân bổ đều request để không bao giờ bị nghẽn RPM.
 * **Đồng nhất xưng hô:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; giữ nguyên tên Romaji khi gọi tên.
 * **Linter V1 & Dual Dialogue:** Tự động gộp câu nói đồng thời, loại bỏ flicker, kiểm tra tốc độ đọc CPS và chống rò rỉ CJK.
 

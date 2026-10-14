@@ -14,7 +14,7 @@
 * **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows / macOS)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
 * **Tôn chỉ Pareto:** Chất lượng hình ảnh cân bằng với thời gian. Không hy sinh nét vẽ anime lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
-  * Trên RTX 3060 (PyTorch CUDA FP16 Batch Inference `batch_size=4` đạt 4.31 fps, ~6.75–7.20 fps hiệu dụng với Dedup): **~5–6 tập mỗi đêm** (~1.5 giờ/tập với ~17.000 unique frames).
+  * Trên RTX 3060 (PyTorch CUDA FP16 Batch Inference `batch_size=6` đạt ~4.8–5.2 fps suy luận thuần, ~10–12+ fps hiệu dụng với Dedup & `cv2.imwrite`): **~6–8 tập mỗi đêm** (~45 phút – 1 giờ/tập với ~17.000 unique frames).
   * Trên M3 Pro (PyTorch MPS FP16 ~1.68 fps): **~2 tập mỗi đêm** (~3 giờ/tập).
 
 ---
@@ -44,7 +44,7 @@ pytest
 **Trên macOS (Terminal):**
 ```bash
 # Chạy nhanh bằng shell launcher:
-./upscale.sh path/to/source.mkv -o ~/Documents/Upscaled/
+./scripts/upscale.sh path/to/source.mkv -o ~/Documents/Upscaled/
 
 # Xem trước nhanh 10 giây:
 python3 upscale.py path/to/source.mkv --preview 10
@@ -57,6 +57,12 @@ python3 upscale.py path/to/source.mkv --preview 10
 | `--queue` | `None` | Danh sách các file video chạy nối tiếp qua đêm |
 | `--engine` | Auto (`cuda` / `mps` / `cpu`) | Engine suy luận: `cuda` (NVIDIA CUDA FP16), `mps` (Apple Metal), `ncnn` (Vulkan) hoặc `cpu` |
 | `--model` | `animevideov3` | Model Super-Resolution đăng ký trong `models/models.yaml` |
+| `--batch-size` | `6` (CUDA RTX 3060) | Kích thước batch cho AI Inference GPU (tối ưu hóa Tensor Cores) |
+| `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite` 500 RPD) hoặc `high` (`gemini-3.8-flash`) |
+| `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua giai đoạn video upscale |
+| `--subs-upgrade` | `False` | Nâng cấp phụ đề tiếng Việt hiện có lên bản dịch chất lượng cao (Gemini) |
+| `--auto-align-en` | `True` | Ghim mốc thời gian phụ đề Whisper/tiếng Nhật theo track tiếng Anh phòng thu |
+| `--no-auto-align-en` | `False` | Tắt tính năng tự động ghim mốc thời gian phụ đề theo tiếng Anh |
 | `--allow-partial` | `False` | Cho phép dừng tập an toàn ở ranh giới chunk 8s khi chạm deadline ca đêm |
 | `--auto-offset` | Bật trong `--queue` | Tự động đo và bù độ lệch thời gian phụ đề tiếng Nhật - Anh |
 | `--no-auto-offset` | `False` | Ép tắt tính năng auto-offset trong hàng đợi |
@@ -76,8 +82,8 @@ python3 upscale.py path/to/source.mkv --preview 10
 ai-video-upscaler/
 ├── upscale.py              # CLI Entrypoint (Argparse, UTF-8 console, Queue orchestrator, Checkpoint Resume)
 ├── upscale.bat             # Windows batch launcher (One-click chạy trên Windows)
-├── upscale.sh              # Shell launcher native cho macOS/Linux
 ├── subtrans.py             # Subtitle Translation CLI Runner
+├── subtrans.bat            # Windows batch launcher cho Subtrans (UTF-8, Multi-Key Round-Robin)
 ├── shows.yaml              # Ánh xạ mô hình SR theo từng bộ anime (người dùng cấu hình)
 ├── pytest.ini              # Cấu hình Pytest (testpaths = tests subtrans/tests)
 ├── requirements.txt        # Danh sách thư viện Python phụ thuộc
@@ -86,6 +92,7 @@ ai-video-upscaler/
 ├── AGENTS.md               # Kim chỉ nam kiến trúc & các bất biến kỹ thuật
 ├── src/                    # Pipeline phóng to video (CUDA/MPS, NVENC/VideoToolbox, FFmpeg)
 │   ├── config.py           # Single source of truth: Auto-detect platform, encoder (hevc_nvenc/videotoolbox), params
+│   ├── subtitles.py        # Trích xuất phụ đề rời/container, Whisper STT fallback
 │   ├── ramdisk.py          # RAMDisk Context Manager: macOS HFS+ RAM Disk ảo; Windows fallback/rolling cleanup
 │   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (NVENC/VideoToolbox BT.709 10-bit, Mux, Embed Subs)
 │   ├── mps_engine.py       # Multi-platform PyTorch Engine: CUDA FP16/FP32, Apple Metal MPS, CPU
@@ -101,12 +108,17 @@ ai-video-upscaler/
 │   ├── cleanup.py          # Auto-cleanup: Dọn dẹp thư mục tạm (.temp_*), symlinks & gom gọn audit/
 │   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
 ├── subtrans/               # Engine dịch thuật phụ đề (xem subtrans/AGENTS.md)
+├── benchmarks/             # Kịch bản đo lường hiệu năng, Soak Tests & Blind AB Evaluations
+│   ├── upscale/            # Benchmarks hiệu năng GPU, VRAM, tốc độ suy luận, Dedup
+│   ├── subtrans/           # Đánh giá độ ổn định xưng hô (Golden Pronoun Evaluations)
+│   └── research/           # Kịch bản hiệu chuẩn và nghiên cứu chuyên sâu
+├── scripts/                # Tiện ích vận hành (organize subs, soak monitor, upscale.sh)
 ├── bin/realesrgan/         # Universal Mach-O binary & NCNN models (.param / .bin)
 ├── models/                 # Super-Resolution models registry (models.yaml)
 ├── glossaries/             # Bảng thuật ngữ riêng từng bộ anime (glossary.<anime>.yaml)
 ├── samples/                # Video mẫu phục vụ kiểm thử
 ├── test_frames/            # 3 frame ảnh mẫu chuẩn (Action, Close-up, Scenery)
-├── tests/                  # Bộ kiểm thử tự động, benchmark hiệu năng, soak test, chaos test
+├── tests/                  # Bộ kiểm thử tự động (Unit & Integration Tests)
 ├── docs/                   # Tài liệu chuyên sâu: video-pipeline.md, dedup-architecture.md, audit-and-safety.md...
 └── logs/                   # Log chi tiết có cấu trúc & báo cáo tổng kết đêm
 ```
@@ -129,7 +141,7 @@ ai-video-upscaler/
    * Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full -> YUV Limited `p010le`).
    * Metadata gắn cờ: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
 4. **Mã hóa phần cứng 10-bit theo nền tảng:**
-   * **Windows:** Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng pixel `p010le`, preset `p5` (chất lượng cao) và `spatial-aq 1`.
+   * **Windows:** Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng pixel `p010le`, preset `p6` (chất lượng cao), multipass `qres`, lookahead `24` và `spatial-aq 1`.
    * **macOS:** Bắt buộc dùng `hevc_videotoolbox` với profile `main10`, định dạng pixel `p010le`, spatial AQ.
 5. **Vòng đời an toàn (Process Lifecycle & Anti-Sleep):**
    * **Windows:** Sử dụng Win32 API native `SetThreadExecutionState` ngăn hệ thống đi vào chế độ ngủ (sleep/suspend) trong suốt quá trình chạy.
@@ -163,12 +175,12 @@ ai-video-upscaler/
 ### A. Phân Hệ Phóng To Video AI & GPU Engine — [docs/video-pipeline.md](docs/video-pipeline.md)
 * **Mô hình Super-Resolution:** Chọn `realesr-animevideov3` (kiến trúc mạng `SRVGGNetCompact` 4x kết hợp Bicubic 0.5 để xuất 2x).
 * **Động cơ suy luận chính:**
-  * **Windows:** PyTorch CUDA FP16 Native (`src/mps_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Tốc độ thực nghiệm trên RTX 3060 12GB: **2.2 – 2.5 fps** (single frame, VRAM ~1.1GB).
+  * **Windows:** PyTorch CUDA FP16 Native (`src/mps_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=6` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
   * **macOS:** PyTorch MPS FP16 Native (1.68 fps sustained soak).
   * NCNN Vulkan đóng vai trò fallback.
 * **Đính chính mô hình AnimeJaNai:** Thêm phép cộng nearest $\times 2$ residual tại tag `janai-fix` (`F.interpolate(x, scale_factor=2.0, mode='nearest')`), khớp bit-exact 0.0 với spandrel CPU chuẩn (PSNR 75–158 dB).
 * **Mã hóa phần cứng 10-bit:**
-  * Windows: `hevc_nvenc` Main 10 Profile (`p010le`, preset `p5`, spatial AQ).
+  * Windows: `hevc_nvenc` Main 10 Profile (`p010le`, preset `p6`, multipass `qres`, lookahead `24`, spatial AQ).
   * macOS: `hevc_videotoolbox` Main 10 Profile (`p010le`, spatial AQ).
 * **Màu sắc & Stream Copy:** Ma trận BT.709 hai chiều (Limited YUV $\leftrightarrow$ Full RGB24), gắn cờ `-tag:v hvc1`, cờ mux bắt buộc `-max_interleave_delta 0` copy nguyên bản audio, subtitle, fonts và chapters.
 
@@ -179,7 +191,8 @@ ai-video-upscaler/
 * **Tái tạo khung hình 4K (Re-expansion):** FFmpeg Concat Demuxer theo thời lượng `runs` đại diện + `fps=24000/1001` (triệt tiêu toàn bộ chi phí đĩa của hardlinks).
 
 ### C. Phân Hệ Dịch Thuật Phụ Đề Subtrans — [subtrans/AGENTS.md](subtrans/AGENTS.md)
-* **100% Cloud API:** Chạy 100% Gemini Flash-Lite / Flash qua Google GenAI SDK.
+* **100% Cloud API & Phân Phối Tải 3 Key:** Chạy 100% Gemini qua Google GenAI SDK với cơ chế luân phiên Round-Robin 3 API key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`) chống nghẽn RPM. Mặc định dùng `gemini-3.5-flash-lite` (500 RPD/key, tốc độ cực nhanh); chế độ chất lượng cao `--subs-quality high` dùng `gemini-3.8-flash`.
+* **Cơ Chế Whisper STT Fallback & Auto-Align:** Tự động dùng Whisper trích xuất tiếng Nhật khi video thiếu track JA (`src/subtitles.py`), ghim chuẩn xác mốc thời gian theo track tiếng Anh phòng thu qua 3-pass snapping (`--auto-align-en`).
 * **Đồng nhất xưng hô & Bảo tồn Romaji:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; giữ nguyên tên Romaji khi đối thoại gọi tên.
 * **Hiển thị tối ưu & CC Splitting:** Tự động gộp 2 người nói cùng lúc thành Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`), gộp câu ngắn (<1.2s), thời lượng đọc tối thiểu $\ge 1.2\text{s} - 1.4\text{s}$, khoảng nghỉ 40ms chống flicker.
 * **Smart Cloud Cascade & Subtitle RAG:** Điểm khó $S(cue)$, Draft Pass Lite kết hợp Repair Pass Flash; kho tri thức SQLite `.cache/knowledge.db`.

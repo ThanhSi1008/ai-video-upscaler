@@ -1,7 +1,7 @@
 # Engineering Log — Nhật Ký Thực Nghiệm & Đo Đạc Hiệu Năng
 
 > **Tài liệu lưu trữ toàn bộ số đo thực nghiệm, benchmark đối đầu, soak test và lịch sử kiểm định của dự án.**
-> Tham chiếu từ: [AGENTS.md](file:///Users/xis108/Desktop/upscale/AGENTS.md) và [subtrans/AGENTS.md](file:///Users/xis108/Desktop/upscale/subtrans/AGENTS.md).
+> Tham chiếu từ: [AGENTS.md](../AGENTS.md) và [subtrans/AGENTS.md](../subtrans/AGENTS.md).
 
 ---
 

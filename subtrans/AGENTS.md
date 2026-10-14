@@ -1,7 +1,7 @@
 # Subtitle Translation Engine (subtrans) — AI Agent Guidelines
 
 > **Chỉ dẫn kiến trúc và quy chuẩn phát triển cho phân hệ dịch phụ đề anime (`subtrans/`).**
-> Tham chiếu từ: [AGENTS.md](file:///Users/xis108/Desktop/upscale/AGENTS.md) | Đo đạc: [docs/engineering-log.md](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md).
+> Tham chiếu từ: [AGENTS.md](../AGENTS.md) | Đo đạc: [docs/engineering-log.md](../docs/engineering-log.md).
 
 ---
 
@@ -20,6 +20,9 @@
 * **Bảo tồn tên riêng Romaji khi xưng hô gọi tên (Vocative Name Retention):**
   * Khi lời thoại tiếng Nhật gọi tên nhân vật, phụ đề tiếng Việt phải giữ nguyên tên Romaji (e.g. "Fran, cẩn thận!", "Jean, chạy đi!", "Cảm ơn chị Nell", "Reirin, chuyện gì vậy?").
   * Có thể kèm từ xưng hô thân mật/kính ngữ tự nhiên ("chị Nell", "bác Garrus"), nhưng **tên riêng Romaji bắt buộc phải xuất hiện**, không được triệt tiêu thành các đại từ chung chung ("cậu", "anh", "em", "mày").
+* **Ghim mốc thời gian tự động theo phụ đề tiếng Anh phòng thu (Auto-Align Subtitle Timestamps):**
+  * Tự động bắt và ghim mốc thời gian của track tiếng Nhật hoặc Whisper theo track tiếng Anh chuẩn phòng thu (Crunchyroll/Netflix) qua cờ `--auto-align-en` (mặc định bật).
+  * Thuật toán 3-pass snapping trong `subtrans/parser.py`: Direct Containment (câu JA nằm trọn trong câu EN), Max Overlap >= 60%, và Nearest Neighbor (cửa sổ tìm kiếm ±300ms).
 * **Tối ưu hóa hiển thị phụ đề đa thoại & chống trôi chữ (Dual Dialogue & Playback Optimization):**
   * Tự động phát hiện 2 người nói cùng lúc / gần cùng lúc (start chênh <= 800ms, overlap >= 400ms) để gộp thành phụ đề song song 2 dòng (`- Lời 1\n- Lời 2`) kéo dài tối thiểu 2.2s.
   * Tự động gộp các mảnh câu liên tiếp nói quá nhanh (< 1.2s/mảnh) thành một câu liền mạch; bảo đảm thời lượng đọc tối thiểu (>= 1.2s - 1.4s) và khoảng nghỉ 40ms chống giật flicker trên IINA, mpv, VLC và Apple TV.
@@ -54,7 +57,7 @@ subtrans/
 ├── config.py / config.yaml # Cấu hình RPM, RPD, chuỗi model, batch size (mặc định 100)
 ├── cast_sheet.py           # Stage A: Khám phá nhân vật, đại từ xưng hô, xuất out/<name>.cast.yaml
 ├── models.py               # Pydantic models: Cue (với CoT metadata), GlossaryTerm, AddressRules, Glossary
-├── parser.py               # pysubs2: lọc OP/ED/Signs, gỡ tag ASS, align time overlap JA-EN (>=50%)
+├── parser.py               # pysubs2: lọc OP/ED/Signs, gỡ tag ASS, align time overlap JA-EN (>=50%), Auto-Align EN
 ├── gemini_backend.py       # Primary: Google GenAI SDK (Schema "Suy luận trước, dịch sau", RAG context, CoT)
 ├── throttle.py             # RateLimiter, Exponential Backoff + Jitter, phân loại lỗi 429
 ├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256 (hỗ trợ rag_hash và stage)
@@ -64,32 +67,35 @@ subtrans/
 └── report.py               # Stage C: Báo cáo QA audit Markdown (out/<name>.audit.md & --review-file)
 ```
 
-> **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.
-> **Schema "Suy luận trước, dịch sau":** `SubtitleOutputItem` đặt các trường `speaker`, `addressee`, `mode`, `en_conflict` lên TRƯỚC trường bản dịch `vi`, giúp mô hình giải quyết ngữ cảnh nhân vật và zero-pronouns trước khi sinh bản dịch tiếng Việt.
-> **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20 (trần cứng > 25), lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.
-> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 2000 RPD), tự động tính điểm độ khó $S(cue)$ (sau khi chạy auto-fix) và gom tối đa 20% số cue khó (trần ngân sách $\le 25$ cues/lần, $\le 2$ requests/tập) gửi vào Repair Pass của `gemini-3.8-flash`. Cổng Re-lint so sánh theo danh tính vi phạm `_ident`, chặn trôi dạt ngữ nghĩa và lệch chữ số.
-> **Lightweight RAG & Error Bank (P3):** Lưu trữ 4.144 câu song ngữ (`gold_units` có status `draft`, `reviewed`, `gold`) và 7 quy tắc bẫy lỗi (`error_bank`). Chỉ nạp `gold`/`reviewed` vào prompt, loại trừ tập đang đo (`exclude_episode`), cách ly cache nháp bằng `rag_hash`.
-
+> **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.  
+> **Schema "Suy luận trước, dịch sau":** `SubtitleOutputItem` đặt các trường `speaker`, `addressee`, `mode`, `en_conflict` lên TRƯỚC trường bản dịch `vi`, giúp mô hình giải quyết ngữ cảnh nhân vật và zero-pronouns trước khi sinh bản dịch tiếng Việt.  
+> **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20 (trần cứng > 25), lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.  
+> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 500 RPD/key), tự động tính điểm độ khó $S(cue)$ (sau khi chạy auto-fix) và gom tối đa 20% số cue khó gửi vào Repair Pass của `gemini-3.8-flash`. Cổng Re-lint so sánh theo danh tính vi phạm `_ident`, chặn trôi dạt ngữ nghĩa và lệch chữ số.  
+> **Lightweight RAG & Error Bank (P3):** Lưu trữ câu song ngữ (`gold_units` có status `draft`, `reviewed`, `gold`) và quy tắc bẫy lỗi (`error_bank`). Chỉ nạp `gold`/`reviewed` vào prompt, loại trừ tập đang đo (`exclude_episode`), cách ly cache nháp bằng `rag_hash`.
 
 ---
 
 ## 4. Chính Sách Quota & Chuỗi Fallback Gemini
 
 ### A. Chuỗi Model Cấu Hình
-* **Mặc định:** `gemini-3.8-flash`
-* **Fallback tự động:** `["gemini-3.7-flash", "gemini-3.6-flash"]`
-* **Lite model (cuối chuỗi Gemini):** `gemini-3.5-flash-lite`
-* **Quy tắc Thinking:** `thinking_budget=0` cho dòng 3.8/3.7/3.6; `thinking_level=MINIMAL` cho flash-lite.
+* **Mặc định (Chế độ Tiêu chuẩn / Fast):** `gemini-3.5-flash-lite` (500 RPD/key, tốc độ cực nhanh, ổn định không bị nghẽn 503).
+* **Chế độ Chất lượng cao (`--subs-quality high`):** `gemini-3.8-flash`.
+* **Fallback tự động:** `["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]`.
+* **Quy tắc Thinking:** `thinking_level=MINIMAL` cho dòng `gemini-3.5-flash-lite`; `thinking_budget=0` cho dòng 3.8/3.7/3.6.
 * **Cấm sử dụng:** Tuyệt đối không dùng dòng `gemini-2.*` cũ làm mặc định. Không dùng alias `gemini-flash-latest` nếu thiếu cờ `--allow-latest-alias`.
 
-### B. Phân Loại Lỗi 429 & Cơ Chế Chuyển Model
-1. **Lỗi 429 PerMinute (Rate Limit RPM) hoặc 503 (Spike tải tạm thời):**
+### B. Phân Phối Tải & Xử Lý Lỗi 429
+1. **Phân bổ Luân phiên Round-Robin 3 Key:**
+   * Tự động luân phiên đều các request giữa 3 API key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`) cấu hình trong `.env`, chống nghẽn RPM trong các tập anime có nhiều câu thoại dồn dập.
+2. **Lỗi 429 PerMinute (Rate Limit RPM) hoặc 503 (Spike tải tạm thời):**
    * Tạm dừng (pause) theo `retryDelay` hoặc exponential backoff + jitter (tối đa 5 lần thử lại).
    * **Bắt buộc retry trên CÙNG model** để bảo toàn tính nhất quán tuyệt đối của đại từ xưng hô toàn tập.
-2. **Lỗi 429 PerDay (Daily Quota RPD cạn kiệt ngày):**
-   * **Xoay vòng Key trước khi chuyển model (Multi-Key Rotation):** Nếu cấu hình nhiều key trong `.env` (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`), hệ thống tự động xoay sang key tiếp theo để tiếp tục dịch trên CÙNG model trước khi phải hạ cấp xuống model khác.
-   * Khi TẤT CẢ các keys đều cạn kiệt trên model đó: Ngay lập tức ghi DB đánh dấu model cạn kiệt cho tới mốc reset giờ Thái Bình Dương (00:00 PT = 14:00 VN) và **chuyển sang model kế tiếp trong chuỗi**.
-3. **Không dùng Model Local & Dừng Chạy Êm (Graceful Exit):**
+3. **Lỗi 429 PerDay (Daily Quota RPD cạn kiệt ngày):**
+   * **Xoay vòng Key trong nhóm:** Khi 1 key cạn hạn ngạch ngày, hệ thống tự động loại bỏ key đó và tiếp tục với các key còn lại.
+   * Khi TẤT CẢ các keys đều cạn kiệt trên model đó: Ghi DB đánh dấu model cạn kiệt cho tới mốc reset (00:00 PT = 14:00 VN) và **chuyển sang model kế tiếp trong chuỗi**.
+4. **Cơ Chế Dịch Dự Phòng Whisper (Speech-to-Text Fallback):**
+   * Nếu file video nguồn không có track tiếng Nhật (chỉ có audio tiếng Nhật và phụ đề tiếng Anh), hệ thống tự động kích hoạt Whisper để chuyển đổi âm thanh thành track `.ja.srt` tạm thời (`src/subtitles.py`), sau đó căn chỉnh khớp mốc thời gian qua `--auto-align-en` và tiến hành dịch EN+JA -> VI trọn vẹn.
+5. **Không dùng Model Local & Dừng Chạy Êm (Graceful Exit):**
    * **Tuyệt đối không dùng model local (Ollama / TranslateGemma):** Bỏ toàn bộ fallback cục bộ.
    * Khi TOÀN BỘ chuỗi Gemini cạn kiệt hạn mức ngày (RPD): Hệ thống tự động dừng êm (Graceful Exit), in rõ thời gian reset (14:00 giờ VN PDT hoặc 15:00 giờ VN PST sau ngày 1/11). Toàn bộ câu thoại đã dịch được bảo toàn an toàn trong cache SQLite để phiên chạy kế tiếp tiếp tục ngay lập tức mà không tiêu tốn lại bất kỳ request nào.
 
@@ -104,15 +110,18 @@ subtrans/
 ## 5. Lệnh CLI Cơ Bản
 
 ```bash
-# Kiểm tra môi trường, API keys và danh sách model khả dụng
-python3 subtrans.py check
+# Trên Windows (PowerShell / CMD sử dụng launcher tiện ích):
+.\subtrans.bat check                   # Kiểm tra sức khỏe kết nối & 3 API keys
+.\subtrans.bat models                  # Liệt kê danh sách Gemini models
+.\subtrans.bat path/to/ja.srt --en path/to/en.ass -o out/
 
-# Dịch một tập phụ đề đơn lẻ (tự động Stage A -> B -> C)
-python3 subtrans.py run path/to/ja.srt --en path/to/en.ass -o out/
+# Chạy trực tiếp qua Python CLI:
+python subtrans.py check
+python subtrans.py run path/to/ja.srt --en path/to/en.ass -o out/ --auto-align-en
 
-# Chạy thử nghiệm KHÔNG tốn quota API (Mock Dry-Run)
-python3 subtrans.py run path/to/ja.srt --en path/to/en.ass -o out/ --dry-run
+# Chạy thử nghiệm KHÔNG tốn quota API (Mock Dry-Run):
+python subtrans.py run path/to/ja.srt --en path/to/en.ass -o out/ --dry-run
 
-# Chạy test suite chuyên biệt của subtrans
-./venv/bin/pytest subtrans/tests/
+# Chạy test suite chuyên biệt của subtrans:
+pytest subtrans/tests/
 ```

@@ -1,7 +1,7 @@
 # DEDUP-ARCHITECTURE.MD — Kiến Trúc Deduplication Engine & Dòng Chảy Quang Học DIS
 
 > **Chuyên đề phân hệ loại bỏ trùng lặp khung hình (Deduplication Preflight) & Tái tạo khung hình 4K.**  
-> **Tham chiếu chính:** [AGENTS.md](file:///Users/xis108/Desktop/upscale/AGENTS.md) | **Đo đạc thực nghiệm:** [docs/engineering-log.md](file:///Users/xis108/Desktop/upscale/docs/engineering-log.md)
+> **Tham chiếu chính:** [AGENTS.md](../AGENTS.md) | **Đo đạc thực nghiệm:** [docs/engineering-log.md](engineering-log.md)
 
 ---
 
@@ -9,16 +9,16 @@
 
 | File mã nguồn | Vai trò & Trách nhiệm chính |
 | :--- | :--- |
-| [`src/dedup.py`](file:///Users/xis108/Desktop/upscale/src/dedup.py) | Engine Deduplication: Quét Preflight mpdecimate, DIS Optical Flow, Phase Correlation, tạo `plan.json`, tỉa frame RAM Disk |
-| [`upscale.py`](file:///Users/xis108/Desktop/upscale/upscale.py) | CLI options: tiếp nhận các cờ `--dedup-policy`, `--dis-thresh`, `--drift-delta` và truyền vào pipeline |
-| [`shows.yaml`](file:///Users/xis108/Desktop/upscale/shows.yaml) | Cấu hình cấp series: ánh xạ chính sách `dedup_policy` tự động theo từng bộ anime |
-| [`tests/test_dedup_policy.py`](file:///Users/xis108/Desktop/upscale/tests/test_dedup_policy.py) | Bộ kiểm thử tự động toàn diện kiểm tra schema, tương thích ngược, resume rejection và DIS scan |
+| [`src/dedup.py`](../src/dedup.py) | Engine Deduplication: Quét Preflight mpdecimate, DIS Optical Flow, Phase Correlation, tạo `plan.json`, tỉa frame RAM Disk |
+| [`upscale.py`](../upscale.py) | CLI options: tiếp nhận các cờ `--dedup-policy`, `--dis-thresh`, `--drift-delta` và truyền vào pipeline |
+| [`shows.yaml`](../shows.yaml) | Cấu hình cấp series: ánh xạ chính sách `dedup_policy` tự động theo từng bộ anime |
+| [`tests/test_dedup_policy.py`](../tests/test_dedup_policy.py) | Bộ kiểm thử tự động toàn diện kiểm tra schema, tương thích ngược, resume rejection và DIS scan |
 
 ---
 
 ## 2. Bản Đồ Chính Sách Deduplication (`--dedup-policy`)
 
-Bảng tra cứu tham số trong [`src/dedup.py:DEDUP_POLICY_PARAMS`](file:///Users/xis108/Desktop/upscale/src/dedup.py#L35):
+Bảng tra cứu tham số trong [`src/dedup.py:DEDUP_POLICY_PARAMS`](../src/dedup.py):
 
 | Chính sách | Tham số cốt lõi | Đặc điểm & Đối tượng phù hợp |
 | :--- | :--- | :--- |
@@ -38,7 +38,7 @@ Bảng tra cứu tham số trong [`src/dedup.py:DEDUP_POLICY_PARAMS`](file:///Us
 Trước đây hệ thống áp đặt giả định lưới 192 frames tĩnh ($8\text{s} \times 24\text{ fps}$). Tuy nhiên, các bản BD Remux gốc có ranh giới Keyframe GOP biến thiên (ví dụ: `[250, 250, 219...]`), dẫn đến việc cắt ngang GOP khiến FFmpeg phải re-encode hoặc lệch số frame giữa các chunk.
 
 ### B. Cơ Chế Giải Quyết Đã Chốt
-1. **Đưa Phân Đoạn Lên Trước:** [`src/pipeline.py`](file:///Users/xis108/Desktop/upscale/src/pipeline.py) thực thi `split_video_segments` (Stream Copy nguyên bản) **TRƯỚC** khi quét preflight.
+1. **Đưa Phân Đoạn Lên Trước:** [`src/pipeline.py`](../src/pipeline.py) thực thi `split_video_segments` (Stream Copy nguyên bản) **TRƯỚC** khi quét preflight.
 2. **Đo Frame Thực Tế Từng Segment:** Hàm `get_segments_frame_counts` sử dụng FFprobe đo chính xác độ dài thực tế của từng segment theo ranh giới GOP nguồn.
 3. **Ép Giữ Frame Đầu Mỗi Chunk:** Hàm `scan_dedup_plan` tự động thêm `chunk_start_indices` vào danh sách bắt buộc giữ (`keep`), bảo đảm mỗi segment luôn có khung hình khởi đầu hợp lệ.
 4. **Tự Động Hủy Bỏ Plan Cũ:** Nếu phát hiện `plan.json` có sẵn không khớp với `chunk_frame_counts` thực tế, hệ thống tự động vô hiệu hóa cache và quét lại từ đầu.
@@ -49,7 +49,7 @@ Trước đây hệ thống áp đặt giả định lưới 192 frames tĩnh ($
 ## 4. Dòng Chảy Quang Học DIS (Dense Inverse Search Optical Flow)
 
 ### A. Cơ Chế Toán Học 3 Tầng Nhận Diện Chuyển Động
-Được cài đặt tại [`src/dedup.py:detect_dis_policy_actions`](file:///Users/xis108/Desktop/upscale/src/dedup.py#L270), thuật toán đọc luồng grayscale $480 \times 270$ qua FFmpeg pipe không chạm đĩa:
+Được cài đặt tại [`src/dedup.py:detect_dis_policy_actions`](../src/dedup.py), thuật toán đọc luồng grayscale $480 \times 270$ qua FFmpeg pipe không chạm đĩa:
 
 1. **Lia máy (Pan / Tilt Translation):**
    $$dx = \text{median}(u), \quad dy = \text{median}(v) \implies \text{mag}_{pan} = \sqrt{dx^2 + dy^2}$$
@@ -89,7 +89,7 @@ Nếu $\text{Score} \ge \tau$ (mặc định 0.30 px 1080p) hoặc $\text{Area}_
 
 ## 6. Chốt Chặn Resume Cache Trong `plan.json`
 
-Hàm [`src/dedup.py:load_or_create_plan`](file:///Users/xis108/Desktop/upscale/src/dedup.py#L670) kiểm định nghiêm ngặt trước khi tái sử dụng cache:
+Hàm [`src/dedup.py:load_or_create_plan`](../src/dedup.py) kiểm định nghiêm ngặt trước khi tái sử dụng cache:
 1. Từ chối resume nếu `dedup_policy` trong cache khác với chính sách yêu cầu (`ValueError: Từ chối resume`).
 2. Từ chối resume nếu chính sách `drift` có `drift_delta` trong cache khác với giá trị yêu cầu.
 3. Từ chối resume nếu chính sách `dis` có `dis_thresh` trong cache khác với giá trị yêu cầu.
