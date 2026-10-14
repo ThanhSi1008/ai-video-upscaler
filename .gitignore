@@ -31,7 +31,6 @@ venv.bak/
 *.mp4
 *.mkv
 !samples/sample_30s.mkv
-!samples/sample_sword_3min.mkv
 *.mov
 *.avi
 *.tmp
