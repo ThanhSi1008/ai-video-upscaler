@@ -35,6 +35,7 @@ venv.bak/
 *.avi
 *.tmp
 *.lock
+*.vi.srt
 .temp_*
 vid_probe.json
 temp_sub.ass

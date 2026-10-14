@@ -158,30 +158,53 @@ Phân hệ dịch phụ đề anime chuyên sâu bằng mô hình ngôn ngữ l�
 
 ```text
 ai-video-upscaler/
-├── upscale.py                  # CLI Entrypoint với đầy đủ tùy chọn (Windows & macOS)
+├── upscale.py                  # CLI Entrypoint cho AI Video Upscaler 4K
 ├── upscale.bat                 # Windows batch launcher (One-click chạy trên Windows)
-├── upscale.sh                  # Shell launcher tiện lợi cho macOS/Linux
-├── subtrans.py                 # Subtitle Translation CLI Runner
+├── subtrans.py                 # CLI Entrypoint cho Anime Subtitle Translator
 ├── subtrans.bat                # Windows batch launcher cho Subtrans (UTF-8, multi-key)
 ├── shows.yaml                  # Cấu hình model SR theo từng bộ anime
 ├── pytest.ini                  # Cấu hình Pytest
 ├── requirements.txt            # Danh sách thư viện Python phụ thuộc
 ├── README.md                   # Tài liệu hướng dẫn sử dụng
 ├── AGENTS.md                   # Kim chỉ nam kiến trúc & bất biến kỹ thuật
-├── src/                        # Pipeline phóng to video (CUDA/MPS, NVENC/VideoToolbox, FFmpeg)
-│   ├── config.py               # Thiết lập cấu hình, auto-detect platform/hardware
-│   ├── mps_engine.py           # Multi-platform PyTorch Engine (CUDA FP16 / MPS / CPU)
+├── src/                        # Core Engine: AI Video Upscaling (PyTorch CUDA, NVENC 10-bit)
+│   ├── config.py               # Quản lý cấu hình tập trung, phần cứng & RAM Disk
+│   ├── ai_engine.py            # PyTorch Super-Resolution Inference Engine
+│   ├── subtitles.py            # Trích xuất phụ đề rời/container, Whisper STT fallback
 │   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (NVENC/VideoToolbox 10-bit)
 │   ├── preflight.py            # Chống sleep (Win32 / Caffeinate), kiểm tra sạc & đĩa trống
 │   ├── pipeline.py             # Bộ điều phối Rolling Segments Pipeline + Checkpoint Resume
 │   ├── dedup.py                # Deduplication Engine (mpdecimate, DIS Optical Flow)
 │   ├── mux_audit.py            # Stream copy integrity audit & font count verifier
 │   ├── output_sanity.py        # Output Sanity Guard kiểm định độ sáng & tương quan đầu ra
-│   ├── ramdisk.py              # Quản lý RAM Disk ảo (macOS HFS+ / Windows fallback)
+│   ├── ramdisk.py              # Quản lý RAM Disk ảo (Windows ImDisk / Unified Memory)
+│   ├── scheduler.py            # Bộ lập lịch hàng đợi qua đêm & preflight nền
+│   ├── cleanup.py              # Dọn dẹp thư mục tạm, symlinks & gom file audit
 │   └── logger.py               # Telemetry logging & thanh tiến trình Rich
-├── samples/                    # Video mẫu phục vụ kiểm thử
+├── subtrans/                   # Core Engine: Anime Subtitle Translation (Google GenAI Gemini)
+│   ├── cli.py                  # CLI Typer cho subtrans
+│   ├── pipeline.py             # Pipeline dịch phụ đề 4 giai đoạn
+│   ├── parser.py               # Stage 1: Parse ASS/SRT, Auto-Align Whisper timestamps, Auto-Offset
+│   ├── cast_sheet.py           # Stage A: Khai thác bảng nhân vật & danh xưng
+│   ├── gemini_backend.py       # Gemini API client (Round-Robin 3 key, Retry, Backoff)
+│   ├── cascade.py              # Stage P2: Smart Cloud Cascade Repair pass
+│   ├── rag.py                  # RAG few-shot retrieval & cautions
+│   ├── linter.py               # Bộ quy tắc kiểm định CPS, CJK leakage, ngoặc kép
+│   ├── writer.py               # Xuất phụ đề SRT/ASS chuẩn single-line
+│   ├── report.py               # Báo cáo kiểm định chất lượng (QA Report .audit.md/.json)
+│   └── tests/                  # Unit tests riêng của phân hệ dịch phụ đề
+├── tests/                      # Automated Test Suite (100% Pytest Unit & Integration Tests)
+├── benchmarks/                 # Kịch bản đo lường hiệu năng, Soak Tests & Blind AB Evaluations
+│   ├── upscale/                # Benchmarks hiệu năng GPU, VRAM, tốc độ suy luận, Dedup
+│   ├── subtrans/               # Đánh giá độ ổn định xưng hô (Golden Pronoun Evaluations)
+│   └── research/               # Kịch bản hiệu chuẩn và nghiên cứu chuyên sâu
+├── scripts/                    # Các tiện ích vận hành (organize subs, soak monitor, shell launcher)
+├── glossaries/                 # Từ điển thuật ngữ riêng theo từng series anime
+├── models/                     # Danh mục đăng ký mô hình Super-Resolution (models.yaml)
 ├── models_bench/               # Trọng số mô hình AI PyTorch (.pth)
-├── docs/                       # Tài liệu kỹ thuật chuyên sâu
-└── out/                        # Thư mục xuất video thành phẩm
+├── docs/                       # Tài liệu kỹ thuật chuyên sâu & engineering logs
+├── samples/                    # Video mẫu 3 phút phục vụ kiểm thử (Mushoku, Slime, Sword)
+├── logs/                       # Nhật ký telemetry CSV và báo cáo phiên chạy đêm
+└── out/                        # Thư mục xuất video 4K, phụ đề hoàn thiện và báo cáo audit
 ```
 
