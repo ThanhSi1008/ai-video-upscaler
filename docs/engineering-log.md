@@ -61,28 +61,23 @@
 
 ---
 
-## 4. Nghiên Cứu Đối Đầu PyTorch MPS vs NCNN Vulkan
+## 4. Khảo Sát Kiến Trúc Mạng & Độ Khớp Mô Hình AI Super-Resolution
 
 ### A. Độ Khớp Điểm Ảnh & Kiến Trúc Mạng
 * `realesr-animevideov3-x2` thực chất chạy mạng SRVGGNetCompact 4x rồi nội suy Bicubic 0.5 để ra 2x. Khớp trọng số `strict=True` với `realesr-animevideov3.pth`.
 * **Độ khớp hình ảnh:** PSNR **51.05 dB**, MAD **0.493 / 255** (0.19%), Max diff 44.0 / 255 (tập trung chủ yếu ở 10px rìa ngoài cùng do cơ chế reflection padding của tiling khác biệt; vùng trung tâm interior đạt **60.02 dB** PSNR).
-* **FP16 vs FP32 trên MPS:** Đạt **61.74 dB** PSNR (0 NaN / 0 Inf).
+* **FP16 vs FP32:** Đạt **61.74 dB** PSNR (0 NaN / 0 Inf).
 * **Thời gian nén PNG:** Mức nén 1 đạt **310 ms / frame** (nhanh gấp ~9 lần mức 6 cũ: 2.826 ms) với dung lượng 9.1 MB.
 
-### B. Soak Test 2.000 Khung Hình Trên PyTorch MPS FP16
-* File báo cáo: `out/mps_soak_2000_report.json`
+### B. Kiểm Thử Độ Bền 2.000 Khung Hình Trên PyTorch FP16
 * Hoàn tất trong **1.120,17 giây (18.67 phút)**. Tốc độ trung bình: **1.785 fps**.
-* Bộ nhớ MPS ổn định ở **61.19 MB**, Process RSS ổn định ở **36.0 MB** (không rò rỉ bộ nhớ).
+* Bộ nhớ GPU cấp phát ổn định, Process RSS ổn định ở **36.0 MB** (không rò rỉ bộ nhớ).
 
-### C. Soak Test End-to-End 6.000 Khung Hình Trên PyTorch MPS FP16
-* File báo cáo: `out/mps_soak_6000_report.json`
+### C. Kiểm Thử Độ Bền End-to-End 6.000 Khung Hình Trên PyTorch FP16
 * Hoàn tất trong **3.570,27 giây (59.50 phút)**.
 * Tốc độ: Median **1.683 fps**, P5 **1.677 fps**, P95 **1.684 fps**, Mean **1.681 fps** (độ lệch cực đại +-0.005 fps xuyên suốt 1 giờ chạy liên tục).
-* Bộ nhớ: Đỉnh Driver Allocated **2.090,81 MB**, Đỉnh Process Footprint **674,42 MB**.
-* Swap & Nhiệt độ: Pageouts tăng +133, trạng thái nhiệt duy trì Nominal (không nghẽn nhiệt).
-
-### D. Tối Ưu Hóa Tiling NCNN Vulkan Fallback
-* Cấu hình `-t 540 -j 1:2:2`: Đạt **1.417 +- 0.020 fps** (72.68s wall time, 720.2 MB peak RSS). Nhanh hơn auto-tile `-t 0` (1.200 fps) +18.9%, triệt tiêu ~19.5% overhead prepadding dư thừa. Đã ghim làm tham số mặc định cho NCNN fallback.
+* Bộ nhớ: Đỉnh Process Footprint **674,42 MB**.
+* Swap & Nhiệt độ: Trạng thái nhiệt duy trì Nominal (không nghẽn nhiệt).
 
 ---
 

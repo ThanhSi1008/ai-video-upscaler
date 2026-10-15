@@ -9,7 +9,6 @@ Các kịch bản đánh giá hệ thống AI Video Upscaling:
 - `benchmark_models_comparison.py`: So sánh tốc độ và VRAM giữa các mô hình Super-Resolution trên CUDA.
 - `profile_tail_latency.py`: Đo đạc độ trễ đuôi (P95, P99 tail latency) của từng frame trên GPU NVIDIA RTX.
 - `audit_local_metrics.py` & `audit_small_block_dedup.py`: Đo tỷ lệ nén và bắt chuyển động của Deduplication.
-- `measure_background_preflight_latency.py`: Đo độ trễ của tiến trình Preflight nền.
 - `chaos_test_resume.py`: Kiểm thử khả năng phục hồi khi xảy ra ngắt quãng tiến trình.
 - `ab_test/`: Dữ liệu kiểm tra thị giác độc lập (Double-Blind A/B).
 
@@ -24,4 +23,5 @@ Kịch bản nghiên cứu và hiệu chuẩn thuật toán:
 - `calibrate_b1_b2.py`: Hiệu chuẩn ngưỡng phát hiện chuyển động.
 - `benchmark_dis_synthetic_b1_b2.py`: Kiểm thử dòng chảy quang học DIS trên dữ liệu tổng hợp.
 - `measure_a1_a2_windows.py`: Đo đạc hiệu năng và độ chính xác FP16 trên Windows CUDA.
+- `measure_a2_animejanai.py`: Đo đạc đối chiếu sai số độc lập giữa mô hình nội bộ và Spandrel CPU.
 - `make_blind_ab.py`: Sinh bài kiểm tra mù A/B cho các mô hình SR.
