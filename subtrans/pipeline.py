@@ -356,6 +356,17 @@ class TranslationPipeline:
             cast_sheet_hash = hashlib.sha256(canonical_chars.encode("utf-8")).hexdigest()[:16]
         prompt_version = "v2.0"
 
+        # Khởi tạo HysteresisCastManager đóng kín vòng lặp phản hồi quan hệ nhân vật
+        from subtrans.dynamic_cast import HysteresisCastManager, CastRelationDelta
+        initial_cast_data = {}
+        if cast_file.exists():
+            try:
+                import yaml
+                initial_cast_data = yaml.safe_load(cast_file.read_text(encoding="utf-8")) or {}
+            except Exception:
+                pass
+        cast_manager = HysteresisCastManager(initial_cast_data) if initial_cast_data else HysteresisCastManager.from_glossary(glossary)
+
         stage_start_time = time.monotonic()
         with Progress(
             SpinnerColumn(),
@@ -436,6 +447,12 @@ class TranslationPipeline:
                 backend_used = active_backend_mode
                 model_used = candidate_gemini_models[curr_gemini_idx] if candidate_gemini_models else "none"
 
+                # Bơm ngữ cảnh xưng hô phân tầng động từ HysteresisCastManager vào batch prompt
+                if cast_manager and glossary:
+                    dyn_cast_ctx = cast_manager.to_prompt_context()
+                    if dyn_cast_ctx and dyn_cast_ctx not in glossary.style_rules:
+                        glossary.style_rules.append(dyn_cast_ctx)
+
                 if active_backend_mode == "gemini":
                     translated = False
                     while curr_gemini_idx < len(candidate_gemini_models):
@@ -508,6 +525,23 @@ class TranslationPipeline:
                         )
                         self.cache.set_cue(ckey, backend_used, model_used, vi)
                     progress.advance(task, 1)
+
+                # Ghi nhận phản hồi sau batch để cập nhật HysteresisCastManager
+                if cast_manager:
+                    for cue in uncached_cues:
+                        if cue.speaker and cue.speaker != "unknown" and cue.addressee:
+                            if cue.uncertain_reason and "pronoun" in cue.uncertain_reason.lower():
+                                cast_manager.apply_deltas([
+                                    CastRelationDelta(
+                                        scope="SITUATIONAL_SHIFT",
+                                        speaker=cue.speaker,
+                                        listener=cue.addressee,
+                                        pronoun_1p="tôi",
+                                        pronoun_2p="ngươi",
+                                        reason=f"Batch {batch_idx+1} contextual shift",
+                                        confidence=0.80
+                                    )
+                                ])
 
         stage_times["stage_2_translate"] = time.monotonic() - t_s2
 
@@ -636,6 +670,8 @@ class TranslationPipeline:
             "auto_offset_applied": auto_offset_applied,
             "reason": offset_reason,
         }
+        if cast_manager:
+            stats["dynamic_cast_state"] = cast_manager.export_state()
         audit_file = self.output_dir / f"{base_name}.audit.md"
         with console.status(f"[bold blue]Stage C: Generating QA audit report at {audit_file}...[/bold blue]"):
             generate_qa_report(

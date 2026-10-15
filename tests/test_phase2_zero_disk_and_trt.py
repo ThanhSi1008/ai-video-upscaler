@@ -99,3 +99,79 @@ def test_export_onnx_pipeline(tmp_path):
     out_path = export_model_to_onnx(base_model, onnx_file, max_batch=2, dummy_shape=(64, 64))
     assert os.path.exists(out_path)
     assert os.path.getsize(out_path) > 1000
+
+
+def test_spawn_nvenc_pipe_writer_chroma_center_argument(monkeypatch):
+    """Verifies that spawn_nvenc_pipe_writer includes -chroma_sample_location center for accurate anime edges."""
+    import subprocess
+    captured_cmd = []
+
+    def mock_popen(cmd, *args, **kwargs):
+        captured_cmd.extend(cmd)
+        class MockProc:
+            stdin = None
+        return MockProc()
+
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
+    DoubleBufferedPipeUpscaler.spawn_nvenc_pipe_writer("out_test.mp4", fps_str="24/1")
+
+    assert "-chroma_sample_location" in captured_cmd
+    idx = captured_cmd.index("-chroma_sample_location")
+    assert captured_cmd[idx + 1] == "center"
+
+
+def test_check_frame_sanity_arrays_in_memory():
+    """Verifies that check_frame_sanity_arrays operates correctly on in-memory numpy RGB arrays."""
+    from src.output_sanity import check_frame_sanity_arrays
+
+    # 1. Hai frame giống hệt nhau -> passed = True, corr = 1.0, delta_y = 0.0
+    img_a = np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8)
+    res_pass = check_frame_sanity_arrays(img_a, img_a, is_rgb=True)
+    assert res_pass["passed"] is True
+    assert res_pass["delta_y"] < 0.001
+    assert res_pass["corr"] >= 0.999
+
+    # 2. Frame đầu ra toàn màu đen (black screen) -> passed = False
+    img_black = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    res_fail = check_frame_sanity_arrays(img_a, img_black, is_rgb=True)
+    assert res_fail["passed"] is False
+
+
+def test_double_buffered_upscaler_pipelined_processing():
+    """Verifies that DoubleBufferedPipeUpscaler executes multi-batch frames with repeats into pipe."""
+    import io
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    dummy_model = lambda x: F.interpolate(x, scale_factor=2.0)
+    upscaler = DoubleBufferedPipeUpscaler(dummy_model, batch_size=2, device=device)
+
+    # Tạo 3 unique frames
+    unique_frames = [
+        np.full((1080, 1920, 3), 100 + i * 20, dtype=np.uint8)
+        for i in range(3)
+    ]
+    repeat_counts = [2, 1, 3]  # Tổng cộng 2 + 1 + 3 = 6 frames 4K
+
+    class MockEncoderProc:
+        def __init__(self):
+            self.written_bytes = 0
+            self.stdin = io.BytesIO()
+
+        def write(self, b):
+            self.written_bytes += len(b)
+
+    mock_proc = MockEncoderProc()
+    total_written = upscaler.process_frames_to_pipe(unique_frames, repeat_counts, mock_proc)
+    assert total_written == 6
+
+
+def test_cli_zero_disk_argument_parser():
+    """Verifies that upscale.py CLI argument parser supports --zero-disk flag."""
+    from upscale import build_arg_parser
+    parser = build_arg_parser()
+    args = parser.parse_args(["--zero-disk"])
+    assert args.zero_disk is True
+
+    args_default = parser.parse_args([])
+    assert args_default.zero_disk is False
+
+

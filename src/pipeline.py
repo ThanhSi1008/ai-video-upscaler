@@ -104,7 +104,8 @@ def run_upscale_pipeline(
     deadline_dt: Optional[datetime] = None,
     keep_temp: bool = False,
     dedup_policy: Optional[str] = None,
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None,
+    zero_disk: bool = False
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
@@ -585,69 +586,129 @@ def run_upscale_pipeline(
                                         prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
                                         suffix=f"AI Inferencing ({engine.upper()}){dedup_info}..."
                                     )
-                                    ai_result = upscale_frames_with_fallback(
-                                        input_dir=c_in_dir,
-                                        output_dir=c_out_dir,
-                                        model_info=model_info,
-                                        engine=engine,
-                                        precision=precision,
-                                        batch_size=batch_size,
-                                        fmt=fmt,
-                                        logger=logger,
-                                        mid_chunk_callback=_mid_chunk_bp_check
-                                    )
+                                    if zero_disk and engine == "cuda":
+                                        import cv2
+                                        import torch
+                                        from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler, SRVGGNetCompactTRTWrapper
+                                        from src.mps_engine import get_cuda_inference_engine
+                                        from src.output_sanity import check_frame_sanity_arrays, OutputSanityError, write_failed_sanity_audit
 
-                                    # Tích lũy kích thước frame PNG thực tế
-                                    try:
-                                        out_files = [os.path.join(c_out_dir, f) for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")]
-                                        if out_files:
-                                            actual_avg_mb = (sum(os.path.getsize(f) for f in out_files) / len(out_files)) / (1024 * 1024)
-                                            chunk_png_unit_sizes.append(actual_avg_mb)
-                                    except Exception:
-                                        pass
+                                        in_files = sorted([os.path.join(c_in_dir, f) for f in os.listdir(c_in_dir) if f.lower().endswith(f".{fmt}")])
+                                        unique_frames_rgb = [cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB) for f in in_files]
+                                        runs = extracted["chunk_plan"].get("runs", []) if extracted.get("chunk_plan") else []
+                                        repeat_counts = [r["count"] for r in runs] if runs else [1] * len(unique_frames_rgb)
 
-                                    # Chốt chặn kiểm định chất lượng hình ảnh đầu ra C3:
-                                    # Thực hiện sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunk sau
-                                    should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
-                                    if should_check_sanity:
-                                        out_frame_list = sorted([f for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")])
-                                        if out_frame_list:
-                                            sample_f = out_frame_list[0]
-                                            src_f = os.path.join(c_in_dir, sample_f)
-                                            out_f = os.path.join(c_out_dir, sample_f)
-                                            if os.path.exists(src_f) and os.path.exists(out_f):
-                                                from src.output_sanity import check_frame_sanity, OutputSanityError, write_failed_sanity_audit
-                                                s_res = check_frame_sanity(src_f, out_f)
-                                                s_res["chunk"] = c_idx + 1
-                                                s_res["frame"] = sample_f
-                                                sanity_checks_history.append(s_res)
-                                                if not s_res["passed"]:
-                                                    err_msg = (
-                                                        f"❌ [CHỐT CHẶN ĐẦU RA THẤT BẠI] Phân đoạn {c_idx+1:02d}: "
-                                                        f"|ΔY| = {s_res['delta_y']} (trần {s_res['max_delta_y']}), "
-                                                        f"Corr = {s_res['corr']} (sàn {s_res['min_corr']}). "
-                                                        f"Mô hình có dấu hiệu xuất video đen hoặc sai lệch cấu trúc!"
-                                                    )
-                                                    logger.error(err_msg, to_console=True)
-                                                    audit_file = os.path.splitext(output_path)[0] + ".audit.json"
-                                                    write_failed_sanity_audit(
-                                                        audit_file_path=audit_file,
-                                                        source_file=input_path,
-                                                        output_file=output_path,
-                                                        model_info=model_info,
-                                                        engine=engine,
-                                                        precision=precision,
-                                                        chunk_idx=c_idx,
-                                                        metrics=s_res,
-                                                        all_checks=sanity_checks_history
-                                                    )
-                                                    raise OutputSanityError(err_msg, metrics=s_res)
-                                                else:
-                                                    logger.info(
-                                                        f"🛡️ [OUTPUT SANITY PASS] Đoạn {c_idx+1:02d}: |ΔY| = {s_res['delta_y']:.2f}, "
-                                                        f"Corr = {s_res['corr']:.4f} ({s_res['elapsed_ms']:.1f}ms)",
-                                                        to_console=False
-                                                    )
+                                        cuda_engine = get_cuda_inference_engine(model_info, precision=precision, batch_size=batch_size)
+                                        wrapped_model = SRVGGNetCompactTRTWrapper(cuda_engine.model, scale=2.0)
+                                        pipe_upscaler = DoubleBufferedPipeUpscaler(wrapped_model, batch_size=batch_size or 8, device=cuda_engine.device)
+
+                                        fps_str = f"{meta['fps_num']}/{meta['fps_den']}"
+                                        t0_pipe = time.time()
+                                        enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(c_seg_out, fps_str=fps_str)
+                                        pipe_upscaler.process_frames_to_pipe(unique_frames_rgb, repeat_counts, enc_proc)
+                                        enc_proc.stdin.close()
+                                        enc_proc.wait()
+                                        t_pipe_elapsed = time.time() - t0_pipe
+
+                                        # In-memory sanity check cho chunk đầu tiên và mỗi 10 chunks
+                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
+                                        if should_check_sanity and unique_frames_rgb:
+                                            sample_in = unique_frames_rgb[0]
+                                            with torch.inference_mode():
+                                                s_in_tensor = torch.from_numpy(sample_in).permute(2, 0, 1).unsqueeze(0).to(cuda_engine.device)
+                                                s_in_tensor = s_in_tensor.to(memory_format=torch.channels_last).to(torch.float16).mul_(1.0 / 255.0)
+                                                s_out_tensor = wrapped_model(s_in_tensor)
+                                                sample_out = (s_out_tensor.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).mul(255.0).byte().cpu().numpy())
+                                            s_res = check_frame_sanity_arrays(sample_in, sample_out, is_rgb=True)
+                                            s_res["chunk"] = c_idx + 1
+                                            s_res["frame"] = os.path.basename(in_files[0]) if in_files else "frame_0000.png"
+                                            sanity_checks_history.append(s_res)
+                                            if not s_res["passed"]:
+                                                err_msg = (
+                                                    f"❌ [CHỐT CHẶN ĐẦU RA THẤT BẠI] Phân đoạn {c_idx+1:02d}: "
+                                                    f"|ΔY| = {s_res['delta_y']} (trần {s_res['max_delta_y']}), "
+                                                    f"Corr = {s_res['corr']} (sàn {s_res['min_corr']}). "
+                                                )
+                                                logger.error(err_msg, to_console=True)
+                                                raise OutputSanityError(err_msg, metrics=s_res)
+                                            else:
+                                                logger.info(
+                                                    f"🛡️ [ZERO-DISK SANITY PASS] Đoạn {c_idx+1:02d}: |ΔY| = {s_res['delta_y']:.2f}, "
+                                                    f"Corr = {s_res['corr']:.4f} ({s_res['elapsed_ms']:.1f}ms)",
+                                                    to_console=False
+                                                )
+
+                                        ai_result = {
+                                            "elapsed_seconds": t_pipe_elapsed,
+                                            "fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
+                                            "steady_fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
+                                            "t0_seconds": 0.0,
+                                            "peak_rss_mb": 0.0
+                                        }
+                                    else:
+                                        ai_result = upscale_frames_with_fallback(
+                                            input_dir=c_in_dir,
+                                            output_dir=c_out_dir,
+                                            model_info=model_info,
+                                            engine=engine,
+                                            precision=precision,
+                                            batch_size=batch_size,
+                                            fmt=fmt,
+                                            logger=logger,
+                                            mid_chunk_callback=_mid_chunk_bp_check
+                                        )
+
+                                        # Tích lũy kích thước frame PNG thực tế
+                                        try:
+                                            out_files = [os.path.join(c_out_dir, f) for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")]
+                                            if out_files:
+                                                actual_avg_mb = (sum(os.path.getsize(f) for f in out_files) / len(out_files)) / (1024 * 1024)
+                                                chunk_png_unit_sizes.append(actual_avg_mb)
+                                        except Exception:
+                                            pass
+
+                                        # Chốt chặn kiểm định chất lượng hình ảnh đầu ra C3:
+                                        # Thực hiện sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunk sau
+                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
+                                        if should_check_sanity:
+                                            out_frame_list = sorted([f for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")])
+                                            if out_frame_list:
+                                                sample_f = out_frame_list[0]
+                                                src_f = os.path.join(c_in_dir, sample_f)
+                                                out_f = os.path.join(c_out_dir, sample_f)
+                                                if os.path.exists(src_f) and os.path.exists(out_f):
+                                                    from src.output_sanity import check_frame_sanity, OutputSanityError, write_failed_sanity_audit
+                                                    s_res = check_frame_sanity(src_f, out_f)
+                                                    s_res["chunk"] = c_idx + 1
+                                                    s_res["frame"] = sample_f
+                                                    sanity_checks_history.append(s_res)
+                                                    if not s_res["passed"]:
+                                                        err_msg = (
+                                                            f"❌ [CHỐT CHẶN ĐẦU RA THẤT BẠI] Phân đoạn {c_idx+1:02d}: "
+                                                            f"|ΔY| = {s_res['delta_y']} (trần {s_res['max_delta_y']}), "
+                                                            f"Corr = {s_res['corr']} (sàn {s_res['min_corr']}). "
+                                                            f"Mô hình có dấu hiệu xuất video đen hoặc sai lệch cấu trúc!"
+                                                        )
+                                                        logger.error(err_msg, to_console=True)
+                                                        audit_file = os.path.splitext(output_path)[0] + ".audit.json"
+                                                        write_failed_sanity_audit(
+                                                            audit_file_path=audit_file,
+                                                            source_file=input_path,
+                                                            output_file=output_path,
+                                                            model_info=model_info,
+                                                            engine=engine,
+                                                            precision=precision,
+                                                            chunk_idx=c_idx,
+                                                            metrics=s_res,
+                                                            all_checks=sanity_checks_history
+                                                        )
+                                                        raise OutputSanityError(err_msg, metrics=s_res)
+                                                    else:
+                                                        logger.info(
+                                                            f"🛡️ [OUTPUT SANITY PASS] Đoạn {c_idx+1:02d}: |ΔY| = {s_res['delta_y']:.2f}, "
+                                                            f"Corr = {s_res['corr']:.4f} ({s_res['elapsed_ms']:.1f}ms)",
+                                                            to_console=False
+                                                        )
 
                                     # Chunk hoàn thành thành công, thoát vòng lặp retry
                                     break
@@ -758,21 +819,46 @@ def run_upscale_pipeline(
                                 )
                                 future_encode = None
 
-                            # Khởi động mã hóa phần cứng NVENC cho chunk hiện tại ở luồng nền
-                            encode_item = {
-                                "target": target_chunk,
-                                "extracted": extracted,
-                                "out_dir": c_out_dir
-                            }
-                            last_encode_item = encode_item
-                            last_ai_result = ai_result
-                            last_seg_start = seg_start_time
-                            render_progress(
-                                c_idx, total_segs,
-                                prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
-                                suffix="Hardware Encoding 10-bit (Pipelined)..."
-                            )
-                            future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
+                            # Khởi động mã hóa phần cứng NVENC cho chunk hiện tại ở luồng nền (hoặc ghi nhận zero-disk pipe)
+                            if zero_disk and engine == "cuda":
+                                shutil.rmtree(c_out_dir, ignore_errors=True)
+                                chunk_elapsed = time.time() - seg_start_time
+                                total_enc_time += 0.001
+                                render_progress(
+                                    c_idx + 1, total_segs,
+                                    prefix=f"✨ Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                                    suffix=f"[{extracted['expected_frames']/max(0.01, chunk_elapsed):.2f} fps (Zero-Disk Pipe)]"
+                                )
+                                print()
+                                logger.log_chunk_done(
+                                    chunk_idx=c_idx,
+                                    total_chunks=total_segs,
+                                    frames=extracted["expected_frames"],
+                                    ai_time=ai_result["elapsed_seconds"],
+                                    ai_fps=ai_result["fps"],
+                                    enc_time=0.001,
+                                    total_chunk_time=chunk_elapsed,
+                                    output_seg=c_seg_out,
+                                    t0_seconds=0.0,
+                                    steady_fps=ai_result["fps"],
+                                    rss_mb=0.0
+                                )
+                                future_encode = None
+                            else:
+                                encode_item = {
+                                    "target": target_chunk,
+                                    "extracted": extracted,
+                                    "out_dir": c_out_dir
+                                }
+                                last_encode_item = encode_item
+                                last_ai_result = ai_result
+                                last_seg_start = seg_start_time
+                                render_progress(
+                                    c_idx, total_segs,
+                                    prefix=f"🚀 Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                                    suffix="Hardware Encoding 10-bit (Pipelined)..."
+                                )
+                                future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
 
                             # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
                             if i + 1 < len(chunks_to_process):

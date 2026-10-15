@@ -18,43 +18,34 @@ class OutputSanityError(RuntimeError):
         self.metrics = metrics or {}
 
 
-def check_frame_sanity(
-    src_frame_path: str,
-    out_frame_path: str,
+def check_frame_sanity_arrays(
+    src_img: np.ndarray,
+    out_img: np.ndarray,
+    is_rgb: bool = False,
     max_delta_y: float = 6.0,
     min_corr: float = 0.98
 ) -> dict:
     """
-    Kiểm định độ sáng và tương quan giữa 1 frame nguồn và 1 frame đầu ra sau AI:
+    Kiểm định độ sáng và tương quan giữa 2 mảng ảnh numpy (nguồn và đầu ra sau AI) trong bộ nhớ:
+    - is_rgb: True nếu mảng có thứ tự kênh RGB, False nếu là BGR (OpenCV chuẩn).
     - Thu nhỏ cả hai về 480x270 bằng cv2.INTER_AREA.
     - Tính độ sáng BT.709: Y = 0.2126*R + 0.7152*G + 0.0722*B.
     - So sánh chênh lệch độ sáng trung bình: |ΔY| <= max_delta_y (trên thang 255).
     - So sánh hệ số tương quan Pearson: corr >= min_corr.
-    - Đo thời gian thực thi (chi phí < 1s).
     """
     t0 = time.time()
-    
-    if not os.path.exists(src_frame_path):
-        raise FileNotFoundError(f"Không tìm thấy frame nguồn: {src_frame_path}")
-    if not os.path.exists(out_frame_path):
-        raise FileNotFoundError(f"Không tìm thấy frame đầu ra: {out_frame_path}")
-
-    src_bgr = cv2.imread(src_frame_path)
-    out_bgr = cv2.imread(out_frame_path)
-
-    if src_bgr is None:
-        raise ValueError(f"Không thể đọc ảnh nguồn: {src_frame_path}")
-    if out_bgr is None:
-        raise ValueError(f"Không thể đọc ảnh đầu ra: {out_frame_path}")
-
-    # Thu nhỏ về chuẩn 480x270
     target_size = (480, 270)
-    src_small = cv2.resize(src_bgr, target_size, interpolation=cv2.INTER_AREA)
-    out_small = cv2.resize(out_bgr, target_size, interpolation=cv2.INTER_AREA)
+    src_small = cv2.resize(src_img, target_size, interpolation=cv2.INTER_AREA)
+    out_small = cv2.resize(out_img, target_size, interpolation=cv2.INTER_AREA)
 
-    # Chuyển đổi luma BT.709 (OpenCV đọc BGR: B=0, G=1, R=2)
-    y_src = 0.2126 * src_small[:, :, 2] + 0.7152 * src_small[:, :, 1] + 0.0722 * src_small[:, :, 0]
-    y_out = 0.2126 * out_small[:, :, 2] + 0.7152 * out_small[:, :, 1] + 0.0722 * out_small[:, :, 0]
+    if is_rgb:
+        # RGB: R=0, G=1, B=2
+        y_src = 0.2126 * src_small[:, :, 0] + 0.7152 * src_small[:, :, 1] + 0.0722 * src_small[:, :, 2]
+        y_out = 0.2126 * out_small[:, :, 0] + 0.7152 * out_small[:, :, 1] + 0.0722 * out_small[:, :, 2]
+    else:
+        # BGR: B=0, G=1, R=2
+        y_src = 0.2126 * src_small[:, :, 2] + 0.7152 * src_small[:, :, 1] + 0.0722 * src_small[:, :, 0]
+        y_out = 0.2126 * out_small[:, :, 2] + 0.7152 * out_small[:, :, 1] + 0.0722 * out_small[:, :, 0]
 
     mean_y_src = float(y_src.mean())
     mean_y_out = float(y_out.mean())
@@ -67,7 +58,6 @@ def check_frame_sanity(
     std_out = np.std(y_out_flat)
 
     if std_src < 1e-5 and std_out < 1e-5:
-        # Cả hai đều là ảnh thuần 1 màu phẳng
         corr = 1.0 if delta_y <= max_delta_y else 0.0
     elif std_src < 1e-5 or std_out < 1e-5:
         corr = 0.0
@@ -90,6 +80,38 @@ def check_frame_sanity(
         "min_corr": min_corr,
         "elapsed_ms": round(elapsed_ms, 2)
     }
+
+
+def check_frame_sanity(
+    src_frame_path: str,
+    out_frame_path: str,
+    max_delta_y: float = 6.0,
+    min_corr: float = 0.98
+) -> dict:
+    """
+    Kiểm định độ sáng và tương quan giữa 1 frame nguồn và 1 frame đầu ra sau AI từ đường dẫn file.
+    """
+    if not os.path.exists(src_frame_path):
+        raise FileNotFoundError(f"Không tìm thấy frame nguồn: {src_frame_path}")
+    if not os.path.exists(out_frame_path):
+        raise FileNotFoundError(f"Không tìm thấy frame đầu ra: {out_frame_path}")
+
+    src_bgr = cv2.imread(src_frame_path)
+    out_bgr = cv2.imread(out_frame_path)
+
+    if src_bgr is None:
+        raise ValueError(f"Không thể đọc ảnh nguồn: {src_frame_path}")
+    if out_bgr is None:
+        raise ValueError(f"Không thể đọc ảnh đầu ra: {out_frame_path}")
+
+    return check_frame_sanity_arrays(
+        src_img=src_bgr,
+        out_img=out_bgr,
+        is_rgb=False,
+        max_delta_y=max_delta_y,
+        min_corr=min_corr
+    )
+
 
 
 def write_failed_sanity_audit(

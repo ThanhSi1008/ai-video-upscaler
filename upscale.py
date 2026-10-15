@@ -389,6 +389,12 @@ def build_arg_parser():
         default=False,
         help="Không tự động gom các file báo cáo kiểm định (.audit.json, .audit.md, .cast.yaml) vào thư mục con audit/"
     )
+    parser.add_argument(
+        "--zero-disk",
+        action="store_true",
+        default=False,
+        help="Kích hoạt pipeline Zero-Disk: Dùng DoubleBufferedPipeUpscaler xuất luồng p010le trực tiếp qua stdin pipe tới NVENC, triệt tiêu 100% file PNG trung gian trên SSD"
+    )
 
     return parser
  
@@ -704,7 +710,8 @@ def main():
                 deadline_dt=deadline_dt,
                 keep_temp=args.keep_temp,
                 dedup_policy=args.dedup_policy,
-                batch_size=args.batch_size
+                batch_size=args.batch_size,
+                zero_disk=getattr(args, "zero_disk", False)
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
             if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):

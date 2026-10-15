@@ -93,6 +93,40 @@ class HysteresisCastManager:
             return rec.get("1p", ""), rec.get("2p", "")
         return None
 
+    def to_prompt_context(self) -> str:
+        """
+        Sinh chuỗi ngữ cảnh quan hệ nhân vật để đưa vào prompt Gemini API.
+        Ưu tiên arc_overrides lên đầu, sau đó là relations baseline.
+        """
+        lines = []
+        if self.arc_overrides:
+            lines.append("XƯNG HÔ BƯỚC NGOẶT (ARC OVERRIDES - BẮT BUỘC TUÂN THỦ):")
+            for pair, rel in self.arc_overrides.items():
+                lines.append(f"  • {pair}: {rel.get('1p', '')}/{rel.get('2p', '')} (Lý do: {rel.get('reason', '')})")
+        if self.relations:
+            lines.append("XƯNG HÔ CHUẨN CƠ BẢN (BASELINE RELATIONS):")
+            for pair, rel in self.relations.items():
+                if pair not in self.arc_overrides:
+                    lines.append(f"  • {pair}: {rel.get('1p', '')}/{rel.get('2p', '')}")
+        return "\n".join(lines)
+
+    @classmethod
+    def from_glossary(cls, glossary: Any) -> "HysteresisCastManager":
+        """Khởi tạo Cast Manager từ đối tượng Glossary nếu có."""
+        relations = {}
+        if glossary and hasattr(glossary, "characters"):
+            for char in glossary.characters:
+                c_name = getattr(char, "name_vi", None) or getattr(char, "name_ja", "")
+                for st in getattr(char, "speaks_to", []):
+                    pair = f"{c_name} -> {st.listener}"
+                    relations[pair] = {
+                        "1p": st.self,
+                        "2p": st.other,
+                        "reason": getattr(st, "note", "") or "Glossary baseline",
+                        "confidence": 1.0
+                    }
+        return cls({"relations": relations})
+
     def export_state(self) -> Dict[str, Any]:
         """Xuất toàn bộ trạng thái quan hệ nhân vật hiện hành."""
         return {
@@ -100,3 +134,4 @@ class HysteresisCastManager:
             "arc_overrides": self.arc_overrides,
             "situational_shifts_count": len(self.situational_log)
         }
+

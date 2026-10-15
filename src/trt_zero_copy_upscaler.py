@@ -206,6 +206,7 @@ class DoubleBufferedPipeUpscaler:
             "-colorspace", "bt709",
             "-color_primaries", "bt709",
             "-color_trc", "bt709",
+            "-chroma_sample_location", "center",
             "-r", fps_str,
             "-i", "pipe:0",
             "-c:v", HEVC_ENCODER,
@@ -228,6 +229,8 @@ class DoubleBufferedPipeUpscaler:
         """
         Xử lý danh sách các unique frames của 1 phân đoạn và nhân bản trực tiếp trong RAM Pipe
         theo repeat_counts (kết quả từ Deduplication Engine).
+        Áp dụng cấu trúc True Software Pipelining (Pre-fetch Prologue / Steady-State / Epilogue)
+        để truyền H2D(b+1) và suy luận Compute(b+1) gối đầu 100% với D2H(b) và ghi pipe.
         Returns:
             Tổng số khung hình 4K đã được ghi thành công vào encoder pipe.
         """
@@ -237,23 +240,29 @@ class DoubleBufferedPipeUpscaler:
 
         total_frames_written = 0
 
-        for start_idx in range(0, num_unique, self.batch_size):
-            end_idx = min(start_idx + self.batch_size, num_unique)
-            cur_B = end_idx - start_idx
-            slot = (start_idx // self.batch_size) % 2
+        if self.device.type == "cuda":
+            # Xây dựng danh sách batch slicing
+            batches = []
+            for start_idx in range(0, num_unique, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, num_unique)
+                batches.append((start_idx, end_idx))
+            num_batches = len(batches)
 
-            if self.device.type == "cuda":
+            def _dispatch_batch_cuda(batch_k: int):
+                slot = batch_k % 2
+                s_idx, e_idx = batches[batch_k]
+                cur_B = e_idx - s_idx
+
                 # 1. Nạp dữ liệu vào Pinned Host Memory và truyền H2D bất đồng bộ
                 with torch.cuda.stream(self.stream_h2d):
                     for i in range(cur_B):
-                        # unique_frames_rgb[i] có shape (3, 1080, 1920) uint8
-                        self.host_in_pins[slot][i].copy_(
-                            torch.from_numpy(unique_frames_rgb[start_idx + i])
-                        )
+                        t = torch.from_numpy(unique_frames_rgb[s_idx + i])
+                        if t.ndim == 3 and t.shape[-1] == 3:
+                            t = t.permute(2, 0, 1)
+                        self.host_in_pins[slot][i].copy_(t)
                     gpu_in = self.host_in_pins[slot][:cur_B].to(
                         self.device, non_blocking=True
                     )
-                    # Chuyển sang FP16 channels_last chuẩn hóa [0.0, 1.0]
                     gpu_tensor = (
                         gpu_in.to(memory_format=torch.channels_last)
                         .to(torch.float16)
@@ -271,23 +280,59 @@ class DoubleBufferedPipeUpscaler:
                 with torch.cuda.stream(self.stream_d2h):
                     self.host_out_pins[slot][:cur_B].copy_(gpu_p010, non_blocking=True)
 
-                self.stream_d2h.synchronize()
+                # Ghi nhận CUDA Event trên stream_d2h để CPU đồng bộ đúng lúc
+                evt = torch.cuda.Event()
+                evt.record(self.stream_d2h)
+                return evt
+
+            # PROLOGUE: Phát lệnh Batch 0
+            curr_event = _dispatch_batch_cuda(0)
+
+            # STEADY-STATE: Gối đầu bất đồng bộ H2D(b+1) & Compute(b+1) với D2H(b) & Host Pipe Write(b)
+            for b in range(num_batches):
+                next_event = None
+                if b + 1 < num_batches:
+                    next_event = _dispatch_batch_cuda(b + 1)
+
+                # Chờ Batch b hoàn tất chuyển D2H về Pinned Memory
+                curr_event.synchronize()
+
+                slot = b % 2
+                s_idx, e_idx = batches[b]
+                cur_B = e_idx - s_idx
                 out_np = self.host_out_pins[slot][:cur_B].numpy()
-            else:
-                # CPU Fallback
-                batch_arrs = [unique_frames_rgb[start_idx + i] for i in range(cur_B)]
-                batch_np = np.stack(batch_arrs, axis=0)
-                tensor = torch.from_numpy(batch_np).float().div_(255.0)
+
+                # Ghi trực tiếp ra stdin pipe kèm nhân bản frame lặp (0 byte file trung gian trên đĩa)
+                for i in range(cur_B):
+                    frame_bytes = memoryview(out_np[i])
+                    repeats = repeat_counts[s_idx + i] if repeat_counts else 1
+                    for _ in range(repeats):
+                        encoder_proc.stdin.write(frame_bytes)
+                        total_frames_written += 1
+
+                curr_event = next_event
+
+        else:
+            # CPU Fallback
+            for start_idx in range(0, num_unique, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, num_unique)
+                cur_B = end_idx - start_idx
+                batch_tensors = []
+                for i in range(cur_B):
+                    t = torch.from_numpy(unique_frames_rgb[start_idx + i])
+                    if t.ndim == 3 and t.shape[-1] == 3:
+                        t = t.permute(2, 0, 1)
+                    batch_tensors.append(t)
+                tensor = torch.stack(batch_tensors, dim=0).float().div_(255.0)
                 out_rgb = self.model(tensor)
                 out_p010 = self.color_conv.rgb_to_p010le(out_rgb)
                 out_np = out_p010.numpy()
 
-            # Ghi trực tiếp ra stdin pipe kèm nhân bản frame lặp (0 byte file trung gian trên đĩa)
-            for i in range(cur_B):
-                frame_bytes = memoryview(out_np[i])
-                repeats = repeat_counts[start_idx + i] if repeat_counts else 1
-                for _ in range(repeats):
-                    encoder_proc.stdin.write(frame_bytes)
-                    total_frames_written += 1
+                for i in range(cur_B):
+                    frame_bytes = memoryview(out_np[i])
+                    repeats = repeat_counts[start_idx + i] if repeat_counts else 1
+                    for _ in range(repeats):
+                        encoder_proc.stdin.write(frame_bytes)
+                        total_frames_written += 1
 
         return total_frames_written

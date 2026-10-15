@@ -152,3 +152,42 @@ def test_hysteresis_cast_manager_prevents_naive_auto_update_trap():
     assert res3["permanent_shifts"] == 1
     # Giờ đây xưng hô được nâng cấp thành anh - em qua arc_overrides
     assert mgr.resolve_pronouns("Stark", "Fern") == ("anh", "em")
+
+
+def test_hysteresis_cast_manager_from_glossary_and_to_prompt_context():
+    """Verifies that HysteresisCastManager initializes from glossary and generates structured prompt context."""
+    from subtrans.models import Glossary, Character, CharacterSpeaksTo
+
+    char = Character(
+        name_ja="フェルン",
+        name_vi="Fern",
+        speaks_to=[
+            CharacterSpeaksTo(listener="Stark", self="em", other="anh", note="tình cảm"),
+        ]
+    )
+    glossary = Glossary(characters=[char])
+    mgr = HysteresisCastManager.from_glossary(glossary)
+
+    assert mgr.resolve_pronouns("Fern", "Stark") == ("em", "anh")
+
+    # Kiểm tra prompt context
+    prompt_ctx = mgr.to_prompt_context()
+    assert "BASELINE RELATIONS" in prompt_ctx
+    assert "Fern -> Stark: em/anh" in prompt_ctx
+
+    # Bổ sung arc override và kiểm tra ưu tiên
+    mgr.apply_deltas([
+        CastRelationDelta(
+            scope="PERMANENT_ARC_SHIFT",
+            speaker="Fern",
+            listener="Stark",
+            pronoun_1p="vợ",
+            pronoun_2p="chồng",
+            reason="kết hôn",
+            confidence=0.95
+        )
+    ])
+    prompt_ctx_arc = mgr.to_prompt_context()
+    assert "ARC OVERRIDES" in prompt_ctx_arc
+    assert "Fern -> Stark: vợ/chồng" in prompt_ctx_arc
+
