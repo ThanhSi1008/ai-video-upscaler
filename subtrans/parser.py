@@ -245,70 +245,26 @@ def snap_whisper_cues_to_en(
     if not dialogue_cues:
         return 0
 
-    snapped_matches: Dict[int, Dict[str, Any]] = {}
+    # Thuật toán Monotonic DTW Auto-Align toàn cục:
+    from subtrans.dtw_auto_align import align_ja_to_en_monotonic_dtw, SubCue
+    ja_sub_cues = [SubCue(start_ms=c.start, end_ms=c.end, text=c.ja) for c in dialogue_cues]
+    en_sub_cues = [SubCue(start_ms=ec["start"], end_ms=ec["end"], text=ec["text"]) for ec in clean_en_cues]
 
-    # Pass 1: Ghép cặp tối ưu theo Overlap hoặc khoảng cách tâm
+    aligned_results = align_ja_to_en_monotonic_dtw(ja_sub_cues, en_sub_cues)
+
+    # Cập nhật mốc thời gian và EN reference chuẩn phòng thu
+    snapped_count = 0
+    aligned_idx = 0
     for c in dialogue_cues:
-        w_start, w_end = c.start, c.end
-        w_dur = max(1, w_end - w_start)
-        w_mid = (w_start + w_end) / 2.0
-
-        best_cand = None
-        best_overlap = -1
-
-        for ec in clean_en_cues:
-            overlap = max(0, min(w_end, ec["end"]) - max(w_start, ec["start"]))
-            if overlap > best_overlap and overlap >= min(200, 0.2 * w_dur):
-                best_overlap = overlap
-                best_cand = ec
-
-        if not best_cand:
-            # Fallback khoảng cách tâm thoại trong phạm vi sai số Whisper <= 500ms
-            best_dist = float("inf")
-            for ec in clean_en_cues:
-                ec_mid = (ec["start"] + ec["end"]) / 2.0
-                dist = abs(w_mid - ec_mid)
-                if dist <= 500 and dist < best_dist:
-                    best_dist = dist
-                    best_cand = ec
-
-        if best_cand:
-            snapped_matches[id(c)] = best_cand
-            c.start = best_cand["start"]
-            c.end = best_cand["end"]
-            if not c.en:
-                c.en = best_cand["text"]
-
-    snapped_count = len(snapped_matches)
-
-    # Pass 2: Phân tách vùng thời gian khi nhiều câu Whisper liên tiếp cùng map vào 1 câu EN
-    i = 0
-    while i < len(dialogue_cues):
-        m_i = snapped_matches.get(id(dialogue_cues[i]))
-        if not m_i:
-            i += 1
-            continue
-        j = i + 1
-        while (
-            j < len(dialogue_cues)
-            and snapped_matches.get(id(dialogue_cues[j]))
-            and snapped_matches[id(dialogue_cues[j])]["id"] == m_i["id"]
-        ):
-            j += 1
-        count = j - i
-        if count > 1:
-            span_start = m_i["start"]
-            span_end = m_i["end"]
-            total_span = max(count * 300, span_end - span_start)
-            span_end = span_start + total_span
-            sub_dur = (total_span - (count - 1) * min_gap_ms) // count
-            sub_dur = max(200, sub_dur)
-            curr_s = span_start
-            for k in range(i, j):
-                dialogue_cues[k].start = curr_s
-                dialogue_cues[k].end = curr_s + sub_dur
-                curr_s = dialogue_cues[k].end + min_gap_ms
-        i = j
+        if aligned_idx < len(aligned_results):
+            sub_aligned, paired_en = aligned_results[aligned_idx]
+            if paired_en:
+                c.start = sub_aligned.start_ms
+                c.end = sub_aligned.end_ms
+                if not c.en:
+                    c.en = paired_en
+                snapped_count += 1
+            aligned_idx += 1
 
     # Pass 3: Đảm bảo tính đơn điệu và khoảng cách tối thiểu giữa các cue liên tiếp
     cues.sort(key=lambda c: (c.start, c.end))
