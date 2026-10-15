@@ -118,8 +118,9 @@ DEFAULT_MODEL = "realesr-animevideov3"
 DEFAULT_ENGINE = _detect_default_engine()  # Mặc định: 'cuda' trên NVIDIA RTX
 DEVICE_NAME = get_device_name()
 DEFAULT_PRECISION = "fp16"
-DEFAULT_BATCH_SIZE = 6 if DEFAULT_ENGINE == "cuda" else 1  # Lô 6 frames tối ưu cho 12GB VRAM RTX 3060
-DEFAULT_GPU_RESTART_CHUNKS = 10  # Khởi động lại worker mỗi N chunks để giải phóng driver pool
+DEFAULT_BATCH_SIZE = 8 if DEFAULT_ENGINE == "cuda" else 1  # Lô 8 frames (Điểm ngọt tối ưu cho GA106 30 SMs trên RTX 3060 12GB)
+DEFAULT_VRAM_CLEANUP_THRESHOLD_GB = 9.5  # Ngưỡng VRAM (GB) để dọn dẹp CUDA memory cache thay vì restart tiến trình
+DEFAULT_GPU_RESTART_CHUNKS = 10  # Ngưỡng dự phòng cho worker
 DEFAULT_MPS_RESTART_CHUNKS = DEFAULT_GPU_RESTART_CHUNKS  # Alias tương thích ngược
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"
@@ -164,7 +165,16 @@ def _detect_hevc_encoder() -> str:
 
 HEVC_ENCODER = _detect_hevc_encoder()
 HEVC_PRESET = "p6"  # Preset p6 (Slower/Better Quality) cho RTX NVENC
-HEVC_CQ_LEVEL = "19"  # Constant Quality cho NVENC (visually lossless, thích ứng theo cảnh phim)
+HEVC_CQ_LEVEL = "18"  # Constant Quality CQ 18 cho NVENC (visually lossless chuẩn Blu-ray, giảm 35-45% file size cảnh tĩnh)
+HEVC_MAXRATE = "45M"  # Trần bitrate cho các cảnh hành động/chiến đấu nhiều hạt
+HEVC_BUFSIZE = "90M"  # Bộ đệm rate-control
+HEVC_MULTIPASS = "fullres"  # Khai thác 100% ASIC NVENC chuyên dụng (không tốn CUDA cores)
+HEVC_RC_LOOKAHEAD = 32  # Lookahead tối đa 32 frames để NVENC tối ưu hóa Coding Units (CU) 8x8
+HEVC_SPATIAL_AQ = 1  # Adaptive Quantization không gian
+HEVC_AQ_STRENGTH = 6  # Hạ từ 8 -> 6 để bảo vệ độ sắc bén của nét vẽ anime từ realesr-animevideov3
+HEVC_TEMPORAL_AQ = 1  # Adaptive Quantization thời gian (khóa chất lượng phông nền tĩnh anime)
+HEVC_BF = 4  # Số khung hình B tối đa
+HEVC_B_REF_MODE = "middle"  # B-frame reference mode middle giúp tăng hiệu quả nén cảnh chuyển động nhẹ
 HEVC_PROFILE = "main10"
 HEVC_PIX_FMT = "p010le"
 HEVC_COLOR_RANGE = "tv"
@@ -172,6 +182,34 @@ HEVC_COLORSPACE = "bt709"
 HEVC_COLOR_PRIMARIES = "bt709"
 HEVC_COLOR_TRC = "bt709"
 HEVC_TAG = "hvc1"
+
+
+def get_hevc_rate_args(bitrate: str = "28M") -> list:
+    """
+    Trả về bộ tham số rate-control tối ưu cho HEVC Main 10 theo phần cứng hiện hành.
+    Trên NVIDIA NVENC: áp dụng cấu hình CQ 18 + fullres + lookahead 32 + AQ kép chuyên biệt cho Anime 4K.
+    """
+    if HEVC_ENCODER == "hevc_nvenc":
+        return [
+            "-preset", HEVC_PRESET,
+            "-tune", "hq",
+            "-multipass", HEVC_MULTIPASS,
+            "-rc", "vbr",
+            "-cq", str(HEVC_CQ_LEVEL),
+            "-b:v", "0",
+            "-maxrate", HEVC_MAXRATE,
+            "-bufsize", HEVC_BUFSIZE,
+            "-rc-lookahead", str(HEVC_RC_LOOKAHEAD),
+            "-spatial-aq", str(HEVC_SPATIAL_AQ),
+            "-aq-strength", str(HEVC_AQ_STRENGTH),
+            "-temporal-aq", str(HEVC_TEMPORAL_AQ),
+            "-bf", str(HEVC_BF),
+            "-b_ref_mode", HEVC_B_REF_MODE,
+        ]
+    return [
+        "-b:v", bitrate,
+        "-spatial_aq", "1"
+    ]
 
 
 def validate_environment(engine: str = DEFAULT_ENGINE):

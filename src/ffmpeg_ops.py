@@ -28,7 +28,8 @@ from src.config import (
     HEVC_COLORSPACE,
     HEVC_COLOR_PRIMARIES,
     HEVC_COLOR_TRC,
-    HEVC_TAG
+    HEVC_TAG,
+    get_hevc_rate_args
 )
 
 
@@ -226,22 +227,7 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
     ext = "png" if fmt == "png" else "jpg"
     frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
 
-    if HEVC_ENCODER == "hevc_nvenc":
-        rate_args = [
-            "-preset", HEVC_PRESET,
-            "-rc", "vbr",
-            "-cq", HEVC_CQ_LEVEL,
-            "-b:v", "0",
-            "-multipass", "qres",
-            "-rc-lookahead", "24",
-            "-spatial-aq", "1",
-            "-temporal-aq", "1",
-        ]
-    else:
-        rate_args = [
-            "-b:v", bitrate,
-            "-spatial_aq", "1"
-        ]
+    rate_args = get_hevc_rate_args(bitrate=bitrate)
 
     encode_cmd = [
         "ffmpeg", "-y",

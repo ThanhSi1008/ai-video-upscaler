@@ -159,6 +159,8 @@ class MPSPersistentWorker:
             clean_weights = {k: v.float() for k, v in clean_weights.items()}
 
         model.load_state_dict(clean_weights, strict=True)
+        if self.device.type == "cuda":
+            model = model.to(memory_format=torch.channels_last)
         model.eval()
 
         # Warm-up lô frame
@@ -166,6 +168,8 @@ class MPSPersistentWorker:
         dummy = torch.rand(warm_b, 3, 540, 960, device=self.device)
         if self.precision == "fp16":
             dummy = dummy.half()
+        if self.device.type == "cuda":
+            dummy = dummy.to(memory_format=torch.channels_last)
         with torch.inference_mode():
             _ = model(dummy)
             if self.device.type == "cuda":
@@ -175,19 +179,35 @@ class MPSPersistentWorker:
         self.last_load_time = time.time() - t0
 
     def restart_if_needed(self, logger=None) -> bool:
-        """Kiểm tra và tự động khởi động lại worker nếu đã vượt ngưỡng N chunks."""
+        """
+        Quản lý bộ nhớ VRAM thông minh cho GPU NVIDIA (Phase 1 Quick Win):
+        Ưu tiên dọn dẹp CUDA memory cache khi vượt ngưỡng an toàn (9.5 GB) để loại bỏ
+        hoàn toàn việc dừng pipeline 3-4s nạp lại mô hình từ đĩa.
+        """
         self.chunks_processed += 1
-        if self.chunks_processed >= self.max_chunks_before_restart:
+        if self.device.type == "cuda":
+            reserved_gb = torch.cuda.memory_reserved(self.device) / (1024 ** 3)
+            from src.config import DEFAULT_VRAM_CLEANUP_THRESHOLD_GB
+            if reserved_gb >= DEFAULT_VRAM_CLEANUP_THRESHOLD_GB:
+                torch.cuda.empty_cache()
+                msg = (
+                    f"🧹 [VRAM Garbage Collection] Đã dọn dẹp CUDA memory cache "
+                    f"(Reserved: {reserved_gb:.2f} GB >= {DEFAULT_VRAM_CLEANUP_THRESHOLD_GB} GB)"
+                )
+                if logger:
+                    logger.info(msg)
+                return True
+            return False
+
+        if self.max_chunks_before_restart > 0 and self.chunks_processed >= self.max_chunks_before_restart:
             t0 = time.time()
             self.model = None
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
             self._load_model()
             restart_elapsed = time.time() - t0
             self.chunks_processed = 0
             self.total_restarts += 1
             msg = (
-                f"♻️ [GPU Worker Restart] Đã làm mới worker sau {self.max_chunks_before_restart} chunks "
+                f"♻️ [Worker Restart] Đã làm mới worker sau {self.max_chunks_before_restart} chunks "
                 f"(Chi phí nạp lại: {restart_elapsed*1000:.1f} ms | Tổng lần restart: {self.total_restarts})"
             )
             if logger:
@@ -262,6 +282,8 @@ class MPSPersistentWorker:
                 tensor = torch.from_numpy(batch_np).to(self.device, non_blocking=True)
                 if self.precision == "fp16":
                     tensor = tensor.half()
+                if self.device.type == "cuda":
+                    tensor = tensor.to(memory_format=torch.channels_last)
 
                 # 2. Suy luận GPU (CUDA / CPU)
                 with torch.inference_mode():

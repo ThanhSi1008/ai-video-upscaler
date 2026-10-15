@@ -30,7 +30,8 @@ from src.config import (
     HEVC_COLORSPACE,
     HEVC_COLOR_PRIMARIES,
     HEVC_COLOR_TRC,
-    HEVC_TAG
+    HEVC_TAG,
+    get_hevc_rate_args
 )
 
 DEDUP_POLICY_PARAMS = {
@@ -845,19 +846,7 @@ def encode_chunk_reexpanded(
     if os.path.exists(tmp_output):
         os.remove(tmp_output)
 
-    if HEVC_ENCODER == "hevc_nvenc":
-        rate_args = [
-            "-preset", HEVC_PRESET,
-            "-rc", "vbr",
-            "-cq", HEVC_CQ_LEVEL,
-            "-b:v", "0",
-            "-spatial-aq", "1",
-            "-temporal-aq", "1",
-        ]
-    else:
-        rate_args = [
-            "-b:v", bitrate
-        ]
+    rate_args = get_hevc_rate_args(bitrate=bitrate)
 
     cmd = [
         "ffmpeg", "-y",

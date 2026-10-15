@@ -22,6 +22,7 @@ from subtrans.models import Cue, Glossary
 from subtrans.translator import BaseTranslator
 from subtrans.validation import validate_translations
 from subtrans.cache import execute_and_log_api_request
+from subtrans.ja_morph_tagger import extract_ja_linguistic_hints
 
 logger = logging.getLogger("subtrans.gemini")
 
@@ -50,6 +51,7 @@ SYSTEM_INSTRUCTION = (
     "    - 'en_conflict': true if the English reference diverges significantly from or contradicts the authentic Japanese nuance, else false.\n"
     "    - 'vi': the Vietnamese dialogue translation adhering strictly to the above rules.\n"
     "    - 'uncertain': 'none' if confident; or 'pronoun', 'referent', 'wordplay', 'archaic', 'term', 'other' if unsure.\n"
+    "11. Japanese Linguistic Hints & Register (Zero-Pronouns): When cues contain `ja_hints` (e.g. `1P:ore`, `2P:kisama/temee/anta/omae`, `SFP` tone markers), use them as decisive semantic anchors for Vietnamese pronouns and sentence register, avoiding mechanical translations of English 'you/I' into generic 'bạn/tôi'.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
 
@@ -494,20 +496,35 @@ class GeminiTranslator(BaseTranslator):
                 c.uncertain = False
             return [f"[DRY-RUN VI] {c.en or c.ja}" for c in cues]
 
+        def _format_target_cue(c: Cue) -> Dict[str, Any]:
+            item = {"id": c.id, "ja": c.ja}
+            if c.en:
+                item["en"] = c.en
+            hints = extract_ja_linguistic_hints(c.ja)
+            if hints:
+                item["ja_hints"] = hints
+            return item
+
         expected_ids = [c.id for c in cues]
         payload = {
-            "cues_to_translate": [
-                {"id": c.id, "ja": c.ja, "en": c.en} if c.en else {"id": c.id, "ja": c.ja}
-                for c in cues
-            ]
+            "cues_to_translate": [_format_target_cue(c) for c in cues]
         }
 
         # Add surrounding context (up to +/-10 cues per ADDENDUM 6)
         if context:
-            payload["surrounding_context"] = [
-                {"id": c.id, "ja": c.ja, "en": c.en, "context": True}
-                for c in context
-            ]
+            first_id = cues[0].id
+            last_id = cues[-1].id
+            ctx_items = []
+            for c in context:
+                ctx_item = {"id": c.id, "ja": c.ja, "context": True}
+                if c.en:
+                    ctx_item["en"] = c.en
+                if c.id < first_id:
+                    ctx_item["role"] = "history_readonly"
+                elif c.id > last_id:
+                    ctx_item["role"] = "lookahead_readonly"
+                ctx_items.append(ctx_item)
+            payload["surrounding_context"] = ctx_items
 
         # Add relevant glossary entries
         rel_glossary = filter_relevant_glossary(cues, glossary)
@@ -541,6 +558,8 @@ class GeminiTranslator(BaseTranslator):
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",
             "Follow character relationships, pronouns, and glossary strictly.",
+            "JAPANESE LINGUISTIC HINTS: When 'ja_hints' is present on a cue (e.g. 1P:ore, 2P:kisama/temee/anta/omae, SFP tone markers), prioritize them over generic English pronouns ('I/you') to render authentic Japanese relationship register and emotional intensity.",
+            "CONTEXT RULES: Cues in 'surrounding_context' are READ-ONLY for dialogue continuity. NEVER translate or include cues marked with context=true in your output.",
             "CRITICAL NAMING RULE: Always keep character names, family/clan names, and organization names in Romaji matching the English reference track (e.g. Fran, Urushi, Jean, Reirin, Keigetsu, Rudeus). NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (DO NOT use Pháp Lạp, Ô Lỗ Thi, Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt).",
             "ADDRESSING BY NAME: Whenever someone is addressed by their proper name in Japanese (vocative), ALWAYS preserve that Romaji proper name directly in the Vietnamese subtitle line (e.g. 'Fran, ...', 'Jean, ...', 'chị Nell, ...'). Do NOT replace proper names with generic standalone pronouns.",
             "When unsure of a rendering, set 'uncertain': true instead of inventing meaning.",
