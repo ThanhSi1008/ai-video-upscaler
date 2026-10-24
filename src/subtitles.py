@@ -111,7 +111,8 @@ def find_or_extract_subtitles(video_path: str) -> Tuple[Optional[str], Optional[
             break
 
     # 2. Kiểm tra container video qua ffprobe để trích xuất nếu thiếu file rời
-    tmp_dir = os.path.join(vid_dir, f".temp_{base_name}")
+    safe_base = base_name.rstrip('. ')
+    tmp_dir = os.path.join(vid_dir, f".temp_{safe_base}")
     try:
         cmd = [
             "ffprobe", "-v", "error",

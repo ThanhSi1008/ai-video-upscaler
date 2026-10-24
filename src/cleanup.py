@@ -144,7 +144,8 @@ def cleanup_subtitle_extracts(vid_dir: str, base_name: str, logger=None) -> int:
     Dọn dẹp các tệp phụ đề tạm (extracted_en.ass, extracted_ja.ass) được trích xuất
     trong quá trình xử lý subtrans trong thư mục .temp_<base_name>.
     """
-    tmp_dir = os.path.join(vid_dir, f".temp_{base_name}")
+    safe_base = base_name.rstrip('. ')
+    tmp_dir = os.path.join(vid_dir, f".temp_{safe_base}")
     if not os.path.lexists(tmp_dir):
         return 0
 
