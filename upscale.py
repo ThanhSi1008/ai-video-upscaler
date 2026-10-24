@@ -523,10 +523,12 @@ def main():
         )
         base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
         use_auto_offset = bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False
+        target_4k = os.path.join(sub_out_dir, f"{base_vid_name}_4K.mkv")
+        out_base = f"{base_vid_name}_4K" if os.path.exists(target_4k) else base_vid_name
         res = sub_pipeline.run(
             ja_path=Path(ja_sub),
             en_path=Path(en_sub) if en_sub else None,
-            output_basename=f"{base_vid_name}_4K",
+            output_basename=out_base,
             subs_upgrade=args.subs_upgrade,
             sub_offset_ms=args.sub_offset_ms,
             auto_offset=use_auto_offset,
@@ -535,23 +537,24 @@ def main():
         srt_path = res.get('subtitle_path') or res.get('output_path')
         print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
 
-        # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K
+        # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
         if srt_path and os.path.exists(srt_path):
             is_partial_sub = str(srt_path).endswith(".partial.srt")
             if is_partial_sub:
-                print(f"⚠️ [CHƯA ĐỦ ĐIỀU KIỆN NHÚNG] File phụ đề là bản một phần ({os.path.basename(str(srt_path))}). Không nhúng vào MKV 4K.")
+                print(f"⚠️ [CHƯA ĐỦ ĐIỀU KIỆN NHÚNG] File phụ đề là bản một phần ({os.path.basename(str(srt_path))}). Không nhúng vào MKV.")
             else:
                 from src.ffmpeg_ops import embed_subtitle_track
-                target_4k = os.path.join(sub_out_dir, f"{base_vid_name}_4K.mkv")
-                if os.path.exists(target_4k):
+                target_mkv = target_4k if os.path.exists(target_4k) else (target_subs_vid if target_subs_vid.lower().endswith(".mkv") else None)
+                if target_mkv and os.path.exists(target_mkv):
                     if not getattr(args, "no_embed", False):
-                        print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_4k)}...")
-                        ok = embed_subtitle_track(target_4k, str(srt_path), original_source_path=target_subs_vid)
+                        print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_mkv)}...")
+                        ok = embed_subtitle_track(target_mkv, str(srt_path), original_source_path=target_subs_vid)
                         if ok:
-                            print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container 4K MKV!")
+                            print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container MKV!")
                         else:
-                            print("⚠️ Không thể nhúng phụ đề vào container 4K (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
-                        print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container 4K, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
+                            print("⚠️ Không thể nhúng phụ đề vào container (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
+                    else:
+                        print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container MKV, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
             # Luôn đồng bộ file phụ đề .vi.srt cùng tên ngay cạnh video gốc để các trình phát video tự động nhận
             raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
