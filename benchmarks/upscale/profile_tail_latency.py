@@ -20,12 +20,12 @@ from pathlib import Path
 # Đảm bảo import được module từ thư mục gốc
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.mps_engine import RealESRAnimeVideoV3
+from src.cuda_engine import RealESRAnimeVideoV3
 from src.config import DEVICE_NAME
 
 
 def run_tail_profiling(precision: str = "fp16", num_iters: int = 50):
-    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}")
     print(f"🔬 BẮT ĐẦU PROFILE ĐUÔI 8K TRÊN {DEVICE_NAME.upper()} ({precision.upper()})")
     print(f"   • Thiết bị: {device} ({DEVICE_NAME})")

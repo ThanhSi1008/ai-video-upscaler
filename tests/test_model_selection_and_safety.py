@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 tests/test_model_selection_and_safety.py
-Kiểm thử bộ quy tắc D10:
+Kiểm thử bộ quy tắc D10 trên Windows 11 + NVIDIA CUDA:
 (a) Không có override thì dùng animevideov3;
 (b) Mỗi model cho đúng kích thước đầu ra (3840x2160) từ 1080p;
 (c) Resume khác model bị từ chối (trừ khi có --force);
-(d) Lỗi MPS khi chạy AnimeJaNai không làm đổi sang animevideov3 (chỉ chuyển sang MPS FP32).
+(d) Lỗi GPU khi chạy AnimeJaNai không làm đổi sang animevideov3 (chỉ chuyển sang CUDA FP32 fallback).
 """
 
 import os
@@ -21,11 +21,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models_resolver import resolve_model_for_video, load_models_registry
-from src.mps_engine import (
+from src.cuda_engine import (
     RealESRAnimeVideoV3,
     AnimeJaNaiCompact2x,
     upscale_frames_with_fallback,
-    MPSError
+    GPUError
 )
 
 
@@ -48,7 +48,7 @@ def test_d10_a_default_model_resolution():
 
 def test_d10_b_output_resolution_tensor():
     """Kiểm tra (b): Mỗi model cho đúng kích thước 3840x2160 từ 1920x1080."""
-    device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 1. RealESRAnimeVideoV3
     m_v3 = RealESRAnimeVideoV3().to(device).half()
@@ -58,8 +58,6 @@ def test_d10_b_output_resolution_tensor():
         out_v3 = m_v3(dummy_1080p)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        elif device.type == "mps":
-            torch.mps.synchronize()
     assert out_v3.shape == (1, 3, 2160, 3840), f"RealESRAnimeVideoV3 cho shape sai: {out_v3.shape}"
 
     # 2. AnimeJaNaiCompact2x
@@ -69,8 +67,6 @@ def test_d10_b_output_resolution_tensor():
         out_aj = m_aj(dummy_1080p)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        elif device.type == "mps":
-            torch.mps.synchronize()
     assert out_aj.shape == (1, 3, 2160, 3840), f"AnimeJaNaiCompact2x cho shape sai: {out_aj.shape}"
 
 
@@ -85,7 +81,7 @@ def test_d10_c_resume_different_model_rejected(tmp_path):
         "model_id": "animevideov3",
         "model_name": "RealESR-AnimeVideoV3",
         "sha256": "3cb49a466a93cb338b8b0932bbbe602167d643878b2d131f49615a6b0c2a8db4",
-        "engine": "mps",
+        "engine": "cuda",
         "precision": "fp16"
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -122,7 +118,7 @@ def test_d10_c_resume_different_model_rejected(tmp_path):
             "model_id": new_model_info["id"],
             "model_name": new_model_info["name"],
             "sha256": new_model_info["sha256"],
-            "engine": "mps",
+            "engine": "cuda",
             "precision": "fp16"
         }
         with open(work_dir / "manifest.json", "w", encoding="utf-8") as f:
@@ -133,8 +129,8 @@ def test_d10_c_resume_different_model_rejected(tmp_path):
     assert updated["model_id"] == "animejanai-hd-v3-compact"
 
 
-def test_d10_d_animejanai_mps_error_does_not_switch_to_animevideov3(tmp_path):
-    """Kiểm tra (d): Lỗi MPS khi chạy AnimeJaNai không làm đổi sang animevideov3 mà rơi về MPS FP32."""
+def test_d10_d_animejanai_gpu_error_does_not_switch_to_animevideov3(tmp_path):
+    """Kiểm tra (d): Lỗi GPU khi chạy AnimeJaNai không làm đổi sang animevideov3 mà rơi về CUDA FP32."""
     model_info = resolve_model_for_video("test.mkv", "animejanai-hd-v3-compact")
 
     in_dir = str(tmp_path / "in")
@@ -147,13 +143,13 @@ def test_d10_d_animejanai_mps_error_does_not_switch_to_animevideov3(tmp_path):
     img = Image.new("RGB", (32, 32), color=(100, 150, 200))
     img.save(os.path.join(in_dir, "frame_0001.png"))
 
-    # Giả lập lỗi MPS FP16 bằng cách truyền NaN hoặc patch worker
+    # Giả lập lỗi GPU FP16 bằng cách truyền NaN hoặc patch worker
     from unittest.mock import patch, MagicMock
 
-    with patch("src.mps_engine.get_mps_worker") as mock_get_worker:
+    with patch("src.cuda_engine.get_gpu_worker") as mock_get_worker:
         # Mock worker đầu tiên (FP16) bị lỗi
         mock_fp16_worker = MagicMock()
-        mock_fp16_worker.upscale_directory.side_effect = MPSError("Simulated GPU Error in FP16")
+        mock_fp16_worker.upscale_directory.side_effect = GPUError("Simulated GPU Error in FP16")
 
         # Mock worker thứ hai (FP32) thành công
         mock_fp32_worker = MagicMock()
@@ -178,13 +174,13 @@ def test_d10_d_animejanai_mps_error_does_not_switch_to_animevideov3(tmp_path):
             input_dir=in_dir,
             output_dir=out_dir,
             model_info=model_info,
-            engine="mps",
+            engine="cuda",
             precision="fp16",
             fmt="png"
         )
 
-        # Khẳng định fallback là mps_fp32_fallback, tuyệt đối không phải ncnn hay animevideov3
-        assert res["engine_used"] == "mps_fp32_fallback"
+        # Khẳng định fallback là cuda_fp32_fallback, tuyệt đối không phải ncnn hay animevideov3
+        assert res["engine_used"] == "cuda_fp32_fallback"
         assert "ncnn" not in res["engine_used"]
 
 

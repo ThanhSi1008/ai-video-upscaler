@@ -63,6 +63,7 @@ class AntiSleepContext:
 
 
 # Alias tương thích ngược
+# Alias tương thích ngược (deprecated legacy shim)
 CaffeinateContext = AntiSleepContext
 
 
@@ -118,6 +119,7 @@ def send_system_notification(title: str, message: str, sound: str = "Glass"):
         except Exception:
             pass
 
+# Alias tương thích ngược (deprecated legacy shim)
 send_macos_notification = send_system_notification
 
 

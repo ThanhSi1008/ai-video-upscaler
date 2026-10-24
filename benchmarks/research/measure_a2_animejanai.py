@@ -5,7 +5,7 @@ scripts/measure_a2_animejanai.py
 So sánh độc lập giữa:
 1. Tham chiếu độc lập: Spandrel CPU (FP32)
 2. Pipeline nội bộ: AnimeJaNai CPU (FP32)
-3. Pipeline nội bộ: AnimeJaNai MPS (FP16)
+3. Pipeline nội bộ: AnimeJaNai GPU / CUDA (FP16)
 trên 5 frame ảnh thực tế (crop 960x540).
 """
 
@@ -21,7 +21,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models_resolver import load_models_registry
-from src.mps_engine import AnimeJaNaiCompact2x
+from src.cuda_engine import AnimeJaNaiCompact2x
 
 
 def calc_metrics(arr_ref: np.ndarray, arr_test: np.ndarray, border_px: int = 10):
@@ -90,8 +90,8 @@ def main():
 
     # 3. Nạp Our AnimeJaNai GPU FP16
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    our_mps = AnimeJaNaiCompact2x().eval().to(device).half()
-    our_mps.load_state_dict(clean_weights, strict=True)
+    our_gpu = AnimeJaNaiCompact2x().eval().to(device).half()
+    our_gpu.load_state_dict(clean_weights, strict=True)
 
     # Thu thập 5 frame (crop 960x540)
     img_paths = [
@@ -135,25 +135,25 @@ def main():
             out_cpu = torch.clamp(our_cpu(t_in_cpu), 0.0, 1.0)
             arr_cpu = out_cpu.squeeze(0).permute(1, 2, 0).numpy()
 
-            # Our MPS FP16
-            t_in_mps = t_in_cpu.to(device).half()
-            out_mps = torch.clamp(our_mps(t_in_mps), 0.0, 1.0)
+            # Our CUDA FP16
+            t_in_gpu = t_in_cpu.to(device).half()
+            out_gpu = torch.clamp(our_gpu(t_in_gpu), 0.0, 1.0)
             if device.type == "cuda":
                 torch.cuda.synchronize()
-            arr_mps = out_mps.to("cpu", dtype=torch.float32).squeeze(0).permute(1, 2, 0).numpy()
+            arr_gpu = out_gpu.to("cpu", dtype=torch.float32).squeeze(0).permute(1, 2, 0).numpy()
 
         # So sánh 1: Our CPU FP32 vs Spandrel CPU FP32
         m_cpu = calc_metrics(arr_ref, arr_cpu)
-        # So sánh 2: Our MPS FP16 vs Spandrel CPU FP32
-        m_mps = calc_metrics(arr_ref, arr_mps)
+        # So sánh 2: Our CUDA FP16 vs Spandrel CPU FP32
+        m_gpu = calc_metrics(arr_ref, arr_gpu)
 
         print(f"\n--- Frame {idx}: {os.path.basename(p)} ---")
         print(f"  [Our CPU FP32 vs Spandrel Ref FP32]:")
         print(f"    max |diff| float: {m_cpu['max_diff_float']:.8e}, uint8: {m_cpu['max_diff_u8']}")
         print(f"    PSNR all: {m_cpu['psnr_all']} dB, center: {m_cpu['psnr_center']} dB, border: {m_cpu['psnr_border']} dB, |ΔY|: {m_cpu['delta_y']:.4f}/255")
-        print(f"  [Our MPS FP16 vs Spandrel Ref FP32]:")
-        print(f"    max |diff| float: {m_mps['max_diff_float']:.6f}, uint8: {m_mps['max_diff_u8']}")
-        print(f"    PSNR all: {m_mps['psnr_all']} dB, center: {m_mps['psnr_center']} dB, border: {m_mps['psnr_border']} dB, |ΔY|: {m_mps['delta_y']:.4f}/255")
+        print(f"  [Our CUDA FP16 vs Spandrel Ref FP32]:")
+        print(f"    max |diff| float: {m_gpu['max_diff_float']:.6f}, uint8: {m_gpu['max_diff_u8']}")
+        print(f"    PSNR all: {m_gpu['psnr_all']} dB, center: {m_gpu['psnr_center']} dB, border: {m_gpu['psnr_border']} dB, |ΔY|: {m_gpu['delta_y']:.4f}/255")
 
 
 if __name__ == "__main__":

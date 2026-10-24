@@ -10,7 +10,7 @@
 | File mã nguồn | Vai trò & Trách nhiệm chính |
 | :--- | :--- |
 | `src/pipeline.py` | Orchestrator điều phối toàn bộ luồng: gối đầu 3 tầng (triple-buffering), rolling segments, checkpoint resume |
-| `src/mps_engine.py` | PyTorch GPU Engine: Hỗ trợ CUDA FP16 Native, Batch Inference (`batch_size=6`), Tensor Cores và CPU fallback |
+| `src/cuda_engine.py` | PyTorch GPU Engine: Hỗ trợ CUDA FP16 Native, Batch Inference (`batch_size=8`), Tensor Cores và CPU fallback |
 | `src/ai_engine.py` | Interface trừu tượng Super-Resolution |
 | `src/models_resolver.py` | Bộ phân giải model registry (`models/models.yaml`), xác thực mã băm SHA256 và tải trọng số |
 | `src/ramdisk.py` | Quản lý bộ đệm khung hình: Cơ chế rolling cleanup đệm tạm và hỗ trợ RAM Disk ảo (ImDisk) trên Windows |
@@ -37,7 +37,7 @@ Chunk N+1: [FFmpeg Trích xuất Frame (CPU)]      ──► Giải mã GOP từ
 
 ## 3. Engine Suy Luận: PyTorch CUDA FP16 Native
 
-### A. PyTorch CUDA FP16 Native (`src/mps_engine.py` trên Windows / NVIDIA RTX)
+### A. PyTorch CUDA FP16 Native (`src/cuda_engine.py` trên Windows 11 / NVIDIA RTX)
 * **Phần cứng mục tiêu:** NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6, kiến trúc Ampere) trên Windows 11.
 * **Mô hình chính:** `realesr-animevideov3` (kiến trúc mạng `SRVGGNetCompact` 4x kết hợp nội suy Bicubic 0.5 để xuất 2x).
 * **Đặc tính kỹ thuật:**

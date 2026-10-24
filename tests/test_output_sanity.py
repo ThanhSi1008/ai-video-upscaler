@@ -121,7 +121,7 @@ def test_output_sanity_audit_generation(tmp_path, sample_frames):
         source_file=sample_frames["src_path"],
         output_file=str(tmp_path / "test_video_4K.mkv"),
         model_info=model_info,
-        engine="mps",
+        engine="cuda",
         precision="fp16",
         chunk_idx=0,
         metrics=res,

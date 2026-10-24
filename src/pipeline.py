@@ -68,7 +68,7 @@ from src.dedup import (
 )
 from src.ai_engine import upscale_frames
 from src.models_resolver import resolve_model_for_video
-from src.mps_engine import upscale_frames_with_fallback
+from src.cuda_engine import upscale_frames_with_fallback
 from src.logger import (
     format_time,
     format_bytes,
@@ -97,7 +97,8 @@ def run_upscale_pipeline(
     fmt: str = DEFAULT_FRAME_FORMAT,
     use_ramdisk: bool = True,
     resume: bool = True,
-    caffeinate: bool = True,
+    anti_sleep: bool = True,
+    caffeinate: Optional[bool] = None,
     preview_seconds: Optional[int] = None,
     dedup: bool = True,
     allow_partial: bool = False,
@@ -178,8 +179,9 @@ def run_upscale_pipeline(
     )
 
     # Kích hoạt AntiSleep để chống Sleep máy trong suốt phiên chạy
-    with AntiSleepContext(enabled=caffeinate):
-        if caffeinate:
+    effective_anti_sleep = anti_sleep if caffeinate is None else caffeinate
+    with AntiSleepContext(enabled=effective_anti_sleep):
+        if effective_anti_sleep:
             logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
 
         target_w = meta["width"] * DEFAULT_SCALE
@@ -590,7 +592,7 @@ def run_upscale_pipeline(
                                         import cv2
                                         import torch
                                         from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler, SRVGGNetCompactTRTWrapper
-                                        from src.mps_engine import get_cuda_inference_engine
+                                        from src.cuda_engine import get_cuda_inference_engine
                                         from src.output_sanity import check_frame_sanity_arrays, OutputSanityError, write_failed_sanity_audit
 
                                         in_files = sorted([os.path.join(c_in_dir, f) for f in os.listdir(c_in_dir) if f.lower().endswith(f".{fmt}")])

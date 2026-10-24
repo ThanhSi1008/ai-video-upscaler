@@ -98,7 +98,7 @@ python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-parti
 * `-f`, `--format`: Định dạng khung hình trung gian (`png` lossless BT.709 hoặc `jpg`).
 * `--no-ramdisk`: Buộc dùng thư mục tạm trên ổ cứng nếu không tạo RAM Disk ảo.
 * `--no-resume`: Buộc chạy lại từ đầu thay vì tiếp tục phân đoạn cũ.
-* `--no-caffeinate`: Không kích hoạt cơ chế chống sleep máy trong khi chạy.
+* `--no-anti-sleep`: Không kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows) trong khi chạy.
 * `--preview [giây]`: Chế độ xem trước N giây ở giữa phim và mở trình phát xem ngay.
 
 ---

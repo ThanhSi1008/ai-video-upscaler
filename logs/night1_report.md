@@ -1,5 +1,11 @@
 # BÁO CÁO GIÁM SÁT CA CHẠY QUA ĐÊM (NIGHT 1)
 
+> [!NOTE] Lưu trữ Lịch sử (Historical Archive - Initial macOS Prototype Run)
+> Báo cáo này ghi lại kết quả thử nghiệm ban đầu trên thiết bị macOS cũ trước khi chuyển giao.
+> Toàn bộ dự án hiện tại đã chính thức chuyển dịch 100% sang nền tảng **Windows 11 (64-bit)** với cấu hình phần cứng:
+> **Intel Core i5-12600K (10 nhân / 16 luồng, AVX2)** | **NVIDIA GeForce RTX 3060 12GB (Ampere GA106, Tensor Cores FP16 & TensorRT)** | **HEVC NVENC 10-bit hardware encoder**.
+
+
 * **Thời điểm bắt đầu ca:** 2026-10-05 00:25:59 +07:00
 * **Commit hash:** `82ea864a56ca0afa09740e143efeab56c5cfb050` (`git status` sạch hoàn toàn)
 * **Nguồn điện:** AC Power (`pmset -g batt`: AC attached, 80%)

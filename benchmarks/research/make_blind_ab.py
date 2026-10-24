@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.models_resolver import resolve_model_for_video, load_models_registry
-from src.mps_engine import get_mps_worker
+from src.cuda_engine import get_gpu_worker
 from src.ffmpeg_ops import probe_video
 
 
@@ -57,8 +57,8 @@ def extract_diverse_frames(video_path: str, num_frames: int = 5, tmp_dir: str = 
     return frame_paths
 
 
-def upscale_single_frame_mps(worker, img_path: str) -> np.ndarray:
-    """Suy luận 1 khung hình qua MPSPersistentWorker và trả về RGB uint8 array."""
+def upscale_single_frame_gpu(worker, img_path: str) -> np.ndarray:
+    """Suy luận 1 khung hình qua GPUPersistentWorker và trả về RGB uint8 array."""
     img = Image.open(img_path).convert("RGB")
     arr = (np.array(img).transpose((2, 0, 1)) / 255.0).astype(np.float32)
     tensor = torch.from_numpy(arr).unsqueeze(0).to(worker.device)
@@ -72,6 +72,10 @@ def upscale_single_frame_mps(worker, img_path: str) -> np.ndarray:
 
     out_np = (out_tensor.squeeze(0).clamp(0, 1).float().cpu().numpy().transpose((1, 2, 0)) * 255.0).round().astype(np.uint8)
     return out_np
+
+
+# Backward compatibility alias
+upscale_single_frame_mps = upscale_single_frame_gpu
 
 
 def make_blind_ab(
@@ -100,7 +104,7 @@ def make_blind_ab(
     workers = {}
     for m_id in models:
         m_info = resolve_model_for_video(video_path, m_id)
-        workers[m_id] = get_mps_worker(
+        workers[m_id] = get_gpu_worker(
             model_id=m_info["id"],
             weights_path=m_info["weights_path"],
             precision="fp16"
@@ -130,7 +134,7 @@ def make_blind_ab(
         candidates = []
         for m_id in models:
             worker = workers[m_id]
-            out_arr = upscale_single_frame_mps(worker, f_path)
+            out_arr = upscale_single_frame_gpu(worker, f_path)
             candidates.append((m_id, out_arr))
 
         # Xáo trộn ngẫu nhiên thứ tự các candidate

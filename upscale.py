@@ -238,7 +238,7 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--no-anti-sleep", "--no-caffeinate",
-        dest="no_caffeinate",
+        dest="no_anti_sleep",
         action="store_true",
         help="Không tự động kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows)"
     )
@@ -703,7 +703,7 @@ def main():
                 fmt=args.format,
                 use_ramdisk=not args.no_ramdisk,
                 resume=not args.no_resume,
-                caffeinate=not args.no_caffeinate,
+                anti_sleep=not args.no_anti_sleep,
                 preview_seconds=args.preview,
                 dedup=not args.no_dedup,
                 allow_partial=args.allow_partial,
@@ -785,7 +785,7 @@ def main():
                     fmt=args.format,
                     use_ramdisk=not args.no_ramdisk,
                     resume=not args.no_resume,
-                    caffeinate=not args.no_caffeinate,
+                    anti_sleep=not args.no_anti_sleep,
                     preview_seconds=args.preview,
                     dedup=not args.no_dedup,
                     allow_partial=args.allow_partial,
