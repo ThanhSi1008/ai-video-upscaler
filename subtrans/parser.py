@@ -250,21 +250,19 @@ def snap_whisper_cues_to_en(
     ja_sub_cues = [SubCue(start_ms=c.start, end_ms=c.end, text=c.ja) for c in dialogue_cues]
     en_sub_cues = [SubCue(start_ms=ec["start"], end_ms=ec["end"], text=ec["text"]) for ec in clean_en_cues]
 
-    aligned_results = align_ja_to_en_monotonic_dtw(ja_sub_cues, en_sub_cues)
+    from subtrans.dtw_auto_align import get_dtw_alignment_map
+    cue_map = get_dtw_alignment_map(ja_sub_cues, en_sub_cues)
 
-    # Cập nhật mốc thời gian và EN reference chuẩn phòng thu
+    # Cập nhật mốc thời gian và EN reference chuẩn phòng thu theo đúng chỉ mục cue gốc
     snapped_count = 0
-    aligned_idx = 0
-    for c in dialogue_cues:
-        if aligned_idx < len(aligned_results):
-            sub_aligned, paired_en = aligned_results[aligned_idx]
-            if paired_en:
-                c.start = sub_aligned.start_ms
-                c.end = sub_aligned.end_ms
-                if not c.en:
-                    c.en = paired_en
-                snapped_count += 1
-            aligned_idx += 1
+    for idx, c in enumerate(dialogue_cues):
+        if idx in cue_map and cue_map[idx] is not None:
+            new_start, new_end, paired_en = cue_map[idx]
+            c.start = new_start
+            c.end = new_end
+            if not c.en:
+                c.en = paired_en
+            snapped_count += 1
 
     # Pass 3: Đảm bảo tính đơn điệu và khoảng cách tối thiểu giữa các cue liên tiếp
     cues.sort(key=lambda c: (c.start, c.end))

@@ -501,9 +501,13 @@ def main():
             print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
             sys.exit(1)
 
-        print(f"   • File gốc JA: {ja_sub}")
-        if en_sub:
-            print(f"   • File tham chiếu EN: {en_sub}")
+        if ja_sub == en_sub:
+            print(f"   • Nguồn phụ đề: Dùng track tiếng Anh phòng thu làm gốc ({os.path.basename(ja_sub)}) để đảm bảo mốc thời gian frame-perfect 0ms sai lệch.")
+            en_sub = None
+        else:
+            print(f"   • File gốc JA: {ja_sub}")
+            if en_sub:
+                print(f"   • File tham chiếu EN: {en_sub}")
 
         from subtrans.pipeline import TranslationPipeline
         vid_dir = os.path.dirname(os.path.abspath(target_subs_vid))

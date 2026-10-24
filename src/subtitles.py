@@ -163,18 +163,24 @@ def find_or_extract_subtitles(video_path: str) -> Tuple[Optional[str], Optional[
     except Exception:
         pass
 
-    # 3. Cơ chế dự phòng Whisper Speech-to-Text: Nếu không có track tiếng Nhật thì tự động nhận diện giọng nói
+    # 3. Cơ chế dự phòng: Nếu không có track phụ đề tiếng Nhật dạng text
     if not ja_sub:
-        whisper_ja = os.path.join(tmp_dir, f"{base_name}.whisper_ja.srt")
-        if os.path.exists(whisper_ja) and os.path.getsize(whisper_ja) > 100:
-            ja_sub = whisper_ja
+        # Ưu tiên 3a: Nếu có sẵn track tiếng Anh phòng thu (EN), ưu tiên dùng trực tiếp mốc thời gian chuẩn phòng thu
+        # để đảm bảo đồng bộ từng khung hình (frame-perfect, 0ms sai lệch) và triệt tiêu câu rác Whisper
+        if en_sub and os.path.exists(en_sub) and os.path.getsize(en_sub) > 100:
+            ja_sub = en_sub
         else:
-            try:
-                os.makedirs(tmp_dir, exist_ok=True)
-                ok = transcribe_japanese_audio(video_path, whisper_ja)
-                if ok and os.path.exists(whisper_ja):
-                    ja_sub = whisper_ja
-            except Exception as e_whisper:
-                print(f"⚠️ [WHISPER FALLBACK] Không thể tạo phụ đề JA từ giọng nói: {e_whisper}")
+            # Ưu tiên 3b: Chạy Whisper STT nhận diện giọng nói tiếng Nhật nếu hoàn toàn không có track nào
+            whisper_ja = os.path.join(tmp_dir, f"{base_name}.whisper_ja.srt")
+            if os.path.exists(whisper_ja) and os.path.getsize(whisper_ja) > 100:
+                ja_sub = whisper_ja
+            else:
+                try:
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    ok = transcribe_japanese_audio(video_path, whisper_ja)
+                    if ok and os.path.exists(whisper_ja):
+                        ja_sub = whisper_ja
+                except Exception as e_whisper:
+                    print(f"⚠️ [WHISPER FALLBACK] Không thể tạo phụ đề JA từ giọng nói: {e_whisper}")
 
     return ja_sub, en_sub
