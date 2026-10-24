@@ -393,7 +393,7 @@ def build_arg_parser():
         "--zero-disk",
         action="store_true",
         default=False,
-        help="Kích hoạt pipeline Zero-Disk: Dùng DoubleBufferedPipeUpscaler xuất luồng p010le trực tiếp qua stdin pipe tới NVENC, triệt tiêu 100% file PNG trung gian trên SSD"
+        help="Kích hoạt pipeline Zero-Disk: Dùng DoubleBufferedPipeUpscaler xuất luồng p010le trực tiếp qua stdin pipe tới NVENC, triệt tiêu 100%% file PNG trung gian trên SSD"
     )
 
     return parser
