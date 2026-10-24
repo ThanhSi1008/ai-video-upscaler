@@ -82,6 +82,12 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
             else:
                 data = json.load(f)
 
+        # Xử lý symlink dạng text pointer trên Windows
+        if isinstance(data, str) and data.strip().endswith((".yaml", ".yml")):
+            target_path = (glossary_path.parent / data.strip()).resolve()
+            if target_path.exists() and target_path != glossary_path:
+                return load_glossary(target_path)
+
         meta = data.get("meta", {})
         schema_ver = meta.get("schema", 2)
         style_rules = [str(r) for r in data.get("style_rules", [])]
