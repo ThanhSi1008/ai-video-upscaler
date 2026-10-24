@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional
 
 
 CHUNK_LOG_REGEX = re.compile(
-    r"\[CHUNK (\d+)/(\d+)\] Hoàn tất (\d+) frames \(AI (?:Metal|GPU): ([\d\.]+)s @ ([\d\.]+) fps \| "
+    r"\[CHUNK (\d+)/(\d+)\] Hoàn tất (\d+) frames \(AI (?:CUDA|GPU): ([\d\.]+)s @ ([\d\.]+) fps \| "
     r"Steady: ([\d\.]+) fps, Peak RSS: ([\d\.]+) MB \| Encode: ([\d\.]+)s \| Tổng: ([\d\.]+)s \| File: (\S+) ([\d\.]+) MB\)"
 )
 

@@ -20,7 +20,7 @@ from src.trt_zero_copy_upscaler import (
     SRVGGNetCompactTRTWrapper,
     DoubleBufferedPipeUpscaler,
 )
-from src.mps_engine import RealESRAnimeVideoV3
+from src.cuda_engine import RealESRAnimeVideoV3
 from src.build_trt_engine import is_tensorrt_available, export_model_to_onnx
 
 

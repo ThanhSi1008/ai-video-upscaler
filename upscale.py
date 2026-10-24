@@ -237,8 +237,8 @@ def build_arg_parser():
         help="Không tiếp tục từ phân đoạn đã làm dở mà chạy lại từ đầu"
     )
     parser.add_argument(
-        "--no-anti-sleep", "--no-caffeinate",
-        dest="no_anti_sleep",
+        "--no-anti-sleep",
+
         action="store_true",
         help="Không tự động kích hoạt cơ chế chống sleep máy (SetThreadExecutionState trên Windows)"
     )

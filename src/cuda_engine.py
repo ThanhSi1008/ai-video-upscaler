@@ -524,11 +524,5 @@ def upscale_frames_with_fallback(
         raise RuntimeError(f"Lỗi suy luận và không có đường fallback khả dụng cho model '{model_id}': {e}")
 
 
-# -----------------------------------------------------------------------------
-# 4. Aliases tương thích ngược (Backward Compatibility)
-# -----------------------------------------------------------------------------
-MPSError = GPUError
+# Alias tiện ích
 GPUEngineError = GPUError
-MPSPersistentWorker = GPUPersistentWorker
-get_mps_worker = get_gpu_worker
-_GLOBAL_MPS_WORKER = _GLOBAL_GPU_WORKER

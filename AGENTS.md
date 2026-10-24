@@ -90,7 +90,7 @@ ai-video-upscaler/
 │   ├── subtitles.py        # Trích xuất phụ đề rời/container, Whisper STT fallback
 │   ├── ramdisk.py          # RAMDisk Context Manager: Quản lý bộ đệm khung hình và rolling cleanup
 │   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (NVENC BT.709 10-bit, Mux, Embed Subs)
-│   ├── mps_engine.py       # PyTorch GPU Engine: Hỗ trợ CUDA FP16/FP32 Native, Tensor Cores, batch inference
+│   ├── cuda_engine.py      # PyTorch GPU Engine: Tối ưu NVIDIA CUDA FP16 Native, Tensor Cores, batch inference
 │   ├── ai_engine.py        # Super-Resolution Interface abstraction
 │   ├── models_resolver.py  # SR Models Registry resolver & weights loader (SHA-256 verification)
 │   ├── mux_audit.py        # Stream copy integrity audit & font count verifier
@@ -168,7 +168,7 @@ ai-video-upscaler/
 
 ### A. Phân Hệ Phóng To Video AI & GPU Engine — [docs/video-pipeline.md](docs/video-pipeline.md)
 * **Mô hình Super-Resolution:** Chọn `realesr-animevideov3` (kiến trúc mạng `SRVGGNetCompact` 4x kết hợp Bicubic 0.5 để xuất 2x).
-* **Động cơ suy luận chính:** PyTorch CUDA FP16 Native (`src/mps_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=6` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
+* **Động cơ suy luận chính:** PyTorch CUDA FP16 Native (`src/cuda_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=8` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
 * **Đính chính mô hình AnimeJaNai:** Thêm phép cộng nearest $\times 2$ residual tại tag `janai-fix` (`F.interpolate(x, scale_factor=2.0, mode='nearest')`), khớp bit-exact 0.0 với spandrel CPU chuẩn (PSNR 75–158 dB).
 * **Mã hóa phần cứng 10-bit:** `hevc_nvenc` Main 10 Profile (`p010le`, preset `p6`, multipass `qres`, lookahead `24`, spatial AQ).
 * **Màu sắc & Stream Copy:** Ma trận BT.709 hai chiều (Limited YUV $\leftrightarrow$ Full RGB24), gắn cờ `-tag:v hvc1`, cờ mux bắt buộc `-max_interleave_delta 0` copy nguyên bản audio, subtitle, fonts và chapters.

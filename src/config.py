@@ -121,7 +121,7 @@ DEFAULT_PRECISION = "fp16"
 DEFAULT_BATCH_SIZE = 8 if DEFAULT_ENGINE == "cuda" else 1  # Lô 8 frames (Điểm ngọt tối ưu cho GA106 30 SMs trên RTX 3060 12GB)
 DEFAULT_VRAM_CLEANUP_THRESHOLD_GB = 9.5  # Ngưỡng VRAM (GB) để dọn dẹp CUDA memory cache thay vì restart tiến trình
 DEFAULT_GPU_RESTART_CHUNKS = 10  # Ngưỡng dự phòng cho worker
-DEFAULT_MPS_RESTART_CHUNKS = DEFAULT_GPU_RESTART_CHUNKS  # Alias tương thích ngược
+
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"
 # Phân đoạn 8s (~192 frames) là kích thước lý tưởng cho PNG Lossless:

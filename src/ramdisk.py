@@ -15,7 +15,7 @@ from typing import Optional
 
 
 def cleanup_orphan_ramdisks():
-    """Hàm giữ lại tương thích ngược, không cần thực hiện thao tác hdiutil trên Windows."""
+    """Dọn dẹp thư mục đệm tạm mồ côi nếu có trên hệ thống Windows."""
     pass
 
 

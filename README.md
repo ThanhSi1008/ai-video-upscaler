@@ -156,6 +156,7 @@ ai-video-upscaler/
 ├── src/                        # Core Engine: AI Video Upscaling (PyTorch CUDA, NVENC 10-bit)
 │   ├── config.py               # Quản lý cấu hình tập trung, phần cứng & RAM Disk
 │   ├── ai_engine.py            # PyTorch Super-Resolution Inference Engine
+│   ├── cuda_engine.py          # PyTorch GPU Engine: Tối ưu NVIDIA CUDA FP16 Native, Tensor Cores
 │   ├── subtitles.py            # Trích xuất phụ đề rời/container, Whisper STT fallback
 │   ├── ffmpeg_ops.py           # FFmpeg / FFprobe chuẩn tham chiếu (NVENC 10-bit)
 │   ├── preflight.py            # Chống sleep (Win32 SetThreadExecutionState), kiểm tra sạc & đĩa trống

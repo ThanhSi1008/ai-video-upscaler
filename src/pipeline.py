@@ -98,7 +98,7 @@ def run_upscale_pipeline(
     use_ramdisk: bool = True,
     resume: bool = True,
     anti_sleep: bool = True,
-    caffeinate: Optional[bool] = None,
+
     preview_seconds: Optional[int] = None,
     dedup: bool = True,
     allow_partial: bool = False,
@@ -179,9 +179,8 @@ def run_upscale_pipeline(
     )
 
     # Kích hoạt AntiSleep để chống Sleep máy trong suốt phiên chạy
-    effective_anti_sleep = anti_sleep if caffeinate is None else caffeinate
-    with AntiSleepContext(enabled=effective_anti_sleep):
-        if effective_anti_sleep:
+    with AntiSleepContext(enabled=anti_sleep):
+        if anti_sleep:
             logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
 
         target_w = meta["width"] * DEFAULT_SCALE

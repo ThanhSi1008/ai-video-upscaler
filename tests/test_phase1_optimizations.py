@@ -30,7 +30,7 @@ from src.config import (
     get_hevc_rate_args,
     HEVC_ENCODER,
 )
-from src.mps_engine import MPSPersistentWorker
+from src.cuda_engine import GPUPersistentWorker
 
 
 def test_phase1_nvenc_configuration_constants():
@@ -70,7 +70,7 @@ def test_phase1_batch_size_and_vram_threshold():
 
 def test_phase1_vram_smart_cleanup_logic():
     """Verifies that restart_if_needed performs empty_cache when >= 9.5 GB and does not reload model."""
-    worker = MPSPersistentWorker.__new__(MPSPersistentWorker)
+    worker = GPUPersistentWorker.__new__(GPUPersistentWorker)
     worker.chunks_processed = 0
     worker.max_chunks_before_restart = 10
     worker.total_restarts = 0

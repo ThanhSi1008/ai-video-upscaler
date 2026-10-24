@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from src.output_sanity import check_frame_sanity, OutputSanityError, write_failed_sanity_audit
-from src.mps_engine import AnimeJaNaiCompact2x
+from src.cuda_engine import AnimeJaNaiCompact2x
 
 
 @pytest.fixture

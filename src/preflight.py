@@ -62,9 +62,9 @@ class AntiSleepContext:
                 pass
 
 
-# Alias tương thích ngược
-# Alias tương thích ngược (deprecated legacy shim)
-CaffeinateContext = AntiSleepContext
+
+
+
 
 
 def check_power_source() -> Dict[str, Any]:
@@ -119,8 +119,8 @@ def send_system_notification(title: str, message: str, sound: str = "Glass"):
         except Exception:
             pass
 
-# Alias tương thích ngược (deprecated legacy shim)
-send_macos_notification = send_system_notification
+
+
 
 
 

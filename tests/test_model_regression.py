@@ -10,7 +10,7 @@ import spandrel
 import numpy as np
 
 from src.models_resolver import load_models_registry
-from src.mps_engine import RealESRAnimeVideoV3, AnimeJaNaiCompact2x
+from src.cuda_engine import RealESRAnimeVideoV3, AnimeJaNaiCompact2x
 
 
 def calc_psnr(a: np.ndarray, b: np.ndarray) -> float:
@@ -23,7 +23,7 @@ def calc_psnr(a: np.ndarray, b: np.ndarray) -> float:
 @pytest.mark.parametrize("model_id", ["animevideov3", "animejanai-hd-v3-compact"])
 def test_model_independent_regression(model_id):
     """
-    So sánh đối chiếu độc lập mô hình trong src/mps_engine.py với spandrel
+    So sánh đối chiếu độc lập mô hình trong src/cuda_engine.py với spandrel
     trên 1 crop nhỏ (128x128).
     Ngưỡng: FP32 PSNR >= 50 dB, chênh độ sáng |ΔY| <= 0.5/255.
     """
