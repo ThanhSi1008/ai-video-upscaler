@@ -120,7 +120,7 @@ def find_or_extract_subtitles(video_path: str) -> Tuple[Optional[str], Optional[
             "-of", "json",
             video_path
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         sub_info = json.loads(r.stdout).get("streams", [])
 
         if sub_info:

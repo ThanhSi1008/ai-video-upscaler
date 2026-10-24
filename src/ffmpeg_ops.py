@@ -43,7 +43,7 @@ def probe_video(video_path: str) -> Dict[str, Any]:
         "-of", "json",
         video_path
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     data = json.loads(res.stdout)
 
     streams = data.get("streams", [])
@@ -142,7 +142,7 @@ def get_segments_frame_counts(seg_paths: List[str]) -> List[int]:
             "-of", "csv=p=0",
             p
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         out = res.stdout.strip()
         return int(out) if out.isdigit() else 0
 
@@ -322,7 +322,7 @@ def embed_subtitle_track(
     non_vie_sub_indices = []
     try:
         probe_cmd = ["ffprobe", "-v", "error", "-show_streams", "-of", "json", mkv_path]
-        r_probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+        r_probe = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r_probe.returncode == 0:
             data = json.loads(r_probe.stdout)
             sub_stream_idx = 0
@@ -365,7 +365,7 @@ def embed_subtitle_track(
     ])
 
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0 or not os.path.exists(tmp_out) or os.path.getsize(tmp_out) <= 1000:
             if r.returncode != 0 and r.stderr:
                 err_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""

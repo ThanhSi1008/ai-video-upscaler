@@ -486,7 +486,9 @@ def main():
 
     # Xử lý cờ --subs-only (Chạy riêng phụ đề trong tiến trình con độc lập)
     if args.subs_only:
-        target_subs_vid = args.input if args.subs_only == "__INPUT__" else args.subs_only
+        target_subs_vid = args.subs_only
+        if target_subs_vid == "__INPUT__":
+            target_subs_vid = args.input[0] if (isinstance(args.input, list) and len(args.input) > 0) else args.input
         if not target_subs_vid:
             print("❌ Lỗi: Cần cung cấp đường dẫn video khi dùng cờ --subs-only (ví dụ: ./upscale.py --subs-only <tập.mkv>)")
             sys.exit(1)

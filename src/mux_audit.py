@@ -33,7 +33,7 @@ def get_audio_stream_md5(file_path: str, stream_idx: int = 0) -> Optional[str]:
         "-f", "md5", "-"
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         if res.returncode == 0:
             match = re.search(r"MD5=([0-9a-fA-F]+)", res.stdout)
             if match:
@@ -66,7 +66,7 @@ def get_detailed_stream_info(file_path: str) -> Dict[str, Any]:
         file_path
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         if res.returncode == 0:
             data = json.loads(res.stdout)
             streams = data.get("streams", [])
@@ -107,7 +107,7 @@ def count_subtitle_packets(file_path: str, sub_stream_idx: int = 0) -> Optional[
         file_path
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         out = res.stdout.strip()
         if out.isdigit():
             return int(out)
@@ -128,7 +128,7 @@ def get_audio_volume_db(file_path: str, start_sec: float, duration_sec: float = 
         "-f", "null", "-"
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         match = re.search(r"mean_volume:\s*(-?[\d\.]+)\s*dB", res.stderr)
         if match:
             return float(match.group(1))
@@ -174,7 +174,7 @@ def check_window_interleaving(
             "-of", "csv=p=0",
             file_path
         ]
-        r_v = subprocess.run(cmd_v, capture_output=True, text=True)
+        r_v = subprocess.run(cmd_v, capture_output=True, text=True, encoding="utf-8", errors="replace")
         has_video = len(r_v.stdout.strip()) > 0
 
         # 2. Kiểm tra từng audio track độc lập
@@ -189,7 +189,7 @@ def check_window_interleaving(
                 "-of", "csv=p=0",
                 file_path
             ]
-            r_a = subprocess.run(cmd_a, capture_output=True, text=True)
+            r_a = subprocess.run(cmd_a, capture_output=True, text=True, encoding="utf-8", errors="replace")
             has_this_audio = len(r_a.stdout.strip()) > 0
             audio_statuses[f"audio_track_{a_idx}"] = has_this_audio
             if not has_this_audio:
@@ -326,7 +326,7 @@ def verify_mux_integrity(src_path: str, out_path: str) -> Dict[str, Any]:
             "-show_entries", "stream=nb_read_packets",
             "-of", "csv=p=0",
             src_path
-        ], capture_output=True, text=True, check=True)
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         r_o = subprocess.run([
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
@@ -334,7 +334,7 @@ def verify_mux_integrity(src_path: str, out_path: str) -> Dict[str, Any]:
             "-show_entries", "stream=nb_read_packets",
             "-of", "csv=p=0",
             out_path
-        ], capture_output=True, text=True, check=True)
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         src_frames_cnt = int(r_s.stdout.strip()) if r_s.stdout.strip().isdigit() else None
         out_frames_cnt = int(r_o.stdout.strip()) if r_o.stdout.strip().isdigit() else None
         if src_frames_cnt is not None and out_frames_cnt is not None:
