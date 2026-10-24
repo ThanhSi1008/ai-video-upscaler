@@ -25,7 +25,8 @@ SUB_OUT_DIR = Path(r"E:\Films\Subtitles")
 RAW_SOURCES_DIR = Path(r"E:\Films\Raw_Sources")
 INCOMPLETE_SUBSTRING = "fate.strange.fake"
 
-SKIP_PATTERNS = ["nced", "ncop", "trailer", "sample", "pv", ".temp_"]
+SKIP_FILENAME_PATTERNS = ["nced", "ncop", "trailer", "sample", "pv", "special ending", ".temp_"]
+SKIP_DIR_PATTERNS = [r"\other", "/other", r"\trailers", "/trailers"]
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
@@ -55,21 +56,23 @@ def has_vietnamese_sub(fpath: str) -> bool:
 def collect_queue() -> list:
     all_files = []
     for root, dirs, files in os.walk(str(RAW_SOURCES_DIR)):
+        if any(d in root.lower() for d in SKIP_DIR_PATTERNS):
+            continue
         for f in files:
             if not f.lower().endswith(".mkv"):
                 continue
             if INCOMPLETE_SUBSTRING in f.lower():
                 continue
-            if any(k in f.lower() for k in SKIP_PATTERNS):
+            if any(k in f.lower() for k in SKIP_FILENAME_PATTERNS):
                 continue
             all_files.append(os.path.join(root, f))
             
-    # Sort by relative folder and then natural sort by filename
     def sort_order(p):
         rel = os.path.relpath(p, str(RAW_SOURCES_DIR))
         parts = rel.split(os.sep)
-        # Order priorities for series
         folder = parts[0].lower()
+        subfolder = parts[1].lower() if len(parts) > 1 else ""
+        
         priority = 50
         if "frieren" in folder:
             priority = 10
@@ -81,7 +84,12 @@ def collect_queue() -> list:
             priority = 40
         elif "demon" in folder or "kimetsu" in folder:
             priority = 60
-        return (priority, folder, natural_sort_key(p))
+            
+        sub_priority = 10
+        if "special" in subfolder:
+            sub_priority = 20
+            
+        return (priority, folder, sub_priority, natural_sort_key(p))
 
     all_files.sort(key=sort_order)
     return all_files
@@ -198,7 +206,6 @@ def main():
             print(f"[{idx}/{len(queue)}] ❌ THẤT BẠI: {fname} (Lỗi: {res.get('error')})", flush=True)
             
         save_state(state)
-        # Small cooldown between episodes to stay safely within rate limits
         time.sleep(2)
 
     total_done = state["completed"] + state["skipped"]
