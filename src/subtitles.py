@@ -115,7 +115,7 @@ def find_or_extract_subtitles(video_path: str) -> Tuple[Optional[str], Optional[
     try:
         cmd = [
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=index:stream_tags=language,title",
+            "-show_entries", "stream=index:stream_tags=language,title:stream_disposition=default",
             "-select_streams", "s",
             "-of", "json",
             video_path
@@ -129,13 +129,29 @@ def find_or_extract_subtitles(video_path: str) -> Tuple[Optional[str], Optional[
             # 2a. Trích xuất stream EN từ container video nếu chưa có file EN rời
             if not en_sub:
                 en_idx = None
+                # Phân loại và ưu tiên track hội thoại (Dialogue / Full Subtitles), tránh Signs & Songs
+                dialogue_candidates = []
+                other_en_candidates = []
                 for s in sub_info:
                     lang = s.get("tags", {}).get("language", "").lower()
                     title = s.get("tags", {}).get("title", "").lower()
-                    if lang in ("eng", "en") or "english" in title or "eng" in title:
-                        en_idx = s["index"]
-                        break
-                if en_idx is None and len(sub_info) > 0:
+                    is_def = s.get("disposition", {}).get("default", 0) == 1
+                    is_en = lang in ("eng", "en") or "english" in title or "eng" in title
+                    if is_en:
+                        is_signs = any(k in title for k in ("s&s", "signs", "songs", "[signs]", "s/s"))
+                        if not is_signs:
+                            # Điểm ưu tiên: default=1 được 10 điểm, có chữ 'dialog' được 5 điểm, 'full' được 3 điểm
+                            score = (10 if is_def else 0) + (5 if "dialog" in title else 0) + (3 if "full" in title else 0)
+                            dialogue_candidates.append((score, s["index"]))
+                        else:
+                            other_en_candidates.append(s["index"])
+
+                if dialogue_candidates:
+                    dialogue_candidates.sort(key=lambda x: x[0], reverse=True)
+                    en_idx = dialogue_candidates[0][1]
+                elif other_en_candidates:
+                    en_idx = other_en_candidates[0]
+                elif len(sub_info) > 0:
                     en_idx = sub_info[0]["index"]
 
                 if en_idx is not None:
