@@ -1,19 +1,19 @@
 # AGENTS.md — AI Agent Guidelines & Architecture Compass
 
 > **Kim chỉ nam dành cho các AI Agent khi đọc, bảo trì và phát triển codebase này.**
+> **Điểm khởi đầu bắt buộc:** [docs/agents/START_HERE.md](docs/agents/START_HERE.md) | [docs/agents/STATE.md](docs/agents/STATE.md) | [docs/agents/PROJECT_MAP.md](docs/agents/PROJECT_MAP.md) | [docs/agents/DECISIONS.md](docs/agents/DECISIONS.md) | [docs/agents/VALIDATION.md](docs/agents/VALIDATION.md)
 > **Quy tắc bắt buộc:** Ngắn gọn, chuẩn xác, không suy diễn; cập nhật file này sau mỗi lần tái cấu trúc hoặc thay đổi kiến trúc code; **BẮT BUỘC commit chi tiết sau MỖI yêu cầu** (nêu rõ nguồn yêu cầu, việc đã làm, lỗi đã fix, số liệu thực nghiệm).
-> **Chỉ mục tài liệu chuyên sâu:** [Video Pipeline](docs/video-pipeline.md) | [Dedup & DIS](docs/dedup-architecture.md) | [Subtrans](subtrans/AGENTS.md) | [Audit & Safety](docs/audit-and-safety.md) | [Engineering Log](docs/engineering-log.md).
 
 ---
 
 ## 1. Mục Tiêu & Ràng Buộc Cốt Lõi (Core Invariants)
 
 * **Thiết bị vận hành mục tiêu:**
-  * **Windows Workstation:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T, tăng tốc AVX2), NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6, CUDA Cores & Tensor Cores), 32GB RAM, FFmpeg hỗ trợ `hevc_nvenc`.
+  * **Windows Workstation:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T AVX2), NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6, CUDA & Tensor Cores), 32GB RAM, FFmpeg `hevc_nvenc`.
 * **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows 11)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
-* **Tôn chỉ Pareto:** Chất lượng hình ảnh cân bằng với thời gian. Không hy sinh nét vẽ anime lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
+* **Tôn chỉ Pareto:** Cân bằng chất lượng anime và thời gian. Không hy sinh nét vẽ lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
-  * Trên RTX 3060 (PyTorch CUDA FP16 Batch Inference `batch_size=6` đạt ~4.8–5.2 fps suy luận thuần, ~10–12+ fps hiệu dụng với Dedup & `cv2.imwrite`): **~6–8 tập mỗi đêm** (~45 phút – 1 giờ/tập với ~17.000 unique frames).
+  * RTX 3060 (PyTorch CUDA FP16 `batch_size=6` ~4.8–5.2 fps suy luận, ~10–12+ fps hiệu dụng với Dedup & `cv2.imwrite`): **~6–8 tập/đêm** (~45–60 phút/tập ~17.000 unique frames).
 
 ---
 
@@ -24,24 +24,24 @@
 ```powershell
 # Nâng cấp 1 tập video đơn lẻ:
 python upscale.py path/to/source.mkv -o out/
-
-# Chạy nhanh qua launcher tiện ích Windows:
 .\upscale.bat path/to/source.mkv
 
 # Xem trước nhanh 10 giây ở 30% phim:
 python upscale.py path/to/source.mkv --preview 10
 
-# Chạy hàng đợi nhiều tập qua đêm (tự động bật auto-offset và lập lịch deadline):
+# Chạy hàng đợi nhiều tập qua đêm (auto-offset và deadline):
 python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-partial
 
-# Tiếp tục tập bị gián đoạn (tự động nhận checkpoint .temp):
+# Tiếp tục tập bị gián đoạn (tự nhận checkpoint .temp):
 python upscale.py path/to/source.mkv -o out/
 
 # Dịch phụ đề riêng lẻ:
 python subtrans.py path/to/source.mkv -o out/
 .\subtrans.bat path/to/source.mkv
 
-# Chạy kiểm thử tự động toàn diện:
+# Kiểm tra bộ nhớ Agent và chạy kiểm thử an toàn offline:
+python scripts/agent_context.py --check
+python scripts/verify_offline.py
 pytest
 ```
 
@@ -49,74 +49,37 @@ pytest
 | Cờ CLI | Mặc định | Ý nghĩa & Hành vi |
 | :--- | :--- | :--- |
 | `-o`, `--output` | `out/<tên>_4K.mkv` | Thư mục hoặc file đích xuất video 4K |
-| `--queue` | `None` | Danh sách các file video chạy nối tiếp qua đêm |
+| `--queue` | `None` | Danh sách file video chạy nối tiếp qua đêm |
 | `--engine` | `cuda` | Engine suy luận: `cuda` (NVIDIA CUDA FP16) hoặc `cpu` |
 | `--model` | `animevideov3` | Model Super-Resolution đăng ký trong `models/models.yaml` |
-| `--batch-size` | `6` (CUDA RTX 3060) | Kích thước batch cho AI Inference GPU (tối ưu hóa Tensor Cores) |
-| `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite` 500 RPD) hoặc `high` (`gemini-3.8-flash`) |
-| `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua giai đoạn video upscale |
-| `--subs-upgrade` | `False` | Nâng cấp phụ đề tiếng Việt hiện có lên bản dịch chất lượng cao (Gemini) |
-| `--auto-align-en` | `True` | Ghim mốc thời gian phụ đề Whisper/tiếng Nhật theo track tiếng Anh phòng thu |
-| `--no-auto-align-en` | `False` | Tắt tính năng tự động ghim mốc thời gian phụ đề theo tiếng Anh |
-| `--allow-partial` | `False` | Cho phép dừng tập an toàn ở ranh giới chunk 8s khi chạm deadline ca đêm |
-| `--auto-offset` | Bật trong `--queue` | Tự động đo và bù độ lệch thời gian phụ đề tiếng Nhật - Anh |
+| `--batch-size` | `6` (RTX 3060) | Kích thước batch cho AI Inference GPU (Tensor Cores) |
+| `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite`) hoặc `high` (`gemini-3.8-flash`) |
+| `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua video upscale |
+| `--subs-upgrade` | `False` | Nâng cấp phụ đề VI hiện có lên bản dịch Gemini |
+| `--auto-align-en` | `True` | Ghim mốc thời gian phụ đề Whisper/JA theo track EN phòng thu |
+| `--no-auto-align-en` | `False` | Tắt tính năng tự động ghim mốc thời gian phụ đề |
+| `--allow-partial` | `False` | Cho phép dừng tập an toàn ở chunk 8s khi chạm deadline ca đêm |
+| `--auto-offset` | Bật trong `--queue` | Tự động đo và bù độ lệch thời gian phụ đề JA - EN |
 | `--no-auto-offset` | `False` | Ép tắt tính năng auto-offset trong hàng đợi |
-| `--sub-offset-ms` | `0` | Bù offset phụ đề thủ công theo mili-giây (luôn có độ ưu tiên cao nhất) |
+| `--sub-offset-ms` | `0` | Bù offset phụ đề thủ công theo ms (luôn ưu tiên cao nhất) |
 | `--no-embed` | `False` | Tắt bước nhúng phụ đề vào container MKV thành phẩm |
-| `--keep-temp` | `False` | Giữ lại thư mục tạm `.temp_<basename>` (mặc định: tự động dọn dẹp sạch khi Mux PASS) |
-| `--clean-temp`, `--cleanup` | `False` | Quét dọn toàn bộ thư mục tạm và gom file audit/cast trong thư mục xuất xưởng rồi thoát |
-| `--dedup-policy` | `default` | Chính sách dedup: `default` (768:320:0.33), `sensitive-a` (512:160:0.15), `sensitive-b` (384:128:0.10), `motion`, `drift`, `dis` (dòng chảy quang học DIS), `off` |
-| `--dis-thresh` | `0.30` | Ngưỡng dòng chảy quang học DIS tính bằng pixel 1080p (`0.20` - `0.50`) |
-| `--dry-run` | `False` | Chạy mô phỏng toàn bộ quy trình mà không gọi AI hay API |
+| `--keep-temp` | `False` | Giữ lại thư mục tạm `.temp_<basename>` (mặc định xóa khi Mux PASS) |
+| `--clean-temp`, `--cleanup` | `False` | Quét dọn toàn bộ thư mục tạm và gom audit/cast rồi thoát |
+| `--dedup-policy` | `default` | Chính sách dedup: `default`, `sensitive-a/b`, `motion`, `drift`, `dis`, `off` |
+| `--dis-thresh` | `0.30` | Ngưỡng dòng chảy quang học DIS tính bằng pixel 1080p |
+| `--dry-run` | `False` | Chạy mô phỏng toàn bộ quy trình không gọi AI hay API |
 
 ---
 
-## 3. Kiến Trúc Thư Mục & Trách Nhiệm Module
+## 3. Bản Đồ Mã Nguồn & Trách Nhiệm Module
 
-```text
-ai-video-upscaler/
-├── upscale.py              # CLI Entrypoint (Argparse, UTF-8 console, Queue orchestrator, Checkpoint Resume)
-├── upscale.bat             # Windows batch launcher (One-click chạy trên Windows)
-├── subtrans.py             # Subtitle Translation CLI Runner
-├── subtrans.bat            # Windows batch launcher cho Subtrans (UTF-8, Multi-Key Round-Robin)
-├── shows.yaml              # Ánh xạ mô hình SR theo từng bộ anime (người dùng cấu hình)
-├── pytest.ini              # Cấu hình Pytest (testpaths = tests subtrans/tests)
-├── requirements.txt        # Danh sách thư viện Python phụ thuộc
-├── README.md               # Hướng dẫn sử dụng & CLI options (Windows 11 & NVIDIA RTX)
-├── LICENSE                 # Giấy phép mã nguồn mở
-├── AGENTS.md               # Kim chỉ nam kiến trúc & các bất biến kỹ thuật
-├── src/                    # Pipeline phóng to video (CUDA FP16, NVENC 10-bit, FFmpeg)
-│   ├── config.py           # Single source of truth: cấu hình Windows, NVENC, batch size, paths
-│   ├── subtitles.py        # Trích xuất phụ đề rời/container, Whisper STT fallback
-│   ├── ramdisk.py          # RAMDisk Context Manager: Quản lý bộ đệm khung hình và rolling cleanup
-│   ├── ffmpeg_ops.py       # Thao tác FFmpeg/FFprobe chuẩn phòng thu (NVENC BT.709 10-bit, Mux, Embed Subs)
-│   ├── cuda_engine.py      # PyTorch GPU Engine: Tối ưu NVIDIA CUDA FP16 Native, Tensor Cores, batch inference
-│   ├── ai_engine.py        # Super-Resolution Interface abstraction
-│   ├── models_resolver.py  # SR Models Registry resolver & weights loader (SHA-256 verification)
-│   ├── mux_audit.py        # Stream copy integrity audit & font count verifier
-│   ├── dedup.py            # Deduplication Engine: Preflight mpdecimate scan, DIS Optical Flow & Concat Re-expansion
-│   ├── preflight.py        # Win32 SetThreadExecutionState (AntiSleep), kiểm tra sạc & dung lượng đĩa trống
-│   ├── pipeline.py         # Orchestrator: Triple-buffering, Rolling Segments, Checkpoint Resume
-│   ├── scheduler.py        # Dynamic overnight queue scheduler & ETA predictor
-│   ├── night_report.py     # Báo cáo viễn trắc tổng kết phiên chạy qua đêm Markdown
-│   ├── output_sanity.py    # Output Sanity Guard: Chốt chặn kiểm định đầu ra (|ΔY| <= 6, corr >= 0.98)
-│   ├── cleanup.py          # Auto-cleanup: Dọn dẹp thư mục tạm (.temp_*), symlinks & gom gọn audit/
-│   └── logger.py           # Structured telemetry logging (logs/*.log & logs/latest.log symlink)
-├── subtrans/               # Engine dịch thuật phụ đề (xem subtrans/AGENTS.md)
-├── benchmarks/             # Kịch bản đo lường hiệu năng, Soak Tests & Khảo sát thuật toán
-│   ├── upscale/            # Benchmarks hiệu năng GPU, VRAM, tốc độ suy luận, Dedup
-│   ├── subtrans/           # Đánh giá độ ổn định xưng hô (Golden Pronoun Evaluations)
-│   └── research/           # Kịch bản hiệu chuẩn và nghiên cứu chuyên sâu
-├── scripts/                # Tiện ích vận hành (organize subs, batch launchers)
-├── models/                 # Super-Resolution models registry (models.yaml)
-├── models_bench/           # Trọng số mô hình AI PyTorch (.pth)
-├── glossaries/             # Bảng thuật ngữ riêng từng bộ anime (glossary.<anime>.yaml)
-├── samples/                # Video mẫu phục vụ kiểm thử (Mushoku, Slime, Sword)
-├── test_frames/            # 3 frame ảnh mẫu chuẩn (Action, Close-up, Scenery)
-├── tests/                  # Bộ kiểm thử tự động (100% Pytest Unit & Integration Tests)
-├── docs/                   # Tài liệu chuyên sâu: video-pipeline.md, dedup-architecture.md, audit-and-safety.md...
-└── logs/                   # Log chi tiết có cấu trúc & báo cáo tổng kết đêm
-```
+> **Chi tiết vị trí từng file, hàm và cấu trúc module:** Xem [`docs/agents/PROJECT_MAP.md`](docs/agents/PROJECT_MAP.md).
+
+- **`upscale.py` / `src/`:** Pipeline phóng to video (CUDA FP16 Native, NVENC 10-bit, Dedup DIS Flow, Rolling Segments).
+- **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
+- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `batch_translate_all.py`, `set_track_defaults.py`).
+- **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.
+- **`tests/` & `subtrans/tests/`:** 100% Pytest tự động hóa kiểm thử đơn vị và tích hợp.
 
 ---
 
@@ -164,37 +127,17 @@ ai-video-upscaler/
 
 ---
 
-## 6. Bảng Quyết Định Kỹ Thuật Đã Chốt & Chỉ Mục Tài Liệu Chuyên Sâu
+## 6. Chỉ Mục Tài Liệu Chuyên Sâu & Quyết Định Kỹ Thuật (ADR)
 
-### A. Phân Hệ Phóng To Video AI & GPU Engine — [docs/video-pipeline.md](docs/video-pipeline.md)
-* **Mô hình Super-Resolution:** Chọn `realesr-animevideov3` (kiến trúc mạng `SRVGGNetCompact` 4x kết hợp Bicubic 0.5 để xuất 2x).
-* **Động cơ suy luận chính:** PyTorch CUDA FP16 Native (`src/cuda_engine.py` hỗ trợ CUDA device, FP16 half precision, `torch.cuda.synchronize()`). Hỗ trợ Batch Inference `batch_size=8` tận dụng Tensor Cores: **4.8 – 5.2 fps** thuần GPU, **~10–12+ fps** hiệu dụng với Dedup và ghi frame `cv2.imwrite` (VRAM ~6.2GB).
-* **Đính chính mô hình AnimeJaNai:** Thêm phép cộng nearest $\times 2$ residual tại tag `janai-fix` (`F.interpolate(x, scale_factor=2.0, mode='nearest')`), khớp bit-exact 0.0 với spandrel CPU chuẩn (PSNR 75–158 dB).
-* **Mã hóa phần cứng 10-bit:** `hevc_nvenc` Main 10 Profile (`p010le`, preset `p6`, multipass `qres`, lookahead `24`, spatial AQ).
-* **Màu sắc & Stream Copy:** Ma trận BT.709 hai chiều (Limited YUV $\leftrightarrow$ Full RGB24), gắn cờ `-tag:v hvc1`, cờ mux bắt buộc `-max_interleave_delta 0` copy nguyên bản audio, subtitle, fonts và chapters.
+> **Hồ sơ lý do kỹ thuật chi tiết:** Xem [`docs/agents/DECISIONS.md`](docs/agents/DECISIONS.md).
 
-### B. Phân Hệ Deduplication Preflight & Dòng Chảy Quang Học DIS — [docs/dedup-architecture.md](docs/dedup-architecture.md)
-* **Ngưỡng mặc định:** `hi=768:lo=320:frac=0.33` (giảm ~60% thời gian GPU; 0% lỗi khẩu hình/chớp mắt trên anime).
-* **Khắc phục lệch khung hình BD Remux GOP dài:** `split_video_segments` stream copy trước, `get_segments_frame_counts` đo frame thực tế theo Keyframe GOP, ép giữ frame đầu mỗi chunk, tái tạo `runs` khớp 100% số frame.
-* **Nhận Diện Chuyển Động Qua DIS Optical Flow:** Thuật toán dòng chảy quang học DIS (Pan/Tilt translation, Radial expansion zoom in/out, Local/diffuse $P_{90}$) kết hợp Candidate Drop Gating. Khắc phục các đoạn lia máy và zoom mà `mpdecimate` bỏ sót. Hỗ trợ cờ `--dedup-policy dis` và `--dis-thresh 0.30`.
-* **Tái tạo khung hình 4K (Re-expansion):** FFmpeg Concat Demuxer theo thời lượng `runs` đại diện + `fps=24000/1001` (triệt tiêu toàn bộ chi phí đĩa của hardlinks).
-
-### C. Phân Hệ Dịch Thuật Phụ Đề Subtrans — [subtrans/AGENTS.md](subtrans/AGENTS.md)
-* **100% Cloud API & Phân Phối Tải 3 Key:** Chạy 100% Gemini qua Google GenAI SDK với cơ chế luân phiên Round-Robin 3 API key (`GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`) chống nghẽn RPM. Mặc định dùng `gemini-3.5-flash-lite` (500 RPD/key, tốc độ cực nhanh); chế độ chất lượng cao `--subs-quality high` dùng `gemini-3.8-flash`.
-* **Cơ Chế Whisper STT Fallback & Auto-Align:** Tự động dùng Whisper trích xuất tiếng Nhật khi video thiếu track JA (`src/subtitles.py`). Trích xuất audio FFmpeg tối ưu: trộn kênh trung tâm thoại Front Center (FC) cho âm thanh đa kênh 5.1 (`pan=mono|c0=0.7*FC...`) kết hợp lọc dải tần giọng nói (`highpass=f=80,lowpass=f=8000,afftdn=nf=-25`), tự động lọc segment rác (`no_speech_prob > 0.65`, `compression_ratio > 2.2`, `avg_logprob < -1.2`). Ghim chuẩn xác mốc thời gian theo track tiếng Anh phòng thu (`--auto-align-en`).
-* **Lọc Ảo Giác Whisper & Orphan Cues:** Bộ lọc Regex `WHISPER_HALLUCINATION_REGEX` (nhận diện `ご視聴ありがとうございました`, `チャンネル登録`, `高評価`, `字幕`, `提供`) và `SCREAM_OR_REPEAT_LOOP_REGEX` (nhận diện tiếng hét lặp token kéo dài). Tự động drop các câu Whisper mồ côi (`is_dropped_sound=True`) nằm giữa khoảng lặng nhạc EN (> 2500ms). Pass 3 chuẩn hóa mốc thời gian độc lập trên `active_cues` không bị ảnh hưởng bởi cue rác/dropped và bảo toàn Dual Dialogue.
-* **Đồng nhất xưng hô & Bảo tồn Romaji:** Stage A Cast Sheet (`out/<name>.cast.yaml`) nạp vô điều kiện vào mọi batch; giữ nguyên tên Romaji khi đối thoại gọi tên. Tách Closed Captions nhiều người nói bảo toàn `Cue.speaker` và định dạng phụ đề song song 2 dòng.
-* **Hiển thị tối ưu & CC Splitting:** Tự động gộp 2 người nói cùng lúc thành Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`), gộp câu ngắn (<1.2s), thời lượng đọc tối thiểu $\ge 1.2\text{s} - 1.4\text{s}$, khoảng nghỉ 40ms chống flicker.
-* **Smart Cloud Cascade & Subtitle RAG:** Điểm khó $S(cue)$, Draft Pass Lite kết hợp Repair Pass Flash; kho tri thức SQLite `.cache/knowledge.db`.
-
-### D. Phân Hệ Kiểm Định Toàn Vẹn, Sanity Guard & An Toàn — [docs/audit-and-safety.md](docs/audit-and-safety.md)
-* **Output Sanity Guard:** `src/output_sanity.py` kiểm tra sau chunk 1 và mỗi 10 chunks sau ($|\Delta Y| \le 6/255$, tương quan $\ge 0.98$ so với bicubic); dừng khẩn cấp và cấm mux nếu rớt.
-* **Cổng Kiểm Toán Mux Audit:** `src/mux_audit.py` đối soát bit-exact stream copy, MD5 track âm thanh, số lượng phụ đề, font chữ đính kèm và tổng số khung hình `video_frame_count`.
-* **Tự Động Dọn Dẹp:** `src/cleanup.py` tự động kích hoạt khi Mux Audit PASS; xóa sạch `.temp_<basename>`, gom file báo cáo vào thư mục con `audit/`.
-* **Vòng Đời An Toàn:** Win32 API native `SetThreadExecutionState` chống sleep máy trong suốt tiến trình.
-
-### E. Nhật Ký Kỹ Thuật & Số Đo Benchmarks Chi Tiết — [docs/engineering-log.md](docs/engineering-log.md)
-* Lưu trữ chi tiết các thử nghiệm kiểm chứng, benchmark soak test và phân tích viễn trắc.
+| Phân hệ chuyên sâu | Tài liệu tham chiếu | Trọng tâm kỹ thuật |
+| :--- | :--- | :--- |
+| **GPU & Video Pipeline** | [`docs/video-pipeline.md`](docs/video-pipeline.md) | PyTorch CUDA FP16 (`src/cuda_engine.py`), batch size 6–8, `janai-fix` residual +2x, NVENC 10-bit p010le, ma trận BT.709. |
+| **Dedup & DIS Flow** | [`docs/dedup-architecture.md`](docs/dedup-architecture.md) | Split segment theo GOP, scan `mpdecimate` (768:320:0.33), dòng chảy quang học DIS lia/zoom, tái tạo Concat Demuxer. |
+| **Dịch Thuật Subtrans** | [`subtrans/AGENTS.md`](subtrans/AGENTS.md) | Gemini 3-key round-robin, trích xuất 5.1 FC mono + bandpass, regex lọc ảo giác Whisper & tiếng hét lặp token, Monotonic DTW auto-align. |
+| **Audit & An Toàn** | [`docs/audit-and-safety.md`](docs/audit-and-safety.md) | Output Sanity Guard ($|\Delta Y| \le 6$, corr $\ge 0.98$), Mux Audit bit-exact stream copy, auto-cleanup, AntiSleep native Win32. |
+| **Nhật Ký Thực Nghiệm** | [`docs/engineering-log.md`](docs/engineering-log.md) | Lịch sử đo đạc benchmark, VRAM, fps, soak tests và phân tích viễn trắc. |
 
 ---
 
@@ -202,6 +145,7 @@ ai-video-upscaler/
 
 Một phiên làm việc hoặc mã nguồn được coi là hoàn tất khi thỏa mãn đầy đủ các điều kiện sau:
 1. **Kiểm thử tự động:** Chạy `pytest` đạt **PASS 100%** cho toàn bộ các bài test không đánh dấu `@pytest.mark.gpu`.
-2. **Kiểm định Mux:** Hàm `verify_mux_integrity` trả về `status: "PASS"` (khớp số kênh audio, số luồng sub, và số lượng font chữ đính kèm).
-3. **Bảo toàn khung hình:** `ffprobe -count_frames` trên video 4K thành phẩm khớp chính xác từng khung hình so với video nguồn gốc.
-4. **Trạng thái Git & Kỷ luật Commit:** Mỗi yêu cầu hoàn thành đều được commit riêng biệt với thông điệp rõ nguồn, nội dung làm/fix và số liệu; `git status` sạch hoàn toàn, không có file tạm bị bỏ sót; tag phiên bản được cập nhật tương ứng.
+2. **Kiểm tra bộ nhớ Agent:** Chạy `python scripts/agent_context.py --check` đạt **0 lỗi** (toàn bộ liên kết hợp lệ, nằm trong byte budget).
+3. **Kiểm định Mux:** Hàm `verify_mux_integrity` trả về `status: "PASS"` (khớp số kênh audio, số luồng sub, và số lượng font chữ đính kèm).
+4. **Bảo toàn khung hình:** `ffprobe -count_frames` trên video 4K thành phẩm khớp chính xác từng khung hình so với video nguồn gốc.
+5. **Trạng thái Git & Kỷ luật Commit:** Mỗi yêu cầu hoàn thành đều được commit riêng biệt với thông điệp rõ nguồn, nội dung làm/fix và số liệu; `git status` sạch hoàn toàn, không có file tạm bị bỏ sót; tag phiên bản được cập nhật tương ứng.
