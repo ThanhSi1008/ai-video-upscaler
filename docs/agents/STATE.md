@@ -1,7 +1,7 @@
 # Trạng Thái Hệ Thống & Ngữ Cảnh Hoạt Động (STATE)
 
 > **Cập nhật ngày:** 2026-10-29  
-> **Commit Baseline:** `f3dd857` (`feat(subtitles): optimize audio extraction, anti-hallucination and multi-speaker cues`)  
+> **Commit Baseline:** `2cb4514` (`feat(agent): tich hop AST Symbol Map, Symbol Finder va Git Pre-commit hook`)  
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
 ---
@@ -26,6 +26,7 @@
 | **Whisper Audio Preprocessing**| `src/subtitles.py` | PASS | Trộn kênh trung tâm 5.1 FC (`pan=mono|c0=0.7*FC...`), lọc tần số giọng nói 80Hz–8000Hz, lọc segment rác (`no_speech_prob > 0.65`, `compression_ratio > 2.2`). |
 | **Whisper Anti-Hallucination** | `subtrans/parser.py` | PASS | Regex `WHISPER_HALLUCINATION_REGEX` & `SCREAM_OR_REPEAT_LOOP_REGEX`, drop orphan Whisper cues (>2500ms từ EN gần nhất), cô lập Pass 3 trên `active_cues`. |
 | **Multi-Speaker & Dual Dialogue**| `subtrans/parser.py`, `subtrans/writer.py` | PASS | Bóc tách người nói vào `Cue.speaker`, bảo toàn timeline Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`). |
+| **Agent AST Code Intelligence**| `scripts/agent_context.py` | PASS | Trích xuất AST classes/functions (`--symbols`), định vị symbol (`--find`), kiểm định ngân sách byte (`--check`), Git pre-commit hook tự động (`--install-hooks`). |
 | **Anti-Sleep & Quota Guard** | `src/preflight.py`, `src/scheduler.py` | PASS | Win32 API native `SetThreadExecutionState`, kiểm tra dung lượng ổ đĩa và lập lịch hàng đợi qua đêm. |
 
 ---
