@@ -1,7 +1,7 @@
 # Trạng Thái Hệ Thống & Ngữ Cảnh Hoạt Động (STATE)
 
 > **Cập nhật ngày:** 2026-10-29  
-> **Commit Baseline:** `2cb4514` (`feat(agent): tich hop AST Symbol Map, Symbol Finder va Git Pre-commit hook`)  
+> **Commit Baseline:** `6dae441` (`feat(subtrans): trien khai toan dien 3 goi toi uu hoa phan he dich phu de`)  
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
 ---
