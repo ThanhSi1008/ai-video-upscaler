@@ -61,6 +61,23 @@ PURE_INTERJECTION_REGEX = re.compile(
 )
 MUSIC_OR_SYMBOL_REGEX = re.compile(r"^[♪～\s\-_~♩♫♬]+$")
 
+WHISPER_HALLUCINATION_REGEX = re.compile(
+    r"(ご視聴(いただき)?ありがとう|"
+    r"ご覧いただきありがとう|"
+    r"チャンネル登録|"
+    r"高評価|"
+    r"^字幕([:：].*)?$|"
+    r"字幕(制作|提供|翻訳)|"
+    r"^提供([:：].*)?$|"
+    r"(ご覧の)?スポンサーの提供)",
+    re.IGNORECASE,
+)
+
+SCREAM_OR_REPEAT_LOOP_REGEX = re.compile(
+    r"(.)\1{5,}|([^\u4e00-\u9fff\s]{1,3})\2{3,}",
+    re.UNICODE,
+)
+
 
 def strip_speaker_prefix(text: str) -> Tuple[str, str]:
     """Tách tên người nói ở đầu câu nếu có: （珊瑚(さんご)）Lời thoại hoặc -（絹秀）Lời thoại -> ('絹秀', 'Lời thoại')."""
@@ -88,7 +105,7 @@ def strip_speaker_prefix(text: str) -> Tuple[str, str]:
     return "", t
 
 
-def is_pure_sound_cue(text: str) -> bool:
+def is_pure_sound_cue(text: str, is_whisper: bool = False) -> bool:
     """Kiểm tra cue thuần mô tả âm thanh, tiếng thở, tiếng kêu hoặc SDH không chứa lời thoại."""
     if not text:
         return True
@@ -96,10 +113,18 @@ def is_pure_sound_cue(text: str) -> bool:
     if MUSIC_OR_SYMBOL_REGEX.match(t):
         return True
 
+    if is_whisper:
+        if WHISPER_HALLUCINATION_REGEX.search(t):
+            return True
+        if SCREAM_OR_REPEAT_LOOP_REGEX.search(t):
+            return True
+
     prefix, rest = strip_speaker_prefix(t)
     if prefix:
         # Nếu có lời thoại thật đằng sau và không phải tiếng than thở thuần túy -> Không phải pure sound cue
         if rest and not PURE_INTERJECTION_REGEX.match(rest):
+            if is_whisper and (WHISPER_HALLUCINATION_REGEX.search(rest) or SCREAM_OR_REPEAT_LOOP_REGEX.search(rest)):
+                return True
             return False
         return True
 
@@ -263,14 +288,44 @@ def snap_whisper_cues_to_en(
             if not c.en:
                 c.en = paired_en
             snapped_count += 1
+        else:
+            # Nhiệm vụ 4: Lọc bỏ Orphan Whisper Cues (không khớp với bất kỳ câu EN nào)
+            min_dist = float("inf")
+            for ec in clean_en_cues:
+                if c.end < ec["start"]:
+                    dist = ec["start"] - c.end
+                elif ec["end"] < c.start:
+                    dist = c.start - ec["end"]
+                else:
+                    dist = 0
+                if dist < min_dist:
+                    min_dist = dist
+
+            if min_dist > 2500 or len(c.ja) <= 6 or bool(SOUND_KEYWORDS_REGEX.search(c.ja)):
+                c.is_dropped_sound = True
+                c.is_skipped = True
+                c.backend_used = "dropped_sound"
+                logger.debug(
+                    f"Orphan Whisper cue #{c.id} ('{c.ja}') dropped: dist_to_en={min_dist}ms, len={len(c.ja)}"
+                )
 
     # Pass 3: Đảm bảo tính đơn điệu và khoảng cách tối thiểu giữa các cue liên tiếp
-    cues.sort(key=lambda c: (c.start, c.end))
-    for i in range(len(cues) - 1):
-        c1 = cues[i]
-        c2 = cues[i + 1]
+    # Sửa lỗi Pass 3 (Nhiệm vụ 5): Chỉ chuẩn hóa trên active_cues (không bị skip và không bị drop sound)
+    active_cues = [c for c in cues if not c.is_skipped and not c.is_dropped_sound]
+    active_cues.sort(key=lambda c: (c.start, c.end, c.id))
+
+    for i in range(len(active_cues) - 1):
+        c1 = active_cues[i]
+        c2 = active_cues[i + 1]
         if c1.end <= c1.start:
             c1.end = c1.start + 300
+
+        # Nếu 2 cue liên tiếp được gắn cùng mốc thời gian bắt đầu từ sự kiện tách câu nhiều người nói
+        # (hoặc chênh lệch abs(c2.start - c1.start) <= 15 và cùng end), giữ nguyên cấu trúc Dual Dialogue
+        is_dual = (abs(c2.start - c1.start) <= 15 and abs(c2.end - c1.end) <= 15)
+        if is_dual:
+            continue
+
         if c2.start < c1.start + min_gap_ms:
             c2.start = c1.start + min_gap_ms
         if c1.end >= c2.start:
@@ -282,8 +337,10 @@ def snap_whisper_cues_to_en(
                 if c2.end <= c2.start:
                     c2.end = c2.start + 300
 
-    if cues and cues[-1].end <= cues[-1].start:
-        cues[-1].end = cues[-1].start + 300
+    if active_cues and active_cues[-1].end <= active_cues[-1].start:
+        active_cues[-1].end = active_cues[-1].start + 300
+
+    cues.sort(key=lambda c: (c.start, c.end, c.id))
 
     return snapped_count
 
@@ -343,16 +400,20 @@ def parse_and_align_subtitles(
         clean_ja = clean_subtitle_text(raw_text)
         is_skip = should_skip_cue(event.style, raw_text, skip_styles_regex)
 
+        # Tách tiền tố người nói nếu có (ví dụ: -（絹秀）Lời thoại)
+        prefix, rest = strip_speaker_prefix(clean_ja)
+        speaker_name: Optional[str] = None
+        if prefix:
+            speaker_name = prefix
+        if rest:
+            clean_ja = rest
+
         # Kiểm tra sound cue / SDH
-        is_sound = is_pure_sound_cue(clean_ja)
+        is_sound = is_pure_sound_cue(clean_ja, is_whisper=bool(is_whisper))
         is_dropped_sound = False
         if is_sound and sound_cues == "drop":
             is_dropped_sound = True
             is_skip = True
-        else:
-            prefix, rest = strip_speaker_prefix(clean_ja)
-            if rest:
-                clean_ja = rest
 
         matching_en_cues = []
         aligned_en = None
@@ -407,16 +468,18 @@ def parse_and_align_subtitles(
             backend_used="dropped_sound" if is_dropped_sound else ("skipped" if is_skip else None),
             is_skipped=is_skip,
             is_dropped_sound=is_dropped_sound,
+            speaker=speaker_name,
             raw_text=raw_text
         )
         cues.append(cue)
 
     # Sắp xếp danh sách cue tuần tự theo start time tăng dần (bảo toàn trọn vẹn thời lượng âm thanh gốc)
-    cues.sort(key=lambda c: (c.start, c.end))
+    cues.sort(key=lambda c: (c.start, c.end, c.id))
     for i in range(len(cues) - 1):
-        if cues[i].start == cues[i + 1].start:
-            cues[i + 1].start += 10
-            cues[i + 1].end = max(cues[i + 1].end, cues[i + 1].start + 300)
+        if not cues[i].is_skipped and not cues[i + 1].is_skipped:
+            if cues[i].start == cues[i + 1].start:
+                cues[i + 1].start += 10
+                cues[i + 1].end = max(cues[i + 1].end, cues[i + 1].start + 300)
 
     # Tự động ghim mốc thời gian Whisper theo track phụ đề EN phòng thu (Auto-Align Subtitle Timestamps)
     if auto_align_whisper_to_en and is_whisper and en_ssa and en_cues:
