@@ -58,6 +58,7 @@ class TranslationPipeline:
         subs_quality: str = "normal",  # "normal" (Lite first) | "high" (Flash first)
         cache_db_path: Optional[Path] = None,
         auto_align_whisper_to_en: Optional[bool] = None,
+        smart_wrap: bool = True,
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
@@ -70,6 +71,8 @@ class TranslationPipeline:
         self.output_dir = output_dir or Path("out")
         self.output_format = output_format or "srt"
         self.wrap_chars = wrap_chars
+        self.smart_wrap = smart_wrap
+        self.custom_batch_size = batch_size
         self.gloss_skill_names = gloss_skill_names
         self.require_approved_cast = require_approved_cast
         self.review_file = review_file
@@ -333,6 +336,19 @@ class TranslationPipeline:
         # Stage 2 & 3: Translation loop (Batch size 50, Context +/-10)
         t_s2 = time.monotonic()
         curr_batch_size = self.local_batch_size if self.local_only else self.batch_size
+
+        # Dynamic Batch Sizing: Tự động tối ưu kích thước batch khi thoại dày đặc (nếu người dùng không ép batch_size)
+        if not self.local_only and self.custom_batch_size is None:
+            if len(dialogue_cues) >= 380:
+                optimal_batch = 60 if len(dialogue_cues) >= 450 else 70
+                if optimal_batch < curr_batch_size:
+                    console.print(
+                        f"  • [cyan]Dynamic Batch Sizing:[/cyan] Phát hiện {len(dialogue_cues)} cues thoại dồn dập "
+                        f"-> Tự động tối ưu batch {curr_batch_size} ➔ [bold green]{optimal_batch} cues[/bold green] "
+                        f"để giảm nguy cơ lỗi JSON và tăng độ ổn định."
+                    )
+                    curr_batch_size = optimal_batch
+
         dialogue_batches = [
             dialogue_cues[i:i + curr_batch_size]
             for i in range(0, len(dialogue_cues), curr_batch_size)
@@ -464,7 +480,7 @@ class TranslationPipeline:
                         try:
                             translated_texts = call_with_retry(
                                 fn=lambda: backend.translate_batch(uncached_cues, context, glossary),
-                                rate_limiter=self.rate_limiter,
+                                rate_limiter=None if self.dry_run else self.rate_limiter,
                                 max_retries=self.max_retries_per_model,
                                 model_name=target_model,
                             )
@@ -620,6 +636,20 @@ class TranslationPipeline:
                 f"({len(lint_errors)} lỗi, {len(lint_warnings)} cảnh báo, {fixes_count} auto-fixes).[/yellow]"
             )
 
+        # Gói 2: Tự động học bẫy lỗi từ Linter Violations vào Error Bank
+        if lint_violations and self.enable_rag:
+            try:
+                from subtrans.rag import KnowledgeBase
+                kb = KnowledgeBase()
+                learned_count = kb.learn_from_linter_violations(lint_violations, cues, series=self.series, episode=base_name)
+                if learned_count > 0:
+                    console.print(
+                        f"[bold green]🧠 [RAG FEEDBACK] Đã tự động nạp {learned_count} bẫy lỗi từ Linter vào Error Bank "
+                        f"(.cache/knowledge.db) cho series '{self.series or 'chung'}'.[/bold green]"
+                    )
+            except Exception as e:
+                logger.debug(f"Could not auto-learn from linter violations: {e}")
+
         with console.status(f"[bold blue]Stage 4: Writing subtitle file to {out_file}...[/bold blue]"):
             saved_path = write_subtitles(
                 cues=cues,
@@ -627,6 +657,7 @@ class TranslationPipeline:
                 output_path=out_file,
                 output_format=out_ext,
                 wrap_chars=self.wrap_chars,
+                smart_wrap=self.smart_wrap,
             )
         stage_times["stage_4_write"] = time.monotonic() - t_s4
 

@@ -519,6 +519,8 @@ class GeminiTranslator(BaseTranslator):
                 ctx_item = {"id": c.id, "ja": c.ja, "context": True}
                 if c.en:
                     ctx_item["en"] = c.en
+                if getattr(c, "vi", None) and c.vi.strip() and not c.vi.startswith("[Chưa dịch"):
+                    ctx_item["vi_ref"] = c.vi
                 if c.id < first_id:
                     ctx_item["role"] = "history_readonly"
                 elif c.id > last_id:
@@ -589,6 +591,8 @@ class GeminiTranslator(BaseTranslator):
             if is_valid:
                 for c, it in zip(cues, items):
                     if isinstance(it, dict):
+                        if it.get("vi"):
+                            c.vi = it["vi"]
                         _apply_item_metadata_to_cue(c, it)
                 return [it["vi"] for it in items]
             logger.warning(f"Batch validation failed on attempt 1 ({err_msg}).")
@@ -605,8 +609,16 @@ class GeminiTranslator(BaseTranslator):
             logger.warning(
                 f"🔀 Tách đôi batch ({len(cues)} cues -> {mid} + {len(cues)-mid} cues) để đảm bảo độ tin cậy và khớp ID..."
             )
-            left_half = self.translate_batch(cues[:mid], context, glossary)
-            right_half = self.translate_batch(cues[mid:], context, glossary)
+            left_cues = cues[:mid]
+            right_cues = cues[mid:]
+
+            # Nửa đầu (Left): Giữ lịch sử trước đó + bổ sung lookahead từ các câu đầu của right_cues
+            left_context = [c for c in (context or []) if c.id < left_cues[0].id] + right_cues[:10]
+            left_half = self.translate_batch(left_cues, left_context, glossary)
+
+            # Nửa sau (Right): Bắc cầu 10 câu cuối của left_cues (đã có bản dịch vi và metadata) làm lịch sử liền kề
+            right_context = left_cues[-10:] + [c for c in (context or []) if c.id > right_cues[-1].id]
+            right_half = self.translate_batch(right_cues, right_context, glossary)
             return left_half + right_half
 
         # Nếu chỉ có 1 cue duy nhất mà thất bại, thử lại lần cuối với prompt nghiêm ngặt

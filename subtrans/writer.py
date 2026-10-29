@@ -454,6 +454,8 @@ def write_srt_subtitles(
     output_path: Path,
     wrap_chars: Optional[int] = None,
     optimize_playback: bool = False,
+    smart_wrap: bool = False,
+    max_line_chars: int = 72,
 ) -> Path:
     """
     Writes cues to standard SRT format matching ReZERO_S04E19_Vietsub_Chuan.srt.
@@ -461,6 +463,7 @@ def write_srt_subtitles(
     - 1-based indexing
     - Exactly one blank line between cues
     - Dual dialogue lines (- Line 1\n- Line 2) preserved when speakers speak simultaneously
+    - Smart Semantic Line Wrapping: automatically wraps long lines (> 72 chars) into 2 balanced lines
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     blocks = []
@@ -489,6 +492,8 @@ def write_srt_subtitles(
 
         if wrap_chars and "\n" not in clean_text:
             clean_text = wrap_subtitle_line(clean_text, wrap_chars=wrap_chars)
+        elif smart_wrap and "\n" not in clean_text and len(clean_text) > max_line_chars:
+            clean_text = wrap_subtitle_line(clean_text, max_chars=max_line_chars)
 
         block = f"{idx}\n{t_start} --> {t_end}\n{clean_text}"
         blocks.append(block)
@@ -508,6 +513,8 @@ def write_subtitles(
     output_format: Optional[str] = None,
     wrap_chars: Optional[int] = None,
     optimize_playback: bool = True,
+    smart_wrap: bool = True,
+    max_line_chars: int = 72,
 ) -> Path:
     """
     Main subtitle writer entrypoint.
@@ -518,14 +525,18 @@ def write_subtitles(
     if not out_format or out_format not in ("ass", "srt"):
         out_format = "srt"
 
+    effective_wrap = wrap_chars or (line_max_chars if wrap_chars else None)
+
     if out_format == "srt":
         if output_path.suffix.lower() != ".srt":
             output_path = output_path.with_suffix(".srt")
         return write_srt_subtitles(
             cues,
             output_path,
-            wrap_chars=wrap_chars or line_max_chars if wrap_chars else None,
+            wrap_chars=effective_wrap,
             optimize_playback=optimize_playback,
+            smart_wrap=smart_wrap,
+            max_line_chars=max_line_chars,
         )
 
     # ASS format fallback (preserves styles and tags if needed)
@@ -541,8 +552,10 @@ def write_subtitles(
     ssa.events.clear()
     for cue in processed_cues:
         clean_text = clean_and_normalize_vietnamese(cue.vi or cue.ja, preserve_dual=True)
-        if wrap_chars and "\n" not in clean_text:
-            clean_text = wrap_subtitle_line(clean_text, wrap_chars=wrap_chars)
+        if effective_wrap and "\n" not in clean_text:
+            clean_text = wrap_subtitle_line(clean_text, wrap_chars=effective_wrap)
+        elif smart_wrap and "\n" not in clean_text and len(clean_text) > max_line_chars:
+            clean_text = wrap_subtitle_line(clean_text, max_chars=max_line_chars)
         clean_text = clean_text.replace("\n", r"\N")
         evt = pysubs2.SSAEvent(
             start=cue.start,

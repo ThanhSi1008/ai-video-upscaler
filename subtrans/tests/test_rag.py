@@ -365,3 +365,52 @@ def test_rag_learn_from_correction_feedback_loop(tmp_path):
     # Check gold few-shot retrieval
     shots = kb.retrieve_few_shots(cues, series="tenken")
     assert any("Urushi, nằm xuống!" in s["vi"] for s in shots)
+
+
+def test_learn_from_linter_violations_auto_feedback(tmp_path):
+    """Verifies that linter violations are automatically extracted and recorded into error_bank."""
+    from subtrans.linter import LintViolation, RULE_BANNED_TERM, RULE_CJK_LEAK, RULE_ROMAJI_MISSING
+
+    db_file = tmp_path / "test_knowledge.db"
+    kb = KnowledgeBase(db_path=db_file)
+
+    cues = [
+        Cue(id=1, start=1000, end=3000, ja="世界観が壊れる", vi="thế giới quan bị phá vỡ"),
+        Cue(id=2, start=4000, end=6000, ja="フラン、待って", vi="Này cô em, đợi đã"),
+        Cue(id=3, start=7000, end=9000, ja="漢字の漏れ", vi="Để sót 漢字 trong câu"),
+    ]
+
+    violations = [
+        LintViolation(
+            rule_id=RULE_BANNED_TERM,
+            severity="ERROR",
+            cue_id=1,
+            message="Contains banned translationese/calque 'thế giới quan'",
+            suggestion="Use 'thế giới' instead",
+        ),
+        LintViolation(
+            rule_id=RULE_ROMAJI_MISSING,
+            severity="ERROR",
+            cue_id=2,
+            message="Cue 2 called 'Fran' in Japanese, but the Romaji name was omitted or changed.",
+            suggestion="Keep Romaji proper name 'Fran'",
+        ),
+        LintViolation(
+            rule_id=RULE_CJK_LEAK,
+            severity="ERROR",
+            cue_id=3,
+            message="Contains CJK characters in Vietnamese translation",
+        ),
+    ]
+
+    learned = kb.learn_from_linter_violations(violations, cues, series="tenken")
+    assert learned == 3
+
+    # Check caution retrieval for the banned calque
+    check_cues = [Cue(id=10, start=0, end=1000, ja="世界観が壊れる")]
+    cautions = kb.retrieve_cautions(check_cues, series="tenken")
+    assert any("thế giới quan" in c["avoid"] for c in cautions)
+
+    # Re-learning the same violations should be idempotent (count = 0)
+    relearned = kb.learn_from_linter_violations(violations, cues, series="tenken")
+    assert relearned == 0

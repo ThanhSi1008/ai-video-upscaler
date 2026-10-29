@@ -188,5 +188,47 @@ def test_optimize_cues_duplicate_variant_dialogue():
     assert "Đúng là pháp sư chiêu hồn vĩ đại" in optimized[0].vi
 
 
+def test_smart_semantic_line_wrapping_auto_splits_long_lines(tmp_path):
+    """Kiểm tra smart_wrap tự động ngắt dòng cân đối 50/50 khi câu > 72 ký tự."""
+    from subtrans.writer import write_srt_subtitles
+    long_line = "Nếu như ngày hôm đó cậu không đến bên cạnh tôi, tôi nhất định sẽ không thể nào vượt qua được nỗi đau này."
+    cues = [
+        Cue(id=1, start=1000, end=5000, ja="a", vi=long_line),
+        Cue(id=2, start=6000, end=9000, ja="b", vi="Câu ngắn bình thường này vẫn ở một dòng."),
+    ]
+    out_srt = tmp_path / "smart_wrap.srt"
+    write_srt_subtitles(cues, out_srt, smart_wrap=True, max_line_chars=72)
+
+    content = out_srt.read_text(encoding="utf-8")
+    blocks = [b.strip() for b in content.strip().split("\n\n") if b.strip()]
+    assert len(blocks) == 2
+
+    # Block 1 is long -> should have 2 lines
+    lines_b1 = blocks[0].split("\n")
+    assert len(lines_b1) == 4  # id, timing, line1, line2
+    assert lines_b1[2].endswith(",")
+
+    # Block 2 is short (<= 72 chars) -> exactly 1 line
+    lines_b2 = blocks[1].split("\n")
+    assert len(lines_b2) == 3  # id, timing, line1
+
+
+def test_smart_semantic_line_wrapping_disabled_keeps_single_line(tmp_path):
+    """Kiểm tra khi smart_wrap=False, câu dài > 72 ký tự vẫn giữ nguyên 1 dòng duy nhất."""
+    from subtrans.writer import write_srt_subtitles
+    long_line = "Nếu như ngày hôm đó cậu không đến bên cạnh tôi, tôi nhất định sẽ không thể nào vượt qua được nỗi đau này."
+    cues = [
+        Cue(id=1, start=1000, end=5000, ja="a", vi=long_line),
+    ]
+    out_srt = tmp_path / "no_smart_wrap.srt"
+    write_srt_subtitles(cues, out_srt, smart_wrap=False)
+
+    content = out_srt.read_text(encoding="utf-8")
+    blocks = [b.strip() for b in content.strip().split("\n\n") if b.strip()]
+    lines_b1 = blocks[0].split("\n")
+    assert len(lines_b1) == 3  # id, timing, single_long_line
+
+
+
 
 

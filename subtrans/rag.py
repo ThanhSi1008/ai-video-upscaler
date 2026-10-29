@@ -467,6 +467,124 @@ class KnowledgeBase:
             "episode": episode,
         }
 
+    def add_error_pattern(
+        self,
+        category: str,
+        ja_pattern: str,
+        bad_pattern: str,
+        good_pattern: str,
+        explanation: str,
+        series: Optional[str] = None,
+    ) -> bool:
+        """
+        Inserts an error pattern into error_bank if not already present.
+        Returns True if newly inserted, False if already exists.
+        """
+        ja_norm = normalize_nfc(ja_pattern).strip()
+        bad_norm = normalize_nfc(bad_pattern).strip()
+        good_norm = normalize_nfc(good_pattern).strip()
+        series_norm = series.lower().strip() if series else None
+
+        if not ja_norm or not bad_norm:
+            return False
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM error_bank
+                WHERE category = ? AND ja_pattern = ? AND bad_pattern = ? AND (series = ? OR (series IS NULL AND ? IS NULL))
+            """, (category, ja_norm, bad_norm, series_norm, series_norm))
+            if cursor.fetchone():
+                return False
+
+            conn.execute("""
+                INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (category, ja_norm, bad_norm, good_norm, explanation, series_norm))
+            conn.commit()
+            return True
+
+    def learn_from_linter_violations(
+        self,
+        violations: List[Any],
+        cues: List[Cue],
+        series: Optional[str] = None,
+        episode: Optional[str] = None,
+    ) -> int:
+        """
+        Extracts and stores error patterns from linter violations into error_bank.
+        Captures:
+        - RULE_BANNED_TERM: banned translationese/calques
+        - RULE_CJK_LEAK: leftover Japanese/Chinese characters
+        - RULE_ROMAJI_MISSING: missing character Romaji name when called in vocative
+        Returns count of newly learned patterns.
+        """
+        if not violations or not cues:
+            return 0
+
+        cue_map = {c.id: c for c in cues}
+        learned_count = 0
+
+        for v in violations:
+            cue = cue_map.get(getattr(v, "cue_id", -1))
+            if not cue or not cue.ja or not cue.vi:
+                continue
+
+            rule_id = getattr(v, "rule_id", "")
+            ja_text = cue.ja.strip()
+            vi_text = cue.vi.strip()
+
+            if rule_id == "LINT_BANNED_TERM":
+                match = re.search(r"['\"]([^'\"]+)['\"]", getattr(v, "message", ""))
+                bad_word = match.group(1) if match else ""
+                suggestion = getattr(v, "suggestion", "")
+                match_sugg = re.search(r"['\"]([^'\"]+)['\"]", suggestion)
+                good_word = match_sugg.group(1) if match_sugg else suggestion
+
+                if bad_word:
+                    if self.add_error_pattern(
+                        category="banned_calque",
+                        ja_pattern=re.escape(ja_text[:30]),
+                        bad_pattern=bad_word,
+                        good_pattern=good_word or "Không dùng từ cấm",
+                        explanation=f"Tránh dùng cụm '{bad_word}', nên dùng '{good_word}'.",
+                        series=series,
+                    ):
+                        learned_count += 1
+
+            elif rule_id == "LINT_CJK_LEAK":
+                from subtrans.eval.metrics import detect_cjk_leakage
+                leaks = detect_cjk_leakage(vi_text)
+                if leaks:
+                    leak_chars = "".join(set(leaks))
+                    if self.add_error_pattern(
+                        category="cjk_leak",
+                        ja_pattern=re.escape(ja_text[:30]),
+                        bad_pattern=re.escape(leak_chars),
+                        good_pattern="[Dịch hoàn toàn sang tiếng Việt]",
+                        explanation=f"Bản dịch sót ký tự CJK '{leak_chars}'. Dịch hoàn toàn sang tiếng Việt.",
+                        series=series,
+                    ):
+                        learned_count += 1
+
+            elif rule_id == "LINT_ROMAJI_MISSING":
+                match = re.search(r"called '([^']+)'", getattr(v, "message", ""))
+                char_name = match.group(1) if match else ""
+                if char_name:
+                    if self.add_error_pattern(
+                        category="vocative_name",
+                        ja_pattern=re.escape(ja_text[:30]),
+                        bad_pattern=r"\b(anh|em|cậu|cô|mày|hắn|nó)\b",
+                        good_pattern=char_name,
+                        explanation=f"Khi câu tiếng Nhật gọi đích danh '{char_name}', bắt buộc giữ tên Romaji '{char_name}'.",
+                        series=series,
+                    ):
+                        learned_count += 1
+
+        if learned_count:
+            logger.info(f"🧠 [RAG LEARN] Đã tự động nạp {learned_count} bẫy lỗi từ linter vào error_bank (series={series})")
+        return learned_count
+
     def retrieve_cautions(
         self,
         cues: List[Cue],

@@ -89,3 +89,14 @@ def test_translate_batch_injects_ja_hints():
     prompt_sent = call_args.kwargs.get("contents", "")
     assert "ja_hints" in prompt_sent
     assert "2P:temee" in prompt_sent
+
+
+def test_extract_extended_verb_honorifics_and_commands():
+    """Verifies detection of verb honorifics, humble forms, imperatives and commands for zero-pronouns."""
+    assert "REGISTER:keigo_formal" in (extract_ja_linguistic_hints("拙者、名乗るほどの者ではござらん。") or "")
+    assert "1P:sessha" in (extract_ja_linguistic_hints("拙者、名乗るほどの者ではござらん。") or "")
+    assert "REGISTER:military" in (extract_ja_linguistic_hints("異常なしであります！") or "")
+    assert "VULGAR:yagare" in (extract_ja_linguistic_hints("ふざけやがって！") or "")
+    assert "CMD:senior_to_junior" in (extract_ja_linguistic_hints("早く戻りなさい。") or "")
+    assert "2P:onushi" in (extract_ja_linguistic_hints("お主の腕前、見事であった。") or "")
+    assert "REQ:polite" in (extract_ja_linguistic_hints("少々お待ちください。") or "")

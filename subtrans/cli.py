@@ -172,6 +172,7 @@ def run(
     cache_db: Optional[Path] = typer.Option(None, "--cache-db", help="File SQLite cache riêng biệt phục vụ thí nghiệm đo lường"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     auto_align_en: bool = typer.Option(True, "--auto-align-en/--no-auto-align-en", help="Tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu (Mặc định: Bật)"),
+    smart_wrap: bool = typer.Option(True, "--smart-wrap/--no-smart-wrap", help="Tự động ngắt dòng thông minh khi câu > 72 ký tự (Mặc định: Bật)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
@@ -189,6 +190,7 @@ def run(
         output_dir=out_dir,
         output_format=format_,
         wrap_chars=wrap,
+        smart_wrap=smart_wrap,
         gloss_skill_names=gloss_skill_names,
         require_approved_cast=require_approved_cast,
         review_file=review_file,

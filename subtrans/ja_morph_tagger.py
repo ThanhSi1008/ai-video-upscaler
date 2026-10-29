@@ -28,14 +28,34 @@ JA_REGISTER_PATTERNS: List[Tuple[str, str]] = [
     (r"あたし|アタシ", "1P:atashi (nữ thân mật -> em/tớ/mình)"),
     (r"わし|ワシ", "1P:washi (lão niên/uy quyền -> lão/ta/ông)"),
     (r"わらわ|妾", "1P:warawa (cổ trang quý tộc nữ -> thiếp/ta)"),
+    (r"拙者|せっしゃ", "1P:sessha (võ sĩ/samurai -> tại hạ)"),
+    (r"我|吾|われ", "1P:ware (cổ trang/ngạo mạn -> ta)"),
     (r"自分", "1P/REFL:jibun (bản thân/tự mình/kỷ luật)"),
+
+    # 2nd Person Archaic & Formal (Ngôi 2 - Cổ trang / Kính trọng)
+    (r"お主|おぬし", "2P:onushi (bề trên gọi kẻ dưới/cổ trang -> ngươi)"),
+    (r"貴殿|きでん", "2P:kiden (trang trọng kính trọng -> các hạ/ngài)"),
 
     # Honorifics & Kinship (Kính ngữ & Thân tộc)
     (r"先輩|せんぱい", "HON:senpai (tiền bối/anh/chị)"),
     (r"先生|せんせい", "HON:sensei (thầy/cô/tiên sinh)"),
     (r"様|さま", "HON:sama (ngài/đại nhân/tiểu thư)"),
+    (r"殿下|でんか", "HON:denka (điện hạ)"),
     (r"兄さん|にいさん|お兄ちゃん|兄貴", "KIN:onii (anh trai/huynh)"),
     (r"姉さん|ねえさん|お姉ちゃん|姉貴", "KIN:onee (chị gái/tỷ)"),
+
+    # Verb Honorifics & Humble Forms (Giải quyết Zero-Pronouns khi tỉnh lược chủ ngữ)
+    (r"で(?:は)?ございます|で(?:は)?ござ[るらりれ]|ございます", "REGISTER:keigo_formal (trang trọng/hầu cận/lịch thiệp)"),
+    (r"であります", "REGISTER:military (quân đội/trang nghiêm)"),
+    (r"(?:いらっしゃる|おいでになる)", "REGISTER:sonkeigo (tôn kính người nghe/bề trên)"),
+    (r"(?:申します|申し上げます|参ります)", "REGISTER:kenjougo (khiêm nhường xưng hô bản thân)"),
+
+    # Verb Imperatives, Commands & Requests
+    (r"やが[るれらり]|やがっ", "VULGAR:yagare (khinh bỉ/rủa xả -> tên khốn/chết tiệt)"),
+    (r"くたばれ|失せろ", "HOSTILE:chết tiệt/biến đi"),
+    (r"(?:なさい|たまえ|おくれ)[。！？…]*$", "CMD:senior_to_junior (bề trên lệnh bề dưới -> hãy...)"),
+    (r"(?:てくれ|てよ|ちょうだい)[。！？…]*$", "REQ:peer_casual (nhờ vả thân mật/ngang hàng)"),
+    (r"(?:てください|ていただけますか|ください[。！？…]*$)", "REQ:polite (yêu cầu lịch sự)"),
 
     # Sentence-Final Particles (Trợ từ cuối câu - Ngữ khí)
     (r"(?:だわ|かしら|ですわ|わよ)[。！？…]*$", "SFP:nữ_tính_hoặc_tiểu_thư"),
