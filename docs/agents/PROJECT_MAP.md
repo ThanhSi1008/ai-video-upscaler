@@ -71,7 +71,10 @@ subtrans.cli → TranslationPipeline
 
 ## Script, benchmark và test
 
-- [`scripts/`](../../scripts): `batch_translate_all.py` điều phối dịch tuần tự; `set_track_defaults.py` đổi default track MKV; `organize_vietnamese_subs.py` sắp xếp phụ đề; `upscale_x4_single.py` tiện ích upscale riêng. Đọc tham số/đường dẫn và side effect trước chạy.
+- [`scripts/`](../../scripts):
+  - `agent_context.py`: Bootstrap Agent, kiểm tra tính toàn vẹn bộ nhớ (`--check`), trích xuất cấu trúc code AST (`--symbols`), tìm kiếm symbol (`--find`), và cài đặt pre-commit hook (`--install-hooks`).
+  - `verify_offline.py`: Kiểm thử an toàn sandbox offline ngắt kết nối mạng.
+  - `batch_translate_all.py` điều phối dịch tuần tự; `set_track_defaults.py` đổi default track MKV; `organize_vietnamese_subs.py` sắp xếp phụ đề; `upscale_x4_single.py` tiện ích upscale riêng. Đọc tham số/đường dẫn và side effect trước chạy.
 - [`benchmarks/README.md`](../../benchmarks/README.md): nhóm `upscale/` đo model, dedup, latency và chaos resume; `subtrans/` đánh giá pronoun; `research/` hiệu chuẩn DIS/so sánh hình ảnh. Không thuộc test mặc định và không phải lệnh bootstrap.
 - [`pytest.ini`](../../pytest.ini): thu thập `tests/` và `subtrans/tests/`. Video tests chia nhóm dedup/GOP, resume/storage, model/color, mux; subtitle tests chia parser/writer/glossary, API stub/quota/cache, cascade/RAG/eval.
 - `-m "not gpu"` loại test gắn marker GPU, nhưng vài test không gắn marker vẫn tự chọn CUDA. Chỉ một tiến trình test, kiểm tra production idle và cách ly dữ liệu theo [VALIDATION](VALIDATION.md).

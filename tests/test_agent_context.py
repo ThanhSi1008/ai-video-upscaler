@@ -94,3 +94,47 @@ def test_git_unavailable_is_reported_without_shell_or_crash(tmp_path, monkeypatc
 def test_check_exit_code_is_nonzero_for_incomplete_memory(tmp_path, capsys):
     assert agent_context.main(["--root", str(tmp_path), "--check"]) == 1
     assert "ERROR:" in capsys.readouterr().out
+
+
+def test_symbols_extracts_ast_classes_and_functions(tmp_path, capsys):
+    sample_file = tmp_path / "sample.py"
+    sample_file.write_text(
+        '"""Module docstring."""\n\n'
+        'class Alpha:\n'
+        '    def beta(self, x: int) -> str:\n'
+        '        return str(x)\n\n'
+        'def gamma(val: bool = True) -> None:\n'
+        '    pass\n',
+        encoding="utf-8",
+    )
+    assert agent_context.main(["--root", str(tmp_path), "--symbols", "sample.py"]) == 0
+    out = capsys.readouterr().out
+    assert "class Alpha: [L3-L5]" in out
+    assert "def beta(self, x: int) -> str: ... [L4-L5]" in out
+    assert "def gamma(val: bool=True) -> None: ... [L7-L8]" in out
+
+
+def test_find_symbol_locates_definitions_across_files(tmp_path, capsys):
+    sample_dir = tmp_path / "pkg"
+    sample_dir.mkdir()
+    (sample_dir / "worker.py").write_text(
+        "class ProcessingEngine:\n"
+        "    def run_pipeline(self, mode: str) -> bool:\n"
+        "        return True\n",
+        encoding="utf-8",
+    )
+    assert agent_context.main(["--root", str(tmp_path), "--find", "run_pipeline"]) == 0
+    out = capsys.readouterr().out
+    assert "Found 1 symbol definition(s) matching 'run_pipeline':" in out
+    assert "pkg/worker.py:2:   def run_pipeline(self, mode: str) -> bool:" in out
+
+
+def test_install_git_hooks_creates_pre_commit_hook(tmp_path, capsys):
+    hooks_dir = tmp_path / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    assert agent_context.main(["--root", str(tmp_path), "--install-hooks"]) == 0
+    out = capsys.readouterr().out
+    assert "Pre-commit hook successfully installed" in out
+    hook_file = hooks_dir / "pre-commit"
+    assert hook_file.is_file()
+    assert "python scripts/agent_context.py --check" in hook_file.read_text(encoding="utf-8")

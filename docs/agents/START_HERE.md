@@ -42,10 +42,15 @@
 python scripts/agent_context.py
 python scripts/agent_context.py --check
 
-# 2. Chạy test cô lập hoàn toàn offline (chống leak API key & socket):
+# 2. Tra cứu cấu trúc code AST tiết kiệm token (không đọc full file):
+python scripts/agent_context.py --symbols src/subtitles.py   # Xem classes/functions/line-numbers
+python scripts/agent_context.py --symbols subtrans/         # Xem API surface của cả package
+python scripts/agent_context.py --find snap_whisper         # Tìm nơi định nghĩa symbol trong 0.05s
+
+# 3. Chạy test cô lập hoàn toàn offline (chống leak API key & socket):
 python scripts/verify_offline.py
 
-# 3. Chạy kiểm thử tự động toàn diện:
+# 4. Chạy kiểm thử tự động toàn diện:
 pytest
 ```
 

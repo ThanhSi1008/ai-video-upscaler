@@ -8,6 +8,7 @@ packages, or run tests. All paths in the output are relative to the repository.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import Counter
 from pathlib import Path
 import re
@@ -167,6 +168,140 @@ def show_inventory(root: Path) -> bool:
     return True
 
 
+def _extract_py_symbols(file_path: Path) -> list[str]:
+    """Extract AST classes and functions with signatures and line ranges."""
+    try:
+        content = file_path.read_text(encoding="utf-8-sig")
+        tree = ast.parse(content, filename=file_path.name)
+    except Exception as exc:
+        return [f"  (failed to parse AST: {exc})"]
+
+    results = []
+    doc = ast.get_docstring(tree)
+    if doc:
+        first_line = doc.strip().splitlines()[0]
+        results.append(f'  """{first_line}"""')
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            bases = ", ".join(ast.unparse(b) for b in node.bases)
+            header = f"  class {node.name}({bases}):" if bases else f"  class {node.name}:"
+            results.append(f"{header} [L{node.lineno}-L{node.end_lineno}]")
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    args = ast.unparse(sub.args)
+                    ret = f" -> {ast.unparse(sub.returns)}" if sub.returns else ""
+                    results.append(f"    def {sub.name}({args}){ret}: ... [L{sub.lineno}-L{sub.end_lineno}]")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = ast.unparse(node.args)
+            ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+            results.append(f"  def {node.name}({args}){ret}: ... [L{node.lineno}-L{node.end_lineno}]")
+    return results
+
+
+def show_symbols(root: Path, target: str | None = None) -> bool:
+    """Print AST symbol maps for a specific file or directory of Python files."""
+    target_path = (root / target) if target else root
+    if not _inside(root, target_path) or not target_path.exists():
+        print(f"Target path does not exist or leaves repo: {target}")
+        return False
+
+    if target_path.is_file():
+        py_files = [target_path] if target_path.suffix == ".py" else []
+    else:
+        skip_dirs = {".venv", ".git", "__pycache__", "scratch", ".pytest_cache"}
+        py_files = []
+        for p in sorted(target_path.rglob("*.py")):
+            if any(part in skip_dirs for part in p.parts):
+                continue
+            py_files.append(p)
+
+    if not py_files:
+        print(f"No Python files found in {target or '.'}")
+        return False
+
+    for p in py_files:
+        rel = p.relative_to(root).as_posix()
+        print(f"\n--- {rel} ---")
+        symbols = _extract_py_symbols(p)
+        if not symbols:
+            print("  (no top-level classes or functions)")
+        else:
+            for s in symbols:
+                print(s)
+    return True
+
+
+def find_symbol(root: Path, symbol_name: str) -> bool:
+    """Search AST definitions across python files for exact or partial symbol name."""
+    skip_dirs = {".venv", ".git", "__pycache__", "scratch", ".pytest_cache"}
+    matches = []
+    target_lower = symbol_name.lower()
+
+    for p in sorted(root.rglob("*.py")):
+        if any(part in skip_dirs for part in p.parts):
+            continue
+        try:
+            content = p.read_text(encoding="utf-8-sig")
+            tree = ast.parse(content, filename=p.name)
+        except Exception:
+            continue
+
+        rel = p.relative_to(root).as_posix()
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                if target_lower in node.name.lower():
+                    bases = ", ".join(ast.unparse(b) for b in node.bases)
+                    header = f"class {node.name}({bases}):" if bases else f"class {node.name}:"
+                    matches.append(f"{rel}:{node.lineno}: {header} [L{node.lineno}-L{node.end_lineno}]")
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if target_lower in sub.name.lower():
+                            args = ast.unparse(sub.args)
+                            ret = f" -> {ast.unparse(sub.returns)}" if sub.returns else ""
+                            matches.append(f"{rel}:{sub.lineno}:   def {sub.name}({args}){ret}: ... [L{sub.lineno}-L{sub.end_lineno}]")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if target_lower in node.name.lower():
+                    args = ast.unparse(node.args)
+                    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+                    matches.append(f"{rel}:{node.lineno}: def {node.name}({args}){ret}: ... [L{node.lineno}-L{node.end_lineno}]")
+
+    if not matches:
+        print(f"No AST definitions found matching '{symbol_name}'")
+        return False
+
+    print(f"Found {len(matches)} symbol definition(s) matching '{symbol_name}':")
+    for m in matches:
+        print(f"  {m}")
+    return True
+
+
+def install_git_hooks(root: Path) -> bool:
+    """Install or update .git/hooks/pre-commit to enforce memory & link checks."""
+    hooks_dir = root / ".git" / "hooks"
+    if not hooks_dir.is_dir():
+        print("Git hooks directory not found (.git/hooks). Is this a valid git repo?")
+        return False
+    hook_path = hooks_dir / "pre-commit"
+    hook_content = (
+        "#!/bin/sh\n"
+        "# Antigravity agent context & memory integrity check\n"
+        "python scripts/agent_context.py --check\n"
+        "status=$?\n"
+        "if [ $status -ne 0 ]; then\n"
+        "    echo \"[PRE-COMMIT ERROR] Aborting commit due to agent_context check errors.\"\n"
+        "    exit 1\n"
+        "fi\n"
+    )
+    hook_path.write_text(hook_content, encoding="utf-8")
+    try:
+        hook_path.chmod(0o755)
+    except OSError:
+        pass
+    print(f"Pre-commit hook successfully installed at: {hook_path}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -174,12 +309,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help="Repository root (default: parent of scripts/)")
     parser.add_argument("--check", action="store_true", help="Check required memory files, local links and instruction byte budgets")
     parser.add_argument("--inventory", action="store_true", help="Count tracked paths by top-level directory without reading contents")
+    parser.add_argument("--symbols", nargs="?", const="", type=str, help="Show AST classes and functions for a path or entire repo")
+    parser.add_argument("--find", type=str, help="Search AST definitions across python files for a class or function name")
+    parser.add_argument("--install-hooks", action="store_true", help="Install git pre-commit hook to verify memory integrity before commit")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     if not root.is_dir():
         parser.error(f"Repository root is not a directory: {root}")
     exit_code = 0
+    ran_action = False
+
     if args.check:
+        ran_action = True
         errors = check_memory(root)
         for error in errors:
             print(f"ERROR: {error}")
@@ -187,10 +328,31 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 1
         else:
             print(f"PASS: required memory files, local links, root <= {ROOT_BUDGET} bytes, root + subtrans <= {COMBINED_BUDGET} bytes")
-    if args.inventory and not show_inventory(root):
-        exit_code = 1
-    if not args.check and not args.inventory:
+
+    if args.inventory:
+        ran_action = True
+        if not show_inventory(root):
+            exit_code = 1
+
+    if args.symbols is not None:
+        ran_action = True
+        target = args.symbols if args.symbols else None
+        if not show_symbols(root, target):
+            exit_code = 1
+
+    if args.find:
+        ran_action = True
+        if not find_symbol(root, args.find):
+            exit_code = 1
+
+    if args.install_hooks:
+        ran_action = True
+        if not install_git_hooks(root):
+            exit_code = 1
+
+    if not ran_action:
         show_bootstrap(root)
+
     return exit_code
 
 
