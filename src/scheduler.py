@@ -111,15 +111,20 @@ class BackgroundQueuePreflightManager:
         skip_first: bool = True,
         logger=None,
         benchmark_mode: bool = False,
-        on_plan_ready=None
+        on_plan_ready=None,
+        dedup_policy: Optional[str] = None,
     ):
         self.queue = queue
-        self.output_dir = output_dir or "out"
+        out_clean = output_dir or "out"
+        if out_clean.lower().endswith((".mkv", ".mp4")):
+            out_clean = os.path.dirname(out_clean) or "out"
+        self.output_dir = out_clean
         self.segment_seconds = segment_seconds
         self.skip_first = skip_first
         self.logger = logger
         self.benchmark_mode = benchmark_mode or (os.environ.get("BENCHMARK_MODE") == "1")
         self.on_plan_ready = on_plan_ready
+        self.dedup_policy = dedup_policy
         self.thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self.results: Dict[str, Dict[str, Any]] = {}
@@ -171,7 +176,9 @@ class BackgroundQueuePreflightManager:
                 plan_file = os.path.join(work_dir, "plan.json")
 
                 from src.dedup import build_preflight_subprocess_spec
-                cmd, popen_kwargs = build_preflight_subprocess_spec(vid, plan_file, self.segment_seconds)
+                cmd, popen_kwargs = build_preflight_subprocess_spec(
+                    vid, plan_file, self.segment_seconds, dedup_policy=self.dedup_policy
+                )
                 proc = subprocess.run(cmd, **popen_kwargs)
                 if proc.returncode == 0 and os.path.exists(plan_file):
                     with open(plan_file, "r", encoding="utf-8") as f:

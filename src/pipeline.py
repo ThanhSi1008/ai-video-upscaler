@@ -466,7 +466,25 @@ def run_upscale_pipeline(
                         shutil.rmtree(c_in_dir, ignore_errors=True)
                         shutil.rmtree(c_out_dir, ignore_errors=True)
 
+                def worker_finalize_zero_disk(proc_obj, tmp_p: str, final_p: str, seg_no: int) -> float:
+                    """Hoàn tất đóng gói MP4 từ NVENC pipe (flush 32-frame lookahead + atomic rename) ở luồng nền."""
+                    t0_w = time.time()
+                    rc = proc_obj.wait()
+                    if rc != 0 or not os.path.exists(tmp_p) or os.path.getsize(tmp_p) == 0:
+                        if os.path.exists(tmp_p):
+                            try:
+                                os.remove(tmp_p)
+                            except OSError:
+                                pass
+                        raise RuntimeError(
+                            f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {seg_no+1:02d} (exit code {rc})."
+                        )
+                    os.replace(tmp_p, final_p)
+                    return max(0.001, time.time() - t0_w)
+
                 acquire_gpu_lock()
+                future_extract = None
+                prev_c_idx = 0
                 try:
                     # Thực thi gối đầu song song (Double-Buffering Bounded Queue <= 2 chunks trên RAM Disk)
                     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="DecodeWorker") as dec_exec, \
@@ -487,6 +505,7 @@ def run_upscale_pipeline(
 
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
+                            prev_c_idx = c_idx
 
                             # Chờ giải mã CPU chunk hiện tại sẵn sàng (chỉ lấy 1 lần cho chunk i)
                             if future_extract is not None:
@@ -495,6 +514,18 @@ def run_upscale_pipeline(
                             else:
                                 extracted = worker_extract(target_chunk)
 
+                            # Gối đầu thực sự (True 3-Stage Overlap):
+                            # Khởi chạy giải mã CPU/NVDEC cho chunk i+1 NGAY TRƯỚC KHI GPU suy luận chunk i!
+                            if (
+                                i + 1 < len(chunks_to_process)
+                                and not (allow_partial and deadline_dt and datetime.now() >= deadline_dt)
+                            ):
+                                can_prefetch_early = (zero_disk and engine == "cuda") or (
+                                    shutil.disk_usage(cache_root).free / (1024 * 1024) >= 1600.0
+                                )
+                                if can_prefetch_early:
+                                    future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
+
                             c_in_dir = extracted["in_dir"]
                             c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
                             if not (zero_disk and engine == "cuda"):
@@ -502,6 +533,7 @@ def run_upscale_pipeline(
 
                             chunk_attempt = 0
                             max_chunk_retries = 2
+                            zero_disk_pending_finalize = None
 
                             while True:
                                 seg_start_time = time.time()
@@ -697,26 +729,32 @@ def run_upscale_pipeline(
                                                 cyclic_dedup=bool(dedup),
                                                 capture_first_rgb_small=should_check_sanity,
                                             )
+                                        except Exception:
+                                            if enc_proc.stdin:
+                                                try:
+                                                    enc_proc.stdin.close()
+                                                except Exception:
+                                                    pass
+                                            try:
+                                                enc_proc.kill()
+                                                enc_proc.wait(timeout=3)
+                                            except Exception:
+                                                pass
+                                            if os.path.exists(tmp_seg_out):
+                                                try:
+                                                    os.remove(tmp_seg_out)
+                                                except OSError:
+                                                    pass
+                                            raise
                                         finally:
                                             if enc_proc.stdin:
                                                 try:
                                                     enc_proc.stdin.close()
                                                 except Exception:
                                                     pass
-                                        ret_code = enc_proc.wait()
                                         t_pipe_elapsed = time.time() - t0_pipe
 
-                                        if ret_code != 0 or not os.path.exists(tmp_seg_out) or os.path.getsize(tmp_seg_out) == 0:
-                                            if os.path.exists(tmp_seg_out):
-                                                try:
-                                                    os.remove(tmp_seg_out)
-                                                except OSError:
-                                                    pass
-                                            raise RuntimeError(
-                                                f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {c_idx+1:02d} (exit code {ret_code})."
-                                            )
-
-                                        # In-memory sanity check sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunks kế tiếp (0 lượt infer phụ)
+                                        # In-memory sanity check ngay sau khi truyền xong frame (không cần chờ NVENC flush xong)
                                         if should_check_sanity and unique_frames_rgb:
                                             sample_in = unique_frames_rgb[0]
                                             sample_out = pipe_upscaler.last_first_rgb_small
@@ -732,6 +770,11 @@ def run_upscale_pipeline(
                                             s_res["frame"] = os.path.basename(in_files[0]) if in_files else "frame_0000.png"
                                             sanity_checks_history.append(s_res)
                                             if not s_res["passed"]:
+                                                try:
+                                                    enc_proc.kill()
+                                                    enc_proc.wait(timeout=3)
+                                                except Exception:
+                                                    pass
                                                 if os.path.exists(tmp_seg_out):
                                                     try:
                                                         os.remove(tmp_seg_out)
@@ -763,7 +806,17 @@ def run_upscale_pipeline(
                                                     to_console=False
                                                 )
 
-                                        os.replace(tmp_seg_out, c_seg_out)
+                                        can_async_finalize = (
+                                            (i + 1 < len(chunks_to_process))
+                                            and (free_mb >= 1024.0)
+                                            and not (allow_partial and deadline_dt and datetime.now() >= deadline_dt)
+                                        )
+                                        if can_async_finalize:
+                                            zero_disk_pending_finalize = (enc_proc, tmp_seg_out, c_seg_out, c_idx)
+                                        else:
+                                            worker_finalize_zero_disk(enc_proc, tmp_seg_out, c_seg_out, c_idx)
+                                            zero_disk_pending_finalize = None
+
                                         num_unique_frames = pipe_upscaler.last_distinct_count or len(unique_frames_rgb)
                                         extracted["ai_frames"] = num_unique_frames
                                         extracted["raw_rgb_frames"] = None
@@ -876,6 +929,13 @@ def run_upscale_pipeline(
                                             except Exception:
                                                 pass
                                             future_encode = None
+                                        if future_extract is not None and not (zero_disk and engine == "cuda"):
+                                            try:
+                                                res_pref = future_extract.result()
+                                                shutil.rmtree(res_pref.get("in_dir", ""), ignore_errors=True)
+                                            except Exception:
+                                                pass
+                                            future_extract = None
                                         # Tái tạo lại frame trích xuất nếu cần
                                         kept_idx_retry = (
                                             extracted.get("chunk_plan", {}).get("kept_indices")
@@ -967,31 +1027,45 @@ def run_upscale_pipeline(
                                 )
                                 future_encode = None
 
-                            # Khởi động mã hóa phần cứng NVENC cho chunk hiện tại ở luồng nền (hoặc ghi nhận zero-disk pipe)
+                            # Khởi động mã hóa phần cứng NVENC cho chunk hiện tại ở luồng nền (hoặc đẩy flush zero-disk sang EncodeWorker)
                             if zero_disk and engine == "cuda":
                                 shutil.rmtree(c_out_dir, ignore_errors=True)
-                                chunk_elapsed = time.time() - seg_start_time
-                                total_enc_time += 0.001
-                                render_progress(
-                                    c_idx + 1, total_segs,
-                                    prefix=f"✨ Đoạn {c_idx+1:02d}/{total_segs:02d}",
-                                    suffix=f"[{extracted['expected_frames']/max(0.01, chunk_elapsed):.2f} fps (Zero-Disk Pipe)]"
-                                )
-                                print()
-                                logger.log_chunk_done(
-                                    chunk_idx=c_idx,
-                                    total_chunks=total_segs,
-                                    frames=extracted["expected_frames"],
-                                    ai_time=ai_result["elapsed_seconds"],
-                                    ai_fps=ai_result["fps"],
-                                    enc_time=0.001,
-                                    total_chunk_time=chunk_elapsed,
-                                    output_seg=c_seg_out,
-                                    t0_seconds=0.0,
-                                    steady_fps=ai_result["fps"],
-                                    rss_mb=0.0
-                                )
-                                future_encode = None
+                                if zero_disk_pending_finalize is not None:
+                                    encode_item = {
+                                        "target": target_chunk,
+                                        "extracted": extracted,
+                                        "out_dir": c_out_dir,
+                                    }
+                                    last_encode_item = encode_item
+                                    last_ai_result = ai_result
+                                    last_seg_start = seg_start_time
+                                    future_encode = enc_exec.submit(
+                                        worker_finalize_zero_disk, *zero_disk_pending_finalize
+                                    )
+                                    zero_disk_pending_finalize = None
+                                else:
+                                    chunk_elapsed = time.time() - seg_start_time
+                                    total_enc_time += 0.001
+                                    render_progress(
+                                        c_idx + 1, total_segs,
+                                        prefix=f"✨ Đoạn {c_idx+1:02d}/{total_segs:02d}",
+                                        suffix=f"[{extracted['expected_frames']/max(0.01, chunk_elapsed):.2f} fps (Zero-Disk Pipe)]"
+                                    )
+                                    print()
+                                    logger.log_chunk_done(
+                                        chunk_idx=c_idx,
+                                        total_chunks=total_segs,
+                                        frames=extracted["expected_frames"],
+                                        ai_time=ai_result["elapsed_seconds"],
+                                        ai_fps=ai_result["fps"],
+                                        enc_time=0.001,
+                                        total_chunk_time=chunk_elapsed,
+                                        output_seg=c_seg_out,
+                                        t0_seconds=0.0,
+                                        steady_fps=ai_result["fps"],
+                                        rss_mb=0.0
+                                    )
+                                    future_encode = None
                             else:
                                 encode_item = {
                                     "target": target_chunk,
@@ -1008,11 +1082,9 @@ def run_upscale_pipeline(
                                 )
                                 future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
 
-                            # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền
-                            if i + 1 < len(chunks_to_process):
+                            # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền (nếu chưa prefetch sớm ở đầu chunk)
+                            if future_extract is None and i + 1 < len(chunks_to_process):
                                 future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
-                            else:
-                                future_extract = None
 
                             # Kiểm tra mốc hạn chót nếu bật --allow-partial
                             if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
@@ -1075,6 +1147,13 @@ def run_upscale_pipeline(
                         )
                         return up_segs_dir
                 finally:
+                    if future_extract is not None:
+                        try:
+                            res_ext = future_extract.result()
+                            shutil.rmtree(res_ext.get("in_dir", ""), ignore_errors=True)
+                        except Exception:
+                            pass
+                        future_extract = None
                     release_gpu_lock()
 
             stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start

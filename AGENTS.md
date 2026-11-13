@@ -78,7 +78,7 @@ pytest
 
 > **Chi tiết vị trí từng file, hàm và cấu trúc module:** Xem [`docs/agents/PROJECT_MAP.md`](docs/agents/PROJECT_MAP.md).
 
-- **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 / CUDA FP16, Zero-Disk Pipe, Cyclic Cel Memoization `A->B->A`, 1-Pass Concat-Mux & `streamhash`, Dedup DIS Flow).
+- **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 Zero-Alloc Ring / CUDA FP16, 3-Stage Overlapped Zero-Disk Pipe, Cyclic Cel Memoization `A->B->A`, GOP-RLE Queue Preflight, 1-Pass Concat-Mux & `streamhash`).
 - **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
 - **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `unlock_rtx3060_admin.ps1`, `batch_translate_all.py`, `set_track_defaults.py`).
 - **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.

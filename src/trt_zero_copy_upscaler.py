@@ -375,21 +375,34 @@ class DoubleBufferedPipeUpscaler:
                 with torch.cuda.stream(self.stream_h2d):
                     first_arr = distinct_frames[s_idx]
                     is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
+                    is_trt = bool(getattr(self.model, "is_tensorrt", False))
                     if is_hwc:
                         hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
                         for i in range(cur_B):
                             hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                         gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
-                        gpu_tensor = gpu_nhwc.permute(0, 3, 1, 2).to(dtype=torch.float16).mul_(1.0 / 255.0)
+                        if is_trt:
+                            # Transpose NCHW ngay ở uint8 (1 byte/kênh = 49.7 MB) giảm 50% băng thông VRAM so với transpose FP16
+                            gpu_tensor = (
+                                gpu_nhwc.permute(0, 3, 1, 2)
+                                .contiguous()
+                                .to(dtype=torch.float16)
+                                .mul_(1.0 / 255.0)
+                            )
+                        else:
+                            gpu_tensor = gpu_nhwc.permute(0, 3, 1, 2).to(dtype=torch.float16).mul_(1.0 / 255.0)
                     else:
                         for i in range(cur_B):
                             self.host_in_pins[slot][i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                         gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
-                        gpu_tensor = (
-                            gpu_in.to(memory_format=torch.channels_last)
-                            .to(torch.float16)
-                            .mul_(1.0 / 255.0)
-                        )
+                        if is_trt:
+                            gpu_tensor = gpu_in.contiguous().to(torch.float16).mul_(1.0 / 255.0)
+                        else:
+                            gpu_tensor = (
+                                gpu_in.to(memory_format=torch.channels_last)
+                                .to(torch.float16)
+                                .mul_(1.0 / 255.0)
+                            )
 
                 # 2. Chờ H2D xong, chạy suy luận + chuyển màu P010LE trực tiếp trên VRAM
                 self.stream_compute.wait_stream(self.stream_h2d)

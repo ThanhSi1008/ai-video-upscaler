@@ -657,6 +657,108 @@ def _scan_fused_mpdecimate_and_dis(
     return raw_actions, final_actions
 
 
+def _encode_actions_rle(actions: List[str]) -> str:
+    """Nén chuỗi hành động keep/drop thành RLE siêu gọn (ví dụ 'K2D3K1', ~25 KB cho 34.000 frames)."""
+    if not actions:
+        return ""
+    parts: List[str] = []
+    cur_sym = "K" if actions[0] == "keep" else "D"
+    cur_cnt = 1
+    for act in actions[1:]:
+        sym = "K" if act == "keep" else "D"
+        if sym == cur_sym:
+            cur_cnt += 1
+        else:
+            parts.append(f"{cur_sym}{cur_cnt}")
+            cur_sym = sym
+            cur_cnt = 1
+    parts.append(f"{cur_sym}{cur_cnt}")
+    return "".join(parts)
+
+
+def _decode_actions_rle(rle: str) -> List[str]:
+    """Giải mã chuỗi RLE ('K2D3...') về danh sách ['keep', 'drop', ...] trong < 1 ms."""
+    if not rle:
+        return []
+    out: List[str] = []
+    for m in re.finditer(r"([KD])(\d+)", rle):
+        word = "keep" if m.group(1) == "K" else "drop"
+        out.extend([word] * int(m.group(2)))
+    return out
+
+
+def _partition_actions_into_chunks(
+    base_actions: List[str],
+    chunk_frame_counts: Optional[List[int]],
+    segment_seconds: int,
+    fps_val: float,
+) -> Tuple[List[Dict[str, Any]], int, int, int]:
+    """
+    Phân hoạch danh sách hành động keep/drop lên lưới chunk_frame_counts thực tế (hoặc lưới segment_seconds),
+    cưỡng bức frame đầu mỗi chunk = 'keep' theo bất biến AGENTS.md và sinh cấu trúc runs.
+    """
+    actions = list(base_actions)
+    total_frames = len(actions)
+    if chunk_frame_counts is not None and len(chunk_frame_counts) > 0:
+        sum_chunks = sum(chunk_frame_counts)
+        assert sum_chunks == total_frames, (
+            f"Tổng số frame của các phân đoạn ({sum_chunks}) không khớp tổng frame ({total_frames})!"
+        )
+        curr_pos = 0
+        for count in chunk_frame_counts:
+            if curr_pos < total_frames:
+                actions[curr_pos] = "keep"
+            curr_pos += count
+        num_chunks = len(chunk_frame_counts)
+        frames_per_chunk = chunk_frame_counts[0] if num_chunks > 0 else int(round(segment_seconds * fps_val))
+        spans = []
+        curr_s = 0
+        for c_len in chunk_frame_counts:
+            spans.append((curr_s, curr_s + c_len))
+            curr_s += c_len
+    else:
+        frames_per_chunk = int(round(segment_seconds * fps_val))
+        for c_start in range(0, total_frames, frames_per_chunk):
+            actions[c_start] = "keep"
+        num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
+        spans = [
+            (c_idx * frames_per_chunk, min((c_idx + 1) * frames_per_chunk, total_frames))
+            for c_idx in range(num_chunks)
+        ]
+
+    chunks_meta: List[Dict[str, Any]] = []
+    total_kept_count = 0
+    for c_idx, (c_start, c_end) in enumerate(spans):
+        c_frames = actions[c_start:c_end]
+        c_len = c_end - c_start
+        runs: List[Dict[str, int]] = []
+        curr_kept = 0
+        curr_count = 0
+        kept_indices: List[int] = []
+        for idx, act in enumerate(c_frames):
+            if act == "keep":
+                if curr_count > 0:
+                    runs.append({"frame_idx": curr_kept, "count": curr_count})
+                curr_kept = idx
+                curr_count = 1
+                kept_indices.append(idx)
+            else:
+                curr_count += 1
+        if curr_count > 0:
+            runs.append({"frame_idx": curr_kept, "count": curr_count})
+        total_kept_count += len(kept_indices)
+        chunks_meta.append({
+            "chunk_idx": c_idx,
+            "start_frame": c_start,
+            "end_frame": c_end,
+            "total_frames": c_len,
+            "kept_count": len(kept_indices),
+            "kept_indices": kept_indices,
+            "runs": runs,
+        })
+    return chunks_meta, total_kept_count, num_chunks, frames_per_chunk
+
+
 def scan_dedup_plan(
     input_path: str,
     plan_path: str,
@@ -828,6 +930,12 @@ def scan_dedup_plan(
             f"Số frame quét từ debug log ({total_frames}) không khớp số frame ffprobe đếm được ({expected_frames})!"
         )
 
+    # Lưu chuỗi RLE của hành động thô trước khi ép ranh giới chunk cho các chính sách độc lập ranh giới,
+    # giúp load_or_create_plan phân hoạch lại theo lưới GOP mới trong < 1 ms mà không phải giải mã lại FFmpeg.
+    raw_actions_rle: Optional[str] = None
+    if not policy_clean.startswith(("drift", "dis")):
+        raw_actions_rle = _encode_actions_rle(frame_actions)
+
     fps_val = fps_num / fps_den
 
     if chunk_frame_counts is not None and len(chunk_frame_counts) > 0:
@@ -978,6 +1086,7 @@ def scan_dedup_plan(
         "chunk_frame_counts": chunk_frame_counts,
         "total_kept_frames": total_kept_count,
         "dedup_ratio_percent": round(dedup_ratio, 2),
+        "raw_actions_rle": raw_actions_rle,
         "chunks": chunks_meta
     }
 
@@ -1063,6 +1172,36 @@ def load_or_create_plan(
                 cached_counts = [c["total_frames"] for c in chunks]
                 if cached_counts == chunk_frame_counts:
                     return data
+                # Khôi phục tức thời (< 1 ms) từ raw_actions_rle khi lưới GOP thực tế khác lưới tạm 192 frames
+                rle_str = data.get("raw_actions_rle")
+                if (
+                    isinstance(rle_str, str)
+                    and rle_str
+                    and not policy_clean.startswith(("drift", "dis"))
+                    and sum(chunk_frame_counts) == data.get("total_frames", 0)
+                ):
+                    raw_actions = _decode_actions_rle(rle_str)
+                    if len(raw_actions) == data["total_frames"]:
+                        fps_val = fps_num / fps_den
+                        re_chunks, re_kept, re_num, re_fpc = _partition_actions_into_chunks(
+                            raw_actions, chunk_frame_counts, segment_seconds, fps_val
+                        )
+                        re_ratio = (1.0 - (re_kept / data["total_frames"])) * 100.0 if data["total_frames"] > 0 else 0.0
+                        data["fps_num"] = fps_num
+                        data["fps_den"] = fps_den
+                        data["fps"] = round(fps_val, 3)
+                        data["segment_seconds"] = segment_seconds
+                        data["frames_per_chunk"] = re_fpc
+                        data["total_chunks"] = re_num
+                        data["chunk_frame_counts"] = chunk_frame_counts
+                        data["total_kept_frames"] = re_kept
+                        data["dedup_ratio_percent"] = round(re_ratio, 2)
+                        data["chunks"] = re_chunks
+                        tmp_plan = f"{plan_path}.repart.tmp"
+                        with open(tmp_plan, "w", encoding="utf-8") as wf:
+                            json.dump(data, wf, indent=2, ensure_ascii=False)
+                        os.replace(tmp_plan, plan_path)
+                        return data
         except ValueError:
             raise
         except Exception:
@@ -1226,10 +1365,57 @@ def encode_chunk_reexpanded(
     shutil.move(tmp_output, output_path)
 
 
+def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
+    """
+    Điểm vào thực thi trong tiến trình con Background Queue Preflight:
+    1. Nếu plan_file nằm trong .temp_<basename>, tách sẵn raw_segs theo Keyframe GOP (Stream Copy)
+       và đo chính xác chunk_frame_counts để khi tập kế tiếp chạy không tốn giây nào chờ tách/quét lại.
+    2. Phân giải đúng dedup_policy (CLI / shows.yaml / default) để khớp 100% với pipeline chính.
+    """
+    from src.ffmpeg_ops import probe_video, split_video_segments, get_segments_frame_counts
+
+    vid = argv[0]
+    plan_f = argv[1]
+    seg_s = int(argv[2])
+    pol_arg = argv[3] if len(argv) > 3 and argv[3] else None
+
+    meta = probe_video(vid)
+    work_d = os.path.dirname(os.path.abspath(plan_f))
+    seg_counts: Optional[List[int]] = None
+    if os.path.basename(work_d).startswith(".temp_"):
+        segs_d = os.path.join(work_d, "raw_segs")
+        existing = (
+            sorted([
+                os.path.join(segs_d, f)
+                for f in os.listdir(segs_d)
+                if f.startswith("seg_") and f.endswith(".mp4")
+            ])
+            if os.path.isdir(segs_d)
+            else []
+        )
+        if not existing:
+            os.makedirs(segs_d, exist_ok=True)
+            existing = split_video_segments(vid, segs_d, seg_s)
+        if existing:
+            seg_counts = get_segments_frame_counts(existing)
+
+    eff_pol = resolve_dedup_policy(vid, pol_arg)
+    return load_or_create_plan(
+        vid,
+        plan_f,
+        seg_s,
+        meta["fps_num"],
+        meta["fps_den"],
+        chunk_frame_counts=seg_counts,
+        policy=eff_pol,
+    )
+
+
 def build_preflight_subprocess_spec(
     video_path: str,
     plan_file: str,
     segment_seconds: int = 8,
+    dedup_policy: Optional[str] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
     Xây dựng lệnh subprocess đa nền tảng (Windows BELOW_NORMAL_PRIORITY_CLASS / POSIX nice)
@@ -1238,13 +1424,10 @@ def build_preflight_subprocess_spec(
     import sys
     script = (
         "import sys; "
-        "from src.dedup import load_or_create_plan; "
-        "from src.ffmpeg_ops import probe_video; "
-        "vid, plan_f, seg_s = sys.argv[1], sys.argv[2], int(sys.argv[3]); "
-        "meta = probe_video(vid); "
-        "load_or_create_plan(vid, plan_f, seg_s, meta['fps_num'], meta['fps_den'])"
+        "from src.dedup import run_preflight_worker_cli; "
+        "run_preflight_worker_cli(sys.argv[1:])"
     )
-    cmd = [sys.executable, "-c", script, video_path, plan_file, str(segment_seconds)]
+    cmd = [sys.executable, "-c", script, video_path, plan_file, str(segment_seconds), dedup_policy or ""]
     popen_kwargs: Dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -1260,7 +1443,8 @@ def spawn_background_preflight(
     video_path: str,
     output_dir: Optional[str] = None,
     segment_seconds: int = 8,
-    logger=None
+    logger=None,
+    dedup_policy: Optional[str] = None,
 ) -> Optional[subprocess.Popen]:
     """
     Kích hoạt tiến trình quét mpdecimate lập plan.json trước cho tập kế tiếp.
@@ -1275,13 +1459,17 @@ def spawn_background_preflight(
     try:
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         out_dir = output_dir or "out"
+        if out_dir.lower().endswith((".mkv", ".mp4")):
+            out_dir = os.path.dirname(out_dir) or "out"
         work_dir = os.path.join(out_dir, f".temp_{base_name}")
         os.makedirs(work_dir, exist_ok=True)
         plan_file = os.path.join(work_dir, "plan.json")
         if os.path.exists(plan_file) and os.path.getsize(plan_file) > 100:
             return None
 
-        cmd, popen_kwargs = build_preflight_subprocess_spec(video_path, plan_file, segment_seconds)
+        cmd, popen_kwargs = build_preflight_subprocess_spec(
+            video_path, plan_file, segment_seconds, dedup_policy=dedup_policy
+        )
         proc = subprocess.Popen(cmd, **popen_kwargs)
         prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"
         msg = f"⚡ [Multi-Episode Queue] Đã kích hoạt Preflight nền ({prio_desc}) cho tập kế tiếp: {os.path.basename(video_path)}"

@@ -293,26 +293,65 @@ class TRTRuntimeEngineWrapper:
             except Exception:
                 pass
         self._use_v3 = hasattr(self.context, "execute_async_v3") and hasattr(self.context, "set_tensor_address")
+        self._out_ring: list[torch.Tensor] = []
+        self._ring_idx: int = 0
+        self._last_input_shape: Optional[Tuple[int, int, int, int]] = None
+        self._last_in_ptr: Optional[int] = None
+        self._last_out_ptr: Optional[int] = None
+
+    def _acquire_output_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
+        """
+        Tái sử dụng vòng đệm đôi (2-slot ping-pong VRAM ring) cho tensor đầu ra 4K (~199 MB/slot ở B=8 FP16),
+        khử ~2.100 lần cấp phát động torch.empty mỗi tập mà vẫn đảm bảo 2 lần gọi liên tiếp không ghi đè nhau.
+        """
+        alloc_b = max(int(B), self.max_batch)
+        target_tail = (int(C), int(out_h), int(out_w))
+        if (
+            len(self._out_ring) != 2
+            or self._out_ring[0].shape[0] < alloc_b
+            or self._out_ring[0].shape[1:] != target_tail
+            or self._out_ring[0].dtype != self.out_torch_dtype
+            or self._out_ring[0].device != self.device
+        ):
+            self._out_ring = [
+                torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
+                for _ in range(2)
+            ]
+            self._ring_idx = 0
+            self._last_out_ptr = None
+        slot_buf = self._out_ring[self._ring_idx]
+        self._ring_idx ^= 1
+        return slot_buf[:B]
 
     def _exec_single_batch(self, contig_in: torch.Tensor) -> torch.Tensor:
         B, C, H, W = contig_in.shape
         out_h, out_w = H * self.scale, W * self.scale
         if contig_in.dtype != self.in_torch_dtype:
             contig_in = contig_in.to(dtype=self.in_torch_dtype).contiguous()
-        output_tensor = torch.empty((B, C, out_h, out_w), dtype=self.out_torch_dtype, device=self.device)
+        output_tensor = self._acquire_output_buffer(B, C, out_h, out_w)
         stream_ptr = (
             torch.cuda.current_stream(self.device).cuda_stream
             if self.device.type == "cuda" and torch.cuda.is_available()
             else 0
         )
 
-        self.context.set_input_shape(self.in_name, (B, C, H, W))
+        in_shape = (int(B), int(C), int(H), int(W))
+        if self._last_input_shape != in_shape:
+            self.context.set_input_shape(self.in_name, in_shape)
+            self._last_input_shape = in_shape
+
+        in_ptr = int(contig_in.data_ptr())
+        out_ptr = int(output_tensor.data_ptr())
         if self._use_v3:
-            self.context.set_tensor_address(self.in_name, int(contig_in.data_ptr()))
-            self.context.set_tensor_address(self.out_name, int(output_tensor.data_ptr()))
+            if self._last_in_ptr != in_ptr:
+                self.context.set_tensor_address(self.in_name, in_ptr)
+                self._last_in_ptr = in_ptr
+            if self._last_out_ptr != out_ptr:
+                self.context.set_tensor_address(self.out_name, out_ptr)
+                self._last_out_ptr = out_ptr
             ok = self.context.execute_async_v3(stream_ptr)
         else:
-            bindings = [int(contig_in.data_ptr()), int(output_tensor.data_ptr())]
+            bindings = [in_ptr, out_ptr]
             ok = self.context.execute_async_v2(bindings=bindings, stream_handle=stream_ptr)
 
         if not ok:

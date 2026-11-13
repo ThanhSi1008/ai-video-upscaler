@@ -836,7 +836,8 @@ def main():
                 segment_seconds=args.segment,
                 skip_first=True,
                 benchmark_mode=args.benchmark_mode,
-                on_plan_ready=_on_bg_plan_ready
+                on_plan_ready=_on_bg_plan_ready,
+                dedup_policy=args.dedup_policy,
             )
             bg_preflight.start()
 

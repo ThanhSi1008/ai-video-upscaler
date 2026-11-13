@@ -251,6 +251,9 @@ DEFAULT_PNG_UNIT_SIZE_MB = 16.0  # Sàn ước tính an toàn dung lượng fram
 # -----------------------------------------------------------------------------
 def _detect_hevc_encoder() -> str:
     """Tự động nhận diện bộ mã hóa phần cứng HEVC 10-bit cho Windows (NVIDIA NVENC)."""
+    env_enc = os.environ.get("UPSCALER_HEVC_ENCODER", "").strip()
+    if env_enc in ("hevc_nvenc", "hevc_qsv", "libx265"):
+        return env_enc
     try:
         import subprocess
         res = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
@@ -267,6 +270,8 @@ def _detect_hevc_encoder() -> str:
 
 
 HEVC_ENCODER = _detect_hevc_encoder()
+if not os.environ.get("PYTEST_CURRENT_TEST"):
+    os.environ.setdefault("UPSCALER_HEVC_ENCODER", HEVC_ENCODER)
 HEVC_PRESET = "p6"  # Preset p6 (Slower/Better Quality) cho RTX NVENC
 HEVC_CQ_LEVEL = "18"  # Constant Quality CQ 18 cho NVENC (visually lossless chuẩn Blu-ray, giảm 35-45% file size cảnh tĩnh)
 HEVC_MAXRATE = "45M"  # Trần bitrate cho các cảnh hành động/chiến đấu nhiều hạt
