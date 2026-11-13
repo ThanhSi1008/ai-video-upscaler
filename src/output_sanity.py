@@ -35,8 +35,16 @@ def check_frame_sanity_arrays(
     """
     t0 = time.time()
     target_size = (480, 270)
-    src_small = cv2.resize(src_img, target_size, interpolation=cv2.INTER_AREA)
-    out_small = cv2.resize(out_img, target_size, interpolation=cv2.INTER_AREA)
+    src_small = (
+        src_img
+        if src_img.shape[:2] == (270, 480)
+        else cv2.resize(src_img, target_size, interpolation=cv2.INTER_AREA)
+    )
+    out_small = (
+        out_img
+        if out_img.shape[:2] == (270, 480)
+        else cv2.resize(out_img, target_size, interpolation=cv2.INTER_AREA)
+    )
 
     if is_rgb:
         # RGB: R=0, G=1, B=2

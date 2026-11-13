@@ -289,14 +289,23 @@ class GPUPersistentWorker:
             im = Image.open(p).convert("RGB")
             return np.ascontiguousarray(np.array(im, dtype=np.uint8)[:, :, ::-1])
 
-        def _save_task(path: str, bgr_array: np.ndarray):
-            cv2.imwrite(path, bgr_array, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        def _save_group_task(out_paths: List[str], bgr_array: np.ndarray):
+            primary_path = out_paths[0]
+            cv2.imwrite(primary_path, bgr_array, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            for dup_path in out_paths[1:]:
+                try:
+                    if os.path.exists(dup_path):
+                        os.remove(dup_path)
+                    os.link(primary_path, dup_path)
+                except OSError:
+                    shutil.copyfile(primary_path, dup_path)
 
         total_frames = len(img_files)
         target_dtype = torch.float16 if self.precision == "fp16" else torch.float32
         pinned_in: Optional[torch.Tensor] = None
         pinned_out_slots: List[Optional[torch.Tensor]] = [None, None]
         slot_futures: List[list] = [[], []]
+        num_distinct = total_frames
 
         def _resolve_runner(in_h: int, in_w: int):
             if (
@@ -325,15 +334,34 @@ class GPUPersistentWorker:
             return self.model
 
         try:
-            for b_start in range(0, total_frames, b_size):
-                batch_files = img_files[b_start : b_start + b_size]
-                cur_b = len(batch_files)
+            # Đọc song song ảnh đầu vào của phân đoạn và khử trùng lặp chu kỳ (A->B->A lip-flap / blink)
+            if loader_executor and total_frames > 1:
+                all_in_arrs = list(loader_executor.map(_read_img_bgr_u8, img_files))
+            else:
+                all_in_arrs = [_read_img_bgr_u8(p) for p in img_files]
 
-                # 1. Đọc nhanh ảnh BGR uint8 (0 phép toán float32 trên CPU, giảm 75% băng thông PCIe H2D)
-                if loader_executor and cur_b > 1:
-                    batch_arrs = list(loader_executor.map(_read_img_bgr_u8, batch_files))
-                else:
-                    batch_arrs = [_read_img_bgr_u8(p) for p in batch_files]
+            if total_frames > 1:
+                from src.dedup import deduplicate_cyclic_frames
+                distinct_arrs, frame_to_distinct = deduplicate_cyclic_frames(all_in_arrs)
+            else:
+                distinct_arrs = list(all_in_arrs)
+                frame_to_distinct = [0]
+            del all_in_arrs
+
+            num_distinct = len(distinct_arrs)
+            distinct_out_groups: List[List[str]] = [[] for _ in range(num_distinct)]
+            distinct_first_names: List[str] = [""] * num_distinct
+            for orig_idx, fpath in enumerate(img_files):
+                d_idx = frame_to_distinct[orig_idx]
+                fname = os.path.basename(fpath)
+                if not distinct_first_names[d_idx]:
+                    distinct_first_names[d_idx] = fname
+                distinct_out_groups[d_idx].append(os.path.join(output_dir, fname))
+
+            for b_start in range(0, num_distinct, b_size):
+                b_end = min(b_start + b_size, num_distinct)
+                batch_arrs = distinct_arrs[b_start:b_end]
+                cur_b = len(batch_arrs)
 
                 h0, w0 = batch_arrs[0].shape[:2]
                 same_shape = all(a.shape[:2] == (h0, w0) for a in batch_arrs)
@@ -363,6 +391,10 @@ class GPUPersistentWorker:
                     )
                     if self.device.type == "cuda":
                         tensor = tensor.to(memory_format=torch.channels_last)
+
+                # Giải phóng sớm tham chiếu mảng đầu vào của batch đã nạp lên GPU
+                for clear_i in range(b_start, b_end):
+                    distinct_arrs[clear_i] = None
 
                 active_runner = _resolve_runner(h0, w0) if same_shape else self.model
 
@@ -411,7 +443,7 @@ class GPUPersistentWorker:
 
                 # 3. Kiểm tra NaN / Inf (Safety Gate)
                 if not is_finite:
-                    sample_name = os.path.basename(batch_files[0])
+                    sample_name = distinct_first_names[b_start]
                     raise GPUError(f"Phát hiện giá trị bất thường (NaN/Inf) tại khung hình lô: '{sample_name}'")
 
                 # 4. Ghi nhận đỉnh VRAM
@@ -422,17 +454,16 @@ class GPUPersistentWorker:
                     d_alloc = torch.cuda.max_memory_allocated(self.device) / (1024 * 1024)
                     if d_alloc > driver_alloc_peak:
                         driver_alloc_peak = d_alloc
-                for b_idx, fpath in enumerate(batch_files):
-                    fname = os.path.basename(fpath)
-                    out_path = os.path.join(output_dir, fname)
-                    fut = writer_executor.submit(_save_task, out_path, out_bgr_u8[b_idx])
+                for b_idx in range(cur_b):
+                    out_group = distinct_out_groups[b_start + b_idx]
+                    fut = writer_executor.submit(_save_group_task, out_group, out_bgr_u8[b_idx])
                     write_futures.append(fut)
                     if self.device.type == "cuda":
                         slot_futures[slot].append(fut)
 
-                if mid_chunk_callback and (b_start <= (total_frames // 2) < (b_start + len(batch_files))):
+                if mid_chunk_callback and (b_start <= (num_distinct // 2) < b_end):
                     try:
-                        mid_chunk_callback(b_start, total_frames)
+                        mid_chunk_callback(b_start, num_distinct)
                     except Exception as e_cb:
                         if "No space left on device" in str(e_cb) or (isinstance(e_cb, OSError) and getattr(e_cb, "errno", None) == 28):
                             raise
@@ -467,6 +498,7 @@ class GPUPersistentWorker:
             "fps": overall_fps,
             "steady_fps": steady_fps,
             "num_frames": len(img_files),
+            "distinct_frames": num_distinct,
             "peak_rss_mb": rss_mb,
             "current_alloc_mb": curr_alloc_peak,
             "driver_alloc_mb": driver_alloc_peak

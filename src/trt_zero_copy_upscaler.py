@@ -228,6 +228,8 @@ class DoubleBufferedPipeUpscaler:
 
         self.host_in_pins: List[torch.Tensor] = []
         self.host_out_pins: List[torch.Tensor] = []
+        self.last_first_rgb_small: Optional[np.ndarray] = None
+        self.last_distinct_count: int = 0
         self.ensure_resolution(input_hw[0], input_hw[1])
 
     def ensure_resolution(self, in_h: int, in_w: int) -> Tuple[int, int]:
@@ -291,32 +293,78 @@ class DoubleBufferedPipeUpscaler:
         self,
         unique_frames_rgb: List[np.ndarray],
         repeat_counts: List[int],
-        encoder_proc: subprocess.Popen
+        encoder_proc: subprocess.Popen,
+        cyclic_dedup: bool = True,
+        capture_first_rgb_small: bool = False,
     ) -> int:
         """
         Xử lý danh sách các unique frames của 1 phân đoạn và nhân bản trực tiếp trong RAM Pipe
         theo repeat_counts (kết quả từ Deduplication Engine).
-        Áp dụng cấu trúc True Software Pipelining (Pre-fetch Prologue / Steady-State / Epilogue)
-        để truyền H2D(b+1) và suy luận Compute(b+1) gối đầu 100% với D2H(b) và ghi pipe.
+        - Tích hợp Cyclic Cel Memoization + Belady's Optimal Liveness Eviction:
+          Khử trùng lặp các khung hình chu kỳ không liên tiếp (nhép miệng A->B->A, chớp mắt, cắt cảnh)
+          trong cùng chunk 8s, chỉ chạy TensorRT + P010LE trên tập distinct frames thực sự.
+        - Tích hợp thu mẫu Sanity 270x480 trực tiếp trên GPU ở Batch 0 (0 lượt infer phụ).
         Returns:
             Tổng số khung hình 4K đã được ghi thành công vào encoder pipe.
         """
+        self.last_first_rgb_small = None
         num_unique = len(unique_frames_rgb)
         if num_unique == 0:
+            self.last_distinct_count = 0
             return 0
 
         f_h, f_w = unique_frames_rgb[0].shape[:2]
         self.ensure_resolution(f_h, f_w)
 
+        if cyclic_dedup and num_unique > 1:
+            from src.dedup import deduplicate_cyclic_frames
+            distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(unique_frames_rgb)
+        else:
+            distinct_frames = unique_frames_rgb
+            frame_to_distinct = list(range(num_unique))
+
+        num_distinct = len(distinct_frames)
+        self.last_distinct_count = num_distinct
+
+        remaining_refs = [0] * num_distinct
+        for d_idx in frame_to_distinct:
+            remaining_refs[d_idx] += 1
+
+        memo_p010: dict[int, np.ndarray] = {}
+        next_u_idx = 0
         total_frames_written = 0
 
+        def _drain_ready_frames(d_limit: int, slot_views: dict[int, np.ndarray]) -> None:
+            nonlocal next_u_idx, total_frames_written
+            while next_u_idx < num_unique:
+                req_d = frame_to_distinct[next_u_idx]
+                if req_d >= d_limit:
+                    break
+                buf_arr = slot_views.get(req_d)
+                if buf_arr is None:
+                    buf_arr = memo_p010[req_d]
+                frame_bytes = memoryview(buf_arr)
+                repeats = repeat_counts[next_u_idx] if repeat_counts else 1
+                for _ in range(repeats):
+                    encoder_proc.stdin.write(frame_bytes)
+                    total_frames_written += 1
+                remaining_refs[req_d] -= 1
+                if remaining_refs[req_d] <= 0 and req_d in memo_p010:
+                    del memo_p010[req_d]
+                next_u_idx += 1
+            # Chỉ sao lưu sang RAM những frame chu kỳ còn xuất hiện lại ở các batch tương lai (Belady's OPT)
+            for d_idx, view_arr in slot_views.items():
+                if remaining_refs[d_idx] > 0 and d_idx not in memo_p010:
+                    memo_p010[d_idx] = view_arr.copy()
+
         if self.device.type == "cuda":
-            # Xây dựng danh sách batch slicing
+            # Xây dựng danh sách batch slicing trên tập distinct_frames đã cô đặc
             batches = []
-            for start_idx in range(0, num_unique, self.batch_size):
-                end_idx = min(start_idx + self.batch_size, num_unique)
+            for start_idx in range(0, num_distinct, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, num_distinct)
                 batches.append((start_idx, end_idx))
             num_batches = len(batches)
+            sanity_gpu_box: List[Optional[torch.Tensor]] = [None]
 
             def _dispatch_batch_cuda(batch_k: int):
                 slot = batch_k % 2
@@ -325,18 +373,17 @@ class DoubleBufferedPipeUpscaler:
 
                 # 1. Nạp dữ liệu tuần tự NHWC vào Pinned Memory (0 transpose trên DDR4 CPU) và truyền H2D bất đồng bộ
                 with torch.cuda.stream(self.stream_h2d):
-                    first_arr = unique_frames_rgb[s_idx]
+                    first_arr = distinct_frames[s_idx]
                     is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
                     if is_hwc:
                         hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
                         for i in range(cur_B):
-                            hwc_pin[i].copy_(torch.from_numpy(unique_frames_rgb[s_idx + i]))
+                            hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                         gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
-                        # permute(0,3,1,2) từ NHWC liền mạch tạo ra NCHW channels_last với 0 bản sao bộ nhớ!
                         gpu_tensor = gpu_nhwc.permute(0, 3, 1, 2).to(dtype=torch.float16).mul_(1.0 / 255.0)
                     else:
                         for i in range(cur_B):
-                            self.host_in_pins[slot][i].copy_(torch.from_numpy(unique_frames_rgb[s_idx + i]))
+                            self.host_in_pins[slot][i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                         gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
                         gpu_tensor = (
                             gpu_in.to(memory_format=torch.channels_last)
@@ -348,66 +395,88 @@ class DoubleBufferedPipeUpscaler:
                 self.stream_compute.wait_stream(self.stream_h2d)
                 with torch.cuda.stream(self.stream_compute):
                     upscaled_rgb = self.model(gpu_tensor)
+                    if capture_first_rgb_small and batch_k == 0:
+                        u0 = upscaled_rgb[0:1].float().clamp(0.0, 1.0)
+                        oh, ow = int(u0.shape[2]), int(u0.shape[3])
+                        if oh >= 270 and ow >= 480 and (oh % 270 == 0) and (ow % 480 == 0):
+                            u0 = F.avg_pool2d(u0, kernel_size=(oh // 270, ow // 480))
+                        sanity_gpu_box[0] = (
+                            u0.mul(255.0)
+                            .round()
+                            .to(torch.uint8)
+                            .squeeze(0)
+                            .permute(1, 2, 0)
+                            .contiguous()
+                        )
                     gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb)
 
                 # 3. Chờ Compute xong, rút D2H về Pinned Memory
                 self.stream_d2h.wait_stream(self.stream_compute)
                 with torch.cuda.stream(self.stream_d2h):
                     self.host_out_pins[slot][:cur_B].copy_(gpu_p010, non_blocking=True)
+                    if batch_k == 0 and sanity_gpu_box[0] is not None:
+                        sanity_cpu = sanity_gpu_box[0].to("cpu", non_blocking=True)
+                    else:
+                        sanity_cpu = None
 
-                # Ghi nhận CUDA Event trên stream_d2h để CPU đồng bộ đúng lúc
                 evt = torch.cuda.Event()
                 evt.record(self.stream_d2h)
-                return evt
+                return evt, sanity_cpu
 
             # PROLOGUE: Phát lệnh Batch 0
-            curr_event = _dispatch_batch_cuda(0)
+            curr_event, curr_sanity_cpu = _dispatch_batch_cuda(0)
 
             # STEADY-STATE: Gối đầu bất đồng bộ H2D(b+1) & Compute(b+1) với D2H(b) & Host Pipe Write(b)
             for b in range(num_batches):
-                next_event = None
+                next_event, next_sanity_cpu = (None, None)
                 if b + 1 < num_batches:
-                    next_event = _dispatch_batch_cuda(b + 1)
+                    next_event, next_sanity_cpu = _dispatch_batch_cuda(b + 1)
 
-                # Chờ Batch b hoàn tất chuyển D2H về Pinned Memory
                 curr_event.synchronize()
+                if b == 0 and curr_sanity_cpu is not None:
+                    self.last_first_rgb_small = curr_sanity_cpu.numpy()
 
                 slot = b % 2
                 s_idx, e_idx = batches[b]
                 cur_B = e_idx - s_idx
                 out_np = self.host_out_pins[slot][:cur_B].numpy()
 
-                # Ghi trực tiếp ra stdin pipe kèm nhân bản frame lặp (0 byte file trung gian trên đĩa)
-                for i in range(cur_B):
-                    frame_bytes = memoryview(out_np[i])
-                    repeats = repeat_counts[s_idx + i] if repeat_counts else 1
-                    for _ in range(repeats):
-                        encoder_proc.stdin.write(frame_bytes)
-                        total_frames_written += 1
+                slot_views = {s_idx + i: out_np[i] for i in range(cur_B)}
+                _drain_ready_frames(e_idx, slot_views)
 
-                curr_event = next_event
+                curr_event, curr_sanity_cpu = next_event, next_sanity_cpu
 
         else:
             # CPU Fallback
-            for start_idx in range(0, num_unique, self.batch_size):
-                end_idx = min(start_idx + self.batch_size, num_unique)
+            for start_idx in range(0, num_distinct, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, num_distinct)
                 cur_B = end_idx - start_idx
                 batch_tensors = []
                 for i in range(cur_B):
-                    t = torch.from_numpy(unique_frames_rgb[start_idx + i])
+                    t = torch.from_numpy(distinct_frames[start_idx + i])
                     if t.ndim == 3 and t.shape[-1] == 3:
                         t = t.permute(2, 0, 1)
                     batch_tensors.append(t)
                 tensor = torch.stack(batch_tensors, dim=0).float().div_(255.0)
                 out_rgb = self.model(tensor)
+                if capture_first_rgb_small and start_idx == 0:
+                    u0 = out_rgb[0:1].float().clamp(0.0, 1.0)
+                    oh, ow = int(u0.shape[2]), int(u0.shape[3])
+                    if oh >= 270 and ow >= 480 and (oh % 270 == 0) and (ow % 480 == 0):
+                        u0 = F.avg_pool2d(u0, kernel_size=(oh // 270, ow // 480))
+                    self.last_first_rgb_small = (
+                        u0.mul(255.0)
+                        .round()
+                        .to(torch.uint8)
+                        .squeeze(0)
+                        .permute(1, 2, 0)
+                        .contiguous()
+                        .numpy()
+                    )
                 out_p010 = self.color_conv.rgb_to_p010le(out_rgb)
                 out_np = out_p010.numpy()
 
-                for i in range(cur_B):
-                    frame_bytes = memoryview(out_np[i])
-                    repeats = repeat_counts[start_idx + i] if repeat_counts else 1
-                    for _ in range(repeats):
-                        encoder_proc.stdin.write(frame_bytes)
-                        total_frames_written += 1
+                slot_views = {start_idx + i: out_np[i] for i in range(cur_B)}
+                _drain_ready_frames(end_idx, slot_views)
 
         return total_frames_written

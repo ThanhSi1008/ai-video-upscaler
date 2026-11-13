@@ -58,7 +58,8 @@ from src.ffmpeg_ops import (
     extract_frames_raw_rgb24,
     encode_chunk_hevc,
     concat_segments,
-    mux_final_container
+    mux_final_container,
+    mux_segments_directly,
 )
 from src.dedup import (
     load_or_create_plan,
@@ -682,13 +683,20 @@ def run_upscale_pipeline(
                                         out_h, out_w = pipe_upscaler.output_hw
                                         tmp_seg_out = f"{c_seg_out}.tmp.mp4"
 
+                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0)
                                         fps_str = f"{meta['fps_num']}/{meta['fps_den']}"
                                         t0_pipe = time.time()
                                         enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(
                                             tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
                                         )
                                         try:
-                                            pipe_upscaler.process_frames_to_pipe(unique_frames_rgb, repeat_counts, enc_proc)
+                                            pipe_upscaler.process_frames_to_pipe(
+                                                unique_frames_rgb,
+                                                repeat_counts,
+                                                enc_proc,
+                                                cyclic_dedup=bool(dedup),
+                                                capture_first_rgb_small=should_check_sanity,
+                                            )
                                         finally:
                                             if enc_proc.stdin:
                                                 try:
@@ -708,16 +716,17 @@ def run_upscale_pipeline(
                                                 f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {c_idx+1:02d} (exit code {ret_code})."
                                             )
 
-                                        # In-memory sanity check sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunks kế tiếp
-                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0)
+                                        # In-memory sanity check sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunks kế tiếp (0 lượt infer phụ)
                                         if should_check_sanity and unique_frames_rgb:
                                             sample_in = unique_frames_rgb[0]
-                                            with torch.inference_mode():
-                                                s_in_tensor = torch.from_numpy(sample_in).permute(2, 0, 1).unsqueeze(0).to(cuda_engine.device)
-                                                s_dtype = torch.float16 if precision == "fp16" else torch.float32
-                                                s_in_tensor = s_in_tensor.to(memory_format=torch.channels_last, dtype=s_dtype).mul_(1.0 / 255.0)
-                                                s_out_tensor = wrapped_model(s_in_tensor)
-                                                sample_out = (s_out_tensor.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).mul(255.0).round().byte().cpu().numpy())
+                                            sample_out = pipe_upscaler.last_first_rgb_small
+                                            if sample_out is None:
+                                                with torch.inference_mode():
+                                                    s_in_tensor = torch.from_numpy(sample_in).permute(2, 0, 1).unsqueeze(0).to(cuda_engine.device)
+                                                    s_dtype = torch.float16 if precision == "fp16" else torch.float32
+                                                    s_in_tensor = s_in_tensor.to(memory_format=torch.channels_last, dtype=s_dtype).mul_(1.0 / 255.0)
+                                                    s_out_tensor = wrapped_model(s_in_tensor)
+                                                    sample_out = (s_out_tensor.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).mul(255.0).round().byte().cpu().numpy())
                                             s_res = check_frame_sanity_arrays(sample_in, sample_out, is_rgb=True)
                                             s_res["chunk"] = c_idx + 1
                                             s_res["frame"] = os.path.basename(in_files[0]) if in_files else "frame_0000.png"
@@ -755,7 +764,8 @@ def run_upscale_pipeline(
                                                 )
 
                                         os.replace(tmp_seg_out, c_seg_out)
-                                        num_unique_frames = len(unique_frames_rgb)
+                                        num_unique_frames = pipe_upscaler.last_distinct_count or len(unique_frames_rgb)
+                                        extracted["ai_frames"] = num_unique_frames
                                         extracted["raw_rgb_frames"] = None
                                         del unique_frames_rgb
                                         cuda_engine.restart_if_needed(logger=logger)
@@ -1071,26 +1081,17 @@ def run_upscale_pipeline(
             logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
 
             # -----------------------------------------------------------------
-            # BƯỚC 3: GHÉP NỐI KHÔNG MẤT DỮ LIỆU CÁC PHÂN ĐOẠN 4K
+            # BƯỚC 3 & 4 (HỢP NHẤT 1 LƯỢT): CONCAT + MUX CONTAINER PHÒNG THU
             # -----------------------------------------------------------------
-            logger.info("Đang ghép nối các phân đoạn 4K...", to_console=True)
+            logger.info("Đang ghép nối phân đoạn 4K và đóng gói Audio, Subtitles, Fonts, Chapters gốc (1-Pass Concat-Mux)...", to_console=True)
             all_upscaled_segs = sorted([
                 os.path.join(up_segs_dir, f)
                 for f in os.listdir(up_segs_dir)
                 if f.startswith("up_") and f.endswith(".mp4")
             ]) if os.path.exists(up_segs_dir) else []
-            merged_video = os.path.join(work_dir, "merged_4k.mp4")
-            t_concat_start = time.time()
-            concat_segments(all_upscaled_segs, work_dir, merged_video)
-            stage_timings["Ghép nối 4K (Concat Demuxer)"] = time.time() - t_concat_start
-
-            # -----------------------------------------------------------------
-            # BƯỚC 4: MUXING ĐÓNG GÓI NGUYÊN BẢN AUDIO, SUBTITLES & CHAPTERS
-            # -----------------------------------------------------------------
-            logger.info("Đang đóng gói lại Audio, Subtitles, Fonts và Chapters gốc vào file 4K hoàn chỉnh...", to_console=True)
             t_mux_start = time.time()
-            mux_final_container(merged_video, input_path, output_path)
-            stage_timings["Đóng gói Container gốc (Muxing)"] = time.time() - t_mux_start
+            mux_segments_directly(all_upscaled_segs, work_dir, input_path, output_path)
+            stage_timings["Ghép nối 4K & Đóng gói Container gốc (1-Pass Mux)"] = time.time() - t_mux_start
 
             total_elapsed = time.time() - start_total_time
             final_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
@@ -1130,10 +1131,10 @@ def run_upscale_pipeline(
             audit_file = os.path.splitext(output_path)[0] + ".audit.json"
             try:
                 from src.mux_audit import verify_mux_integrity
-                mux_res = verify_mux_integrity(input_path, output_path)
+                mux_res = verify_mux_integrity(input_path, output_path, src_meta=meta)
 
-                probe_final = probe_video(output_path)
-                probe_src = probe_video(input_path)
+                probe_final = mux_res.get("output_meta") or probe_video(output_path)
+                probe_src = mux_res.get("source_meta") or meta
                 final_frames = probe_final.get("nb_frames")
                 src_frames = probe_src.get("nb_frames")
                 final_dur = probe_final.get("duration", 0.0)

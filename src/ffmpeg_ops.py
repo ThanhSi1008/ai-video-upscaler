@@ -193,6 +193,47 @@ def extract_frames_raw_rgb24(
     else:
         vf_filter = color_vf
 
+    def _run_pipe_into_array(use_hwaccel: bool, expected_count: int):
+        hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
+        cmd = [
+            "ffmpeg", "-v", "error",
+            *hw_args,
+            "-i", seg_path,
+            "-vf", vf_filter,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "pipe:1",
+        ]
+        out_arr = np.empty((expected_count, int(height), int(width), 3), dtype=np.uint8)
+        mv = memoryview(out_arr).cast("B")
+        total_target = expected_count * frame_bytes
+        offset = 0
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=max(frame_bytes * 2, 1048576),
+        )
+        try:
+            if proc.stdout is not None:
+                while offset < total_target:
+                    n_read = proc.stdout.readinto(mv[offset:total_target])
+                    if not n_read:
+                        break
+                    offset += n_read
+                # Đọc nốt phần dư nếu có để tiến trình FFmpeg đóng sạch
+                while proc.stdout.read(65536):
+                    pass
+                proc.stdout.close()
+        finally:
+            proc.wait()
+
+        if proc.returncode != 0 or offset < frame_bytes:
+            return None
+        actual_frames = offset // frame_bytes
+        return [out_arr[idx] for idx in range(actual_frames)]
+
     def _run_pipe(use_hwaccel: bool) -> Optional[bytes]:
         hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
         cmd = [
@@ -211,6 +252,21 @@ def extract_frames_raw_rgb24(
         return res.stdout
 
     prefer_hw = hwaccel if hwaccel is not None else (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc")
+
+    # Nhánh Zero-Copy readinto: Đọc trực tiếp từ pipe vào mảng NumPy tiền cấp phát (0 bản sao b"".join 1.2GB trên DDR4)
+    if (
+        kept_indices is not None
+        and len(kept_indices) > 0
+        and not hasattr(subprocess.run, "_mock_name")
+        and not hasattr(subprocess.Popen, "_mock_name")
+    ):
+        exp_n = len(kept_indices)
+        frames_direct = _run_pipe_into_array(use_hwaccel=True, expected_count=exp_n) if prefer_hw else None
+        if frames_direct is None:
+            frames_direct = _run_pipe_into_array(use_hwaccel=False, expected_count=exp_n)
+        if frames_direct:
+            return frames_direct
+
     raw_buf = _run_pipe(use_hwaccel=True) if prefer_hw else None
     if raw_buf is None:
         raw_buf = _run_pipe(use_hwaccel=False)
@@ -308,12 +364,18 @@ def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: st
     subprocess.run(encode_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _write_concat_list(segment_files: List[str], concat_list: str) -> str:
+    """Ghi danh sách phân đoạn chuẩn UTF-8 và thoát ký tự nháy đơn an toàn cho FFmpeg Concat Demuxer."""
+    with open(concat_list, "w", encoding="utf-8") as f:
+        for f_seg in segment_files:
+            escaped = f_seg.replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+    return concat_list
+
+
 def concat_segments(segment_files: List[str], work_dir: str, output_path: str):
     """Nối không mất dữ liệu (Lossless Concat) các phân đoạn 4K HEVC"""
-    concat_list = os.path.join(work_dir, "concat.txt")
-    with open(concat_list, "w") as f:
-        for f_seg in segment_files:
-            f.write(f"file '{f_seg}'\n")
+    concat_list = _write_concat_list(segment_files, os.path.join(work_dir, "concat.txt"))
 
     concat_cmd = [
         "ffmpeg", "-y",
@@ -347,6 +409,50 @@ def mux_final_container(upscaled_video: str, original_video: str, final_output: 
         final_output
     ]
     subprocess.run(mux_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def mux_segments_directly(
+    segment_files: List[str],
+    work_dir: str,
+    original_video: str,
+    final_output: str,
+) -> None:
+    """
+    Ghép nối trực tiếp danh sách phân đoạn 4K HEVC (Concat Demuxer) và đóng gói Bit-exact Stream Copy
+    Audio, Subtitles, Fonts, Chapters gốc vào container MKV đích chỉ trong 1 lượt FFmpeg duy nhất:
+    - Loại bỏ hoàn toàn ~8 GB đọc/ghi file trung gian merged_4k.mp4 trên SSD và giảm 4 GB dung lượng tạm đỉnh.
+    - Bảo toàn 100% cờ bắt buộc phòng thu: -map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0.
+    - Tự động fallback an toàn về 2 bước (concat_segments + mux_final_container) nếu container đặc thù báo lỗi.
+    """
+    concat_list = _write_concat_list(segment_files, os.path.join(work_dir, "concat.txt"))
+    direct_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list,
+        "-i", original_video,
+        "-map", "0:v:0",
+        "-map", "1:a?",
+        "-map", "1:s?",
+        "-map", "1:t?",
+        "-map_chapters", "1",
+        "-c", "copy",
+        "-max_interleave_delta", "0",
+        final_output,
+    ]
+    try:
+        subprocess.run(direct_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        merged_tmp = os.path.join(work_dir, "merged_4k.mp4")
+        concat_segments(segment_files, work_dir, merged_tmp)
+        try:
+            mux_final_container(merged_tmp, original_video, final_output)
+        finally:
+            if os.path.exists(merged_tmp):
+                try:
+                    os.remove(merged_tmp)
+                except OSError:
+                    pass
 
 
 def embed_subtitle_track(

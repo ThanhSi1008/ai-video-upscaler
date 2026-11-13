@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `c4918d6`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `b896ec1`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -29,14 +29,14 @@ subtrans.cli → TranslationPipeline
 | File trong `src/` | Trách nhiệm và symbol để tìm |
 | --- | --- |
 | [`config.py`](../../src/config.py) | Hằng số runtime, `configure_cuda_fast_math` (Ampere FP16 `HMMA.F16` + cuDNN benchmark), `get_hevc_rate_args`, `validate_environment`; khóa `.gpu_active.lock` kiểm tra PID sống. |
-| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; worker extract/encode, Zero-Disk NVDEC raw RGB24 pipe, TensorRT 10 FP16, checkpoint, backpressure và quality gates. |
-| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `extract_frames`, `extract_frames_raw_rgb24`, `encode_chunk_hevc`, `concat_segments`, `mux_final_container`, `embed_subtitle_track`. |
+| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; worker extract/encode, Zero-Disk NVDEC raw RGB24 pipe, TensorRT 10 FP16, 0-reinference Sanity, 1-Pass Concat-Mux, checkpoint và backpressure. |
+| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `extract_frames`, `extract_frames_raw_rgb24` (`readinto` 0-copy), `encode_chunk_hevc`, `concat_segments`, `mux_final_container`, `mux_segments_directly`, `embed_subtitle_track`. |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `get_default_model_id`, `resolve_model_for_video`, `verify_weights_sha256`, `list_models_formatted`; neo đường dẫn tương đối về `ROOT_DIR`. |
-| [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (vi phân lô đuôi 8K 2-frame), `AnimeJaNaiCompact2x`, `GPUPersistentWorker` (TensorRT 10 auto-runner + Pinned D2H 1-sync), `get_cuda_inference_engine`, `upscale_frames_with_fallback`. |
+| [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (vi phân lô đuôi 8K 2-frame), `AnimeJaNaiCompact2x`, `GPUPersistentWorker` (Cyclic Cel Dedup + NTFS Hardlink, TensorRT 10 auto-runner + Pinned D2H), `get_cuda_inference_engine`, `upscale_frames_with_fallback`. |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: runner NCNN Vulkan dự phòng; không phải engine PyTorch chính. |
-| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `resolve_dedup_policy`, `detect_global_motion_frames`, `detect_drift_policy_actions`, `detect_dis_policy_actions`; `scan_dedup_plan`/`load_or_create_plan`, `prune_redundant_frames`, concat script/re-expansion và background preflight. |
-| [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays`, `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit`; ΔY/correlation guard. |
-| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity` và helpers MD5 audio, probe stream, subtitle packets, seek volume, window interleaving; xem giới hạn gate trong DECISIONS. |
+| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `resolve_dedup_policy`, `deduplicate_cyclic_frames` (BLAKE2b + chốt chặn nhiễu lượng tử), `detect_dis_policy_actions` (Early-Exit Cascade), 1-Pass fused `mpdecimate+gray`; `scan_dedup_plan`/`load_or_create_plan`. |
+| [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays` (nhận trực tiếp ảnh thu nhỏ GPU `270x480`), `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit`; ΔY/correlation guard. |
+| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity` (đa luồng `ThreadPoolExecutor`, tái sử dụng metadata), `get_all_audio_streams_md5` (1-Pass `-f streamhash`), `check_window_interleaving` song song. |
 | [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` tự dò đĩa RAM vật lý/`UPSCALER_RAMDISK_DIR` hoặc định tuyến về `scratch/rolling_buffer` trên NVMe Gen4 (`E:`); `cleanup_orphan_ramdisks` dọn thư mục mồ côi. |
 | [`cleanup.py`](../../src/cleanup.py) | `cleanup_checkpoint_dir`, `cleanup_subtitle_extracts`, `organize_output_artifacts`, `clean_all_temporary_data`, `get_path_size`; có xóa file/symlink target, không dùng để khảo sát. |
 | [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos` (tắt EcoQoS giữ tiến trình trên P-Cores i5-12600K), `check_power_source`, `check_disk_space`, `run_preflight_checks`. |
@@ -45,7 +45,7 @@ subtrans.cli → TranslationPipeline
 | [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text`; còn dữ liệu lịch sử hardcoded, không mặc nhiên là đo đạc mới. |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`, `_build_whisper_initial_prompt`; hỗ trợ `faster-whisper` + Silero VAD (fallback `openai-whisper`), ưu tiên EN 0ms lệch mặc định hoặc `--prefer-whisper`. |
 | [`pending_queue.py`](../../src/pending_queue.py) | `load_pending_subs`, `save_pending_subs`, `add_pending_sub`, `remove_pending_sub`; module stdlib-only quản lý `pending_subs.json` không kích hoạt import `torch`/CUDA. |
-| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper` (cắt lát 2-frame giảm 75% đỉnh VRAM 8K), `DoubleBufferedPipeUpscaler` (`ensure_resolution`, tái sử dụng Pinned Buffer). |
+| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper` (cắt lát 2-frame giảm 75% đỉnh VRAM 8K), `DoubleBufferedPipeUpscaler` (Belady's OPT Cyclic Memoization + 0-reinference Sanity `avg_pool2d`). |
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, ONNX export (`dynamo=False`), TensorRT 10.16 (`execute_async_v3`) & 8.x runtime wrapper, cache `.engine` theo `(model_id, hw, batch, gpu, trt_ver)`, `get_hybrid_engine_or_wrapper`. |
 
 `src/__init__.py` là package marker. Symbol nhỏ/nested không liệt kê hết: dùng `rg -n '^(class |def |    def )' src/<file>.py` khi đi sâu.

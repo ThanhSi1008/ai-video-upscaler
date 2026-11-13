@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-13
 >
-> **Commit Baseline:** `a496ab7` (`feat(subtrans): trien khai toan dien lo trinh 6 goi nang cap toi da chat luong dich phu de AI V2`)
+> **Commit Baseline:** `b896ec1` (`perf(pipeline): chot kiem toan sau 6 diem nghen cuoi cung tren DDR4-2133, Triton P010LE va TensorRT Level 5`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -19,12 +19,12 @@
 
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
-| **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB` trên NVMe Gen4, `configure_cuda_fast_math` (`HMMA.F16` 51 TFLOPS), TensorRT 10.16 (`builder_optimization_level=5`, `TimingCache`, `execute_async_v3`), Ping-Pong Pinned D2H 0-copy RAM. |
-| **Zero-Disk Pipe & Gen4 NVMe Buffer** | `src/trt_zero_copy_upscaler.py`, `src/ffmpeg_ops.py`, `src/ramdisk.py` | PASS | Giải mã `extract_frames_raw_rgb24` (`-hwaccel cuda` BT.709 pipe) -> NHWC 0-transpose H2D -> TensorRT 10 FP16 -> Triton/`addcmul_` `p010le` pipe -> NVENC (`upscale_turbo.bat`); đệm cuốn chiếu trên NVMe Gen4 `WD_BLACK SN7100`. |
-| **Dedup, DIS Flow & Alder Lake P-Core** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Split theo GOP, `mpdecimate` (64KB pipe buffer), DIS optical flow tiền tính toán `1/r^2` & `mag_sq` (0 `hypot`), `configure_alder_lake_pcore_qos` giữ P-Cores `i5-12600K` + `unlock_rtx3060_admin.ps1`. |
+| **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, TensorRT 10.16 (`builder_optimization_level=5`, `TimingCache`, `execute_async_v3`), Cyclic Cel Dedup + NTFS Hardlink, Ping-Pong Pinned D2H. |
+| **Zero-Disk Pipe & Gen4 NVMe Buffer** | `src/trt_zero_copy_upscaler.py`, `src/ffmpeg_ops.py`, `src/ramdisk.py` | PASS | Giải mã `extract_frames_raw_rgb24` (`readinto` 0-copy) -> NHWC H2D -> Belady's OPT Cyclic Memoization + 0-reinference Sanity `avg_pool2d` -> Triton `p010le` pipe -> NVENC (`upscale_turbo.bat`). |
+| **Dedup, DIS Flow & Alder Lake P-Core** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | `deduplicate_cyclic_frames` (`A->B->A` lip-flap / blink), 1-Pass fused `mpdecimate+gray` (`split=2`), Early-Exit DIS Flow, `configure_alder_lake_pcore_qos` + `unlock_rtx3060_admin.ps1`. |
 | **10-bit NVENC BT.709** | `src/ffmpeg_ops.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, multipass `fullres`/`qres`), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
-| **Bit-exact Mux & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Bắt buộc cờ `-max_interleave_delta 0`, audit MD5 âm thanh, font đính kèm và số lượng frame. |
-| **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$); khóa `.gpu_active.lock` kiểm tra PID sống (`psutil.pid_exists`) chống xóa nhầm khi import. |
+| **Bit-exact 1-Pass Mux & Parallel Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | `mux_segments_directly` (1-Pass Concat+Mux, khử 8 GB `merged_4k.mp4`), `-max_interleave_delta 0`, 1-Pass `-f streamhash` MD5 và `ThreadPoolExecutor` audit đa luồng. |
+| **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$, 0 infer lặp trên Zero-Disk); khóa `.gpu_active.lock` kiểm tra PID sống. |
 | **Gemini 3-Key Subtrans V2 (36 RPM)** | `subtrans/gemini_backend.py`, `subtrans/pipeline.py`, `subtrans/cast_sheet.py` | PASS | Xoay vòng 3-Key modulo + ít tải nhất + đổi key khi `429 PerMinute`, theo dõi cạn RPD theo `(model, key_hash)`, tiền tố tĩnh `>4.096` tokens Implicit Context Caching (`cached_tokens`), `ThinkingConfig(MINIMAL/LOW)`, CoT `p1`/`p2` tường minh trong `HysteresisCastManager` và cắt ngữ cảnh tại điểm chuyển cảnh (`>=4500ms`). |
 | **Contextual Cache (`v2.2`) & Glossary** | `subtrans/cache.py`, `subtrans/glossary.py`, `subtrans/ja_morph_tagger.py` | PASS | Khóa cache ngữ cảnh `compute_contextual_cue_sig`, `inline_cached_context` khi partial hit, ghi ngược `Cascade` vào cache, deep-merge `AddressRules`, `strip_ja_furigana` xuyên suốt, nhận diện Kansai-ben & `soregashi`. |
 | **Smart Cascade, Linter V2 & Hybrid RAG** | `subtrans/cascade.py`, `subtrans/linter.py`, `subtrans/rag.py` | PASS | Ranh giới từ Katakana chống báo giả, `Character.aliases`, `RULE_GLOSSARY_TERM` & `RULE_PRONOUN_CONSISTENCY`, cách ly lệch con số trong Cascade, Hybrid BM25 RAG + tự động tuyển chọn mẫu `silver`, `22/22` cues & `6/6` ca hồi quy trong `eval/runner.py`. |
