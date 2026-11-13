@@ -139,7 +139,21 @@ class GPUPersistentWorker:
                 url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
                 print(f"📥 Đang tự động tải trọng số RealESR-AnimeVideoV3 từ {url}...")
                 import urllib.request
-                urllib.request.urlretrieve(url, self.weights_path)
+                from src.models_resolver import load_models_registry, verify_weights_sha256
+                tmp_dl = self.weights_path + ".part"
+                urllib.request.urlretrieve(url, tmp_dl)
+                expected_sha = None
+                try:
+                    expected_sha = load_models_registry().get("animevideov3", {}).get("sha256")
+                except Exception:
+                    pass
+                if not verify_weights_sha256(tmp_dl, expected_sha):
+                    try:
+                        os.remove(tmp_dl)
+                    except OSError:
+                        pass
+                    raise RuntimeError(f"Kiểm tra toàn vẹn SHA-256 thất bại khi tải trọng số {self.weights_path}")
+                os.replace(tmp_dl, self.weights_path)
             else:
                 raise FileNotFoundError(f"Không tìm thấy file trọng số mô hình: {self.weights_path}")
 
@@ -255,36 +269,59 @@ class GPUPersistentWorker:
         loader_workers = min(4, b_size)
         loader_executor = ThreadPoolExecutor(max_workers=loader_workers) if loader_workers > 1 else None
 
-        def _read_img(p: str) -> np.ndarray:
+        def _read_img_bgr_u8(p: str) -> np.ndarray:
             im_bgr = cv2.imread(p, cv2.IMREAD_COLOR)
             if im_bgr is not None:
-                im_rgb = cv2.cvtColor(im_bgr, cv2.COLOR_BGR2RGB)
-                return (im_rgb.transpose((2, 0, 1)) / 255.0).astype(np.float32)
+                return im_bgr
             im = Image.open(p).convert("RGB")
-            return (np.array(im).transpose((2, 0, 1)) / 255.0).astype(np.float32)
+            return np.ascontiguousarray(np.array(im, dtype=np.uint8)[:, :, ::-1])
 
-        def _save_task(path: str, array: np.ndarray):
-            bgr = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(path, bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        def _save_task(path: str, bgr_array: np.ndarray):
+            cv2.imwrite(path, bgr_array, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
         total_frames = len(img_files)
+        target_dtype = torch.float16 if self.precision == "fp16" else torch.float32
+        pinned_in: Optional[torch.Tensor] = None
 
         try:
             for b_start in range(0, total_frames, b_size):
                 batch_files = img_files[b_start : b_start + b_size]
+                cur_b = len(batch_files)
 
-                # 1. Đọc nhanh ảnh RGB24
-                if loader_executor and len(batch_files) > 1:
-                    batch_arrs = list(loader_executor.map(_read_img, batch_files))
+                # 1. Đọc nhanh ảnh BGR uint8 (0 phép toán float32 trên CPU, giảm 75% băng thông PCIe H2D)
+                if loader_executor and cur_b > 1:
+                    batch_arrs = list(loader_executor.map(_read_img_bgr_u8, batch_files))
                 else:
-                    batch_arrs = [_read_img(p) for p in batch_files]
+                    batch_arrs = [_read_img_bgr_u8(p) for p in batch_files]
 
-                batch_np = np.stack(batch_arrs, axis=0)
-                tensor = torch.from_numpy(batch_np).to(self.device, non_blocking=True)
-                if self.precision == "fp16":
-                    tensor = tensor.half()
-                if self.device.type == "cuda":
-                    tensor = tensor.to(memory_format=torch.channels_last)
+                h0, w0 = batch_arrs[0].shape[:2]
+                same_shape = all(a.shape[:2] == (h0, w0) for a in batch_arrs)
+
+                if self.device.type == "cuda" and same_shape:
+                    if pinned_in is None or pinned_in.shape[0] < cur_b or pinned_in.shape[1:3] != (h0, w0):
+                        pinned_in = torch.empty((max(b_size, cur_b), h0, w0, 3), dtype=torch.uint8, pin_memory=True)
+                    for i, arr in enumerate(batch_arrs):
+                        pinned_in[i].copy_(torch.from_numpy(arr))
+                    gpu_bgr = pinned_in[:cur_b].to(self.device, non_blocking=True)
+                    # Lật kênh BGR -> RGB, chuyển NHWC -> NCHW channels_last và chuẩn hóa [0,1] ngay trên VRAM
+                    tensor = (
+                        gpu_bgr[..., [2, 1, 0]]
+                        .permute(0, 3, 1, 2)
+                        .to(memory_format=torch.channels_last, dtype=target_dtype)
+                        .mul_(1.0 / 255.0)
+                    )
+                else:
+                    batch_np = np.stack(batch_arrs, axis=0)
+                    raw_t = torch.from_numpy(batch_np).to(self.device)
+                    tensor = (
+                        raw_t[..., [2, 1, 0]]
+                        .permute(0, 3, 1, 2)
+                        .contiguous()
+                        .to(dtype=target_dtype)
+                        .mul_(1.0 / 255.0)
+                    )
+                    if self.device.type == "cuda":
+                        tensor = tensor.to(memory_format=torch.channels_last)
 
                 # 2. Suy luận GPU (NVIDIA CUDA / CPU)
                 with torch.inference_mode():
@@ -309,12 +346,22 @@ class GPUPersistentWorker:
                     if d_alloc > driver_alloc_peak:
                         driver_alloc_peak = d_alloc
 
-                # 5. Xuất ảnh 4K (async writer)
-                out_batch_np = (out_tensor.clamp(0, 1).float().cpu().numpy().transpose((0, 2, 3, 1)) * 255.0).round().astype(np.uint8)
+                # 5. Lượng tử hóa uint8 + lật RGB -> BGR ngay trên thiết bị tính toán (giảm 75% PCIe D2H & bỏ cvtColor CPU)
+                with torch.inference_mode():
+                    out_bgr_u8 = (
+                        out_tensor.clamp(0.0, 1.0)
+                        .mul(255.0)
+                        .round()
+                        .to(torch.uint8)[:, [2, 1, 0], :, :]
+                        .permute(0, 2, 3, 1)
+                        .contiguous()
+                        .cpu()
+                        .numpy()
+                    )
                 for b_idx, fpath in enumerate(batch_files):
                     fname = os.path.basename(fpath)
                     out_path = os.path.join(output_dir, fname)
-                    write_futures.append(writer_executor.submit(_save_task, out_path, out_batch_np[b_idx]))
+                    write_futures.append(writer_executor.submit(_save_task, out_path, out_bgr_u8[b_idx]))
 
                 if mid_chunk_callback and (b_start <= (total_frames // 2) < (b_start + len(batch_files))):
                     try:

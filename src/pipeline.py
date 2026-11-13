@@ -532,7 +532,8 @@ def run_upscale_pipeline(
                                         free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
                                 # Kiểm tra giới hạn cứng ENOSPC trước khi infer
-                                min_needed_mb = n_unique * unit_size_mb
+                                # Ở chế độ Zero-Disk, không xuất PNG 4K trung gian nên chỉ cần biên an toàn nhỏ cho MP4 nén
+                                min_needed_mb = max(256.0, n_unique * 0.5) if (zero_disk and engine == "cuda") else (n_unique * unit_size_mb)
                                 if free_mb < min_needed_mb:
                                     raise OSError(
                                         28,
@@ -589,48 +590,116 @@ def run_upscale_pipeline(
                                     )
                                     if zero_disk and engine == "cuda":
                                         import cv2
+                                        import psutil
                                         import torch
                                         from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler, SRVGGNetCompactTRTWrapper
                                         from src.cuda_engine import get_cuda_inference_engine
                                         from src.output_sanity import check_frame_sanity_arrays, OutputSanityError, write_failed_sanity_audit
 
                                         in_files = sorted([os.path.join(c_in_dir, f) for f in os.listdir(c_in_dir) if f.lower().endswith(f".{fmt}")])
-                                        unique_frames_rgb = [cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB) for f in in_files]
+                                        unique_frames_rgb = []
+                                        for f in in_files:
+                                            bgr = cv2.imread(f, cv2.IMREAD_COLOR)
+                                            if bgr is None:
+                                                raise RuntimeError(f"Không thể đọc khung hình trích xuất: {f}")
+                                            unique_frames_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
                                         runs = extracted["chunk_plan"].get("runs", []) if extracted.get("chunk_plan") else []
                                         repeat_counts = [r["count"] for r in runs] if runs else [1] * len(unique_frames_rgb)
 
+                                        in_h, in_w = (
+                                            unique_frames_rgb[0].shape[:2]
+                                            if unique_frames_rgb
+                                            else (int(meta.get("height", 1080)), int(meta.get("width", 1920)))
+                                        )
                                         cuda_engine = get_cuda_inference_engine(model_info, precision=precision, batch_size=batch_size)
-                                        wrapped_model = SRVGGNetCompactTRTWrapper(cuda_engine.model, scale=2.0)
-                                        pipe_upscaler = DoubleBufferedPipeUpscaler(wrapped_model, batch_size=batch_size or 8, device=cuda_engine.device)
+                                        eff_bs = batch_size or cuda_engine.batch_size or 8
+
+                                        # Khởi tạo & tái sử dụng Pinned Memory Buffers (Ping-Pong) xuyên suốt toàn bộ các chunk của tập
+                                        if (
+                                            getattr(cuda_engine, "_zero_disk_upscaler", None) is None
+                                            or cuda_engine._zero_disk_upscaler.batch_size != eff_bs
+                                        ):
+                                            wrapped_model = SRVGGNetCompactTRTWrapper(cuda_engine.model, scale=2.0)
+                                            cuda_engine._zero_disk_wrapper = wrapped_model
+                                            cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
+                                                wrapped_model,
+                                                batch_size=eff_bs,
+                                                device=cuda_engine.device,
+                                                input_hw=(in_h, in_w),
+                                                scale=2,
+                                            )
+                                        else:
+                                            wrapped_model = cuda_engine._zero_disk_wrapper
+                                            cuda_engine._zero_disk_upscaler.ensure_resolution(in_h, in_w)
+
+                                        pipe_upscaler = cuda_engine._zero_disk_upscaler
+                                        out_h, out_w = pipe_upscaler.output_hw
+                                        tmp_seg_out = f"{c_seg_out}.tmp.mp4"
 
                                         fps_str = f"{meta['fps_num']}/{meta['fps_den']}"
                                         t0_pipe = time.time()
-                                        enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(c_seg_out, fps_str=fps_str)
-                                        pipe_upscaler.process_frames_to_pipe(unique_frames_rgb, repeat_counts, enc_proc)
-                                        enc_proc.stdin.close()
-                                        enc_proc.wait()
+                                        enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(
+                                            tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
+                                        )
+                                        try:
+                                            pipe_upscaler.process_frames_to_pipe(unique_frames_rgb, repeat_counts, enc_proc)
+                                        finally:
+                                            if enc_proc.stdin:
+                                                try:
+                                                    enc_proc.stdin.close()
+                                                except Exception:
+                                                    pass
+                                        ret_code = enc_proc.wait()
                                         t_pipe_elapsed = time.time() - t0_pipe
 
-                                        # In-memory sanity check cho chunk đầu tiên và mỗi 10 chunks
-                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
+                                        if ret_code != 0 or not os.path.exists(tmp_seg_out) or os.path.getsize(tmp_seg_out) == 0:
+                                            if os.path.exists(tmp_seg_out):
+                                                try:
+                                                    os.remove(tmp_seg_out)
+                                                except OSError:
+                                                    pass
+                                            raise RuntimeError(
+                                                f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {c_idx+1:02d} (exit code {ret_code})."
+                                            )
+
+                                        # In-memory sanity check sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunks kế tiếp
+                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0)
                                         if should_check_sanity and unique_frames_rgb:
                                             sample_in = unique_frames_rgb[0]
                                             with torch.inference_mode():
                                                 s_in_tensor = torch.from_numpy(sample_in).permute(2, 0, 1).unsqueeze(0).to(cuda_engine.device)
-                                                s_in_tensor = s_in_tensor.to(memory_format=torch.channels_last).to(torch.float16).mul_(1.0 / 255.0)
+                                                s_dtype = torch.float16 if precision == "fp16" else torch.float32
+                                                s_in_tensor = s_in_tensor.to(memory_format=torch.channels_last, dtype=s_dtype).mul_(1.0 / 255.0)
                                                 s_out_tensor = wrapped_model(s_in_tensor)
-                                                sample_out = (s_out_tensor.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).mul(255.0).byte().cpu().numpy())
+                                                sample_out = (s_out_tensor.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).mul(255.0).round().byte().cpu().numpy())
                                             s_res = check_frame_sanity_arrays(sample_in, sample_out, is_rgb=True)
                                             s_res["chunk"] = c_idx + 1
                                             s_res["frame"] = os.path.basename(in_files[0]) if in_files else "frame_0000.png"
                                             sanity_checks_history.append(s_res)
                                             if not s_res["passed"]:
+                                                if os.path.exists(tmp_seg_out):
+                                                    try:
+                                                        os.remove(tmp_seg_out)
+                                                    except OSError:
+                                                        pass
                                                 err_msg = (
                                                     f"❌ [CHỐT CHẶN ĐẦU RA THẤT BẠI] Phân đoạn {c_idx+1:02d}: "
                                                     f"|ΔY| = {s_res['delta_y']} (trần {s_res['max_delta_y']}), "
                                                     f"Corr = {s_res['corr']} (sàn {s_res['min_corr']}). "
                                                 )
                                                 logger.error(err_msg, to_console=True)
+                                                audit_file = os.path.splitext(output_path)[0] + ".audit.json"
+                                                write_failed_sanity_audit(
+                                                    audit_file_path=audit_file,
+                                                    source_file=input_path,
+                                                    output_file=output_path,
+                                                    model_info=model_info,
+                                                    engine=engine,
+                                                    precision=precision,
+                                                    chunk_idx=c_idx,
+                                                    metrics=s_res,
+                                                    all_checks=sanity_checks_history,
+                                                )
                                                 raise OutputSanityError(err_msg, metrics=s_res)
                                             else:
                                                 logger.info(
@@ -639,12 +708,16 @@ def run_upscale_pipeline(
                                                     to_console=False
                                                 )
 
+                                        os.replace(tmp_seg_out, c_seg_out)
+                                        cuda_engine.restart_if_needed(logger=logger)
+                                        rss_now = psutil.Process().memory_info().rss / (1024 * 1024)
+
                                         ai_result = {
                                             "elapsed_seconds": t_pipe_elapsed,
                                             "fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
                                             "steady_fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
                                             "t0_seconds": 0.0,
-                                            "peak_rss_mb": 0.0
+                                            "peak_rss_mb": rss_now
                                         }
                                     else:
                                         ai_result = upscale_frames_with_fallback(
@@ -670,7 +743,7 @@ def run_upscale_pipeline(
 
                                         # Chốt chặn kiểm định chất lượng hình ảnh đầu ra C3:
                                         # Thực hiện sau chunk đầu tiên (c_idx == 0) và mỗi 10 chunk sau
-                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0) or (c_idx % 10 == 0)
+                                        should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0)
                                         if should_check_sanity:
                                             out_frame_list = sorted([f for f in os.listdir(c_out_dir) if f.lower().endswith(f".{fmt}")])
                                             if out_frame_list:

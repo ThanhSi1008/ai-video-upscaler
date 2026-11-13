@@ -88,6 +88,8 @@ class Character(BaseModel):
     name_ja: str
     name_vi: str
     gender: Optional[str] = None
+    speaking_style: Optional[str] = None
+    note: Optional[str] = None
     speaks_to: List[CharacterSpeaksTo] = Field(default_factory=list)
 
 

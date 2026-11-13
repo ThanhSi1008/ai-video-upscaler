@@ -14,7 +14,7 @@ import re
 import json
 import shutil
 import subprocess
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from src.config import (
     DEFAULT_DEDUP_HI,
@@ -906,6 +906,36 @@ def encode_chunk_reexpanded(
     shutil.move(tmp_output, output_path)
 
 
+def build_preflight_subprocess_spec(
+    video_path: str,
+    plan_file: str,
+    segment_seconds: int = 8,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """
+    Xây dựng lệnh subprocess đa nền tảng (Windows BELOW_NORMAL_PRIORITY_CLASS / POSIX nice)
+    và truyền đường dẫn an toàn qua sys.argv (tránh lỗi ký tự nháy đơn/backslash trên Windows).
+    """
+    import sys
+    script = (
+        "import sys; "
+        "from src.dedup import load_or_create_plan; "
+        "from src.ffmpeg_ops import probe_video; "
+        "vid, plan_f, seg_s = sys.argv[1], sys.argv[2], int(sys.argv[3]); "
+        "meta = probe_video(vid); "
+        "load_or_create_plan(vid, plan_f, seg_s, meta['fps_num'], meta['fps_den'])"
+    )
+    cmd = [sys.executable, "-c", script, video_path, plan_file, str(segment_seconds)]
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    elif shutil.which("nice"):
+        cmd = ["nice", "-n", "10", *cmd]
+    return cmd, popen_kwargs
+
+
 def spawn_background_preflight(
     video_path: str,
     output_dir: Optional[str] = None,
@@ -914,7 +944,8 @@ def spawn_background_preflight(
 ) -> Optional[subprocess.Popen]:
     """
     Kích hoạt tiến trình quét mpdecimate lập plan.json trước cho tập kế tiếp.
-    Chạy với độ ưu tiên thấp (nice -n 10) trong nền lúc GPU đang bận xử lý tập trước.
+    Chạy với độ ưu tiên nền (BELOW_NORMAL_PRIORITY_CLASS trên Windows / nice -n 10 trên POSIX)
+    trong lúc GPU đang bận xử lý tập trước.
     """
     import sys
     if os.environ.get("BENCHMARK_MODE") == "1":
@@ -930,16 +961,10 @@ def spawn_background_preflight(
         if os.path.exists(plan_file) and os.path.getsize(plan_file) > 100:
             return None
 
-        # Gọi python chạy preflight với nice -n 10
-        cmd = [
-            "nice", "-n", "10",
-            sys.executable, "-c",
-            f"import sys; from src.dedup import load_or_create_plan; from src.ffmpeg_ops import probe_video; "
-            f"meta = probe_video('{video_path}'); "
-            f"load_or_create_plan('{video_path}', '{plan_file}', {segment_seconds}, meta['fps_num'], meta['fps_den'])"
-        ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        msg = f"⚡ [Multi-Episode Queue] Đã kích hoạt Preflight nền (nice -n 10) cho tập kế tiếp: {os.path.basename(video_path)}"
+        cmd, popen_kwargs = build_preflight_subprocess_spec(video_path, plan_file, segment_seconds)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"
+        msg = f"⚡ [Multi-Episode Queue] Đã kích hoạt Preflight nền ({prio_desc}) cho tập kế tiếp: {os.path.basename(video_path)}"
         if logger:
             logger.info(msg, to_console=True)
         else:

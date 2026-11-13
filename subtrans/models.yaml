@@ -7,7 +7,6 @@ models:
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
     rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
-      (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
   gemini-3.7-flash:
     tier: free_tier
     rpm: 5
@@ -58,12 +57,6 @@ models:
     tpm: unlimited
     rpd_source: mô hình cục bộ
     status: active
-  unit-test-model:
-    tier: test
-    rpm: 5
-    tpm: 250000
-    rpd: 20
-    rpd_source: đọc từ lỗi 429 (GenerateContentRequestsPerDayPerProjectPerModel) (GenerateContentRequestsPerDayPerProjectPerModel)
 chain:
 - gemini-3.5-flash-lite
 - gemini-3.8-flash

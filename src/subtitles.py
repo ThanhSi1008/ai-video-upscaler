@@ -81,7 +81,13 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
             if res.returncode != 0 or not os.path.exists(audio_tmp) or os.path.getsize(audio_tmp) == 0:
                 return False
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        from src.config import is_gpu_lock_held_by_other
+        gpu_busy_pid = is_gpu_lock_held_by_other()
+        if gpu_busy_pid is not None:
+            print(f"ℹ️ [WHISPER STT] GPU đang bận bởi tiến trình Upscale (PID={gpu_busy_pid}) -> Chuyển Whisper sang CPU để bảo toàn VRAM.")
+            device = "cpu"
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         model = whisper.load_model(model_size, device=device)
         result = model.transcribe(
             audio_tmp,
@@ -187,23 +193,51 @@ def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool =
     # 2. Kiểm tra container video qua ffprobe để trích xuất nếu thiếu file rời
     safe_base = base_name.rstrip('. ')
     tmp_dir = os.path.join(vid_dir, f".temp_{safe_base}")
+    bitmap_sub_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub", "pgssub", "vobsub"}
+
+    def _extract_text_stream(stream_obj: dict, stem_prefix: str) -> Optional[str]:
+        codec = (stream_obj.get("codec_name") or "").lower()
+        if codec in bitmap_sub_codecs:
+            return None
+        s_idx = stream_obj["index"]
+        if codec in ("ass", "ssa"):
+            out_file = os.path.join(tmp_dir, f"{stem_prefix}.ass")
+            codec_args = ["-c:s", "copy"]
+        elif codec in ("subrip", "srt"):
+            out_file = os.path.join(tmp_dir, f"{stem_prefix}.srt")
+            codec_args = ["-c:s", "copy"]
+        else:
+            # mov_text, webvtt, text, ... -> chuẩn hóa sang SRT văn bản thuần
+            out_file = os.path.join(tmp_dir, f"{stem_prefix}.srt")
+            codec_args = ["-c:s", "srt"]
+        ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{s_idx}", *codec_args, out_file]
+        sub_res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sub_res.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 20:
+            return out_file
+        return None
+
     try:
         cmd = [
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=index:stream_tags=language,title:stream_disposition=default",
+            "-show_entries", "stream=index,codec_name:stream_tags=language,title:stream_disposition=default",
             "-select_streams", "s",
             "-of", "json",
             video_path
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
-        sub_info = json.loads(r.stdout).get("streams", [])
+        raw_sub_info = json.loads(r.stdout).get("streams", [])
+        # Loại bỏ các luồng phụ đề ảnh bitmap (PGS/VOBSUB trên Blu-ray) để không chặn trích xuất text hoặc Whisper fallback
+        sub_info = [
+            s for s in raw_sub_info
+            if (s.get("codec_name") or "").lower() not in bitmap_sub_codecs
+        ]
 
         if sub_info:
             os.makedirs(tmp_dir, exist_ok=True)
 
             # 2a. Trích xuất stream EN từ container video nếu chưa có file EN rời
             if not en_sub:
-                en_idx = None
+                chosen_en_stream = None
                 # Phân loại và ưu tiên track hội thoại (Dialogue / Full Subtitles), tránh Signs & Songs
                 dialogue_candidates = []
                 other_en_candidates = []
@@ -217,40 +251,32 @@ def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool =
                         if not is_signs:
                             # Điểm ưu tiên: default=1 được 10 điểm, có chữ 'dialog' được 5 điểm, 'full' được 3 điểm
                             score = (10 if is_def else 0) + (5 if "dialog" in title else 0) + (3 if "full" in title else 0)
-                            dialogue_candidates.append((score, s["index"]))
+                            dialogue_candidates.append((score, s))
                         else:
-                            other_en_candidates.append(s["index"])
+                            other_en_candidates.append(s)
 
                 if dialogue_candidates:
                     dialogue_candidates.sort(key=lambda x: x[0], reverse=True)
-                    en_idx = dialogue_candidates[0][1]
+                    chosen_en_stream = dialogue_candidates[0][1]
                 elif other_en_candidates:
-                    en_idx = other_en_candidates[0]
+                    chosen_en_stream = other_en_candidates[0]
                 elif len(sub_info) > 0:
-                    en_idx = sub_info[0]["index"]
+                    chosen_en_stream = sub_info[0]
 
-                if en_idx is not None:
-                    extracted_en = os.path.join(tmp_dir, "extracted_en.ass")
-                    ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{en_idx}", "-c:s", "copy", extracted_en]
-                    sub_res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if sub_res.returncode == 0 and os.path.exists(extracted_en) and os.path.getsize(extracted_en) > 100:
-                        en_sub = extracted_en
+                if chosen_en_stream is not None:
+                    en_sub = _extract_text_stream(chosen_en_stream, "extracted_en")
 
             # 2b. Trích xuất stream JA từ container video nếu chưa có file JA rời
             if not ja_sub:
-                ja_idx = None
+                chosen_ja_stream = None
                 for s in sub_info:
                     lang = s.get("tags", {}).get("language", "").lower()
                     title = s.get("tags", {}).get("title", "").lower()
                     if lang in ("jpn", "ja") or "japanese" in title or "jpn" in title:
-                        ja_idx = s["index"]
+                        chosen_ja_stream = s
                         break
-                if ja_idx is not None:
-                    extracted_ja = os.path.join(tmp_dir, "extracted_ja.ass")
-                    ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{ja_idx}", "-c:s", "copy", extracted_ja]
-                    sub_res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    if sub_res.returncode == 0 and os.path.exists(extracted_ja) and os.path.getsize(extracted_ja) > 100:
-                        ja_sub = extracted_ja
+                if chosen_ja_stream is not None:
+                    ja_sub = _extract_text_stream(chosen_ja_stream, "extracted_ja")
     except Exception:
         pass
 

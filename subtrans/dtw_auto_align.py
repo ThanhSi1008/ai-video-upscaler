@@ -134,7 +134,12 @@ def align_ja_to_en_monotonic_dtw(
                 back[i][j + 1] = ("SKIP_EN", i, j)
 
             # 3. Khớp 1 JA <-> 1 EN
-            if i < N and j < M:
+            if (
+                i < N
+                and j < M
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c11 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i].end_ms,
                     en_cues[j].start_ms, en_cues[j].end_ms,
@@ -145,7 +150,13 @@ def align_ja_to_en_monotonic_dtw(
                     back[i + 1][j + 1] = ("1:1", i, j)
 
             # 4. Khớp 1 JA <-> 2 EN (Whisper gộp 1 câu dài, Studio EN tách làm 2 câu)
-            if i < N and j + 1 < M and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600:
+            if (
+                i < N
+                and j + 1 < M
+                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c12 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i].end_ms,
                     en_cues[j].start_ms, en_cues[j + 1].end_ms,
@@ -156,7 +167,13 @@ def align_ja_to_en_monotonic_dtw(
                     back[i + 1][j + 2] = ("1:2", i, j)
 
             # 5. Khớp 2 JA <-> 1 EN (Whisper ngắt 2 câu ngắn, Studio EN gộp làm 1 câu)
-            if i + 1 < N and j < M and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600:
+            if (
+                i + 1 < N
+                and j < M
+                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
+                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c21 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
                     en_cues[j].start_ms, en_cues[j].end_ms,
@@ -273,7 +290,12 @@ def get_dtw_alignment_map(
             if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
                 dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
                 back[i][j + 1] = ("SKIP_EN", i, j)
-            if i < N and j < M:
+            if (
+                i < N
+                and j < M
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c11 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i].end_ms,
                     en_cues[j].start_ms, en_cues[j].end_ms,
@@ -282,7 +304,13 @@ def get_dtw_alignment_map(
                 if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
                     dp[i + 1][j + 1] = dp[i][j] + c11
                     back[i + 1][j + 1] = ("1:1", i, j)
-            if i < N and j + 1 < M and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600:
+            if (
+                i < N
+                and j + 1 < M
+                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c12 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i].end_ms,
                     en_cues[j].start_ms, en_cues[j + 1].end_ms,
@@ -291,7 +319,13 @@ def get_dtw_alignment_map(
                 if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
                     dp[i + 1][j + 2] = dp[i][j] + c12
                     back[i + 1][j + 2] = ("1:2", i, j)
-            if i + 1 < N and j < M and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600:
+            if (
+                i + 1 < N
+                and j < M
+                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
+                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
                 c21 = pair_cost(
                     ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
                     en_cues[j].start_ms, en_cues[j].end_ms,

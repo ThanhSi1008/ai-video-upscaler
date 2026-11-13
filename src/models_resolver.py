@@ -8,20 +8,43 @@ Thứ tự ưu tiên (D2):
 3. Mặc định trong models/models.yaml (animevideov3)
 """
 
+import hashlib
 import os
 import yaml
 import fnmatch
 from typing import Dict, Any, Optional, Tuple
 
+from src.config import ROOT_DIR
+
 MODELS_YAML = "models/models.yaml"
 SHOWS_YAML = "shows.yaml"
 
 
+def _resolve_repo_path(path_str: str) -> str:
+    """Ưu tiên đường dẫn hiện tại (phục vụ test override), fallback về ROOT_DIR khi chạy khác thư mục."""
+    if os.path.exists(path_str) or os.path.isabs(path_str):
+        return path_str
+    candidate = os.path.join(ROOT_DIR, path_str)
+    return candidate if os.path.exists(candidate) else path_str
+
+
+def verify_weights_sha256(weights_path: str, expected_sha256: Optional[str]) -> bool:
+    """Kiểm tra toàn vẹn SHA-256 của file trọng số mô hình."""
+    if not expected_sha256:
+        return True
+    h = hashlib.sha256()
+    with open(weights_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().lower() == expected_sha256.strip().lower()
+
+
 def load_models_registry() -> Dict[str, Any]:
     """Nạp danh mục mô hình từ models/models.yaml."""
-    if not os.path.exists(MODELS_YAML):
+    models_yaml_path = _resolve_repo_path(MODELS_YAML)
+    if not os.path.exists(models_yaml_path):
         raise FileNotFoundError(f"Không tìm thấy file danh mục mô hình: {MODELS_YAML}")
-    with open(MODELS_YAML, "r", encoding="utf-8") as f:
+    with open(models_yaml_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data.get("models", {})
 
@@ -82,9 +105,10 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
             )
 
     # 2. Ưu tiên thứ hai: shows.yaml (nếu chưa chỉ định qua CLI)
-    if not chosen_id and os.path.exists(SHOWS_YAML):
+    shows_yaml_path = _resolve_repo_path(SHOWS_YAML)
+    if not chosen_id and os.path.exists(shows_yaml_path):
         try:
-            with open(SHOWS_YAML, "r", encoding="utf-8") as f:
+            with open(shows_yaml_path, "r", encoding="utf-8") as f:
                 shows_data = yaml.safe_load(f) or {}
             shows_rules = shows_data.get("shows", []) or []
 
@@ -109,5 +133,7 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
         resolution_source = "Mặc định hệ thống (models/models.yaml)"
 
     model_info = dict(registry[chosen_id])
+    if model_info.get("weights_path"):
+        model_info["weights_path"] = _resolve_repo_path(model_info["weights_path"])
     model_info["resolution_source"] = resolution_source
     return model_info

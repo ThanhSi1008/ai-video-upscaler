@@ -49,11 +49,13 @@ def test_d10_a_default_model_resolution():
 def test_d10_b_output_resolution_tensor():
     """Kiểm tra (b): Mỗi model cho đúng kích thước 3840x2160 từ 1920x1080."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Trên CPU offline (CUDA_VISIBLE_DEVICES=-1), dùng FP32 native AVX2 để tránh giả lập FP16 bằng phần mềm mất >10 phút
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     # 1. RealESRAnimeVideoV3
-    m_v3 = RealESRAnimeVideoV3().to(device).half()
+    m_v3 = RealESRAnimeVideoV3().to(device=device, dtype=dtype)
     m_v3.eval()
-    dummy_1080p = torch.rand(1, 3, 1080, 1920, device=device).half()
+    dummy_1080p = torch.rand(1, 3, 1080, 1920, device=device, dtype=dtype)
     with torch.inference_mode():
         out_v3 = m_v3(dummy_1080p)
         if device.type == "cuda":
@@ -61,7 +63,7 @@ def test_d10_b_output_resolution_tensor():
     assert out_v3.shape == (1, 3, 2160, 3840), f"RealESRAnimeVideoV3 cho shape sai: {out_v3.shape}"
 
     # 2. AnimeJaNaiCompact2x
-    m_aj = AnimeJaNaiCompact2x().to(device).half()
+    m_aj = AnimeJaNaiCompact2x().to(device=device, dtype=dtype)
     m_aj.eval()
     with torch.inference_mode():
         out_aj = m_aj(dummy_1080p)

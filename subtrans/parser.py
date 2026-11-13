@@ -223,6 +223,7 @@ def snap_whisper_cues_to_en(
     en_events: List[Any],
     min_gap_ms: int = 50,
     skip_styles_regex: str = DEFAULT_SKIP_STYLES,
+    cast_names_ja_en: Optional[List[Tuple[str, str]]] = None,
 ) -> int:
     """
     Auto-Align Subtitle Timestamps:
@@ -276,7 +277,11 @@ def snap_whisper_cues_to_en(
     en_sub_cues = [SubCue(start_ms=ec["start"], end_ms=ec["end"], text=ec["text"]) for ec in clean_en_cues]
 
     from subtrans.dtw_auto_align import get_dtw_alignment_map
-    cue_map = get_dtw_alignment_map(ja_sub_cues, en_sub_cues)
+    cue_map = get_dtw_alignment_map(
+        ja_sub_cues,
+        en_sub_cues,
+        cast_names_ja_en=cast_names_ja_en or (),
+    )
 
     # Cập nhật mốc thời gian và EN reference chuẩn phòng thu theo đúng chỉ mục cue gốc
     snapped_count = 0
@@ -285,7 +290,7 @@ def snap_whisper_cues_to_en(
             new_start, new_end, paired_en = cue_map[idx]
             c.start = new_start
             c.end = new_end
-            if not c.en:
+            if paired_en:
                 c.en = paired_en
             snapped_count += 1
         else:
@@ -356,6 +361,7 @@ def parse_and_align_subtitles(
     sound_cues: str = "drop",
     auto_align_whisper_to_en: bool = True,
     is_whisper: Optional[bool] = None,
+    cast_names_ja_en: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[List[Cue], pysubs2.SSAFile, Optional[pysubs2.SSAFile]]:
     """
     Parses Japanese and optional English subtitles, cleans text, and aligns them by time overlap.
@@ -492,6 +498,7 @@ def parse_and_align_subtitles(
             en_events=clean_en_dialogues if clean_en_dialogues else en_cues,
             min_gap_ms=50,
             skip_styles_regex=skip_styles_regex,
+            cast_names_ja_en=cast_names_ja_en,
         )
         if snapped_count > 0:
             logger.info(

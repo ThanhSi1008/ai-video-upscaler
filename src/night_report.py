@@ -67,6 +67,11 @@ def parse_telemetry_window(
         sw_end = float(end_row["swap_used_mb"])
         delta_sw = sw_end - sw_start
         peak_sw = max(float(r["swap_used_mb"]) for r in rows_in_window) if rows_in_window else sw_end
+        thermal_states = sorted({
+            str(r["thermal_state"]).strip()
+            for r in rows_in_window
+            if r.get("thermal_state")
+        }) or ["Nominal"]
 
         delta_write_gib = None
         delta_read_gib = None

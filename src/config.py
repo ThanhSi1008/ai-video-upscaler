@@ -50,9 +50,28 @@ def add_pending_sub(record: dict) -> None:
 
 
 def remove_pending_sub(base_name: str) -> None:
-    """Xóa một tập khỏi pending_subs.json khi đã đạt chuẩn."""
+    """Xóa một tập khỏi pending_subs.json khi đã đạt chuẩn (khớp base_name hoặc video_path)."""
+    if not base_name:
+        return
     items = load_pending_subs()
-    new_items = [it for it in items if it.get("base_name") != base_name]
+    stem = os.path.splitext(os.path.basename(str(base_name)))[0]
+    candidate_names = {str(base_name), stem, f"{stem}_4K"}
+    if stem.endswith("_4K"):
+        candidate_names.add(stem[:-3])
+    abs_target = os.path.abspath(str(base_name)) if os.path.sep in str(base_name) or "/" in str(base_name) else None
+
+    def _is_match(it: dict) -> bool:
+        if it.get("base_name") in candidate_names:
+            return True
+        vp = it.get("video_path")
+        if vp:
+            if vp == base_name or (abs_target and os.path.abspath(vp) == abs_target):
+                return True
+            if os.path.splitext(os.path.basename(vp))[0] in candidate_names:
+                return True
+        return False
+
+    new_items = [it for it in items if not _is_match(it)]
     if len(new_items) != len(items):
         try:
             with open(PENDING_SUBS_FILE, "w", encoding="utf-8") as f:
@@ -61,18 +80,55 @@ def remove_pending_sub(base_name: str) -> None:
             pass
 
 
+_GPU_LOCK_OWNED: bool = False
+
+
+def is_gpu_lock_held_by_other() -> int | None:
+    """
+    Kiểm tra xem .gpu_active.lock có đang thuộc về một tiến trình khác còn sống hay không.
+    Trả về PID đang giữ khóa nếu tiến trình đó còn tồn tại, ngược lại trả về None (stale lock hoặc không có khóa).
+    """
+    if not os.path.exists(GPU_LOCK_FILE):
+        return None
+    try:
+        with open(GPU_LOCK_FILE, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if not raw:
+            return None
+        pid = int(raw.splitlines()[0].strip())
+        if pid == os.getpid():
+            return None
+        import psutil
+        if psutil.pid_exists(pid):
+            return pid
+    except Exception:
+        return None
+    return None
+
 
 def acquire_gpu_lock() -> None:
-    """Tạo file khóa đánh dấu giai đoạn upscale GPU đang hoạt động."""
+    """Tạo file khóa đánh dấu giai đoạn upscale GPU đang hoạt động (tự động thu hồi stale lock nếu PID cũ đã chết)."""
+    global _GPU_LOCK_OWNED
+    other_pid = is_gpu_lock_held_by_other()
+    if other_pid is not None:
+        raise RuntimeError(
+            f"GPU đang bận bởi tiến trình khác đang hoạt động (PID={other_pid}, lock: {GPU_LOCK_FILE}). "
+            f"Chỉ cho phép duy nhất 1 tiến trình suy luận GPU tại một thời điểm."
+        )
     try:
         with open(GPU_LOCK_FILE, "w", encoding="utf-8") as f:
             f.write(f"{os.getpid()}\n")
+        _GPU_LOCK_OWNED = True
     except Exception:
         pass
 
 
 def release_gpu_lock() -> None:
-    """Giải phóng file khóa giai đoạn upscale GPU."""
+    """Giải phóng file khóa giai đoạn upscale GPU (không xóa nhầm khóa của PID khác đang chạy)."""
+    global _GPU_LOCK_OWNED
+    _GPU_LOCK_OWNED = False
+    if is_gpu_lock_held_by_other() is not None:
+        return
     try:
         if os.path.exists(GPU_LOCK_FILE):
             os.remove(GPU_LOCK_FILE)
@@ -80,8 +136,14 @@ def release_gpu_lock() -> None:
         pass
 
 
+def _atexit_release_gpu_lock() -> None:
+    """Chỉ tự động xóa khóa khi chính tiến trình này đã acquire_gpu_lock()."""
+    if _GPU_LOCK_OWNED:
+        release_gpu_lock()
+
+
 import atexit
-atexit.register(release_gpu_lock)
+atexit.register(_atexit_release_gpu_lock)
 
 
 

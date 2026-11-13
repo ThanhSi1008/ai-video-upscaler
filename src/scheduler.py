@@ -157,7 +157,8 @@ class BackgroundQueuePreflightManager:
                 self.results[vid] = cached
                 continue
 
-            msg = f"⚡ [Background Preflight] Đang quét nền (nice -n 10) cho: {os.path.basename(vid)}"
+            prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"
+            msg = f"⚡ [Background Preflight] Đang quét nền ({prio_desc}) cho: {os.path.basename(vid)}"
             if self.logger:
                 self.logger.info(msg, to_console=True)
             else:
@@ -169,14 +170,9 @@ class BackgroundQueuePreflightManager:
                 os.makedirs(work_dir, exist_ok=True)
                 plan_file = os.path.join(work_dir, "plan.json")
 
-                cmd = [
-                    "nice", "-n", "10",
-                    sys.executable, "-c",
-                    f"from src.dedup import load_or_create_plan; from src.ffmpeg_ops import probe_video; "
-                    f"meta = probe_video('{vid}'); "
-                    f"load_or_create_plan('{vid}', '{plan_file}', {self.segment_seconds}, meta['fps_num'], meta['fps_den'])"
-                ]
-                proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                from src.dedup import build_preflight_subprocess_spec
+                cmd, popen_kwargs = build_preflight_subprocess_spec(vid, plan_file, self.segment_seconds)
+                proc = subprocess.run(cmd, **popen_kwargs)
                 if proc.returncode == 0 and os.path.exists(plan_file):
                     with open(plan_file, "r", encoding="utf-8") as f:
                         plan_data = json.load(f)

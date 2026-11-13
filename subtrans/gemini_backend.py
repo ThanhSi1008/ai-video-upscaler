@@ -152,11 +152,18 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
     # Always include all episode cast characters to preserve pronoun continuity across batches,
     # as Japanese anime dialogues frequently omit subject names (zero-pronouns).
     for char in glossary.characters:
-        relevant_characters.append({
+        char_entry: Dict[str, Any] = {
             "name_ja": char.name_ja,
             "name_vi": char.name_vi,
-            "speaks_to": [s.model_dump() for s in char.speaks_to]
-        })
+            "speaks_to": [s.model_dump(exclude_none=True) for s in char.speaks_to],
+        }
+        if getattr(char, "gender", None):
+            char_entry["gender"] = char.gender
+        if getattr(char, "speaking_style", None):
+            char_entry["register"] = char.speaking_style
+        if getattr(char, "note", None):
+            char_entry["note"] = char.note
+        relevant_characters.append(char_entry)
 
     res: Dict[str, Any] = {}
     if relevant_terms:
@@ -213,6 +220,7 @@ class GeminiTranslator(BaseTranslator):
         dry_run: bool = False,
         enable_rag: bool = True,
         round_robin: bool = False,
+        cache: Optional[Any] = None,
     ):
         import datetime
         from subtrans.config import get_gemini_api_keys
@@ -236,7 +244,7 @@ class GeminiTranslator(BaseTranslator):
 
         self.api_keys: List[str] = collected_keys
         self.key_ids: List[str] = [compute_key_id(k) for k in self.api_keys]
-        self.cache = TranslationCache()
+        self.cache = cache if cache is not None else TranslationCache()
         self.round_robin = round_robin
 
         self.model = model
@@ -405,7 +413,7 @@ class GeminiTranslator(BaseTranslator):
                     _send,
                     model=self.model,
                     backend="gemini",
-                    cues_count=0,
+                    cues_count=int(getattr(self, "_current_cues_count", 0) or 0),
                     request_type="translation",
                     cache=self.cache,
                     key_id=curr_kid,
@@ -481,7 +489,8 @@ class GeminiTranslator(BaseTranslator):
         self,
         cues: List[Cue],
         context: List[Cue],
-        glossary: Optional[Glossary] = None
+        glossary: Optional[Glossary] = None,
+        rag_bundle: Optional[Tuple[List[Dict[str, str]], List[Dict[str, str]], str]] = None,
     ) -> List[str]:
         """Translates batch of cues (100–150 cues) with immediate bisecting (split in half) on cue/ID mismatch."""
         if not cues:
@@ -535,20 +544,27 @@ class GeminiTranslator(BaseTranslator):
 
         # Add RAG few-shot examples and error cautions from KnowledgeBase
         self.last_rag_hash = "no_rag"
-        if self.enable_rag:
+        if rag_bundle is not None:
+            few_shots, cautions, self.last_rag_hash = rag_bundle
+            if few_shots:
+                payload["approved_reference_examples"] = few_shots
+            if cautions:
+                payload["error_prevention_cautions"] = cautions
+        elif self.enable_rag:
             try:
                 import hashlib
                 from subtrans.rag import KnowledgeBase
                 kb = KnowledgeBase()
+                series_key = getattr(self, "series", None)
                 few_shots = kb.retrieve_few_shots(
                     cues,
-                    series=getattr(self, "series", None),
+                    series=series_key,
                     max_examples=3,
                     exclude_episode=getattr(self, "exclude_episode", None)
                 )
                 if few_shots:
                     payload["approved_reference_examples"] = few_shots
-                cautions = kb.retrieve_cautions(cues, max_cautions=2)
+                cautions = kb.retrieve_cautions(cues, series=series_key, max_cautions=2)
                 if cautions:
                     payload["error_prevention_cautions"] = cautions
                 if few_shots or cautions:
@@ -571,7 +587,7 @@ class GeminiTranslator(BaseTranslator):
                 "SKILL NAMES: When a named attack/spell occurs and the EN reference provides the name, "
                 "write in Vietnamese followed by the English name in parentheses, e.g. 'Độ Không Tuyệt Đối! (Absolute Zero)'."
             )
-        prompt_lines.append(f"\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
+        prompt_lines.append(f"\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
         prompt_str = "\n".join(prompt_lines)
 
         # Build system prompt from glossary style_rules if provided (append to maintain SYSTEM_INSTRUCTION rules)
@@ -582,6 +598,7 @@ class GeminiTranslator(BaseTranslator):
         # Attempt 1: Call API
         try:
             self.stats["api_requests"] += 1
+            self._current_cues_count = len(cues)
             items = self._call_api(prompt_str, system_prompt=system_prompt)
             for c, it in zip(cues, items):
                 if isinstance(it, dict) and not (it.get("vi") or "").strip():
@@ -614,11 +631,11 @@ class GeminiTranslator(BaseTranslator):
 
             # Nửa đầu (Left): Giữ lịch sử trước đó + bổ sung lookahead từ các câu đầu của right_cues
             left_context = [c for c in (context or []) if c.id < left_cues[0].id] + right_cues[:10]
-            left_half = self.translate_batch(left_cues, left_context, glossary)
+            left_half = self.translate_batch(left_cues, left_context, glossary, rag_bundle=None)
 
             # Nửa sau (Right): Bắc cầu 10 câu cuối của left_cues (đã có bản dịch vi và metadata) làm lịch sử liền kề
             right_context = left_cues[-10:] + [c for c in (context or []) if c.id > right_cues[-1].id]
-            right_half = self.translate_batch(right_cues, right_context, glossary)
+            right_half = self.translate_batch(right_cues, right_context, glossary, rag_bundle=None)
             return left_half + right_half
 
         # Nếu chỉ có 1 cue duy nhất mà thất bại, thử lại lần cuối với prompt nghiêm ngặt
@@ -628,6 +645,7 @@ class GeminiTranslator(BaseTranslator):
             + prompt_str
         )
         self.stats["api_requests"] += 1
+        self._current_cues_count = len(cues)
         items = self._call_api(strict_prompt, system_prompt=system_prompt)
         for c, it in zip(cues, items):
             if isinstance(it, dict) and not (it.get("vi") or "").strip():
@@ -637,6 +655,8 @@ class GeminiTranslator(BaseTranslator):
         if is_valid:
             for c, it in zip(cues, items):
                 if isinstance(it, dict):
+                    if it.get("vi"):
+                        c.vi = it["vi"]
                     _apply_item_metadata_to_cue(c, it)
             return [it["vi"] for it in items]
 

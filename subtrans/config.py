@@ -51,31 +51,43 @@ def save_models_config(cfg: Dict[str, Any], custom_path: Optional[Path] = None):
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
 
-def update_model_quota_in_yaml(model_name: str, quota_id: str, quota_value: Any, rpd_source: str = "đọc từ phản hồi 429"):
+def update_model_quota_in_yaml(
+    model_name: str,
+    quota_id: str,
+    quota_value: Any,
+    rpd_source: str = "đọc từ phản hồi 429",
+    custom_path: Optional[Path] = None,
+):
     """
     Cập nhật tự động hạn mức quotaValue vào models.yaml khi nhận được lỗi 429 thực tế.
+    Không ghi bẩn file models.yaml gốc khi chạy kiểm thử pytest hoặc với model giả lập 'unit-test-model'.
     """
+    if custom_path is None and (
+        os.environ.get("PYTEST_CURRENT_TEST") or model_name == "unit-test-model"
+    ):
+        return
     try:
-        cfg = load_models_config()
+        cfg = load_models_config(custom_path)
         if "models" not in cfg:
             cfg["models"] = {}
         if model_name not in cfg["models"]:
             cfg["models"][model_name] = {}
 
+        src_label = rpd_source if (not quota_id or quota_id in rpd_source) else f"{rpd_source} ({quota_id})"
         if "perday" in quota_id.lower() or "requestsperday" in quota_id.lower() or "daily" in quota_id.lower():
             try:
                 cfg["models"][model_name]["rpd"] = int(quota_value)
             except Exception:
                 cfg["models"][model_name]["rpd"] = quota_value
-            cfg["models"][model_name]["rpd_source"] = f"{rpd_source} ({quota_id})"
+            cfg["models"][model_name]["rpd_source"] = src_label
         elif "perminute" in quota_id.lower() or "requestsperminute" in quota_id.lower() or "rpm" in quota_id.lower():
             try:
                 cfg["models"][model_name]["rpm"] = int(quota_value)
             except Exception:
                 cfg["models"][model_name]["rpm"] = quota_value
-            cfg["models"][model_name]["rpm_source"] = f"{rpd_source} ({quota_id})"
+            cfg["models"][model_name]["rpm_source"] = src_label
 
-        save_models_config(cfg)
+        save_models_config(cfg, custom_path)
     except Exception as e:
         import logging
         logging.getLogger("subtrans.config").warning(f"Could not update quota in models.yaml for {model_name}: {e}")

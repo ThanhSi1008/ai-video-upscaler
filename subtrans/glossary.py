@@ -7,6 +7,7 @@ Supports style_rules, address_rules, terms filtering, and per-series overriding.
 
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import hashlib
 import re
 import yaml
 import json
@@ -70,22 +71,63 @@ def _parse_pronoun_list(raw_list: List[Dict[str, Any]]) -> List[PronounRule]:
     return res
 
 
+def resolve_glossary_target(glossary_path: Optional[Path]) -> Optional[Path]:
+    """
+    Giải tham chiếu file glossary dạng text-pointer trên Windows
+    (ví dụ: glossary.reincarnatedasasword.yaml -> glossary.tenken.yaml).
+    """
+    if not glossary_path or not glossary_path.exists():
+        return glossary_path
+    seen = set()
+    curr = glossary_path.resolve()
+    while curr.exists() and curr not in seen:
+        seen.add(curr)
+        if curr.suffix.lower() not in (".yaml", ".yml"):
+            break
+        try:
+            raw = curr.read_text(encoding="utf-8").strip()
+            if "\n" not in raw and raw.endswith((".yaml", ".yml")):
+                nxt = (curr.parent / raw).resolve()
+                if nxt.exists() and nxt != curr:
+                    curr = nxt
+                    continue
+        except Exception:
+            break
+        break
+    return curr
+
+
+def compute_glossary_hash(glossary: Optional[Glossary]) -> str:
+    """Tính SHA-256 ngắn (16 ký tự) từ toàn bộ nội dung Glossary để chống đụng độ cache khi sửa từ điển."""
+    if not glossary:
+        return ""
+    payload = {
+        "style_rules": glossary.style_rules,
+        "terms": [t.model_dump() for t in glossary.terms],
+        "characters": [c.model_dump() for c in glossary.characters],
+        "address_rules": glossary.address_rules.model_dump() if glossary.address_rules else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
     """Loads a Schema v2 YAML or JSON glossary file."""
     if not glossary_path or not glossary_path.exists():
         return None
 
     try:
-        with open(glossary_path, "r", encoding="utf-8") as f:
-            if glossary_path.suffix.lower() in (".yaml", ".yml"):
+        resolved_path = resolve_glossary_target(glossary_path) or glossary_path
+        with open(resolved_path, "r", encoding="utf-8") as f:
+            if resolved_path.suffix.lower() in (".yaml", ".yml"):
                 data = yaml.safe_load(f) or {}
             else:
                 data = json.load(f)
 
         # Xử lý symlink dạng text pointer trên Windows
         if isinstance(data, str) and data.strip().endswith((".yaml", ".yml")):
-            target_path = (glossary_path.parent / data.strip()).resolve()
-            if target_path.exists() and target_path != glossary_path:
+            target_path = (resolved_path.parent / data.strip()).resolve()
+            if target_path.exists() and target_path != resolved_path:
                 return load_glossary(target_path)
 
         meta = data.get("meta", {})
@@ -149,6 +191,8 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
                     name_ja=str(c.get("name_ja", "")),
                     name_vi=str(c.get("name_vi", "")),
                     gender=c.get("gender"),
+                    speaking_style=c.get("register") or c.get("speaking_style"),
+                    note=c.get("note"),
                     speaks_to=speaks,
                 )
             )

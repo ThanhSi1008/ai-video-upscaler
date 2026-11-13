@@ -84,8 +84,15 @@ class TranslationCache:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS translations (
                     cache_key TEXT PRIMARY KEY,
@@ -93,6 +100,7 @@ class TranslationCache:
                     model TEXT,
                     vi TEXT,
                     pt_date TEXT,
+                    metadata_json TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -139,6 +147,8 @@ class TranslationCache:
             cols_tr = [r[1] for r in cursor.fetchall()]
             if "pt_date" not in cols_tr:
                 conn.execute("ALTER TABLE translations ADD COLUMN pt_date TEXT")
+            if "metadata_json" not in cols_tr:
+                conn.execute("ALTER TABLE translations ADD COLUMN metadata_json TEXT")
 
             cursor.execute("PRAGMA table_info(api_requests)")
             cols = [r[1] for r in cursor.fetchall()]
@@ -191,31 +201,110 @@ class TranslationCache:
 
             conn.commit()
 
+    @staticmethod
+    def _is_polluted_vi(vi: Optional[str]) -> bool:
+        if not vi:
+            return True
+        val = vi.strip()
+        return (
+            not val
+            or val.lower() in UNTRANSLATED_STRINGS
+            or val.startswith("[DRY-RUN")
+            or "[dry-run]" in val.lower()
+        )
+
     def get_cue(self, cache_key: str) -> Optional[str]:
         """Retrieves cached translation for a cue. Bỏ qua nếu là chuỗi chưa dịch hoặc dry-run."""
-        with sqlite3.connect(self.db_path) as conn:
+        entry = self.get_cue_entry(cache_key)
+        return entry[0] if entry else None
+
+    def get_cue_entry(self, cache_key: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Truy xuất cả bản dịch VI và metadata suy luận (speaker/addressee/mode/uncertain) từ SQLite cache."""
+        with self._connect() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT vi FROM translations WHERE cache_key = ?", (cache_key,))
+            cursor.execute("SELECT vi, metadata_json FROM translations WHERE cache_key = ?", (cache_key,))
             row = cursor.fetchone()
-            if row and row[0]:
-                val = row[0].strip()
-                if val.lower() in UNTRANSLATED_STRINGS or val.startswith("[DRY-RUN") or "[dry-run]" in val.lower():
-                    return None
-                return val
+            if row and row[0] and not self._is_polluted_vi(row[0]):
+                meta: Dict[str, Any] = {}
+                if row[1]:
+                    try:
+                        meta = json.loads(row[1]) or {}
+                    except Exception:
+                        meta = {}
+                return row[0].strip(), meta
         return None
 
-    def set_cue(self, cache_key: str, backend: str, model: str, vi: str):
-        """Saves translated cue into cache kèm ngày Thái Bình Dương (PT). Tuyệt đối KHÔNG cache chuỗi [Chưa dịch] hoặc [DRY-RUN]."""
-        if not vi or vi.strip().lower() in UNTRANSLATED_STRINGS or vi.startswith("[DRY-RUN") or "[dry-run]" in vi.lower():
+    def get_cues_batch(self, cache_keys: List[str]) -> Dict[str, Tuple[str, Dict[str, Any]]]:
+        """Truy vấn hàng loạt nhiều cache_key trong 1 kết nối SQLite duy nhất (triệt tiêu hàng trăm lần mở DB)."""
+        if not cache_keys:
+            return {}
+        unique_keys = list(dict.fromkeys(cache_keys))
+        result: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            # SQLite hỗ trợ an toàn tối đa 900 biến tham số mỗi câu truy vấn
+            for i in range(0, len(unique_keys), 500):
+                chunk = unique_keys[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor.execute(
+                    f"SELECT cache_key, vi, metadata_json FROM translations WHERE cache_key IN ({placeholders})",
+                    chunk,
+                )
+                for ckey, vi_raw, meta_raw in cursor.fetchall():
+                    if vi_raw and not self._is_polluted_vi(vi_raw):
+                        meta: Dict[str, Any] = {}
+                        if meta_raw:
+                            try:
+                                meta = json.loads(meta_raw) or {}
+                            except Exception:
+                                meta = {}
+                        result[ckey] = (vi_raw.strip(), meta)
+        return result
+
+    def set_cue(
+        self,
+        cache_key: str,
+        backend: str,
+        model: str,
+        vi: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Saves translated cue into cache kèm ngày Thái Bình Dương (PT) và metadata CoT. Tuyệt đối KHÔNG cache [Chưa dịch]/[DRY-RUN]."""
+        if self._is_polluted_vi(vi):
             return
 
         pt_date = get_today_pt_str()
-        with sqlite3.connect(self.db_path) as conn:
+        meta_str = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) if metadata else None
+        with self._connect() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO translations (cache_key, backend, model, vi, pt_date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (cache_key, backend, model, vi, pt_date))
+                INSERT OR REPLACE INTO translations (cache_key, backend, model, vi, pt_date, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (cache_key, backend, model, vi, pt_date, meta_str))
             conn.commit()
+
+    def set_cues_batch(
+        self,
+        entries: List[Tuple[str, str, str, str, Optional[Dict[str, Any]]]],
+    ) -> int:
+        """Ghi hàng loạt nhiều câu thoại vào SQLite trong 1 transaction duy nhất (giảm hàng trăm lần fsync)."""
+        if not entries:
+            return 0
+        pt_date = get_today_pt_str()
+        rows = []
+        for cache_key, backend, model, vi, metadata in entries:
+            if self._is_polluted_vi(vi):
+                continue
+            meta_str = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) if metadata else None
+            rows.append((cache_key, backend, model, vi, pt_date, meta_str))
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO translations (cache_key, backend, model, vi, pt_date, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.commit()
+        return len(rows)
 
     def log_request(
         self,

@@ -108,20 +108,21 @@ class GPUColorConverterP010LE:
 
 class SRVGGNetCompactTRTWrapper(nn.Module):
     """
-    Wrapper giữ nguyên 100% trọng số của realesr-animevideov3:
+    Wrapper giữ nguyên 100% trọng số của realesr-animevideov3 / AnimeJaNaiCompact2x:
     - Backbone trích xuất đặc trưng (16 Conv2d + PReLU) chạy FP16 để tối ưu Tensor Cores.
     - Nhánh cộng dư (Residual Add) và phép nội suy Bicubic được ép tính toán ở FP32
       để triệt tiêu hoàn toàn sai số làm tròn, bảo đảm |ΔY| < 0.3/255 và r > 0.9998.
     """
-    def __init__(self, base_srvgg_model: nn.Module):
+    def __init__(self, base_srvgg_model: nn.Module, scale: Optional[float] = None):
         super().__init__()
         self.body = base_srvgg_model.body
         self.upsampler = base_srvgg_model.upsampler
-        # Xác định hệ số phóng đại (2 hoặc 4)
+        # Xác định hệ số phóng đại gốc của PixelShuffle (2 hoặc 4)
         if hasattr(base_srvgg_model, "upscale"):
             self.upscale = base_srvgg_model.upscale
         else:
             self.upscale = 4 if isinstance(self.upsampler, nn.PixelShuffle) and self.upsampler.upscale_factor == 4 else 2
+        self.target_scale = float(scale) if scale is not None else 2.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = x
@@ -133,15 +134,18 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
         base = F.interpolate(x.float(), scale_factor=float(self.upscale), mode="nearest")
         out_f32 = out.float() + base
 
-        if self.upscale == 4:
-            # Thu nhỏ 4x về 2x (4K) bằng Bicubic ở FP32
-            out_2x = F.interpolate(
-                out_f32, scale_factor=0.5, mode="bicubic", align_corners=False
+        if abs(float(self.upscale) - self.target_scale) > 1e-4:
+            # Thu nhỏ 4x về target_scale (mặc định 2x = 4K) bằng Bicubic ở FP32
+            out_target = F.interpolate(
+                out_f32,
+                scale_factor=self.target_scale / float(self.upscale),
+                mode="bicubic",
+                align_corners=False,
             )
         else:
-            out_2x = out_f32
+            out_target = out_f32
 
-        return out_2x.to(torch.float16)
+        return out_target.to(torch.float16 if x.dtype == torch.float16 else torch.float32)
 
 
 # =============================================================================
@@ -154,44 +158,66 @@ class DoubleBufferedPipeUpscaler:
     kết hợp Double-Buffered Pinned Memory và xuất trực tiếp vào FFmpeg NVENC pipe.
     Triệt tiêu 100% file ảnh PNG trung gian và giải phóng CPU khỏi tác vụ swscale.
     """
-    def __init__(self, model_or_engine: Any, batch_size: int = 8, device: Optional[torch.device] = None):
+    def __init__(
+        self,
+        model_or_engine: Any,
+        batch_size: int = 8,
+        device: Optional[torch.device] = None,
+        input_hw: Tuple[int, int] = (1080, 1920),
+        scale: int = 2,
+    ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
         self.batch_size = max(1, batch_size)
         self.model = model_or_engine
+        self.scale = max(1, int(scale))
         self.color_conv = GPUColorConverterP010LE(self.device)
+        self.input_hw = (0, 0)
+        self.output_hw = (0, 0)
 
         if self.device.type == "cuda":
             self.stream_h2d = torch.cuda.Stream(device=self.device)
             self.stream_compute = torch.cuda.Stream(device=self.device)
             self.stream_d2h = torch.cuda.Stream(device=self.device)
-
-            # Cấp phát sẵn Pinned Memory (2 slot Ping-Pong) để PCIe H2D và D2H đạt băng thông tối đa
-            self.host_in_pins = [
-                torch.empty((self.batch_size, 3, 1080, 1920), dtype=torch.uint8, pin_memory=True)
-                for _ in range(2)
-            ]
-            # Mỗi frame 4K p010le có kích thước (2160 * 3 // 2, 3840) int16 = 24.88 MB
-            self.host_out_pins = [
-                torch.empty((self.batch_size, 3240, 3840), dtype=torch.int16, pin_memory=True)
-                for _ in range(2)
-            ]
         else:
             self.stream_h2d = None
             self.stream_compute = None
             self.stream_d2h = None
-            self.host_in_pins = [
-                torch.empty((self.batch_size, 3, 1080, 1920), dtype=torch.uint8)
-                for _ in range(2)
-            ]
-            self.host_out_pins = [
-                torch.empty((self.batch_size, 3240, 3840), dtype=torch.int16)
-                for _ in range(2)
-            ]
+
+        self.host_in_pins: List[torch.Tensor] = []
+        self.host_out_pins: List[torch.Tensor] = []
+        self.ensure_resolution(input_hw[0], input_hw[1])
+
+    def ensure_resolution(self, in_h: int, in_w: int) -> Tuple[int, int]:
+        """Đảm bảo bộ đệm Pinned Memory khớp độ phân giải khung hình thực tế (hỗ trợ tái sử dụng xuyên suốt tập)."""
+        out_h = in_h * self.scale
+        out_w = in_w * self.scale
+        if (out_h % 2 != 0) or (out_w % 2 != 0):
+            raise ValueError(f"Độ phân giải đầu ra p010le phải chẵn, nhận được: {out_w}x{out_h}")
+        if self.input_hw == (in_h, in_w) and len(self.host_in_pins) == 2:
+            return self.output_hw
+
+        self.input_hw = (in_h, in_w)
+        self.output_hw = (out_h, out_w)
+        pin = self.device.type == "cuda"
+        self.host_in_pins = [
+            torch.empty((self.batch_size, 3, in_h, in_w), dtype=torch.uint8, pin_memory=pin)
+            for _ in range(2)
+        ]
+        self.host_out_pins = [
+            torch.empty((self.batch_size, out_h * 3 // 2, out_w), dtype=torch.int16, pin_memory=pin)
+            for _ in range(2)
+        ]
+        return self.output_hw
 
     @staticmethod
-    def spawn_nvenc_pipe_writer(output_mp4_path: str, fps_str: str = "24000/1001") -> subprocess.Popen:
+    def spawn_nvenc_pipe_writer(
+        output_mp4_path: str,
+        fps_str: str = "24000/1001",
+        width: int = 3840,
+        height: int = 2160,
+    ) -> subprocess.Popen:
         """
         Khởi tạo tiến trình FFmpeg NVENC nhận trực tiếp luồng rawvideo p010le từ stdin pipe.
         Áp dụng toàn bộ cấu hình tối ưu của Giai đoạn 1 (CQ 18 + fullres + lookahead 32 + AQ kép).
@@ -201,11 +227,11 @@ class DoubleBufferedPipeUpscaler:
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo",
             "-pix_fmt", "p010le",
-            "-s", "3840x2160",
-            "-color_range", "tv",
-            "-colorspace", "bt709",
-            "-color_primaries", "bt709",
-            "-color_trc", "bt709",
+            "-s", f"{width}x{height}",
+            "-color_range", HEVC_COLOR_RANGE,
+            "-colorspace", HEVC_COLORSPACE,
+            "-color_primaries", HEVC_COLOR_PRIMARIES,
+            "-color_trc", HEVC_COLOR_TRC,
             "-chroma_sample_location", "center",
             "-r", fps_str,
             "-i", "pipe:0",
@@ -237,6 +263,9 @@ class DoubleBufferedPipeUpscaler:
         num_unique = len(unique_frames_rgb)
         if num_unique == 0:
             return 0
+
+        f_h, f_w = unique_frames_rgb[0].shape[:2]
+        self.ensure_resolution(f_h, f_w)
 
         total_frames_written = 0
 

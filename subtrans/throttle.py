@@ -202,6 +202,7 @@ def call_with_retry(
     base_delay: float = 2.0,
     max_delay: float = 60.0,
     model_name: str = "gemini",
+    cache: Optional[TranslationCache] = None,
 ) -> Any:
     """
     Executes a callable with rate limiting and intelligent 429 handling.
@@ -209,7 +210,7 @@ def call_with_retry(
       and raises DailyQuotaExhaustedError IMMEDIATELY (no retries/pause).
     - If 429 contains PerMinute -> sleeps retryDelay and retries.
     """
-    cache = TranslationCache()
+    cache = cache or TranslationCache()
 
     # Pre-check: Nếu model đã bị đánh dấu hết hạn mức ngày trong DB, chuyển ngay!
     # Không chặn khi đang chạy trong môi trường kiểm thử pytest

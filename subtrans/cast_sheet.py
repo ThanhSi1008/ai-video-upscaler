@@ -123,6 +123,7 @@ def load_or_generate_series_cast_sheet(
     timeout_ms: int = 45000,
     dry_run: bool = False,
     force_update: bool = False,
+    cache: Optional[Any] = None,
 ) -> Optional[Glossary]:
     """
     Stage A: Quản lý Cast Sheet theo bộ (<series>.cast.yaml).
@@ -138,6 +139,8 @@ def load_or_generate_series_cast_sheet(
         try:
             with open(series_cast_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
+            meta_desc = str(data.get("meta", {}).get("description", ""))
+            is_dry_artifact = "dry-run" in meta_desc.lower()
             chars_data = data.get("characters", [])
             characters = []
             for cd in chars_data:
@@ -155,26 +158,47 @@ def load_or_generate_series_cast_sheet(
                         name_ja=cd.get("name_ja", ""),
                         name_vi=cd.get("name_vi", ""),
                         gender=cd.get("gender"),
+                        speaking_style=cd.get("register") or cd.get("speaking_style"),
+                        note=cd.get("note"),
                         speaks_to=speaks,
                     )
                 )
 
             if characters:
-                new_names = check_for_new_characters(cues, characters)
-                if not new_names:
-                    logger.info(
-                        f"✅ Cast sheet của bộ '{series_name}' ({len(characters)} nhân vật) đã sẵn sàng. "
-                        f"Không có nhân vật mới -> Tái sử dụng (0 requests API)."
-                    )
-                    # Ghi bản sao cho tập hiện tại nếu cần
-                    if episode_cast_path and not episode_cast_path.exists():
-                        try:
-                            episode_cast_path.write_bytes(series_cast_file.read_bytes())
-                        except Exception:
-                            pass
+                # Nếu đang chạy dry-run và đã có cast sheet thật trên đĩa, tuyệt đối không ghi đè cast thật!
+                if dry_run and not is_dry_artifact:
                     return Glossary(characters=characters)
+
+                # Nếu đang chạy thật nhưng file hiện có là mẫu dry-run (Rudeus/Sylphiette),
+                # chỉ tái sử dụng khi lời thoại thực sự khớp nhân vật; tránh ô nhiễm bộ anime khác.
+                can_reuse = True
+                if not dry_run and is_dry_artifact:
+                    can_reuse = any(
+                        (c.name_ja and c.name_ja in (cue.ja or ""))
+                        or (c.name_vi and c.name_vi.lower() in (cue.en or "").lower())
+                        for c in characters
+                        for cue in cues
+                        if not cue.is_skipped
+                    )
+
+                if can_reuse:
+                    new_names = check_for_new_characters(cues, characters)
+                    if not new_names:
+                        logger.info(
+                            f"✅ Cast sheet của bộ '{series_name}' ({len(characters)} nhân vật) đã sẵn sàng. "
+                            f"Không có nhân vật mới -> Tái sử dụng (0 requests API)."
+                        )
+                        # Ghi bản sao cho tập hiện tại nếu cần
+                        if episode_cast_path and not episode_cast_path.exists():
+                            try:
+                                episode_cast_path.write_bytes(series_cast_file.read_bytes())
+                            except Exception:
+                                pass
+                        return Glossary(characters=characters)
+                    else:
+                        logger.info(f"Phát hiện nhân vật mới tiềm năng ({', '.join(new_names)}) trong '{series_name}'. Đang cập nhật Cast Sheet...")
                 else:
-                    logger.info(f"Phát hiện nhân vật mới tiềm năng ({', '.join(new_names)}) trong '{series_name}'. Đang cập nhật Cast Sheet...")
+                    logger.info(f"Bỏ qua Cast Sheet mẫu Dry-Run cũ của '{series_name}' để sinh Cast Sheet thật từ lời thoại.")
         except Exception as e:
             logger.warning(f"Lỗi khi đọc {series_cast_file}: {e}. Đang tạo lại...")
 
@@ -195,7 +219,7 @@ def load_or_generate_series_cast_sheet(
             yaml.safe_dump(
                 {
                     "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Series Cast Sheet (Dry-Run)"},
-                    "characters": [c.model_dump() for c in mock_chars],
+                    "characters": [c.model_dump(exclude_none=True) for c in mock_chars],
                 },
                 f,
                 allow_unicode=True,
@@ -207,7 +231,7 @@ def load_or_generate_series_cast_sheet(
                 yaml.safe_dump(
                     {
                         "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Episode Cast Sheet (Dry-Run)"},
-                        "characters": [c.model_dump() for c in mock_chars],
+                        "characters": [c.model_dump(exclude_none=True) for c in mock_chars],
                     },
                     f,
                     allow_unicode=True,
@@ -222,6 +246,7 @@ def load_or_generate_series_cast_sheet(
         gemini_model=gemini_model,
         fallback_models=fallback_models,
         timeout_ms=timeout_ms,
+        cache=cache,
     )
     if res_glossary and episode_cast_path and series_cast_file.exists():
         try:
@@ -237,6 +262,7 @@ def generate_cast_sheet(
     gemini_model: str = "gemini-3.8-flash",
     fallback_models: Optional[List[str]] = None,
     timeout_ms: int = 45000,
+    cache: Optional[Any] = None,
 ) -> Optional[Glossary]:
     """
     Stage A: Discovers characters and pronoun tables across the episode.
@@ -294,7 +320,8 @@ def generate_cast_sheet(
                 model=model_name,
                 backend="gemini",
                 cues_count=0,
-                request_type="cast_sheet"
+                request_type="cast_sheet",
+                cache=cache,
             )
             if res and res.text:
                 break
@@ -326,6 +353,8 @@ def generate_cast_sheet(
                     name_ja=cd.get("name_ja", ""),
                     name_vi=cd.get("name_vi", ""),
                     gender=cd.get("gender"),
+                    speaking_style=cd.get("register") or cd.get("speaking_style"),
+                    note=cd.get("note"),
                     speaks_to=speaks,
                 )
             )
@@ -338,7 +367,7 @@ def generate_cast_sheet(
             yaml.safe_dump(
                 {
                     "meta": {"schema": 2, "description": "Auto-generated Series Cast Sheet"},
-                    "characters": [c.model_dump() for c in characters],
+                    "characters": [c.model_dump(exclude_none=True) for c in characters],
                 },
                 f,
                 allow_unicode=True,

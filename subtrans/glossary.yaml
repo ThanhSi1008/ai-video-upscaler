@@ -32,7 +32,7 @@ style_rules:
   - "Addressing by proper name: Whenever the Japanese dialogue addresses someone by their proper name (e.g. calling 'Fran', 'Jean', 'Nell', 'Reirin'), ALWAYS retain the Romaji proper name directly in the Vietnamese subtitle line (e.g. 'Fran, em có sao không?', 'Jean, cẩn thận!'). Never omit the name or replace it entirely with standalone generic pronouns (anh/em/cậu/cô/mày) to avoid mistranslation and keep sync with the voiceover."
   - "Place names, organizations, palaces, and named techniques not in the glossary: keep the English-track romanization and translate only descriptive parts (e.g. 'cung Shuku', 'cung Kouki', 'Quý phi Shu')."
   - "Do not translate or add laughs or breaths in spoken dialogue. For standalone sound effects in parentheses (e.g. （鳥のさえずり）), translate the sound concisely in parentheses (e.g. (tiếng chim hót)); never leave a cue empty."
-  - "Keep each cue's content inside that cue: never merge, split, reorder, or drop cues. Maximum 2 lines, about 42 characters per line."
+  - "Keep each cue's content inside that cue: never merge, split, reorder, or drop cues."
   - "No translator notes or explanations in parentheses unless a term entry's note requires it."
   - "Match register: keep rude, polite, archaic, childish, or dialect speech recognizable in Vietnamese, without censoring or toning down."
   - "Use '...' for trailing off. Never stack more than two '!' or '?'."

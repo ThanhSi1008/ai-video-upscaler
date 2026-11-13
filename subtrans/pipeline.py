@@ -26,7 +26,14 @@ from subtrans.gemini_backend import GeminiTranslator
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError, DailyQuotaExhaustedError
 from subtrans.writer import write_subtitles
 from subtrans.report import generate_qa_report
-from subtrans.glossary import load_glossary, merge_glossaries, DEFAULT_BASE_GLOSSARY_PATH, find_series_glossary
+from subtrans.glossary import (
+    load_glossary,
+    merge_glossaries,
+    DEFAULT_BASE_GLOSSARY_PATH,
+    find_series_glossary,
+    resolve_glossary_target,
+    compute_glossary_hash,
+)
 from subtrans.cast_sheet import generate_cast_sheet, load_or_generate_series_cast_sheet
 
 logger = logging.getLogger("subtrans.pipeline")
@@ -102,7 +109,12 @@ class TranslationPipeline:
         self.gemini_model = model_override or (ordered_chain[0] if ordered_chain else "gemini-3.5-flash-lite")
         self.fallback_models: List[str] = [m for m in ordered_chain if m != self.gemini_model]
         self.lite_model = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
-        self.gemini_rpm = gemini_cfg.get("max_rpm", 15 if "lite" in self.gemini_model.lower() else 5)
+        default_rpm = 15 if "lite" in self.gemini_model.lower() else 5
+        raw_rpm = gemini_cfg.get("max_rpm")
+        try:
+            self.gemini_rpm = int(raw_rpm) if raw_rpm is not None else default_rpm
+        except (TypeError, ValueError):
+            self.gemini_rpm = default_rpm
 
         # Protection against mutable alias 'gemini-flash-latest' per ADDENDUM 8
         if "latest" in self.gemini_model.lower() and not self.allow_latest_alias:
@@ -156,6 +168,7 @@ class TranslationPipeline:
                             dry_run=self.dry_run,
                             enable_rag=self.enable_rag,
                             round_robin=True,
+                            cache=self.cache,
                         )
                     except Exception as e:
                         logger.warning(f"Could not initialize backend for {m_name}: {e}")
@@ -182,6 +195,7 @@ class TranslationPipeline:
         subs_upgrade: bool = False,
         auto_offset: bool = False,
         sound_cues: str = "drop",
+        video_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
@@ -232,7 +246,9 @@ class TranslationPipeline:
             auto_g = find_series_glossary(base_name)
             if auto_g:
                 glossary_path = auto_g
-                resolved_series = auto_g.resolve().name.split(".")[1]
+                target_g = resolve_glossary_target(auto_g) or auto_g
+                parts = target_g.name.split(".")
+                resolved_series = parts[1] if len(parts) >= 3 else target_g.stem
                 self.series = resolved_series
                 console.print(f"  • [bold green]Tự động nhận diện Glossary riêng của series:[/bold green] [cyan]{auto_g.name}[/cyan] (Series key: [yellow]{resolved_series}[/yellow])")
         override_glossary = load_glossary(glossary_path) if glossary_path else None
@@ -262,6 +278,11 @@ class TranslationPipeline:
 
         # Stage 1: Parse and align
         t_s1 = time.monotonic()
+        cast_names_ja_en = (
+            [(c.name_ja, c.name_vi) for c in glossary.characters if c.name_ja and c.name_vi]
+            if glossary and glossary.characters
+            else []
+        )
         with console.status("[bold blue]Stage 1: Parsing and aligning subtitle streams...[/bold blue]"):
             cues, ja_ssa, en_ssa = parse_and_align_subtitles(
                 ja_path=str(ja_path),
@@ -270,6 +291,7 @@ class TranslationPipeline:
                 ja_offset_ms=sub_offset_ms,
                 sound_cues=sound_cues,
                 auto_align_whisper_to_en=self.auto_align_whisper_to_en,
+                cast_names_ja_en=cast_names_ja_en,
             )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
 
@@ -297,6 +319,7 @@ class TranslationPipeline:
                     fallback_models=self.fallback_models,
                     timeout_ms=self.request_timeout_ms,
                     dry_run=self.dry_run,
+                    cache=self.cache,
                 )
                 if cast_glossary and cast_glossary.characters:
                     console.print(f"  • Stage A Cast Sheet: [cyan]{cast_file}[/cyan] ({len(cast_glossary.characters)} characters identified)")
@@ -360,7 +383,7 @@ class TranslationPipeline:
         )
         curr_gemini_idx = 0
 
-        # Compute cast sheet hash for cache keying
+        # Compute cast sheet hash & canonical glossary hash for cache keying
         cast_sheet_hash = ""
         if cast_file.exists():
             try:
@@ -370,18 +393,22 @@ class TranslationPipeline:
         elif glossary and glossary.characters:
             canonical_chars = json.dumps([c.model_dump() for c in glossary.characters], sort_keys=True)
             cast_sheet_hash = hashlib.sha256(canonical_chars.encode("utf-8")).hexdigest()[:16]
+        glossary_hash = compute_glossary_hash(glossary)
         prompt_version = "v2.0"
 
         # Khởi tạo HysteresisCastManager đóng kín vòng lặp phản hồi quan hệ nhân vật
-        from subtrans.dynamic_cast import HysteresisCastManager, CastRelationDelta
-        initial_cast_data = {}
+        from subtrans.dynamic_cast import HysteresisCastManager
+        cast_manager = HysteresisCastManager.from_glossary(glossary)
         if cast_file.exists():
             try:
                 import yaml
                 initial_cast_data = yaml.safe_load(cast_file.read_text(encoding="utf-8")) or {}
+                if isinstance(initial_cast_data.get("relations"), dict):
+                    cast_manager.relations.update(initial_cast_data["relations"])
+                if isinstance(initial_cast_data.get("arc_overrides"), dict):
+                    cast_manager.arc_overrides.update(initial_cast_data["arc_overrides"])
             except Exception:
                 pass
-        cast_manager = HysteresisCastManager(initial_cast_data) if initial_cast_data else HysteresisCastManager.from_glossary(glossary)
 
         stage_start_time = time.monotonic()
         with Progress(
@@ -412,39 +439,72 @@ class TranslationPipeline:
 
                 # 1. Compute RAG snapshot hash for this batch (C0/C2 use 'no_rag', C1/C3 use few-shot hash)
                 rag_hash = "no_rag"
+                rag_bundle = None
                 if self.enable_rag:
                     try:
-                        import hashlib
                         from subtrans.rag import KnowledgeBase
                         kb = KnowledgeBase()
                         fs = kb.retrieve_few_shots(batch, series=self.series, max_examples=3, exclude_episode=base_name)
-                        ca = kb.retrieve_cautions(batch, max_cautions=2)
+                        ca = kb.retrieve_cautions(batch, series=self.series, max_cautions=2)
                         if fs or ca:
                             rag_data = {"few_shots": fs, "cautions": ca}
                             rag_hash = hashlib.sha256(json.dumps(rag_data, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+                        rag_bundle = (fs, ca, rag_hash)
                     except Exception:
-                        pass
+                        rag_bundle = None
 
-                # Check cache for cues in batch
+                # Check cache for cues in batch (single SQLite batch query; fallback to get_cue on mock caches)
                 uncached_cues: List[Cue] = []
-                for cue in batch:
-                    target_m = candidate_gemini_models[curr_gemini_idx]
-                    ckey = compute_cue_cache_key(
-                        model=target_m,
-                        ja=cue.ja,
-                        en=cue.en,
-                        glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
-                        cast_sheet_hash=cast_sheet_hash,
-                        prompt_version=prompt_version,
-                        stage="draft",
-                        rag_hash=rag_hash,
+                target_m = candidate_gemini_models[curr_gemini_idx] if candidate_gemini_models else "none"
+                is_lower_model = "lite" in target_m.lower()
+                use_batch_cache = isinstance(self.cache, TranslationCache)
+                cue_keys = [
+                    (
+                        cue,
+                        compute_cue_cache_key(
+                            model=target_m,
+                            ja=cue.ja,
+                            en=cue.en,
+                            glossary_hash=glossary_hash,
+                            cast_sheet_hash=cast_sheet_hash,
+                            prompt_version=prompt_version,
+                            stage="draft",
+                            rag_hash=rag_hash,
+                        ),
                     )
-                    cached_val = self.cache.get_cue(ckey)
-                    is_lower_model = "lite" in target_m
-                    if cached_val and not (subs_upgrade and is_lower_model):
-                        cue.vi = cached_val
+                    for cue in batch
+                ]
+                if subs_upgrade and is_lower_model:
+                    cached_map = {}
+                elif use_batch_cache:
+                    cached_map = self.cache.get_cues_batch([ck for _, ck in cue_keys])
+                else:
+                    cached_map = {}
+                    for _, ck in cue_keys:
+                        val = self.cache.get_cue(ck)
+                        if isinstance(val, str) and val:
+                            cached_map[ck] = (val, {})
+                for cue, ckey in cue_keys:
+                    cached_entry = cached_map.get(ckey)
+                    if cached_entry and cached_entry[0]:
+                        cached_vi, meta = cached_entry
+                        cue.vi = cached_vi
+                        cue.draft_vi = cached_vi
                         cue.backend_used = "cache"
                         cue.model_used = target_m
+                        if isinstance(meta, dict):
+                            if meta.get("speaker"):
+                                cue.speaker = meta["speaker"]
+                            if meta.get("addressee") is not None:
+                                cue.addressee = meta["addressee"]
+                            if meta.get("mode"):
+                                cue.mode = meta["mode"]
+                            if "uncertain" in meta:
+                                cue.uncertain = bool(meta["uncertain"])
+                            if meta.get("uncertain_reason") is not None:
+                                cue.uncertain_reason = meta["uncertain_reason"]
+                            if "en_conflict" in meta:
+                                cue.en_conflict = bool(meta["en_conflict"])
                         stats["cache_hits"] += 1
                         stats["model_counts"]["cache"] = stats["model_counts"].get("cache", 0) + 1
                         progress.advance(task, 1)
@@ -477,15 +537,27 @@ class TranslationPipeline:
                         if not backend:
                             curr_gemini_idx += 1
                             continue
+                        is_native_gemini = isinstance(backend, GeminiTranslator)
                         try:
                             translated_texts = call_with_retry(
-                                fn=lambda: backend.translate_batch(uncached_cues, context, glossary),
-                                rate_limiter=None if self.dry_run else self.rate_limiter,
+                                fn=(
+                                    lambda: backend.translate_batch(uncached_cues, context, glossary, rag_bundle=rag_bundle)
+                                    if is_native_gemini
+                                    else backend.translate_batch(uncached_cues, context, glossary)
+                                ),
+                                rate_limiter=None if (self.dry_run or is_native_gemini) else self.rate_limiter,
                                 max_retries=self.max_retries_per_model,
                                 model_name=target_model,
+                                cache=self.cache,
                             )
-                            status_str = "dry_run" if self.dry_run else "success"
-                            self.cache.log_request(model=target_model, backend="gemini", cues_count=len(uncached_cues), status=status_str)
+                            if self.dry_run or not is_native_gemini:
+                                status_str = "dry_run" if self.dry_run else "success"
+                                self.cache.log_request(
+                                    model=target_model,
+                                    backend="gemini",
+                                    cues_count=len(uncached_cues),
+                                    status=status_str,
+                                )
                             stats["episode_requests"] = stats.get("episode_requests", 0) + 1
                             backend_used = "gemini"
                             model_used = target_model
@@ -520,44 +592,44 @@ class TranslationPipeline:
                         backend_used = "untranslated"
                         model_used = "none"
 
-                # Store into cues and cache
+                # Store into cues and batch-insert into SQLite cache
+                batch_cache_rows = []
                 for cue, vi in zip(uncached_cues, translated_texts):
                     cue.vi = vi
+                    cue.draft_vi = vi
                     cue.backend_used = backend_used
                     cue.model_used = model_used
                     if backend_used == "untranslated":
                         cue.uncertain = True
                         stats["model_counts"]["untranslated"] = stats["model_counts"].get("untranslated", 0) + 1
-                    else:
+                    elif not self.dry_run:
                         ckey = compute_cue_cache_key(
                             model=model_used,
                             ja=cue.ja,
                             en=cue.en,
-                            glossary_hash=f"{len(glossary.terms)}:{len(glossary.characters)}" if glossary else "",
+                            glossary_hash=glossary_hash,
                             cast_sheet_hash=cast_sheet_hash,
                             prompt_version=prompt_version,
                             stage="draft",
                             rag_hash=rag_hash,
                         )
-                        self.cache.set_cue(ckey, backend_used, model_used, vi)
+                        cue_meta = {
+                            "speaker": cue.speaker,
+                            "addressee": cue.addressee,
+                            "mode": cue.mode,
+                            "uncertain": bool(cue.uncertain),
+                            "uncertain_reason": cue.uncertain_reason,
+                            "en_conflict": bool(getattr(cue, "en_conflict", False)),
+                        }
+                        batch_cache_rows.append((ckey, backend_used, model_used, vi, cue_meta))
                     progress.advance(task, 1)
 
-                # Ghi nhận phản hồi sau batch để cập nhật HysteresisCastManager
-                if cast_manager:
-                    for cue in uncached_cues:
-                        if cue.speaker and cue.speaker != "unknown" and cue.addressee:
-                            if cue.uncertain_reason and "pronoun" in cue.uncertain_reason.lower():
-                                cast_manager.apply_deltas([
-                                    CastRelationDelta(
-                                        scope="SITUATIONAL_SHIFT",
-                                        speaker=cue.speaker,
-                                        listener=cue.addressee,
-                                        pronoun_1p="tôi",
-                                        pronoun_2p="ngươi",
-                                        reason=f"Batch {batch_idx+1} contextual shift",
-                                        confidence=0.80
-                                    )
-                                ])
+                if batch_cache_rows:
+                    if isinstance(self.cache, TranslationCache):
+                        self.cache.set_cues_batch(batch_cache_rows)
+                    else:
+                        for ckey, b_used, m_used, vi_val, _ in batch_cache_rows:
+                            self.cache.set_cue(ckey, b_used, m_used, vi_val)
 
         stage_times["stage_2_translate"] = time.monotonic() - t_s2
 
@@ -605,23 +677,26 @@ class TranslationPipeline:
 
         if is_qualified:
             out_file = self.output_dir / f"{base_name}.vi.{out_ext}"
-            remove_pending_sub(base_name)
+            if not self.dry_run:
+                remove_pending_sub(base_name)
         else:
             out_file = self.output_dir / f"{base_name}.vi.partial.{out_ext}"
-            add_pending_sub({
-                "base_name": base_name,
-                "ja_path": str(ja_path),
-                "en_path": str(en_path) if en_path else None,
-                "output_dir": str(self.output_dir),
-                "real_rate": round(real_rate, 4),
-                "uncertain_rate": round(uncertain_rate, 4),
-                "timestamp": datetime.datetime.now().isoformat()
-            })
+            if not self.dry_run:
+                add_pending_sub({
+                    "base_name": base_name,
+                    "video_path": str(video_path) if video_path else None,
+                    "ja_path": str(ja_path),
+                    "en_path": str(en_path) if en_path else None,
+                    "output_dir": str(self.output_dir),
+                    "real_rate": round(real_rate, 4),
+                    "uncertain_rate": round(uncertain_rate, 4),
+                    "timestamp": datetime.datetime.now().isoformat()
+                })
             console.print(
                 f"\n[bold yellow]⚠️ [CHỐT CHẶN PHỤ ĐỀ] Tập '{base_name}' chưa đạt chuẩn nhúng "
                 f"(Bản dịch thật: {real_rate*100:.1f}% < 95% hoặc Nghi vấn: {uncertain_rate*100:.1f}% >= 10%).[/bold yellow]\n"
                 f"   • Đã ghi file tạm: [yellow]{out_file}[/yellow]\n"
-                f"   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n"
+                + ("" if self.dry_run else "   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n")
             )
 
         # Stage 4: Linter V1 Quality Verification & Subtitle Writing
@@ -636,8 +711,8 @@ class TranslationPipeline:
                 f"({len(lint_errors)} lỗi, {len(lint_warnings)} cảnh báo, {fixes_count} auto-fixes).[/yellow]"
             )
 
-        # Gói 2: Tự động học bẫy lỗi từ Linter Violations vào Error Bank
-        if lint_violations and self.enable_rag:
+        # Gói 2: Tự động học bẫy lỗi từ Linter Violations vào Error Bank (chỉ khi chạy thật)
+        if lint_violations and self.enable_rag and not self.dry_run:
             try:
                 from subtrans.rag import KnowledgeBase
                 kb = KnowledgeBase()

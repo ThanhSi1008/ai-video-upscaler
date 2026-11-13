@@ -362,9 +362,9 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--subs-quality",
-        choices=["normal", "high"],
+        choices=["normal", "fast", "high"],
         default="normal",
-        help="Chất lượng dịch phụ đề: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"
+        help="Chất lượng dịch phụ đề: 'normal'/'fast' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"
     )
     parser.add_argument(
         "--subs-pending",
@@ -400,7 +400,10 @@ def build_arg_parser():
  
  
 def parse_args(args=None):
-    return build_arg_parser().parse_args(args)
+    parsed = build_arg_parser().parse_args(args)
+    if getattr(parsed, "subs_quality", None) == "fast":
+        parsed.subs_quality = "normal"
+    return parsed
 
 
 def main():
@@ -419,6 +422,9 @@ def main():
         from src.config import DEFAULT_OUTPUT_DIR
         from src.logger import format_bytes
         target_clean_dir = args.output if (args.output and os.path.isdir(args.output)) else DEFAULT_OUTPUT_DIR
+        if getattr(args, "dry_run", False):
+            print(f"\n🔍 [DRY RUN] Mô phỏng quét dọn thư mục tạm tại '{target_clean_dir}' (không xóa file thật).")
+            sys.exit(0)
         print(f"\n🧹 Bắt đầu quét và dọn dẹp thư mục: {target_clean_dir}...")
         report = clean_all_temporary_data(target_clean_dir)
         print(f"✅ Đã dọn dẹp {len(report['cleaned_dirs'])} thư mục/symlink tạm:")
@@ -445,39 +451,56 @@ def main():
             sys.exit(0)
         print(f"\n📋 [SUBS PENDING] Tìm thấy {len(pending_items)} tập cần xử lý lại phụ đề:")
         for it in pending_items:
-            vid_p = it.get("video_path", "")
-            print(f"  • {os.path.basename(vid_p)} (Tỷ lệ thật: {it.get('real_rate', 0)*100:.1f}%, uncertain: {it.get('uncertain_rate', 0)*100:.1f}%)")
+            label = os.path.basename(it.get("video_path") or it.get("base_name") or it.get("ja_path") or "unknown")
+            print(f"  • {label} (Tỷ lệ thật: {it.get('real_rate', 0)*100:.1f}%, uncertain: {it.get('uncertain_rate', 0)*100:.1f}%)")
 
         from subtrans.pipeline import TranslationPipeline
         for it in pending_items:
             vid_p = it.get("video_path")
-            if not vid_p or not os.path.exists(vid_p):
+            ja_s = it.get("ja_path")
+            en_s = it.get("en_path")
+            base_name_rec = it.get("base_name")
+
+            if vid_p and os.path.exists(vid_p):
+                ja_s, en_s = find_or_extract_subtitles(vid_p)
+                base_vid = os.path.splitext(os.path.basename(vid_p))[0]
+                default_out_d = Path(os.path.dirname(os.path.abspath(vid_p)))
+            elif ja_s and os.path.exists(ja_s):
+                vid_p = None
+                stem = base_name_rec or os.path.splitext(os.path.basename(ja_s))[0]
+                base_vid = stem[:-3] if stem.endswith("_4K") else stem
+                default_out_d = Path(os.path.dirname(os.path.abspath(ja_s)))
+            else:
                 continue
-            ja_s, en_s = find_or_extract_subtitles(vid_p)
-            if not ja_s:
+
+            if not ja_s or not os.path.exists(ja_s):
                 continue
-            base_vid = os.path.splitext(os.path.basename(vid_p))[0]
-            out_d = Path(args.output) if args.output and os.path.isdir(args.output) else Path(os.path.dirname(os.path.abspath(vid_p)))
+
+            out_d = Path(args.output) if args.output and os.path.isdir(args.output) else default_out_d
+            out_basename = base_name_rec if base_name_rec else f"{base_vid}_4K"
             sub_pipe = TranslationPipeline(
                 local_only=False,
                 output_dir=out_d,
                 output_format="srt",
+                dry_run=getattr(args, "dry_run", False),
                 require_approved_cast=False,
                 allow_latest_alias=False,
                 subs_quality=getattr(args, "subs_quality", "normal"),
+                auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
             )
             res = sub_pipe.run(
                 ja_path=Path(ja_s),
-                en_path=Path(en_s) if en_s else None,
-                output_basename=f"{base_vid}_4K",
+                en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
+                output_basename=out_basename,
                 subs_upgrade=True,
                 sub_offset_ms=args.sub_offset_ms,
                 auto_offset=True,
                 sound_cues=args.sound_cues,
+                video_path=Path(vid_p) if vid_p else None,
             )
             srt_p = res.get('subtitle_path') or res.get('output_path')
-            if srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
-                remove_pending_sub(vid_p)
+            if not getattr(args, "dry_run", False) and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
+                remove_pending_sub(base_name_rec or vid_p or out_basename)
                 target_4k = os.path.join(out_d, f"{base_vid}_4K.mkv")
                 if os.path.exists(target_4k) and not getattr(args, "no_embed", False):
                     from src.ffmpeg_ops import embed_subtitle_track
@@ -516,6 +539,7 @@ def main():
             local_only=False,
             output_dir=sub_out_dir,
             output_format="srt",
+            dry_run=getattr(args, "dry_run", False),
             require_approved_cast=False,
             allow_latest_alias=False,
             subs_quality=getattr(args, "subs_quality", "normal"),
@@ -533,9 +557,15 @@ def main():
             sub_offset_ms=args.sub_offset_ms,
             auto_offset=use_auto_offset,
             sound_cues=args.sound_cues,
+            video_path=Path(target_subs_vid),
         )
         srt_path = res.get('subtitle_path') or res.get('output_path')
         print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
+
+        if getattr(args, "dry_run", False):
+            cleanup_subtitle_extracts(vid_dir, base_vid_name)
+            print("🔍 [DRY RUN] Bỏ qua bước nhúng MKV và ghi đè phụ đề cạnh video gốc.")
+            sys.exit(0)
 
         # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
         if srt_path and os.path.exists(srt_path):
@@ -788,6 +818,7 @@ def main():
                     model=args.model,
                     engine=args.engine,
                     precision=args.precision,
+                    batch_size=args.batch_size,
                     force=args.force,
                     bitrate=args.bitrate,
                     segment_time=args.segment,
@@ -800,7 +831,8 @@ def main():
                     allow_partial=args.allow_partial,
                     deadline_dt=None,
                     keep_temp=args.keep_temp,
-                    dedup_policy=args.dedup_policy
+                    dedup_policy=args.dedup_policy,
+                    zero_disk=getattr(args, "zero_disk", False),
                 )
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))

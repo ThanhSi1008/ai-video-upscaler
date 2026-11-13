@@ -402,26 +402,50 @@ def run_cascade_repair_pass(
         # Dynamic affirmative cast & glossary blocks
         rel_glossary = filter_relevant_glossary(chunk_cues, glossary)
         glossary_block = ""
-        if rel_glossary:
-            gloss_lines = [f"- {term} → {trans}" for term, trans in rel_glossary.items()]
+        if rel_glossary and rel_glossary.get("terms"):
+            gloss_lines = []
+            for t in rel_glossary["terms"]:
+                line = f"- {t.get('ja', '')} → {t.get('vi', '')}"
+                extras = []
+                if t.get("alt"):
+                    alt_val = ", ".join(t["alt"]) if isinstance(t["alt"], list) else str(t["alt"])
+                    extras.append(f"alt: {alt_val}")
+                if t.get("note"):
+                    extras.append(f"note: {t['note']}")
+                if extras:
+                    line += f" ({'; '.join(extras)})"
+                gloss_lines.append(line)
             glossary_block = "<glossary>\n" + "\n".join(gloss_lines) + "\n</glossary>\n\n"
 
         cast_block = ""
         if glossary and glossary.characters:
-            hit_chars = [c for c in glossary.characters if any(c.name_ja in (cue.ja or "") for cue in chunk_cues)]
-            if hit_chars:
-                cast_lines = [f"- {c.name_ja} → {c.name_vi}" for c in hit_chars]
+            cast_lines = []
+            for c in glossary.characters:
+                meta_parts = []
+                if getattr(c, "gender", None):
+                    meta_parts.append(str(c.gender))
+                if getattr(c, "speaking_style", None):
+                    meta_parts.append(str(c.speaking_style))
+                if getattr(c, "note", None):
+                    meta_parts.append(str(c.note))
+                meta_str = f" [{', '.join(meta_parts)}]" if meta_parts else ""
+                speaks_str = ""
+                if getattr(c, "speaks_to", None):
+                    pairs = [f"{s.self}/{s.other} -> {s.listener}" for s in c.speaks_to]
+                    speaks_str = f" | speaks_to: {'; '.join(pairs)}"
+                cast_lines.append(f"- {c.name_ja} → {c.name_vi}{meta_str}{speaks_str}")
+            if cast_lines:
                 cast_block = "<cast>\n" + "\n".join(cast_lines) + "\n</cast>\n\n"
 
         prompt_str = (
             f"{cast_block}{glossary_block}"
-            f"<cues>\n{json.dumps({'cues_to_review': repair_items}, ensure_ascii=False, indent=2)}\n</cues>"
+            f"<cues>\n{json.dumps({'cues_to_review': repair_items}, ensure_ascii=False, separators=(',', ':'))}\n</cues>"
         )
 
         try:
             from google.genai import types
             from subtrans.cache import execute_and_log_api_request
-            from subtrans.throttle import call_with_retry
+            from subtrans.throttle import call_with_retry, DailyQuotaExhaustedError
 
             config_kwargs = {
                 "system_instruction": REPAIR_SYSTEM_INSTRUCTION,
@@ -431,27 +455,67 @@ def run_cascade_repair_pass(
                 "thinking_config": types.ThinkingConfig(thinking_budget=0),
             }
 
-            def _send():
-                return call_with_retry(
-                    fn=lambda: repair_translator.client.models.generate_content(
-                        model=repair_translator.model,
-                        contents=prompt_str,
-                        config=types.GenerateContentConfig(**config_kwargs),
-                    ),
-                    model_name=repair_translator.model,
-                    max_retries=2,
-                )
+            api_keys_list = getattr(repair_translator, "api_keys", []) or []
+            repair_cache = getattr(repair_translator, "cache", None)
+            rate_limiters = getattr(repair_translator, "rate_limiters", {}) or {}
 
-            curr_kid = repair_translator.key_ids[repair_translator.current_key_idx] if repair_translator.key_ids else "none"
-            response = execute_and_log_api_request(
-                _send,
-                model=repair_translator.model,
-                backend="gemini",
-                cues_count=len(chunk_cues),
-                request_type="cascade_repair",
-                cache=repair_translator.cache,
-                key_id=curr_kid,
-            )
+            while True:
+                curr_kid = (
+                    repair_translator.key_ids[repair_translator.current_key_idx]
+                    if getattr(repair_translator, "key_ids", None)
+                    else "none"
+                )
+                if len(api_keys_list) > 1 and repair_cache and repair_cache.is_key_model_exhausted(curr_kid, repair_translator.model):
+                    if not repair_translator.rotate_key(reason="Cascade pre-check PerDay exhausted"):
+                        raise DailyQuotaExhaustedError(
+                            model=repair_translator.model,
+                            quota_id="AllKeysExhausted",
+                            quota_value="",
+                            reset_pt_str="",
+                            reset_vn_str="",
+                        )
+                    curr_kid = repair_translator.key_ids[repair_translator.current_key_idx]
+
+                if curr_kid in rate_limiters:
+                    rate_limiters[curr_kid].wait_if_needed()
+
+                def _send():
+                    return call_with_retry(
+                        fn=lambda: repair_translator.client.models.generate_content(
+                            model=repair_translator.model,
+                            contents=prompt_str,
+                            config=types.GenerateContentConfig(**config_kwargs),
+                        ),
+                        model_name=repair_translator.model,
+                        max_retries=2,
+                        cache=repair_cache,
+                    )
+
+                try:
+                    response = execute_and_log_api_request(
+                        _send,
+                        model=repair_translator.model,
+                        backend="gemini",
+                        cues_count=len(chunk_cues),
+                        request_type="cascade_repair",
+                        cache=repair_cache,
+                        key_id=curr_kid,
+                    )
+                    if getattr(repair_translator, "round_robin", False) and len(api_keys_list) > 1:
+                        repair_translator.select_next_round_robin_key(reason="Cascade repair round-robin")
+                    break
+                except DailyQuotaExhaustedError as dqe:
+                    if len(api_keys_list) > 1 and repair_cache:
+                        repair_cache.mark_key_model_exhausted(
+                            key_id=curr_kid,
+                            model=repair_translator.model,
+                            quota_id=dqe.quota_id or "PerDay",
+                            quota_value=dqe.quota_value or "",
+                            reason=f"Cascade 429 PerDay: {dqe.quota_id}",
+                        )
+                        if repair_translator.rotate_key(reason=f"Cascade 429 PerDay ({dqe.quota_id})"):
+                            continue
+                    raise
 
             raw_text = response.text.strip()
             data = json.loads(raw_text)
@@ -574,7 +638,8 @@ def run_cascade_repair_pass(
 
 def _write_telemetry_jsonl(episode_basename: str, records: List[Dict[str, Any]]) -> None:
     """Writes detailed per-cue telemetry JSONL for calibration and logistic regression training."""
-    if not records:
+    import os
+    if not records or os.environ.get("PYTEST_CURRENT_TEST"):
         return
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
