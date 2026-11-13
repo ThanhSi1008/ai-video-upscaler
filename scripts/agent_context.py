@@ -1,8 +1,9 @@
-"""Read-only, standard-library bootstrap for a new agent in this repository.
+"""Standard-library bootstrap for a new agent in this repository.
 
 Reads only the curated Markdown memory and Git metadata. It deliberately does
 not import the application, inspect credentials/media/checkpoints, install
-packages, or run tests. All paths in the output are relative to the repository.
+packages, or run tests. AST commands read bounded source files. The explicit
+--install-hooks action is the only command that writes a file.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,6 +36,20 @@ BOOTSTRAP_FILES = ("docs/agents/START_HERE.md", "docs/agents/STATE.md")
 ROOT_BUDGET = 12 * 1024
 COMBINED_BUDGET = 32 * 1024
 LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)")
+BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
+RUNTIME_PATHS = ("upscale.py", "subtrans.py", "src", "subtrans", "scripts")
+SOURCE_DIRS = frozenset({"src", "subtrans", "tests", "scripts", "benchmarks"})
+PRIVATE_DIRS = frozenset({"venv", "env", "__pycache__", "scratch", "out", "models_bench", "samples", "test_frames"})
+MANAGED_HOOK = (
+    "#!/bin/sh\n"
+    "# Antigravity agent context & memory integrity check\n"
+    "python scripts/agent_context.py --check\n"
+    "status=$?\n"
+    "if [ $status -ne 0 ]; then\n"
+    "    echo \"[PRE-COMMIT ERROR] Aborting commit due to agent_context check errors.\"\n"
+    "    exit 1\n"
+    "fi\n"
+)
 
 
 def _inside(root: Path, path: Path) -> bool:
@@ -138,12 +154,42 @@ def check_memory(root: Path) -> list[str]:
     return errors
 
 
+def check_freshness(root: Path, head_short: str | None = None) -> str | None:
+    """Return a non-blocking warning when runtime code drifted past STATE.md baseline."""
+    state_path = root / "docs" / "agents" / "STATE.md"
+    if not _inside(root, state_path) or not state_path.is_file():
+        return None
+    try:
+        content = _read_memory(root, "docs/agents/STATE.md")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    match = BASELINE_RE.search(content)
+    if not match:
+        return None
+    baseline = match.group(1).lower()
+    head = (head_short or git_output(root, "rev-parse", "--short", "HEAD") or "").lower()
+    if not head or head.startswith(baseline) or baseline.startswith(head):
+        return None
+    changed_raw = git_output(root, "diff", "--name-only", f"{baseline}..HEAD", "--", *RUNTIME_PATHS)
+    if changed_raw is None:
+        return f"STATE.md baseline `{baseline}` differs from HEAD `{head}` (commit range unavailable)."
+    changed = [line for line in changed_raw.splitlines() if line.strip()]
+    if not changed:
+        return None
+    preview = ", ".join(changed[:4]) + ("..." if len(changed) > 4 else "")
+    return f"STATE.md baseline `{baseline}` trails HEAD `{head}` ({len(changed)} runtime path(s) changed: {preview})"
+
+
 def show_bootstrap(root: Path) -> None:
     print("AGENT CONTEXT - read-only; no runtime/API/GPU initialization")
     print(f"Branch: {git_output(root, 'branch', '--show-current') or '(detached or unavailable)'}")
-    print(f"HEAD: {git_output(root, 'rev-parse', '--short', 'HEAD') or '(unavailable)'}")
+    head = git_output(root, "rev-parse", "--short", "HEAD")
+    print(f"HEAD: {head or '(unavailable)'}")
     status = git_output(root, 'status', '--short')
     print(f"Working tree:\n{status if status else '(clean)' if status == '' else '(Git unavailable)'}")
+    freshness_warn = check_freshness(root, head_short=head)
+    if freshness_warn:
+        print(f"WARN: {freshness_warn}")
     for relative in BOOTSTRAP_FILES:
         print(f"\n--- {relative} ---")
         try:
@@ -199,25 +245,55 @@ def _extract_py_symbols(file_path: Path) -> list[str]:
     return results
 
 
-def show_symbols(root: Path, target: str | None = None) -> bool:
-    """Print AST symbol maps for a specific file or directory of Python files."""
-    target_path = (root / target) if target else root
-    if not _inside(root, target_path) or not target_path.exists():
-        print(f"Target path does not exist or leaves repo: {target}")
+def _source_path_allowed(root: Path, path: Path) -> bool:
+    """Reject private directories, links and resolved escapes before any read."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
         return False
+    if not relative.parts:
+        return _inside(root, path)
+    if any(part.startswith(".") or part.lower() in PRIVATE_DIRS for part in relative.parts):
+        return False
+    if len(relative.parts) > 1 or path.is_dir():
+        if relative.parts[0] not in SOURCE_DIRS:
+            return False
+    current = root
+    for part in relative.parts:
+        current /= part
+        # A link to another path inside the repo can also expose runtime data.
+        if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+            return False
+        if current.resolve() != current.absolute():
+            return False
+    return _inside(root, path)
 
+
+def source_files(root: Path, target: str | None = None) -> list[Path]:
+    """Prune before traversal; never enumerate virtualenv/cache/output trees."""
+    root = root.resolve()
+    target_path = root / target if target else root
+    if not _source_path_allowed(root, target_path) or not target_path.exists():
+        return []
     if target_path.is_file():
-        py_files = [target_path] if target_path.suffix == ".py" else []
-    else:
-        skip_dirs = {".venv", ".git", "__pycache__", "scratch", ".pytest_cache"}
-        py_files = []
-        for p in sorted(target_path.rglob("*.py")):
-            if any(part in skip_dirs for part in p.parts):
-                continue
-            py_files.append(p)
+        return [target_path] if target_path.suffix.lower() == ".py" else []
+    found = []
+    for directory, dirs, files in os.walk(target_path, followlinks=False):
+        parent = Path(directory)
+        dirs[:] = sorted(name for name in dirs if _source_path_allowed(root, parent / name))
+        for name in sorted(files):
+            path = parent / name
+            if path.suffix.lower() == ".py" and _source_path_allowed(root, path):
+                found.append(path)
+    return sorted(found)
+
+
+def show_symbols(root: Path, target: str | None = None) -> bool:
+    """Print AST symbol maps for safe source files without importing them."""
+    py_files = source_files(root, target)
 
     if not py_files:
-        print(f"No Python files found in {target or '.'}")
+        print(f"No allowed Python source files found in {target or '.'}")
         return False
 
     for p in py_files:
@@ -234,13 +310,10 @@ def show_symbols(root: Path, target: str | None = None) -> bool:
 
 def find_symbol(root: Path, symbol_name: str) -> bool:
     """Search AST definitions across python files for exact or partial symbol name."""
-    skip_dirs = {".venv", ".git", "__pycache__", "scratch", ".pytest_cache"}
     matches = []
     target_lower = symbol_name.lower()
 
-    for p in sorted(root.rglob("*.py")):
-        if any(part in skip_dirs for part in p.parts):
-            continue
+    for p in source_files(root):
         try:
             content = p.read_text(encoding="utf-8-sig")
             tree = ast.parse(content, filename=p.name)
@@ -277,27 +350,42 @@ def find_symbol(root: Path, symbol_name: str) -> bool:
 
 
 def install_git_hooks(root: Path) -> bool:
-    """Install or update .git/hooks/pre-commit to enforce memory & link checks."""
-    hooks_dir = root / ".git" / "hooks"
-    if not hooks_dir.is_dir():
-        print("Git hooks directory not found (.git/hooks). Is this a valid git repo?")
+    """Install the managed hook without replacing user hooks or external paths."""
+    common_dir = git_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    effective_hooks = git_output(root, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
+    if not common_dir or not effective_hooks:
+        print("Git hooks directory unavailable. Is this a valid git repo?")
+        return False
+    common_path = Path(common_dir).resolve()
+    hooks_dir = Path(effective_hooks)
+    if not hooks_dir.is_absolute():
+        hooks_dir = root / hooks_dir
+    if not hooks_dir.resolve().is_relative_to(common_path):
+        print("Refusing custom hooks path outside the repository Git directory.")
         return False
     hook_path = hooks_dir / "pre-commit"
-    hook_content = (
-        "#!/bin/sh\n"
-        "# Antigravity agent context & memory integrity check\n"
-        "python scripts/agent_context.py --check\n"
-        "status=$?\n"
-        "if [ $status -ne 0 ]; then\n"
-        "    echo \"[PRE-COMMIT ERROR] Aborting commit due to agent_context check errors.\"\n"
-        "    exit 1\n"
-        "fi\n"
-    )
-    hook_path.write_text(hook_content, encoding="utf-8")
     try:
+        if hook_path.is_symlink() or not hook_path.resolve().is_relative_to(common_path):
+            print("Refusing linked pre-commit hook.")
+            return False
+        if hook_path.exists():
+            original_variants = {
+                MANAGED_HOOK.encode("utf-8"),
+                MANAGED_HOOK.replace("\n", "\r\n").encode("utf-8"),
+            }
+            if hook_path.read_bytes() in original_variants:
+                print("Managed pre-commit hook already installed; unchanged.")
+                return True
+            print("Existing pre-commit hook preserved; integrate the memory check manually.")
+            return False
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation also protects a hook created concurrently.
+        with hook_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(MANAGED_HOOK)
         hook_path.chmod(0o755)
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"Could not install managed hook: {exc}")
+        return False
     print(f"Pre-commit hook successfully installed at: {hook_path}")
     return True
 
@@ -328,6 +416,9 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 1
         else:
             print(f"PASS: required memory files, local links, root <= {ROOT_BUDGET} bytes, root + subtrans <= {COMBINED_BUDGET} bytes")
+            freshness_warn = check_freshness(root)
+            if freshness_warn:
+                print(f"WARN: {freshness_warn}")
 
     if args.inventory:
         ran_action = True

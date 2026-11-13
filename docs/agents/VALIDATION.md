@@ -1,57 +1,38 @@
-# Sổ Tay Kiểm Thử & Xác Minh An Toàn (VALIDATION)
+# Kiểm thử và bằng chứng
 
-> **Cập nhật ngày:** 2026-10-29  
-> **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [STATE](STATE.md) | [DECISIONS](DECISIONS.md) | [Root AGENTS](../../AGENTS.md)
+Cập nhật 2026-10-31. Xem [STATE](STATE.md), [bản đồ](PROJECT_MAP.md), [quy tắc](../../AGENTS.md).
 
----
+## Lệnh mặc định tại root Windows
 
-## 1. Ba Nguyên Tắc Kiểm Thử Bất Biến (Safety Invariants)
-
-1. **Tuyệt đối không rò rỉ hoặc tiêu tốn Quota API thật:**
-   - Mọi bài kiểm thử tự động (`pytest`) phải sử dụng mock/stub backend (`subtrans/gemini_backend.py` hoặc `tests/test_key_rotation_stub.py`).
-   - Tuyệt đối không gọi API thật trong giờ làm việc (14:00 đến đêm).
-2. **Tuyệt đối không xóa hoặc ghi đè Checkpoint sản xuất:**
-   - Thư mục `.temp_<basename>` trên SSD chứa các chunk đã upscale phục vụ resume qua đêm. Mọi bài test dùng fixture `tmp_path` do pytest quản lý riêng biệt.
-3. **Độc quyền tài nguyên phần cứng (GPU & RAM):**
-   - Không chạy các bài test gắn tag `@pytest.mark.gpu` khi pipeline upscale chính đang hoạt động để tránh gây crash hoặc OOM.
-
----
-
-## 2. Các Lệnh Kiểm Thử Thường Dùng (Test Playbook)
-
-### A. Kiểm tra tính toàn vẹn bộ nhớ ngữ cảnh Agent (Memory Integrity)
-Chạy script kiểm tra để đảm bảo toàn bộ tài liệu agent đều nằm trong ngân sách byte và không có link chết:
 ```powershell
-python scripts/agent_context.py --check
+.\.venv\Scripts\python.exe scripts/agent_context.py --check
+.\.venv\Scripts\python.exe scripts/verify_offline.py
+git diff --check
 ```
 
-### B. Kiểm thử cô lập nguồn hoàn toàn offline (Offline Snapshot)
-Công cụ `scripts/verify_offline.py` sao chép mã nguồn sang thư mục tạm, ngắt kết nối socket mạng và lọc sạch các biến môi trường nhạy cảm (`GEMINI_API_KEY`, credential files) trước khi chạy test:
-```powershell
-python scripts/verify_offline.py
-```
+Dùng Python trong `.venv`; Python trên PATH có thể không có pytest/dependencies. Không tự cài hoặc nâng phiên bản môi trường đang dùng cho production chỉ để bootstrap.
 
-### C. Chạy kiểm thử theo từng phân hệ (Fast Feedback)
-```powershell
-# 1. Kiểm thử phân hệ tiền xử lý và lọc ảo giác Whisper (< 2s):
-.\.venv\Scripts\python.exe -m pytest subtrans/tests/test_whisper_noise_and_speaker.py subtrans/tests/test_parser.py
+`verify_offline.py` dùng interpreter đang gọi, snapshot source/config/fixtures sang `scratch/agent-validation-*/repo`, chạy `pytest -m "not gpu"`. Giữ `pytest.log` và `junit.xml` trong thư mục của lần chạy để đối chiếu. Không copy cache, checkpoint, weights, .env, video hoặc pending queue.
 
-# 2. Kiểm thử toàn bộ phân hệ dịch thuật Subtrans (~30s):
-.\.venv\Scripts\python.exe -m pytest subtrans/tests/
+Process test ẩn CUDA, loại biến key/token, tắt dotenv và plugin autoload, chặn socket Python trước collection. Đây là cách ly dành cho suite đã đọc; **không phải sandbox hệ điều hành cho code không tin cậy**, không chặn mạng của mọi subprocess. Test mới có gọi subprocess/API phải review trước khi chạy. Các test cần weights/video thật sẽ skip khi snapshot không có fixture; ghi rõ số lượng.
 
-# 3. Kiểm thử phân hệ Video Pipeline, Dedup và Chốt chặn Sanity:
-.\.venv\Scripts\python.exe -m pytest tests/test_output_sanity.py tests/test_dedup_policy.py tests/test_mux_audit_regression.py
+## Vì sao không chạy bare pytest trên repo production?
 
-# 4. Kiểm thử toàn bộ test suite dự án (bỏ qua GPU tests):
-.\.venv\Scripts\python.exe -m pytest -m "not gpu"
-```
+- `src/config.py` đăng ký atexit xóa lock; test subtitle guardrails thao tác lock thật nếu chạy trực tiếp.
+- `TranslationCache()`, `KnowledgeBase()` mặc định có thể ghi cache production dù API bị mock; `throttle.call_with_retry` có thể sửa `subtrans/models.yaml`.
+- `-m "not gpu"` chỉ loại marker; một số test còn lại vẫn tự chọn CUDA nếu nhìn thấy GPU.
+- GPU soak test có thao tác xóa checkpoint cố định. Chỉ chạy khi phạm vi đã được người dùng cho phép.
+- `subtrans.py check/models` gọi API thật. `upscale.py --dry-run` không bảo vệ các nhánh cleanup/subs-only/subs-pending chạy trước nó. Dry-run dịch còn ghi cast/output/cache/telemetry.
 
----
+Nếu cần test nhanh, dùng snapshot và lệnh từ log, hoặc chỉ chạy trực tiếp file test đã xác minh hoàn toàn độc lập runtime (ví dụ test công cụ agent). Không áp dụng blanket “mọi test đều dùng tmp_path”.
 
-## 3. Tiêu Chí Đánh Giá Hoàn Tất (Acceptance Checklist)
+## Nghiệm thu và báo cáo
 
-Trước khi commit mã nguồn hoặc kết thúc lượt làm việc:
-- [ ] Lệnh `python scripts/agent_context.py --check` trả về 0 lỗi.
-- [ ] Toàn bộ bài test liên quan trong `tests/` và `subtrans/tests/` đạt 100% PASS.
-- [ ] Không có file tạm, checkpoint giả hoặc credential rơi rớt trong thư mục dự án.
-- [ ] Tài liệu [`STATE.md`](STATE.md) và hồ sơ handoff trong `docs/agents/tasks/` được cập nhật.
+Ghi nguyên lệnh, interpreter, baseline, phạm vi, số passed/failed/skipped/deselected, thời gian, đường dẫn bằng chứng. Test fail phải ghi đúng nguyên nhân; không đổi assertion chỉ để xanh.
+
+Thay đổi bộ nhớ/tooling không tạo video: mux/frame-count/fps ghi **N/A — không tạo thành phẩm**, không ghi PASS. Khi sửa pipeline và có chạy video trong phạm vi được phép, phải đo mux integrity và `ffprobe -count_frames` trên source/output theo AGENTS; unit tests không thay thế kiểm chứng này.
+
+`agent_context.py --check` kiểm tra file bắt buộc, link nội bộ dạng inline (bỏ qua anchors/remote/reference links), ngân sách byte. Cảnh báo freshness so sánh source hiện tại với baseline lưu trong STATE; không thay kiểm tra ngữ nghĩa bằng source/test. Hook kiểm tra working tree, không phải chứng nhận nội dung staged.
+
+Kết thúc: cập nhật [handoff](tasks/TEMPLATE.md), STATE, kiểm tra diff/staged, commit riêng của yêu cầu. Giữ số đo cũ là lịch sử; không gọi API/GPU để tạo một báo cáo “PASS” ngoài phạm vi được phép.
+

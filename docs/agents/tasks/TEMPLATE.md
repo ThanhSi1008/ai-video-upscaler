@@ -1,41 +1,36 @@
-# Mẫu ghi chép nhiệm vụ (Task Handoff Template)
+# Handoff: <tên tác vụ>
 
-> **Mỗi khi thực hiện một yêu cầu mới, tạo một file `docs/agents/tasks/YYYY-MM-DD-<tên-nhiệm-vụ>.md` theo mẫu này.**
+Tạo khi bắt đầu tác vụ nhiều bước; cập nhật trong lúc làm, trước compact/bàn giao/dừng. Mỗi tác vụ một file.
 
----
+## Yêu cầu và phạm vi
+- Ngày/múi giờ:
+- Nguồn yêu cầu và mục tiêu:
+- Kết quả cần bàn giao:
+- Được phép / chưa được phép:
+- Ràng buộc quan trọng:
+- Trạng thái: đang làm / chờ thông tin / hoàn tất.
 
-## 1. Thông Tin Nhiệm Vụ
-- **Ngày:** YYYY-MM-DD
-- **Nguồn yêu cầu:** Người dùng yêu cầu / AI nghiên cứu đề xuất
-- **Người thực hiện:** AI Agent Coder (Senior Python Engineer)
-- **Commit liên quan:** `<hash>`
-- **Trạng thái:** HOÀN TẤT / ĐANG THỰC HIỆN / TẠM DỪNG
+## Mốc mã nguồn và điều phối
+- Root, branch, baseline commit:
+- File đã sửa (kể cả chưa commit):
+- Chủ sở hữu từng phần / subagent / kết quả đã nhận:
+- Tiến trình/session đang chạy và nơi xem kết quả:
+- File dữ liệu production cần giữ:
 
----
+## Đã làm và bằng chứng
+- Thay đổi: file:symbol, lý do.
+- Quyết định đã chốt / giả thuyết / hướng thử bị loại và lý do.
+- Lệnh kiểm tra, interpreter, số pass/fail/skip, thời gian, evidence path.
+- Mux/frame/fps: số đo thật hoặc N/A + lý do.
 
-## 2. Mục Tiêu & Ràng Buộc
-- **Mục tiêu chính:** [Mô tả ngắn gọn 1-2 câu]
-- **Ràng buộc bất biến:** [Ví dụ: 100% cục bộ, không gọi API thật ban ngày, bảo vệ checkpoint .temp, không làm gãy test]
+## Bước tiếp theo
+1. Hành động cụ thể tiếp theo, file/symbol hoặc lệnh.
+2. Việc còn lại và điều kiện hoàn tất.
+- Câu hỏi/approval còn chờ (không coi thời gian trôi qua là đồng ý):
+- Rủi ro/giới hạn cần báo người dùng:
 
----
+## Kết thúc
+- Kết quả và giới hạn đã thông báo:
+- Commit/tag: điền hash có sẵn hoặc tra `git log -- <file-handoff>` sau commit, không dùng <pending> cho task đã xong.
+- Tài liệu cập nhật: [STATE](../STATE.md), [AGENTS](../../../AGENTS.md), bản đồ/quyết định liên quan.
 
-## 3. Nhật Ký Thay Đổi Cụ Thể
-- **File / Module thay đổi:**
-  - `path/to/file1.py`: [Mô tả thay đổi]
-  - `path/to/file2.py`: [Mô tả thay đổi]
-- **Lỗi đã sửa / Tính năng đã thêm:**
-  1. [Lỗi 1 / Tính năng 1]
-  2. [Lỗi 2 / Tính năng 2]
-
----
-
-## 4. Số Liệu & Kết Quả Kiểm Chứng (Verification)
-- **Kiểm thử tự động:** `pytest` [Số test pass, thời gian chạy]
-- **Kiểm định Mux:** [Khớp số luồng audio/sub/font, bit-exact]
-- **Chỉ số hiệu năng:** [FPS, VRAM giải phóng, thời lượng]
-
----
-
-## 5. Handoff Cho Agent Kế Tiếp
-- **Điểm cần lưu ý khi bắt đầu tiếp theo:** [Những gì chưa làm hoặc ca biên cần quan sát]
-- **Tài liệu đã cập nhật:** [`AGENTS.md`](../../../AGENTS.md), [`STATE.md`](../STATE.md)

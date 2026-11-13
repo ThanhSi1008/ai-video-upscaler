@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.debugpy",
+    "charliermarsh.ruff",
+    "redhat.vscode-yaml",
+    "tamasfe.even-better-toml",
+    "eamodio.gitlens",
+    "qwtel.sqlite-viewer",
+    "DavidAnson.vscode-markdownlint",
+    "EditorConfig.EditorConfig"
+  ]
+}

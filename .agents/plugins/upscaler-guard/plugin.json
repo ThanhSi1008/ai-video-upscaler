@@ -1,0 +1,12 @@
+{
+  "name": "upscaler-guard",
+  "displayName": "AI Video Upscaler Safety Guard",
+  "version": "1.0.0",
+  "description": "Enforces project safety invariants via lifecycle hooks: blocks .env/API-key leaks, guards .temp_* checkpoints, protects daytime Gemini RPD quota, and warns against unisolated pytest or concurrent GPU runs.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Chạy kiểm tra ngữ cảnh Agent và kiểm thử offline cô lập toàn dự án",
+    "Tạo bảng thuật ngữ glossary mới cho một bộ anime và kiểm thử dry-run",
+    "Kiểm tra trạng thái checkpoint video và đánh giá hiệu năng pipeline hiện tại"
+  ]
+}

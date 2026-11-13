@@ -1,0 +1,27 @@
+{
+  "upscaler-session-context": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python hooks/session_start.py",
+        "timeout": 5
+      }
+    ]
+  },
+  "upscaler-pre-tool-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command|read_file|write_file|edit_file|view_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/pre_tool_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

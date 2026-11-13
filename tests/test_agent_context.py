@@ -3,6 +3,8 @@
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from scripts import agent_context
 
 
@@ -115,7 +117,7 @@ def test_symbols_extracts_ast_classes_and_functions(tmp_path, capsys):
 
 
 def test_find_symbol_locates_definitions_across_files(tmp_path, capsys):
-    sample_dir = tmp_path / "pkg"
+    sample_dir = tmp_path / "src"
     sample_dir.mkdir()
     (sample_dir / "worker.py").write_text(
         "class ProcessingEngine:\n"
@@ -126,15 +128,117 @@ def test_find_symbol_locates_definitions_across_files(tmp_path, capsys):
     assert agent_context.main(["--root", str(tmp_path), "--find", "run_pipeline"]) == 0
     out = capsys.readouterr().out
     assert "Found 1 symbol definition(s) matching 'run_pipeline':" in out
-    assert "pkg/worker.py:2:   def run_pipeline(self, mode: str) -> bool:" in out
+    assert "src/worker.py:2:   def run_pipeline(self, mode: str) -> bool:" in out
 
 
 def test_install_git_hooks_creates_pre_commit_hook(tmp_path, capsys):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     hooks_dir = tmp_path / ".git" / "hooks"
-    hooks_dir.mkdir(parents=True)
     assert agent_context.main(["--root", str(tmp_path), "--install-hooks"]) == 0
     out = capsys.readouterr().out
     assert "Pre-commit hook successfully installed" in out
     hook_file = hooks_dir / "pre-commit"
     assert hook_file.is_file()
     assert "python scripts/agent_context.py --check" in hook_file.read_text(encoding="utf-8")
+
+
+def test_ast_prunes_private_trees_and_rejects_explicit_private_targets(tmp_path, monkeypatch, capsys):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/worker.py").write_text("def visible(): pass\n", encoding="utf-8")
+    private = [".venv/library.py", "venv/library.py", "out/result.py",
+               "subtrans/.cache/cache.py", "src/.temp_episode/checkpoint.py"]
+    for relative in private:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def private_sentinel(): pass\n", encoding="utf-8")
+    walked = []
+    real_walk = agent_context.os.walk
+
+    def observe_walk(*args, **kwargs):
+        for entry in real_walk(*args, **kwargs):
+            walked.append(Path(entry[0]).relative_to(tmp_path).as_posix())
+            yield entry
+
+    monkeypatch.setattr(agent_context.os, "walk", observe_walk)
+    assert agent_context.find_symbol(tmp_path, "visible")
+    assert not any(name.startswith((".venv", "venv", "out", "subtrans/.cache", "src/.temp")) for name in walked)
+    for relative in private:
+        assert not agent_context.show_symbols(tmp_path, relative)
+    assert "private_sentinel" not in capsys.readouterr().out
+
+
+def test_ast_rejects_source_symlink_to_outside(tmp_path, capsys):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_text("def external_sentinel(): pass\n", encoding="utf-8")
+    linked = root / "src/linked.py"
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("Creating symlinks requires Windows developer mode or privilege")
+    assert not agent_context.show_symbols(root, "src/linked.py")
+    assert not agent_context.find_symbol(root, "external_sentinel")
+    assert "def external_sentinel" not in capsys.readouterr().out
+
+
+def test_existing_custom_and_modified_managed_hooks_are_preserved(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    hook = tmp_path / ".git/hooks/pre-commit"
+    for contents in (b"#!/bin/sh\necho custom\n", agent_context.MANAGED_HOOK.encode() + b"echo custom\n"):
+        hook.write_bytes(contents)
+        assert not agent_context.install_git_hooks(tmp_path)
+        assert hook.read_bytes() == contents
+
+
+def test_managed_hook_is_idempotent_for_original_windows_newlines(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    hook = tmp_path / ".git/hooks/pre-commit"
+    original = agent_context.MANAGED_HOOK.replace("\n", "\r\n").encode("utf-8")
+    hook.write_bytes(original)
+    before = hook.stat().st_mtime_ns
+    assert agent_context.install_git_hooks(tmp_path)
+    assert hook.read_bytes() == original
+    assert hook.stat().st_mtime_ns == before
+
+
+def test_custom_hooks_directory_outside_git_is_not_written(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.hooksPath", ".githooks"], check=True)
+    assert not agent_context.install_git_hooks(tmp_path)
+    assert not (tmp_path / ".githooks").exists()
+
+
+def test_worktree_uses_common_git_hooks_directory(tmp_path):
+    main, worktree = tmp_path / "main", tmp_path / "worktree"
+    subprocess.run(["git", "init", "-q", str(main)], check=True)
+    subprocess.run(["git", "-C", str(main), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+                    "commit", "--allow-empty", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "--detach", "-q", str(worktree)], check=True)
+    assert (worktree / ".git").is_file()
+    assert agent_context.install_git_hooks(worktree)
+    assert (main / ".git/hooks/pre-commit").read_bytes() == agent_context.MANAGED_HOOK.encode("utf-8")
+
+
+def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_path, monkeypatch):
+    make_memory(tmp_path)
+    (tmp_path / "docs/agents/STATE.md").write_text("> **Commit Baseline:** `6dae441`\n", encoding="utf-8")
+
+    # Matching HEAD -> no warning
+    assert agent_context.check_freshness(tmp_path, head_short="6dae441") is None
+
+    # Docs-only change since baseline -> no warning
+    monkeypatch.setattr(agent_context, "git_output", lambda root, *args: "")
+    assert agent_context.check_freshness(tmp_path, head_short="0d6e3b6") is None
+
+    # Runtime code changed since baseline -> actionable warning
+    monkeypatch.setattr(
+        agent_context,
+        "git_output",
+        lambda root, *args: "scripts/embed_fate_subtitles.py\nsrc/pipeline.py",
+    )
+    warn = agent_context.check_freshness(tmp_path, head_short="0d6e3b6")
+    assert warn is not None
+    assert "6dae441" in warn and "0d6e3b6" in warn and "2 runtime path(s)" in warn
+

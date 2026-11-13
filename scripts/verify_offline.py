@@ -34,6 +34,11 @@ def allowed_source(relative: Path) -> bool:
     """Only source/config/fixtures; never copy production state or credentials."""
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         return False
+    if relative.parts[0] == ".agents":
+        return (
+            not any(part in {"__pycache__", "out", "scratch"} for part in relative.parts)
+            and relative.suffix.lower() in SUFFIXES | {".svg"}
+        )
     if any(part.startswith(".") or part in {"__pycache__", "out", "scratch", "models_bench"}
            for part in relative.parts):
         return False

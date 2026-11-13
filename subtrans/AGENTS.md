@@ -6,7 +6,7 @@
 ## 0. Nạp lại ngữ cảnh và nguồn kiểm chứng
 
 - Bắt đầu/resume/subagent: đọc [START_HERE](../docs/agents/START_HERE.md), handoff của task và file này; đối chiếu code trước khi sửa. Không dùng lịch sử chat làm bộ nhớ duy nhất.
-- Đối chiếu ngày **2026-10-29**: `TranslationPipeline.__init__` lấy thứ tự model từ `models.yaml:chain`, lọc `local`/`preview`, rồi sắp Lite trước (`normal`) hoặc Flash trước (`high`). `config.yaml` giữ batch, timeout và tùy chọn; CLI override trong `cli.py`. Model/quota ở đây là cấu hình repo, chưa xác minh khả dụng hay hạn mức nhà cung cấp trong phiên này.
+- Đối chiếu code tại baseline **`2d27aa4`**: `TranslationPipeline.__init__` lấy thứ tự model từ `models.yaml:chain`, lọc `local`/`preview`, rồi sắp Lite trước (`normal`) hoặc Flash trước (`high`). `config.yaml` giữ batch, timeout và tùy chọn; CLI override trong `cli.py`. Model/quota ở đây là cấu hình repo, chưa xác minh khả dụng hay hạn mức nhà cung cấp trong phiên này.
 - Khởi động offline: dùng `--help`; **không chạy `check`/`models`**, vì chúng gọi API thật. `check` còn hiển thị mảnh key. Không đọc/in `.env` hay API key; mọi test dùng stub.
 - `--dry-run` không gọi API nhưng vẫn ghi cast giả, subtitle/audit, telemetry và có thể sửa `pending_subs.json`. Dùng output riêng. `--cache-db` chỉ đổi cache pipeline; backend/RAG còn tạo DB mặc định. Khi test phải cách ly `cache.DB_PATH`, `rag.KNOWLEDGE_DB_PATH` và file quota; không sửa/xóa dữ liệu vận hành để kiểm thử.
 - `--local`/`--review` và cấu hình Ollama là dấu vết cũ, không phải backend được phép dùng. Cổng chất lượng tại `pipeline.py`: bản dịch thật >=95%, nghi vấn <10%; còn lại xuất `.vi.partial.*` và ghi hàng đợi pending.
@@ -31,7 +31,7 @@
 * **Ghim mốc thời gian theo phụ đề tiếng Anh phòng thu (Auto-Align):**
   * `--auto-align-en` mặc định bật, nhưng `parse_and_align_subtitles` chỉ ghim khi tên file chứa `whisper` hoặc `is_whisper=True`; track JA phòng thu giữ timeline nguồn sau offset.
   * `snap_whisper_cues_to_en` dùng `dtw_auto_align.get_dtw_alignment_map`: DTW đơn điệu toàn cục (1:1, 1:2, 2:1), tự động phát hiện và loại bỏ các cue Whisper mồ côi (`is_dropped_sound=True`, `is_skipped=True`) khi unmapped và cách câu EN gần nhất > 2500ms hoặc cue ngắn <= 6 ký tự / chứa từ khóa âm thanh.
-  * Pass 3 đảm bảo tính đơn điệu và khoảng cách tối thiểu 50ms được cô lập trên `active_cues` (bỏ qua các cue đã bị drop/skip để không đẩy lùi mốc thời gian hợp lệ), đồng thời bảo toàn mốc thời gian Dual Dialogue khi 2 cue đồng thời (`abs(start diff) <= 15ms` và cùng end).
+  * Pass 3 chuẩn hóa thứ tự/chồng lấn trên `active_cues` với `min_gap_ms=50` (bỏ qua cue drop/skip); bảo toàn Dual Dialogue khi cả chênh lệch start và end đều <=15ms. Không coi mọi gap dương <50ms là đã được mở rộng: code hiện chỉ xử lý các nhánh đảo thứ tự/chồng lấn. Đọc thân hàm; docstring 3-pass overlap trong `parser.py` còn mô tả thuật toán cũ.
 * **Bộ lọc chống ảo giác Whisper & tiếng hét lặp token:**
   * `WHISPER_HALLUCINATION_REGEX` nhận diện và triệt tiêu các mẫu ảo giác phổ biến của Whisper tiếng Nhật ở đoạn nhạc OP/ED hoặc khoảng lặng (`ご視聴ありがとうございました`, `チャンネル登録`, `高評価`, `字幕`, `提供`, `ご覧いただきありがとうございました`).
   * `SCREAM_OR_REPEAT_LOOP_REGEX` nhận diện các vòng lặp token hoặc tiếng hét kéo dài (1 ký tự lặp >= 6 lần, cụm 1-3 ký tự lặp >= 4 lần không chứa Kanji) để tự động đánh dấu sound cue loại bỏ khi `--sound-cues drop`.
@@ -44,7 +44,7 @@
 * **Chống dịch đúp tiếng cười & Triệt tiêu dị bản trùng lặp trong Dual Dialogue:**
   * Các từ tượng thanh tiếng cười anime (`ふはは+`, `ははは+`, `フハハ+`, `ククク+`, `ふふふ+`...) được nhận diện chính xác là interjection/sound cue trong `subtrans/parser.py`, tránh bị gán nhầm câu thoại tiếng Anh overlap của nhân vật khác.
   * Bộ `optimize_cues_for_playback` trong `subtrans/writer.py` tự động phát hiện các câu xuất hiện cùng lúc chia sẻ tiền tố chung dài (common prefix >= 15 chars) hoặc độ trùng lặp từ vựng >= 60% để chỉ giữ lại 1 câu hoàn chỉnh duy nhất, tuyệt đối không gộp thành 2 dòng Dual Dialogue lặp lại nhau.
-* **Số dòng văn bản:** Thoại đơn mặc định 1 dòng/cue; ngoại lệ là Dual Dialogue ở trên hoặc `--wrap N`. Giới hạn mềm 80 ký tự, báo cáo thêm các câu vượt 107 ký tự.
+* **Số dòng văn bản:** Quy ước một dòng/cue là lịch sử. Từ thay đổi `6dae441`, `cli.run` và `TranslationPipeline` mặc định `smart_wrap=True`; `writer.write_subtitles` ngắt thoại đơn dài >72 ký tự thành tối đa 2 dòng theo dấu câu/liên từ để dễ đọc. Dùng `--no-smart-wrap` để giữ một dòng (vẫn bảo toàn Dual Dialogue); `--wrap N` là lựa chọn thủ công ưu tiên cao hơn. `write_srt_subtitles` gọi trực tiếp vẫn mặc định `smart_wrap=False`, nên kiểm tra đúng entrypoint. Báo cáo QA hiện vẫn đánh dấu các câu vượt 80/107 ký tự.
 * **Dấu câu chuẩn hóa:**
   * Dấu ba chấm: Sử dụng đúng 3 chấm ASCII `...` (không dùng ký tự unicode `…`).
   * Ngắt lời / dở câu: Sử dụng gạch ngang `—` ở cuối câu.
@@ -79,7 +79,7 @@ subtrans/
 ├── cache.py                # SQLite cache (.cache/translations.db) keyed by SHA-256 (hỗ trợ rag_hash và stage)
 ├── glossary.py             # Loader & Merger: Nạp Base glossary + Per-series Override
 ├── glossary.yaml           # Base glossary chuẩn: 13 style rules, address rules, 230+ anime terms
-├── writer.py               # Xuất file .srt chuẩn mẫu (1 dòng/cue, soft cap 80, CPS auto-fix, zero-overlap)
+├── writer.py               # SRT/ASS, smart-wrap >72 ký tự, Dual Dialogue, CPS auto-fix, zero-overlap
 └── report.py               # Stage C: Báo cáo QA audit Markdown (out/<name>.audit.md & --review-file)
 ```
 

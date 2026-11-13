@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Agent: Verify Offline Test Suite",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/verify_offline.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Upscale: Dry-Run Sample (Safe)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/upscale.py",
+      "args": [
+        "samples/sample_30s.mkv",
+        "-o",
+        "scratch/debug_out/",
+        "--no-subs",
+        "--dry-run"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Subtrans: Dry-Run Sample (No API Quota)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/subtrans.py",
+      "args": [
+        "run",
+        "subtrans/samples/sample.ja.srt",
+        "-o",
+        "scratch/debug_subs/",
+        "--dry-run"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Agent: Bootstrap & Context Summary",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["scripts/agent_context.py"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Agent: Verify Memory & Byte Budgets",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["scripts/agent_context.py", "--check"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test: Safe Offline Suite (Isolated Snapshot)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["scripts/verify_offline.py"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint: Ruff Critical Errors Check",
+      "type": "shell",
+      "command": "ruff check upscale.py subtrans.py src subtrans scripts tests",
+      "problemMatcher": []
+    },
+    {
+      "label": "Upscale: List Registered SR Models",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["upscale.py", "--list-models"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Subtrans: CLI Help (Offline Safe)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["subtrans.py", "--help"],
+      "problemMatcher": []
+    }
+  ]
+}

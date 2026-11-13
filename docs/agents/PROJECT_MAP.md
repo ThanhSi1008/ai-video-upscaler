@@ -69,8 +69,13 @@ subtrans.cli → TranslationPipeline
 - **Dữ liệu runtime khác:** `out/`, `logs/`, cache/SQLite, cast, audit, `pending_subs.json`, `.gpu_active.lock`, weights. Không đọc hàng loạt hay đưa vào context/commit. `.env` và key luôn ngoài memory.
 - **Tài liệu chuyên sâu:** [Video](../video-pipeline.md), [Dedup](../dedup-architecture.md), [Audit](../audit-and-safety.md), [Engineering log](../engineering-log.md). Các con số benchmark là lịch sử nếu thiếu phép đo mới.
 
-## Script, benchmark và test
+## Script, công cụ Agent, benchmark và test
 
+- [`.agents/`](../../.agents):
+  - `skills/`: 4 workspace skills nạp theo ngữ cảnh (`safe-offline-test`, `video-upscale-ops`, `subtrans-anime-ops`, `agent-handoff-commit`).
+  - `plugins/upscaler-guard/`: lifecycle hooks (`SessionStart`, `PreToolUse`) bảo vệ `.env`, `.temp_*`, Gemini quota và khóa GPU.
+  - `plugins/upscaler-mcp/`: MCP server Stdio read-only (mặc định tắt để tiết kiệm token).
+- [`.vscode/`](../../.vscode), [`.editorconfig`](../../.editorconfig), [`ruff.toml`](../../ruff.toml), [`.env.example`](../../.env.example): cấu hình IDE/linter/mẫu biến môi trường dùng chung cho dev và AI Agents.
 - [`scripts/`](../../scripts):
   - `agent_context.py`: Bootstrap Agent, kiểm tra tính toàn vẹn bộ nhớ (`--check`), trích xuất cấu trúc code AST (`--symbols`), tìm kiếm symbol (`--find`), và cài đặt pre-commit hook (`--install-hooks`).
   - `verify_offline.py`: Kiểm thử an toàn sandbox offline ngắt kết nối mạng.

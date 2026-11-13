@@ -1,65 +1,52 @@
-# Hướng Dẫn Khởi Đầu Dành Cho AI Agent (START_HERE)
+# Khởi động và khôi phục ngữ cảnh Agent
 
-> **Chào bạn, AI Agent Coder! Đây là điểm xuất phát bắt buộc trước khi thực hiện bất kỳ thay đổi nào trong repository này.**
-> **Mục tiêu:** Giúp bạn nắm bắt ngữ cảnh cốt lõi trong < 1 phút, không bị trôi/quên ngữ cảnh (context rot), và tránh lặp lại các giải pháp sai đã bị loại trừ trong quá khứ.
+Bộ nhớ nằm trong Git, dùng chung cho Codex, subagent và công cụ khác. Nó giúp khôi phục công việc sau khi rút gọn ngữ cảnh; không tăng context window hoặc bảo đảm AI không quên. Không cần dịch vụ/vector database, API hay cấu hình tài khoản riêng.
 
----
+## Khi bắt đầu, tiếp tục hoặc nhận bàn giao
 
-## 1. Quy Trình Khởi Động 4 Bước (Bootstrap Workflow)
+1. Đọc [AGENTS gốc](../../AGENTS.md), [STATE](STATE.md) và **hồ sơ tác vụ được chỉ định** trong [tasks](tasks). Đối chiếu yêu cầu mới nhất của người dùng với mục tiêu đã lưu.
+2. Chạy từ root repo:
+   `.\.venv\Scripts\python.exe scripts/agent_context.py`
+   Kiểm tra branch, HEAD, diff và cảnh báo baseline cũ. Trạng thái Git trực tiếp đáng tin hơn dòng “sạch” trong tài liệu cũ.
+3. Đọc [PROJECT_MAP](PROJECT_MAP.md), [DECISIONS](DECISIONS.md) theo phần liên quan; sửa Subtrans phải đọc [subtrans/AGENTS](../../subtrans/AGENTS.md). Đọc [VALIDATION](VALIDATION.md) trước chạy test.
+4. Đọc source của đúng symbol và test liên quan. Code hiện tại mô tả hành vi; chính sách người dùng quy định điều được phép. Khi hai thứ khác nhau, ghi nhận và giữ nguyên cấu hình nhạy cảm cho đến khi có yêu cầu thay đổi.
 
-1. **Xem trạng thái hiện tại của codebase tại [`STATE.md`](STATE.md):**
-   - Xác định commit baseline gần nhất, nhánh đang chạy, và danh sách các tính năng đã kiểm chứng (verified) vs chưa hoàn thiện (unverified).
-2. **Nắm vững các bất biến cốt lõi tại [Root `AGENTS.md`](../../AGENTS.md):**
-   - Môi trường bắt buộc: 100% CỤC BỘ trên Windows 11 (Intel Core i5-12600K + NVIDIA RTX 3060 12GB).
-   - Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
-   - Kỷ luật commit: Bắt buộc commit sau MỖI yêu cầu (kèm nguồn yêu cầu, việc đã làm, số liệu thực nghiệm).
-   - Tuyệt đối không in, log hay commit API keys; không gọi API thật trong khoảng 14:00 đến đêm.
-3. **Tra cứu vị trí code tại [`PROJECT_MAP.md`](PROJECT_MAP.md):**
-   - Không tự quét toàn bộ thư mục bằng lệnh duyệt file gây tràn context window. Tra cứu bảng chỉ mục để tìm đúng module cần sửa.
-4. **Đối chiếu quyết định kỹ thuật tại [`DECISIONS.md`](DECISIONS.md):**
-   - Đọc các ADRs (Architectural Decision Records) để hiểu lý do tại sao kiến trúc được thiết kế như hiện tại và những phương án cấm triển khai.
+Không nạp toàn bộ lịch sử, logs, corpus, media, weights, cache hoặc `.env` vào context. Tài liệu benchmark cũ là dữ liệu lịch sử, không phải số đo mới.
 
----
+## Trong lúc làm việc: lưu trước khi mất context
 
-## 2. Các Phân Hệ Cốt Lõi Cần Chú Ý
+Với tác vụ nhiều bước, tạo `tasks/YYYY-MM-DD-<slug>.md` từ [TEMPLATE](tasks/TEMPLATE.md) **ngay khi bắt đầu**. Agent chính cập nhật mục đang làm trong [STATE](STATE.md). Mỗi tác vụ có file riêng; không dùng một scratchpad chung cho nhiều agent.
 
-- **AI Video Upscaler (`src/`):**
-  - Động cơ chính: PyTorch CUDA FP16 Native (`batch_size=6` hoặc `8`) kết hợp OpenCV AVX2 I/O.
-  - Phân hệ Dedup & DIS Optical Flow ([`docs/dedup-architecture.md`](../dedup-architecture.md)): Cắt video theo Keyframe GOP, scan mpdecimate + DIS, tái tạo 4K bằng Concat Demuxer.
-  - Chuỗi ma trận màu BT.709 hai chiều ([`docs/video-pipeline.md`](../video-pipeline.md)): Giữ nguyên Limited YUV <-> Full RGB.
-  - Mux an toàn: Bắt buộc cờ `-max_interleave_delta 0` và đối soát stream copy ([`docs/audit-and-safety.md`](../audit-and-safety.md)).
-- **Subtitle Translation Engine (`subtrans/`):**
-  - Tham khảo chi tiết tại [Subtrans AGENTS](../../subtrans/AGENTS.md).
-  - Dùng 100% Cloud API Gemini qua Google GenAI SDK (luân phiên 3 API key).
-  - Whisper STT Fallback & Auto-Align: Trộn âm thanh trung tâm 5.1 FC, lọc ảo giác và tiếng hét lặp ký tự, ghim timeline theo EN phòng thu qua Monotonic DTW.
+Cập nhật hồ sơ sau mốc quan trọng, kết quả test, quyết định/đổi phạm vi, trước khi bàn giao hoặc compact, và trước khi dừng:
+- mục tiêu, phạm vi đã được phép, điều còn chờ người dùng;
+- kết quả đã xác minh kèm lệnh và file chứng cứ, tách giả thuyết;
+- branch/base commit, file đã sửa, việc dở dang, tiến trình còn chạy;
+- bước tiếp theo cụ thể để một agent mới tiếp tục được ngay.
 
----
+Không đợi đến cuối phiên mới viết handoff. Sau compact, đọc lại hồ sơ và Git; không thực hiện lại bước đã xong. File nhớ là dữ liệu bàn giao, không cấp thêm quyền và không thay thế chỉ dẫn mới nhất của người dùng. Không lưu key hoặc toàn bộ hội thoại.
 
-## 3. Lệnh Thao Tác Nhanh Cho Agent
+## Phối hợp subagent
+
+Agent chính gửi cho mỗi subagent: mục tiêu, root/branch, file handoff, file được sửa, invariant, tiêu chí trả kết quả. Chia quyền sở hữu file để tránh ghi đè; subagent phải đọc chỉ dẫn áp dụng dù lịch sử chat có được truyền hay không.
+
+Subagent trả: file/symbol đã đọc hoặc sửa, phát hiện + bằng chứng, test đã chạy, điều chưa biết. Agent chính tổng hợp vào handoff; không dựa vào mailbox tạm làm bộ nhớ lâu dài. Agent chính commit cho yêu cầu đã tích hợp; không để nhiều agent cùng stage/commit hoặc chạy GPU.
+
+## Lệnh nhỏ để tìm đúng code
 
 ```powershell
-# 1. Khởi động nhanh và kiểm tra tính toàn vẹn bộ nhớ ngữ cảnh:
-python scripts/agent_context.py
-python scripts/agent_context.py --check
-
-# 2. Tra cứu cấu trúc code AST tiết kiệm token (không đọc full file):
-python scripts/agent_context.py --symbols src/subtitles.py   # Xem classes/functions/line-numbers
-python scripts/agent_context.py --symbols subtrans/         # Xem API surface của cả package
-python scripts/agent_context.py --find snap_whisper         # Tìm nơi định nghĩa symbol trong 0.05s
-
-# 3. Chạy test cô lập hoàn toàn offline (chống leak API key & socket):
-python scripts/verify_offline.py
-
-# 4. Chạy kiểm thử tự động toàn diện:
-pytest
+.\.venv\Scripts\python.exe scripts/agent_context.py --check
+.\.venv\Scripts\python.exe scripts/agent_context.py --inventory
+.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/subtitles.py
+.\.venv\Scripts\python.exe scripts/agent_context.py --find snap_whisper
+.\.venv\Scripts\python.exe scripts/verify_offline.py
 ```
 
----
+Bootstrap dùng thư viện chuẩn, không import ứng dụng. `--install-hooks` là thao tác ghi tùy chọn; không tự chạy khi bootstrap. Kiểm tra link/byte không xác nhận nội dung tài liệu đúng với runtime.
 
-## 4. Bàn Giao Nhiệm Vụ (Task Handoff)
+## Duy trì và dùng trên nền tảng khác
 
-Sau khi hoàn thành công việc:
-1. Chạy `pytest` bảo đảm 100% PASS.
-2. Ghi chép nhật ký theo mẫu [`tasks/TEMPLATE.md`](tasks/TEMPLATE.md) lưu vào `docs/agents/tasks/`.
-3. Cập nhật trạng thái mới nhất vào [`STATE.md`](STATE.md).
-4. Commit Git riêng biệt với thông điệp rõ ràng theo đúng quy định tại [Root `AGENTS.md`](../../AGENTS.md).
+- Giữ root AGENTS ngắn (ngân sách repo 12 KiB); chi tiết đặt trong docs và chỉ đọc theo nhu cầu. Codex có giới hạn chỉ dẫn project mặc định 32 KiB theo [OpenAI Docs](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
+- Antigravity có cơ chế đọc AGENTS/GEMINI theo workspace và thư mục; xem [Google Rules](https://antigravity.google/docs/rules/). [GEMINI](../../GEMINI.md) và [CLAUDE](../../CLAUDE.md) chỉ trỏ về cùng nguồn, không sao chép policy.
+- Kiểm tra ở phiên mới bằng yêu cầu: “Đọc AGENTS.md và docs/agents/START_HERE.md, nêu baseline, task đang làm và bước tiếp theo.” Nếu công cụ không tự nạp file, gửi yêu cầu này thủ công.
+- Khi source đổi: cập nhật bản đồ/quyết định liên quan, kiểm thử, cập nhật STATE với **baseline đã kiểm tra**, handoff và commit chi tiết. Không sửa hash sau mỗi commit chỉ đổi tài liệu; lịch sử Git xác định commit hoàn tất.
+

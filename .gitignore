@@ -58,13 +58,18 @@ tests/*.png
 ._*
 .Spotlight-V100
 .Trashes
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
 .idea/
 *.swp
 
 # Environment & API Key security
 .env
 .env.*
+!.env.example
 .cache/
 subtrans/.env
 subtrans/.cache/
