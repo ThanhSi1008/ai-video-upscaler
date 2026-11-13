@@ -29,6 +29,7 @@ class Cue(BaseModel):
     p2: Optional[str] = None  # CoT Vietnamese 2nd-person pronoun (e.g. sư phụ, ngươi, bệ hạ)
     mode: Optional[str] = "spoken"
     mode_hint: Optional[str] = None  # Deterministic parser hint: inner | flashback | narration | quoted
+    audio_turn_hint: Optional[str] = None  # Acoustic 5.1 FC voice turn hint: speaker_changed | same_speaker
     en_conflict: bool = False
     uncertain_reason: Optional[str] = "none"
     raw_text: Optional[str] = None  # Original raw text for skipped cues

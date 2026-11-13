@@ -1,0 +1,188 @@
+# =====================================================================
+# glossary.violet.yaml
+# Bảng thuật ngữ, quan hệ xưng hô & phong cách dịch chuyên biệt cho series:
+# "Violet Evergarden" (Búp Bê Ký Ức Tự Động)
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Violet Evergarden characters, military-epistolary register, Auto Memory Doll terms, and style rules"
+  genres: [drama, historical, fantasy, slice_of_life]
+
+style_rules:
+  - "CRITICAL ROMAJI RETENTION: Keep all Western character and place names intact: Violet Evergarden, Gilbert Bougainvillea, Claudia Hodgins, Cattleya Baudelaire, Benedict Blue, Iris Cannary, Erica Brown, Dietfried, Luculia, Leiden, Leidenschaftlich."
+  - "VIOLET'S FORMAL KEIGO & MILITARY DISCIPLINE: Violet speaks in ultra-formal, polite Vietnamese ('tôi - ngài/quý khách/cô/anh'). When speaking to or about Major Gilbert ('少佐'), she ALWAYS calls him 'Thiếu tá' (self: 'tôi', or 'em' ONLY in the final emotional letter/reunion climax when reciprocated). Her signature greeting MUST be natural and dignified: 'Nếu đó là điều quý khách mong muốn, Violet Evergarden xin sẵn sàng đi tới bất cứ nơi đâu.'"
+  - "GILBERT'S GENTLE PROTECTIVE TONE: Major Gilbert speaks to Violet with deep tenderness and sorrow: self='ta' or 'anh' (use 'anh - em' in his confession '愛してる' -> 'Anh yêu em'), other='Violet' / 'em'."
+  - "HODGINS & POSTAL COMPANY COLLEAGUES: Claudia Hodgins speaks like a caring guardian/older brother to Violet (self='tôi' or 'ta', other='Violet'). Cattleya speaks like a warm, mature older sister (self='chị' to Violet/Iris/Erica, 'tôi/em' to Hodgins)."
+
+difficulty_markers:
+  - "自動手記人形"
+  - "愛してる"
+  - "少佐"
+  - "ライデンシャフトリヒ"
+
+address_rules:
+  principle: "Tôn trọng tuyệt đối văn phong thư tín lịch duyệt châu Âu cổ điển và tác phong quân ngũ trang nghiêm của Violet."
+  relations:
+    - case: "Violet -> Thiếu tá Gilbert (少佐)"
+      self: "tôi"
+      other: "Thiếu tá"
+      note: "Kính cẩn tuyệt đối; câu '愛してる' của Thiếu tá dịch là 'Anh yêu em'"
+    - case: "Gilbert -> Violet"
+      self: "anh"
+      other: "Violet"
+      note: "Dịu dàng, trân trọng; khi giao mệnh lệnh quân sự có thể dùng 'ta - em/Violet'"
+    - case: "Violet -> Khách hàng / Người lạ"
+      self: "tôi"
+      other: "quý khách / ngài / tiểu thư / phu nhân"
+
+characters:
+  - name_ja: "ヴァイオレット"
+    name_vi: "Violet"
+    aliases: ["ヴァイオレット・エヴァーガーデン", "Violet Evergarden"]
+    gender: "female"
+    register: "military formal stoic sincere"
+    speaks_to:
+      - listener: "Gilbert"
+        self: "tôi"
+        other: "Thiếu tá"
+      - listener: "Hodgins"
+        self: "tôi"
+        other: "Trung tá Hodgins"
+        note: "Hoặc 'Chủ tịch' khi làm việc tại Công ty Bưu chính CH"
+      - listener: "Cattleya"
+        self: "tôi"
+        other: "cô Cattleya"
+      - listener: "Iris"
+        self: "tôi"
+        other: "Iris"
+      - listener: "Benedict"
+        self: "tôi"
+        other: "Benedict"
+      - listener: "all"
+        self: "tôi"
+        other: "ngài"
+
+  - name_ja: "ギルベルト"
+    name_vi: "Gilbert"
+    aliases: ["ギルベルト・ブーゲンビリア", "少佐", "Gilbert Bougainvillea"]
+    gender: "male"
+    register: "gentle noble military officer"
+    speaks_to:
+      - listener: "Violet"
+        self: "anh"
+        other: "Violet"
+      - listener: "Hodgins"
+        self: "tôi"
+        other: "Hodgins"
+      - listener: "Dietfried"
+        self: "em"
+        other: "anh"
+
+  - name_ja: "ホッジンズ"
+    name_vi: "Hodgins"
+    aliases: ["クラウディア・ホッジンズ", "Claudia Hodgins", "Claudia"]
+    gender: "male"
+    register: "warm guardian president"
+    speaks_to:
+      - listener: "Violet"
+        self: "tôi"
+        other: "Violet"
+      - listener: "Gilbert"
+        self: "tôi"
+        other: "Gilbert"
+      - listener: "Cattleya"
+        self: "tôi"
+        other: "Cattleya"
+
+  - name_ja: "カトレア"
+    name_vi: "Cattleya"
+    aliases: ["カトレア・ボードレール", "Cattleya Baudelaire"]
+    gender: "female"
+    register: "graceful mature sisterly"
+    speaks_to:
+      - listener: "Violet"
+        self: "chị"
+        other: "Violet"
+      - listener: "Hodgins"
+        self: "em"
+        other: "Claudia"
+
+  - name_ja: "ベネディクト"
+    name_vi: "Benedict"
+    aliases: ["ベネディクト・ブルー", "Benedict Blue"]
+    gender: "male"
+    register: "brash casual loyal"
+    speaks_to:
+      - listener: "Violet"
+        self: "tôi"
+        other: "Violet"
+      - listener: "Hodgins"
+        self: "tôi"
+        other: "Hodgins"
+
+  - name_ja: "アイリス"
+    name_vi: "Iris"
+    aliases: ["アイリス・カナリー", "Iris Cannary"]
+    gender: "female"
+    register: "ambitious lively"
+    speaks_to:
+      - listener: "Violet"
+        self: "tôi"
+        other: "Violet"
+
+  - name_ja: "エリカ"
+    name_vi: "Erica"
+    aliases: ["エリカ・ブラウン", "Erica Brown"]
+    gender: "female"
+    register: "gentle shy"
+    speaks_to:
+      - listener: "Violet"
+        self: "tôi"
+        other: "Violet"
+
+  - name_ja: "ディートフリート"
+    name_vi: "Dietfried"
+    aliases: ["Dietfried Bougainvillea"]
+    gender: "male"
+    register: "bitter stern naval captain"
+    speaks_to:
+      - listener: "Violet"
+        self: "ta"
+        other: "ngươi"
+      - listener: "Gilbert"
+        self: "anh"
+        other: "Gilbert"
+
+terms:
+  - ja: "自動手記人形"
+    en: "Auto Memory Doll"
+    aliases: ["Auto Memory Dolls", "ドール"]
+    vi: "Búp bê Ký ức Tự động"
+    alt: ["Doll"]
+  - ja: "CH郵便社"
+    en: "CH Postal Company"
+    vi: "Công ty Bưu chính CH"
+  - ja: "少佐"
+    en: "Major"
+    vi: "Thiếu tá"
+  - ja: "中佐"
+    en: "Lieutenant Colonel"
+    vi: "Trung tá"
+  - ja: "海軍大佐"
+    en: "Naval Captain"
+    vi: "Đại tá Hải quân"
+  - ja: "ライデンシャフトリヒ"
+    en: "Leidenschaftlich"
+    vi: "Leidenschaftlich"
+  - ja: "ライデン"
+    en: "Leiden"
+    vi: "Leiden"
+  - ja: "エヴァーガーデン家"
+    en: "Evergarden family"
+    vi: "gia tộc Evergarden"
+  - ja: "代筆"
+    en: "ghostwriting"
+    vi: "viết thư hộ"
+    alt: ["chấp bút"]

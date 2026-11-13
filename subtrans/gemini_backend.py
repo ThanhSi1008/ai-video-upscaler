@@ -244,6 +244,27 @@ STATIC_ANIME_TRANSLATION_HANDBOOK = (
     "Cue 102 JA=`間違いなくエミリアだったんだ。` -> vi=`chắc chắn chính là Emilia.` (lowercase continuation, proper name `Emilia` capitalized).\n"
     "- Exemplar 7 (Short Zero-Pronoun Line Anchored by Neighbor Context): Context prev=`ネルさん、受付をお願い` -> Current JA=`ありがとう` (speaker=`Fran`) "
     "-> speaker=`Fran`, addressee=`Nell`, mode=`spoken`, p1=`em`, p2=`chị`, en_conflict=`false`, vi=`Cảm ơn chị nhé.`, uncertain=`none`.\n"
+    "- Exemplar 8 (Unlabeled SRT with 5.1 FC Acoustic Turn Shift `audio_turn='speaker_changed'`): Cue 204 JA=`もう遅いから休め。` (speaker=`Hodgins` -> Violet) | "
+    "Cue 205 JA=`いえ、この手紙を書き終えるまでは。` (`audio_turn='speaker_changed'`, female F0 shift) "
+    "-> speaker=`Violet`, addressee=`Hodgins`, mode=`spoken`, p1=`tôi`, p2=`Trung tá`, en_conflict=`false`, vi=`Không ạ, tôi phải viết xong bức thư này đã.`, uncertain=`none`.\n"
+    "- Exemplar 9 (Unlabeled SRT with Continuous Voice `audio_turn='same_speaker'`): Cue 310 JA=`ゾルトラークはもう人を殺す魔法じゃない。` | "
+    "Cue 311 JA=`今の時代では一般攻撃魔法と呼ばれているよ。` (`audio_turn='same_speaker'`) "
+    "-> speaker=`Frieren`, addressee=`Qual`, mode=`spoken`, p1=`ta`, p2=`ngươi`, en_conflict=`false`, vi=`Ở thời đại này, người ta gọi nó là Ma pháp tấn công cơ bản đấy.`, uncertain=`none`.\n"
+    "- Exemplar 10 (Name Suffix `-君` `HON:kun` vs 2nd-Person Pronoun `君` `2P:kimi`): JA=`佐藤君はまだ来ていないのか？` (`ja_hints='HON:kun'`) | EN=`Hasn't Sato-kun arrived yet?` "
+    "-> 3rd-person reference to Sato, NEVER misread `-君` as 2nd-person `'cậu'` addressing the listener -> vi=`Cậu Sato vẫn chưa tới sao?`.\n"
+    "- Exemplar 11 (Polite Apprentice Scolding Mentor — Frieren/Fern Archetype): JA=`フリーレン様、また変な魔導書を買ったのですか。` | EN=`Mistress Frieren, did you buy another weird grimoire?` "
+    "-> speaker=`Fern`, addressee=`Frieren`, mode=`spoken`, p1=`em`, p2=`cô Frieren`, en_conflict=`false`, vi=`Cô Frieren, cô lại mua thêm sách ma đạo kỳ quặc nữa rồi phải không ạ?`, uncertain=`none`.\n"
+    "- Exemplar 12 (Cursed Technique / Breathing Technique Canonical Renderings): JA=`大丈夫、僕最強だから。領域展開「無量空処」。` | EN=`Don't worry, I'm the strongest. Domain Expansion: Unlimited Void.` "
+    "-> speaker=`Gojo`, addressee=`Itadori`, mode=`spoken`, p1=`thầy`, p2=`em`, en_conflict=`false`, vi=`Yên tâm đi, vì thầy là kẻ mạnh nhất mà. Lãnh địa triển khai: Vô Lượng Không Xứ.`, uncertain=`none`.\n"
+    "- Exemplar 13 (Kansai-ben Lively Tsukkomi `DIALECT:kansai_ben`): JA=`なんでやねん！ほんまに無茶苦茶やで！` | EN=`What the heck?! That's seriously crazy!` "
+    "-> preserve energetic colloquial cadence without awkward literalisms -> vi=`Cái quái gì vậy trời! Đúng là loạn hết cả lên mà!`, uncertain=`none`.\n\n"
+    "## SECTION D: ACOUSTIC SPEAKER DIARIZATION & MULTI-MODAL DISAMBIGUATION RULES\n"
+    "- When `speaker_cc` is present (from `.ass` Actor or Closed Captions `(Speaker)`), treat `speaker_cc` as authoritative ground truth.\n"
+    "- When `speaker_cc` is absent on plain `.srt` files, use `audio_turn` (`speaker_changed` vs `same_speaker`) together with `ja_hints` "
+    "(morphological 1P/2P pronouns, keigo verbs, gendered SFPs) and `surrounding_context` (`p1`, `p2`, `vi_ref`) to track turn-taking accurately:\n"
+    "  * `audio_turn='speaker_changed'`: The center-channel voice timbre and fundamental pitch F0 changed significantly from the previous cue. "
+    "Flip `speaker` and `addressee` in conversational 2-person scenes unless explicit vocatives or narration indicate a 3rd participant.\n"
+    "  * `audio_turn='same_speaker'`: The exact same voice continues speaking across the cue boundary. Maintain the same `speaker`, `addressee`, `p1`, and `p2`.\n"
     "</vietnamese_anime_translation_handbook>"
 )
 
@@ -430,16 +451,21 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
             char_entry["note"] = char.note
         relevant_characters.append(char_entry)
 
+    # Đặt khóa TĨNH (characters -> address_guidance) lên trước khóa ĐỘNG theo batch (terms)
+    # nhằm giữ tiền tố JSON bất biến dài nhất giữa các batch liên tiếp!
     res: Dict[str, Any] = {}
     if relevant_characters:
         res["characters"] = relevant_characters
-    if relevant_terms:
-        res["terms"] = relevant_terms
 
     if glossary.address_rules:
         addr: Dict[str, Any] = {}
         if glossary.address_rules.principle:
             addr["principle"] = glossary.address_rules.principle
+        if glossary.address_rules.relations:
+            addr["relation_archetypes"] = [
+                {"case": r.case, "self": r.self, "other": r.other}
+                for r in glossary.address_rules.relations
+            ]
 
         matching_1p = []
         for p in glossary.address_rules.first_person:
@@ -468,14 +494,11 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
         if matching_honorifics:
             addr["relevant_honorifics"] = matching_honorifics
 
-        if glossary.address_rules.relations:
-            addr["relation_archetypes"] = [
-                {"case": r.case, "self": r.self, "other": r.other}
-                for r in glossary.address_rules.relations
-            ]
-
         if addr:
             res["address_guidance"] = addr
+
+    if relevant_terms:
+        res["terms"] = relevant_terms
 
     return res
 
@@ -529,6 +552,8 @@ class GeminiTranslator(BaseTranslator):
         enable_rag: bool = True,
         round_robin: bool = False,
         cache: Optional[Any] = None,
+        explicit_caching: bool = False,
+        kb: Optional[Any] = None,
     ):
         import datetime
         from subtrans.config import get_gemini_api_keys
@@ -562,6 +587,10 @@ class GeminiTranslator(BaseTranslator):
         self.dry_run = dry_run
         self.timeout_ms = timeout_ms
         self.enable_rag = enable_rag
+        self.explicit_caching = explicit_caching
+        self.kb = kb
+        self._explicit_cache_names: Dict[Tuple[str, str, str], str] = {}
+        self._explicit_cache_disabled: set = set()
         self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
 
         # Client-side rate limiting theo khóa (A4: Lite <= 12 RPM, Flash <= 4 RPM)
@@ -688,6 +717,47 @@ class GeminiTranslator(BaseTranslator):
                 return True
         return False
 
+    def _get_or_create_explicit_cache(self, key_id: str, system_prompt: str) -> Optional[str]:
+        """
+        Tạo hoặc tái sử dụng bộ đệm Explicit Context Cache (TTL 15 phút = 900s) trên máy chủ Gemini
+        cho bộ ba `(key_id, model, sha256(system_prompt))` khi bật `explicit_caching=True`.
+        Tự động fallback êm về `None` (dùng Implicit Caching qua `system_instruction`) nếu tier/model từ chối.
+        """
+        if not getattr(self, "explicit_caching", False) or self.dry_run or not self.client:
+            return None
+        if not system_prompt or len(system_prompt) < 12000:
+            return None
+        if (key_id, self.model) in self._explicit_cache_disabled:
+            return None
+
+        import hashlib
+        prompt_sig = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:16]
+        cache_tuple = (key_id, self.model, prompt_sig)
+        existing = self._explicit_cache_names.get(cache_tuple)
+        if existing:
+            return existing
+
+        try:
+            caches_api = getattr(self.client, "caches", None)
+            if caches_api is None or not hasattr(caches_api, "create"):
+                self._explicit_cache_disabled.add((key_id, self.model))
+                return None
+            created = caches_api.create(
+                model=self.model,
+                config=types.CreateCachedContentConfig(
+                    system_instruction=system_prompt,
+                    ttl="900s",
+                ),
+            )
+            c_name = getattr(created, "name", None)
+            if isinstance(c_name, str) and c_name.strip():
+                self._explicit_cache_names[cache_tuple] = c_name.strip()
+                return c_name.strip()
+        except Exception as e:
+            logger.debug(f"Explicit Context Cache unavailable on {self.model}/{key_id}, falling back to Implicit Caching: {e}")
+            self._explicit_cache_disabled.add((key_id, self.model))
+        return None
+
     def _call_api(self, prompt_text: str, system_prompt: str = SYSTEM_INSTRUCTION) -> List[Dict[str, Any]]:
         """Invokes Gemini API requesting structured JSON array with rate limiting, retries, and key rotation."""
         if self.dry_run:
@@ -738,11 +808,17 @@ class GeminiTranslator(BaseTranslator):
             if curr_kid in self.rate_limiters:
                 self.rate_limiters[curr_kid].wait_if_needed()
 
+            explicit_cache_name = self._get_or_create_explicit_cache(curr_kid, system_prompt)
+            req_config_kwargs = dict(config_kwargs)
+            if explicit_cache_name:
+                req_config_kwargs.pop("system_instruction", None)
+                req_config_kwargs["cached_content"] = explicit_cache_name
+
             def _send():
                 return self.client.models.generate_content(
                     model=self.model,
                     contents=prompt_text,
-                    config=types.GenerateContentConfig(**config_kwargs)
+                    config=types.GenerateContentConfig(**req_config_kwargs)
                 )
 
             try:
@@ -763,6 +839,11 @@ class GeminiTranslator(BaseTranslator):
                 return data
             except Exception as e:
                 err_str = str(e).lower()
+                if explicit_cache_name and ("cachedcontent" in err_str or "cached_content" in err_str or "not found" in err_str):
+                    self._explicit_cache_disabled.add((curr_kid, self.model))
+                    for k_del in [k for k, v in self._explicit_cache_names.items() if v == explicit_cache_name]:
+                        self._explicit_cache_names.pop(k_del, None)
+                    continue
                 is_429 = "429" in err_str or "resource_exhausted" in err_str or "too many requests" in err_str
 
                 if is_429:
@@ -870,6 +951,8 @@ class GeminiTranslator(BaseTranslator):
                 item["en"] = c.en
             if c.speaker and c.speaker.strip().lower() not in ("", "unknown"):
                 item["speaker_cc"] = strip_ja_furigana(c.speaker.strip())
+            elif getattr(c, "audio_turn_hint", None):
+                item["audio_turn"] = c.audio_turn_hint
             if getattr(c, "mode_hint", None):
                 item["mode_hint"] = c.mode_hint
             if not en_only_source:
@@ -900,13 +983,17 @@ class GeminiTranslator(BaseTranslator):
             try:
                 import hashlib
                 from subtrans.rag import KnowledgeBase
-                kb = KnowledgeBase()
+                kb = getattr(self, "kb", None)
+                if kb is None:
+                    kb = KnowledgeBase()
+                    self.kb = kb
                 series_key = getattr(self, "series", None)
                 few_shots = kb.retrieve_few_shots(
                     cues,
                     series=series_key,
                     max_examples=3,
-                    exclude_episode=getattr(self, "exclude_episode", None)
+                    exclude_episode=getattr(self, "exclude_episode", None),
+                    fallback_builtin=True,
                 )
                 if few_shots:
                     payload["approved_reference_examples"] = few_shots

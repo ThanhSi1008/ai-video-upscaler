@@ -20,6 +20,7 @@ gemini:
     gemini-3.5-flash-lite: 500 # 500 RPD (chưa xác minh, nguồn bên thứ ba)
     gemini-3.1-flash-lite: 500 # 500 RPD (chưa xác minh, nguồn bên thứ ba)
   request_timeout_ms: 45000  # Timeout per request in MILLISECONDS (45s) per google.genai types.HttpOptions
+  explicit_context_caching: false  # Tùy chọn khóa cứng Explicit Context Cache (TTL 15m) trên máy chủ Gemini
 
 ollama:
   endpoint: "http://localhost:11434"

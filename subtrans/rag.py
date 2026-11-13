@@ -85,6 +85,114 @@ INITIAL_ERROR_BANK_SEEDS = [
     },
 ]
 
+# Kho câu mẫu chuẩn fan-sub tích hợp sẵn (Cold-Start Gold Exemplars) cho các series trọng điểm & hội thoại chung
+BUILTIN_GOLD_EXEMPLARS: List[Dict[str, Optional[str]]] = [
+    {
+        "series": "frieren",
+        "ja": "フリーレン様、そろそろ起きないと置いていきますよ。",
+        "en": "Mistress Frieren, if you don't wake up soon, I will leave you behind.",
+        "vi": "Cô Frieren, nếu cô không dậy ngay là em bỏ cô lại đấy nhé.",
+        "speaker": "Fern",
+        "addressee": "Frieren",
+    },
+    {
+        "series": "frieren",
+        "ja": "シュタルク様、朝からそんなに食べるとお腹を壊しますよ。",
+        "en": "Master Stark, you'll get a stomachache if you eat that much in the morning.",
+        "vi": "Cậu Stark, mới sáng sớm mà ăn nhiều thế là đau bụng đấy.",
+        "speaker": "Fern",
+        "addressee": "Stark",
+    },
+    {
+        "series": "frieren",
+        "ja": "ゾルトラークはもう人を殺す魔法じゃない。一般攻撃魔法だよ。",
+        "en": "Zoltraak is no longer killing magic. It is ordinary offensive magic now.",
+        "vi": "Zoltraak giờ không còn là Ma pháp giết người nữa. Nó đã trở thành Ma pháp tấn công cơ bản rồi.",
+        "speaker": "Frieren",
+        "addressee": "Qual",
+    },
+    {
+        "series": "violet",
+        "ja": "お客様がお望みなら、どこでも駆けつけます。自動手記人形サービス、ヴァイオレット・エヴァーガーデンです。",
+        "en": "If it is your wish, I will travel anywhere to meet you. Auto Memory Doll service, Violet Evergarden.",
+        "vi": "Nếu đó là tâm nguyện của quý khách, tôi xin sẵn sàng đi tới bất cứ nơi đâu. Dịch vụ Búp bê Ký ức Tự động, Violet Evergarden xin nghe.",
+        "speaker": "Violet",
+        "addressee": "Client",
+    },
+    {
+        "series": "violet",
+        "ja": "少佐が私にくださった「愛してる」という言葉の意味を、知りたいのです。",
+        "en": "I want to understand the meaning of the words 'I love you' that the Major gave me.",
+        "vi": "Tôi muốn hiểu được ý nghĩa của lời 'Anh yêu em' mà Thiếu tá đã dành cho tôi.",
+        "speaker": "Violet",
+        "addressee": "Hodgins",
+    },
+    {
+        "series": "jujutsu",
+        "ja": "大丈夫、僕最強だから。領域展開「無量空処」。",
+        "en": "Don't worry, I'm the strongest. Domain Expansion: Unlimited Void.",
+        "vi": "Yên tâm đi, vì thầy là kẻ mạnh nhất mà. Lãnh địa triển khai: Vô Lượng Không Xứ.",
+        "speaker": "Gojo",
+        "addressee": "Itadori",
+    },
+    {
+        "series": "jujutsu",
+        "ja": "頭が高いぞ小僧。伏魔御廚子で刻んでやる。",
+        "en": "Know your place, brat. I'll slice you apart with Malevolent Shrine.",
+        "vi": "Ngươi hơi ngạo mạn rồi đấy thằng nhóc. Ta sẽ băm xác ngươi bằng Phục Ma Ngự Trù Tử.",
+        "speaker": "Sukuna",
+        "addressee": "Itadori",
+    },
+    {
+        "series": "kimetsu",
+        "ja": "全集中、水の呼吸、壱ノ型・水面斬り！",
+        "en": "Total Concentration, Water Breathing, First Form: Water Surface Slash!",
+        "vi": "Toàn Tập Trung, Hơi thở của Nước, Thức thứ nhất: Thủy Diện Trảm!",
+        "speaker": "Tanjiro",
+        "addressee": "Demon",
+    },
+    {
+        "series": "kimetsu",
+        "ja": "お館様の御前だぞ。頭を下げろ、炭治郎。",
+        "en": "You are in the presence of the Master. Bow your head, Tanjiro.",
+        "vi": "Đang ở trước mặt Chúa công đấy. Cúi đầu xuống đi, Tanjiro.",
+        "speaker": "Rengoku",
+        "addressee": "Tanjiro",
+    },
+    {
+        "series": "rezero",
+        "ja": "バルス、朝から見苦しい顔ね。レムを見習いなさい。",
+        "en": "Barusu, your face is unsightly first thing in the morning. Follow Rem's example.",
+        "vi": "Barusu, mới sáng ra mà mặt mũi đã khó coi rồi đấy. Hãy học tập Rem đi.",
+        "speaker": "Ram",
+        "addressee": "Subaru",
+    },
+    {
+        "series": "fate",
+        "ja": "先輩、朝ごはんの準備ができましたよ。",
+        "en": "Senpai, breakfast is ready.",
+        "vi": "Senpai, bữa sáng em chuẩn bị xong rồi ạ.",
+        "speaker": "Sakura",
+        "addressee": "Shirou",
+    },
+    {
+        "series": None,
+        "ja": "先輩、今日の部活は休みですか？",
+        "en": "Senpai, is club practice canceled today?",
+        "vi": "Tiền bối ơi, buổi sinh hoạt câu lạc bộ hôm nay nghỉ ạ?",
+        "speaker": "Kohai",
+        "addressee": "Senpai",
+    },
+    {
+        "series": None,
+        "ja": "貴様ら、この魔王の城に足を踏み入れたことを後悔させてやろう！",
+        "en": "You fools, I'll make you regret setting foot inside this Demon King's castle!",
+        "vi": "Lũ các ngươi, ta sẽ bắt các ngươi phải hối hận vì dám đặt chân vào tòa thành của Ma Vương này!",
+        "speaker": "DemonKing",
+        "addressee": "Heroes",
+    },
+]
+
 
 class KnowledgeBase:
     """SQLite-backed Knowledge Base managing gold subtitle units and error bank."""
@@ -302,6 +410,24 @@ class KnowledgeBase:
             tokens.extend(cleaned[i : i + 3] for i in range(len(cleaned) - 2))
         return tokens
 
+    def seed_default_gold_exemplars(self) -> int:
+        """Nạp kho câu mẫu chuẩn `BUILTIN_GOLD_EXEMPLARS` vào bảng `gold_units` (idempotent)."""
+        inserted = 0
+        for ex in BUILTIN_GOLD_EXEMPLARS:
+            ok = self.add_gold_unit(
+                ja_text=str(ex.get("ja") or ""),
+                vi_text=str(ex.get("vi") or ""),
+                en_text=ex.get("en"),
+                series=ex.get("series"),
+                episode="__builtin_seed__",
+                speaker=ex.get("speaker"),
+                addressee=ex.get("addressee"),
+                status="gold",
+            )
+            if ok:
+                inserted += 1
+        return inserted
+
     def retrieve_few_shots(
         self,
         cues: List[Cue],
@@ -309,6 +435,7 @@ class KnowledgeBase:
         max_examples: int = 3,
         min_score: float = 0.05,
         exclude_episode: Optional[str] = None,
+        fallback_builtin: bool = False,
     ) -> List[Dict[str, str]]:
         """
         Retrieves relevant few-shot examples from gold_units matching cues in the batch.
@@ -364,6 +491,32 @@ class KnowledgeBase:
                 params.append(exclude_episode)
             cursor.execute(query, params)
             candidates = cursor.fetchall()
+
+        if fallback_builtin and len(candidates) < max_examples:
+            seen_ja = {row[1] for row in candidates}
+            series_norm = series.lower() if series else None
+            next_neg_id = -1
+            for ex in BUILTIN_GOLD_EXEMPLARS:
+                ex_series = ex.get("series")
+                if series_norm and ex_series is not None and ex_series != series_norm:
+                    continue
+                if not series_norm and ex_series is not None:
+                    continue
+                ex_ja = str(ex.get("ja") or "")
+                if ex_ja and ex_ja not in seen_ja:
+                    candidates.append((
+                        next_neg_id,
+                        ex_ja,
+                        ex.get("en"),
+                        str(ex.get("vi") or ""),
+                        ex_series,
+                        "__builtin_seed__",
+                        ex.get("speaker"),
+                        ex.get("addressee"),
+                        "gold",
+                    ))
+                    seen_ja.add(ex_ja)
+                    next_neg_id -= 1
 
         if not candidates:
             return []

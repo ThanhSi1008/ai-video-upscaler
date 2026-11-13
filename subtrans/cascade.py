@@ -25,6 +25,7 @@ from subtrans.models import Cue, Glossary
 from subtrans.linter import lint_cue, LintViolation, CRITICAL_RULES, ALL_RULE_IDS, RULE_HIGH_CPS
 from subtrans.gemini_backend import (
     GeminiTranslator,
+    build_episode_system_prompt,
     filter_relevant_glossary,
     get_anime_safety_settings,
     extract_genai_response_text,
@@ -71,6 +72,16 @@ REPAIR_SYSTEM_INSTRUCTION = (
     "<cast>. Use names exactly as in <glossary>. Do not add, drop or reorder information; keep numbers. "
     "Keep length within ±30% of the draft unless the issue is 'too_long'."
 )
+
+
+def build_repair_system_prompt(glossary: Optional[Glossary] = None) -> str:
+    """
+    Xây dựng System Instruction tĩnh (> 4,096 tokens) cho lượt sửa Cascade bằng cách kết hợp
+    REPAIR_SYSTEM_INSTRUCTION với cẩm nang dịch thuật & bảng nhân vật tĩnh của tập, kích hoạt
+    Gemini Implicit Context Caching giảm 75-90% chi phí input token ở cả Stage 2c.
+    """
+    base_episode_prompt = build_episode_system_prompt(glossary=glossary)
+    return f"{REPAIR_SYSTEM_INSTRUCTION}\n\n{base_episode_prompt}"
 
 
 def score_cue_difficulty(
@@ -483,7 +494,7 @@ def run_cascade_repair_pass(
             from subtrans.throttle import call_with_retry, DailyQuotaExhaustedError
 
             config_kwargs: Dict[str, Any] = {
-                "system_instruction": REPAIR_SYSTEM_INSTRUCTION,
+                "system_instruction": build_repair_system_prompt(glossary),
                 "response_mime_type": "application/json",
                 "response_schema": list[RepairOutputItem],
                 "safety_settings": get_anime_safety_settings(),

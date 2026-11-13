@@ -173,6 +173,8 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm toàn bộ pipeline mà KHÔNG gọi API (bảo toàn 100% quota đêm)"),
     auto_align_en: bool = typer.Option(True, "--auto-align-en/--no-auto-align-en", help="Tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu (Mặc định: Bật)"),
     smart_wrap: bool = typer.Option(True, "--smart-wrap/--no-smart-wrap", help="Tự động ngắt dòng thông minh khi câu > 72 ký tự (Mặc định: Bật)"),
+    video: Optional[Path] = typer.Option(None, "--video", "-v", help="Đường dẫn file video MKV/MP4 gốc để phân tích âm sắc đổi giọng 5.1 FC cho SRT trần"),
+    explicit_cache: bool = typer.Option(False, "--explicit-cache", help="Bật khóa cứng Explicit Context Cache (TTL 15 phút) trên máy chủ Gemini"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
@@ -199,6 +201,7 @@ def run(
         subs_quality=subs_quality,
         cache_db_path=cache_db,
         auto_align_whisper_to_en=auto_align_en,
+        explicit_caching=explicit_cache,
     )
 
     try:
@@ -209,6 +212,7 @@ def run(
             en_offset_ms=en_offset_ms,
             sub_offset_ms=sub_offset_ms,
             auto_offset=auto_offset,
+            video_path=video,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Process cancelled by user. Partial cache preserved in SQLite.[/yellow]")
@@ -308,6 +312,19 @@ def rag_stats():
     table.add_row("Distinct Anime Series", str(stats["distinct_series_count"]))
     table.add_row("Error Bank Rules", str(stats["error_bank_rules_count"]))
     console.print(table)
+
+
+@rag_app.command(name="seed")
+def rag_seed():
+    """Seeds built-in fan-sub gold exemplars into the RAG Knowledge Base to eliminate cold-start."""
+    from subtrans.rag import KnowledgeBase
+    kb = KnowledgeBase()
+    added = kb.seed_default_gold_exemplars()
+    stats = kb.get_stats()
+    console.print(
+        f"\n[bold green]✅ Đã nạp thêm {added} câu mẫu chuẩn vào Knowledge Base "
+        f"(Tổng hiện có: {stats['gold_units_count']} gold/reviewed units)![/bold green]\n"
+    )
 
 
 @rag_app.command(name="import")

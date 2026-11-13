@@ -35,23 +35,32 @@ def find_series_glossary(series_or_filename: str, glossaries_dir: Optional[Path]
     if not g_dir.exists() or not series_or_filename:
         return None
 
-    # Chuẩn hoá tên chuỗi đầu vào (bỏ ký tự đặc biệt, lowercase)
-    norm_name = re.sub(r'[^a-zA-Z0-9]', '', series_or_filename.lower())
-    if not norm_name:
-        return None
+    # Chuẩn hoá tên chuỗi đầu vào (hỗ trợ cả đường dẫn chứa tên thư mục cha như 'Frieren/S01E01.mkv')
+    raw_str = str(series_or_filename)
+    path_obj = Path(raw_str)
+    search_targets = [path_obj.name]
+    if path_obj.parent and path_obj.parent.name and path_obj.parent.name not in (".", "raw_sources", "out", "samples", "subtitles"):
+        search_targets.append(path_obj.parent.name)
+    search_targets.append(raw_str)
 
-    candidates = (
+    candidates = sorted(
         list(g_dir.glob("glossary.*.yaml"))
         + list(g_dir.glob("glossary.*.yml"))
-        + list(g_dir.glob("glossary.*.json"))
+        + list(g_dir.glob("glossary.*.json")),
+        key=lambda p: len(p.name),
+        reverse=True,
     )
-    for cand in candidates:
-        parts = cand.name.split(".")
-        if len(parts) >= 3 and parts[0] == "glossary":
-            key = parts[1].lower()
-            norm_key = re.sub(r'[^a-zA-Z0-9]', '', key)
-            if norm_key and norm_key in norm_name:
-                return cand
+    for target in search_targets:
+        norm_name = re.sub(r"[^a-zA-Z0-9]", "", target.lower())
+        if not norm_name:
+            continue
+        for cand in candidates:
+            parts = cand.name.split(".")
+            if len(parts) >= 3 and parts[0] == "glossary":
+                key = parts[1].lower()
+                norm_key = re.sub(r"[^a-zA-Z0-9]", "", key)
+                if norm_key and norm_key in norm_name:
+                    return cand
 
     return None
 

@@ -22,9 +22,9 @@ def _build_whisper_initial_prompt(video_path: str) -> str:
         from subtrans.glossary import find_matching_glossary, load_glossary_file
         from subtrans.ja_morph_tagger import strip_ja_furigana
 
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
-        gloss_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "glossaries")
-        matched = find_matching_glossary(base_name, gloss_dir)
+        from pathlib import Path
+        gloss_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "glossaries"
+        matched = find_matching_glossary(video_path, gloss_dir)
         if not matched:
             return ""
         g = load_glossary_file(matched)

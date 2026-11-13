@@ -1,0 +1,305 @@
+# =====================================================================
+# glossary.frieren.yaml
+# Bảng thuật ngữ, quan hệ xưng hô & phong cách dịch chuyên biệt cho series:
+# "Sousou no Frieren" (Frieren: Beyond Journey's End / Pháp Sư Tiễn Táng)
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Sousou no Frieren characters, pronouns, magic spells, mage exam ranks, and style rules"
+  genres: [fantasy, adventure, drama, slice_of_life]
+
+style_rules:
+  - "CRITICAL ROMAJI RETENTION: Character names MUST retain standard Romaji/Germanic spelling: Frieren, Fern, Stark, Himmel, Heiter, Eisen, Sein, Serie, Flamme, Aura, Qual, Denken, Übel (hoặc Ubel), Land, Wirbel, Lawine, Kanne, Lernen, Genau, Sense. NEVER transliterate into Sino-Vietnamese."
+  - "FERN'S POLITE SPEECH (KEIGO): Fern ALWAYS speaks politely using desu/masu and honorific '-sama' even when scolding Frieren or Stark. Fern calls Frieren 'cô Frieren' (self: 'con' or 'em'), calls Stark 'cậu Stark' (self: 'tôi' or 'em' tùy mạch nhưng giữ lịch sự, chuẩn nhất: self='tôi', other='cậu Stark'), and calls Heiter 'ngài Heiter' / 'cha Heiter' (self: 'con')."
+  - "FRIEREN'S CALM TIMELESS TONE: Frieren is an ancient elf mage with a calm, detached yet warm tone. With Fern & Stark: self='ta' or 'cô', other='Fern' / 'Stark' / 'em'. With Himmel, Heiter, Eisen: self='tôi', other='Himmel' / 'Heiter' / 'Eisen' / 'cậu'. With Flamme: self='em' / 'con', other='sư phụ' / 'cô Flamme'. With demons (Aura, Qual) or Serie: self='ta', other='ngươi' / 'bà'."
+  - "STARK & FERN PEER DYNAMIC: Stark speaks casually and earnestly. With Fern: self='tớ' or 'tôi', other='Fern' or 'cậu'. With Frieren: self='cháu' or 'em', other='cô Frieren' or 'bà lão Frieren' (when joking). With Eisen: self='con', other='sư phụ'."
+  - "SERIE & ANCIENT DEMONS: Serie, Aura, and Great Demons speak with ancient authority: self='ta', other='ngươi' / 'các ngươi'."
+
+difficulty_markers:
+  - "ゾルトラーク"
+  - "アゼリューゼ"
+  - "オレオール"
+  - "一級魔法使い"
+  - "大魔族"
+  - "魔力制限"
+
+address_rules:
+  principle: "Giữ trọn nét lễ phép đặc trưng của Fern ('cô Frieren', 'cậu Stark'), chất điềm tĩnh cổ xưa của Frieren và sự hoài niệm ấm áp của nhóm Dũng giả Himmel."
+  relations:
+    - case: "Fern -> Frieren (học trò lễ phép nhưng hay cằn nhằn sư phụ)"
+      self: "em"
+      other: "cô Frieren"
+      note: "Giữ ngữ khí lịch sự kể cả khi dỗi"
+    - case: "Fern -> Stark (lịch sự gọi シュタルク様)"
+      self: "tôi"
+      other: "cậu Stark"
+      note: "Tuyệt đối không dịch シュタルク様 thành 'ngài Stark' cứng nhắc hay 'mày/tao' thô lỗ"
+    - case: "Frieren -> Fern / Stark"
+      self: "ta"
+      other: "Fern / Stark"
+      note: "Có thể dùng 'cô - em' ở cảnh dịu dàng đời thường"
+    - case: "Himmel -> Frieren"
+      self: "tôi"
+      other: "Frieren"
+      note: "Ôn nhu, trân trọng; ở cảnh tâm tình sâu lắng có thể dùng 'anh - em/Frieren'"
+
+characters:
+  - name_ja: "フリーレン"
+    name_vi: "Frieren"
+    aliases: ["Frieren"]
+    gender: "female"
+    register: "calm timeless detached warm"
+    speaks_to:
+      - listener: "Fern"
+        self: "ta"
+        other: "Fern"
+      - listener: "Stark"
+        self: "ta"
+        other: "Stark"
+      - listener: "Himmel"
+        self: "tôi"
+        other: "Himmel"
+      - listener: "Heiter"
+        self: "tôi"
+        other: "Heiter"
+      - listener: "Eisen"
+        self: "tôi"
+        other: "Eisen"
+      - listener: "Flamme"
+        self: "em"
+        other: "sư phụ"
+      - listener: "Serie"
+        self: "tôi"
+        other: "Serie"
+      - listener: "Aura"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "フェルン"
+    name_vi: "Fern"
+    aliases: ["Fern"]
+    gender: "female"
+    register: "strictly polite stoic"
+    speaks_to:
+      - listener: "Frieren"
+        self: "em"
+        other: "cô Frieren"
+      - listener: "Stark"
+        self: "tôi"
+        other: "cậu Stark"
+      - listener: "Heiter"
+        self: "con"
+        other: "cha Heiter"
+      - listener: "Sein"
+        self: "tôi"
+        other: "anh Sein"
+
+  - name_ja: "シュタルク"
+    name_vi: "Stark"
+    aliases: ["Stark"]
+    gender: "male"
+    register: "casual earnest cowardly-brave"
+    speaks_to:
+      - listener: "Fern"
+        self: "tôi"
+        other: "Fern"
+      - listener: "Frieren"
+        self: "em"
+        other: "cô Frieren"
+      - listener: "Eisen"
+        self: "con"
+        other: "sư phụ"
+      - listener: "Sein"
+        self: "em"
+        other: "anh Sein"
+
+  - name_ja: "ヒンメル"
+    name_vi: "Himmel"
+    aliases: ["Himmel"]
+    gender: "male"
+    register: "gentle heroic charismatic"
+    speaks_to:
+      - listener: "Frieren"
+        self: "tôi"
+        other: "Frieren"
+      - listener: "Heiter"
+        self: "tôi"
+        other: "Heiter"
+      - listener: "Eisen"
+        self: "tôi"
+        other: "Eisen"
+
+  - name_ja: "ハイター"
+    name_vi: "Heiter"
+    aliases: ["Heiter"]
+    gender: "male"
+    register: "easygoing priestly warm"
+    speaks_to:
+      - listener: "Fern"
+        self: "ta"
+        other: "con"
+      - listener: "Frieren"
+        self: "tôi"
+        other: "Frieren"
+
+  - name_ja: "アイゼン"
+    name_vi: "Eisen"
+    aliases: ["Eisen"]
+    gender: "male"
+    register: "stoic dwarf warrior"
+    speaks_to:
+      - listener: "Stark"
+        self: "ta"
+        other: "con"
+      - listener: "Frieren"
+        self: "tôi"
+        other: "Frieren"
+
+  - name_ja: "ザイン"
+    name_vi: "Sein"
+    aliases: ["Sein"]
+    gender: "male"
+    register: "laid-back older brother priest"
+    speaks_to:
+      - listener: "Frieren"
+        self: "tôi"
+        other: "cô Frieren"
+      - listener: "Stark"
+        self: "anh"
+        other: "Stark"
+      - listener: "Fern"
+        self: "anh"
+        other: "Fern"
+
+  - name_ja: "ゼーリエ"
+    name_vi: "Serie"
+    aliases: ["Serie"]
+    gender: "female"
+    register: "ancient imperious archmage"
+    speaks_to:
+      - listener: "all"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "フランメ"
+    name_vi: "Flamme"
+    aliases: ["Flamme"]
+    gender: "female"
+    register: "confident mentor"
+    speaks_to:
+      - listener: "Frieren"
+        self: "ta"
+        other: "Frieren"
+      - listener: "Serie"
+        self: "con"
+        other: "sư phụ"
+
+  - name_ja: "アウラ"
+    name_vi: "Aura"
+    aliases: ["Aura", "断頭台のアウラ"]
+    gender: "female"
+    register: "arrogant greater demon"
+    speaks_to:
+      - listener: "all"
+        self: "ta"
+        other: "ngươi"
+
+  - name_ja: "デンケン"
+    name_vi: "Denken"
+    aliases: ["Denken"]
+    gender: "male"
+    register: "veteran imperial court mage"
+    speaks_to:
+      - listener: "all"
+        self: "lão"
+        other: "cậu"
+
+  - name_ja: "ユーベル"
+    name_vi: "Übel"
+    aliases: ["Ubel", "Übel"]
+    gender: "female"
+    register: "playful dangerous"
+    speaks_to:
+      - listener: "Land"
+        self: "tôi"
+        other: "Bốn Mắt"
+
+  - name_ja: "ラント"
+    name_vi: "Land"
+    aliases: ["Land"]
+    gender: "male"
+    register: "cold deadpan analytical"
+    speaks_to:
+      - listener: "Übel"
+        self: "tôi"
+        other: "cô"
+
+terms:
+  - ja: "ゾルトラーク"
+    en: "Zoltraak"
+    vi: "Zoltraak"
+    note: "Tên thần chú tấn công chuẩn mực"
+  - ja: "人を殺す魔法"
+    en: "Soul Track / Killing Magic"
+    vi: "Ma pháp giết người"
+    alt: ["ma pháp sát nhân"]
+  - ja: "一般攻撃魔法"
+    en: "Ordinary Offensive Magic"
+    vi: "Ma pháp tấn công cơ bản"
+  - ja: "防御魔法"
+    en: "Defensive Magic"
+    vi: "Ma pháp phòng ngự"
+  - ja: "一級魔法使い"
+    en: "First-Class Mage"
+    vi: "Pháp sư cấp 1"
+  - ja: "大陸魔法協会"
+    en: "Continental Magic Association"
+    vi: "Hiệp hội Ma pháp Lục địa"
+  - ja: "勇者一行"
+    en: "Party of Heroes"
+    vi: "Nhóm Dũng giả"
+  - ja: "勇者"
+    en: "Hero"
+    vi: "Dũng giả"
+  - ja: "魔王"
+    en: "Demon King"
+    vi: "Ma Vương"
+  - ja: "大魔族"
+    en: "Greater Demon"
+    vi: "Đại Ma tộc"
+  - ja: "七崩賢"
+    en: "Seven Sages of Destruction"
+    vi: "Thất Băng Hiền"
+  - ja: "断頭台のアウラ"
+    en: "Aura the Guillotine"
+    vi: "Aura Đoạn Đầu Đài"
+  - ja: "アゼリューゼ"
+    en: "Auserlese"
+    vi: "Auserlese"
+  - ja: "服従させる魔法"
+    en: "Spell of Obedience"
+    vi: "Ma pháp bắt phục tùng"
+  - ja: "魂の眠る地"
+    en: "Resting Place of Souls"
+    vi: "Vùng đất linh hồn yên nghỉ"
+  - ja: "オレオール"
+    en: "Aureole"
+    vi: "Aureole"
+  - ja: "女神様の魔法"
+    en: "Goddess's Magic"
+    vi: "Ma pháp của Nữ thần"
+  - ja: "魔力制限"
+    en: "Mana Restriction"
+    vi: "hạn chế ma lực"
+    alt: ["ẩn giấu ma lực", "giới hạn ma lực"]
+  - ja: "民間魔法"
+    en: "Folk Magic"
+    vi: "ma pháp dân gian"
+  - ja: "花畑を出す魔法"
+    en: "Spell to create a field of flowers"
+    vi: "ma pháp tạo ra cánh đồng hoa"
+  - ja: "蒼月草"
+    en: "Blue-Moon Weed"
+    vi: "cỏ Trăng Xanh"

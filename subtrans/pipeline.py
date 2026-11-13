@@ -64,8 +64,10 @@ class TranslationPipeline:
         batch_size: Optional[int] = None,
         subs_quality: str = "normal",  # "normal" (Lite first) | "high" (Flash first)
         cache_db_path: Optional[Path] = None,
+        kb_path: Optional[Path] = None,
         auto_align_whisper_to_en: Optional[bool] = None,
         smart_wrap: bool = True,
+        explicit_caching: Optional[bool] = None,
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
@@ -136,8 +138,14 @@ class TranslationPipeline:
         self.stage_watchdog_seconds = int(trans_cfg.get("stage_watchdog_seconds", 1500))
         self.max_retries_per_model = int(trans_cfg.get("max_retries_per_model", 3))
 
-        # Request timeouts
+        # Request timeouts & Explicit Context Caching
         self.request_timeout_ms = int(gemini_cfg.get("request_timeout_ms", 45000))
+        self.kb_path = kb_path
+        self.explicit_caching = (
+            bool(gemini_cfg.get("explicit_context_caching", False))
+            if explicit_caching is None
+            else bool(explicit_caching)
+        )
 
         # Cache & Rate Limiter
         self.cache = TranslationCache(db_path=cache_db_path)
@@ -169,6 +177,7 @@ class TranslationPipeline:
                             enable_rag=self.enable_rag,
                             round_robin=True,
                             cache=self.cache,
+                            explicit_caching=self.explicit_caching,
                         )
                     except Exception as e:
                         logger.warning(f"Could not initialize backend for {m_name}: {e}")
@@ -251,7 +260,11 @@ class TranslationPipeline:
 
         base_glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH) if DEFAULT_BASE_GLOSSARY_PATH.exists() else None
         if not glossary_path:
-            auto_g = find_series_glossary(base_name)
+            auto_g = (
+                find_series_glossary(base_name)
+                or (find_series_glossary(str(video_path)) if video_path else None)
+                or find_series_glossary(str(ja_path))
+            )
             if auto_g:
                 glossary_path = auto_g
                 target_g = resolve_glossary_target(auto_g) or auto_g
@@ -262,9 +275,18 @@ class TranslationPipeline:
         override_glossary = load_glossary(glossary_path) if glossary_path else None
         glossary = merge_glossaries(base=base_glossary, override=override_glossary)
 
+        episode_kb = None
+        if self.enable_rag:
+            try:
+                from subtrans.rag import KnowledgeBase
+                episode_kb = KnowledgeBase(db_path=self.kb_path)
+            except Exception as e_kb:
+                logger.debug(f"Could not initialize episode KnowledgeBase: {e_kb}")
+
         for b in self.gemini_backends.values():
             b.series = self.series
             b.exclude_episode = base_name
+            b.kb = episode_kb
 
         if glossary:
             src_desc = []
@@ -302,6 +324,14 @@ class TranslationPipeline:
                 cast_names_ja_en=cast_names_ja_en,
                 piecewise_ja_offsets=piecewise_ja_offsets,
             )
+            if video_path and not self.dry_run:
+                from subtrans.audio_diarization import maybe_annotate_unlabeled_srt_speaker_turns
+                diar_stats = maybe_annotate_unlabeled_srt_speaker_turns(cues, video_path=video_path, dry_run=self.dry_run)
+                if diar_stats.get("speaker_changed", 0) or diar_stats.get("same_speaker", 0):
+                    console.print(
+                        f"  • [cyan]5.1 FC Acoustic Diarization:[/cyan] Đã gắn {diar_stats['speaker_changed']} điểm đổi giọng "
+                        f"& {diar_stats['same_speaker']} điểm giữ giọng trên SRT trần."
+                    )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
 
 
@@ -518,15 +548,19 @@ class TranslationPipeline:
                                 progress.advance(task, 1)
                     break
 
-                # 1. Compute RAG snapshot hash for this batch (C0/C2 use 'no_rag', C1/C3 use few-shot hash)
+                # 1. Compute RAG snapshot hash for this batch (tái sử dụng 1 kết nối episode_kb duy nhất)
                 rag_hash = "no_rag"
                 rag_bundle = None
-                if self.enable_rag:
+                if self.enable_rag and episode_kb is not None:
                     try:
-                        from subtrans.rag import KnowledgeBase
-                        kb = KnowledgeBase()
-                        fs = kb.retrieve_few_shots(batch, series=self.series, max_examples=3, exclude_episode=base_name)
-                        ca = kb.retrieve_cautions(batch, series=self.series, max_cautions=2)
+                        fs = episode_kb.retrieve_few_shots(
+                            batch,
+                            series=self.series,
+                            max_examples=3,
+                            exclude_episode=base_name,
+                            fallback_builtin=True,
+                        )
+                        ca = episode_kb.retrieve_cautions(batch, series=self.series, max_cautions=2)
                         if fs or ca:
                             rag_data = {"few_shots": fs, "cautions": ca}
                             rag_hash = hashlib.sha256(json.dumps(rag_data, sort_keys=True).encode("utf-8")).hexdigest()[:16]
@@ -785,11 +819,9 @@ class TranslationPipeline:
                     if repaired_cache_rows and isinstance(self.cache, TranslationCache):
                         self.cache.set_cues_batch(repaired_cache_rows)
 
-                    if self.enable_rag:
+                    if self.enable_rag and episode_kb is not None:
                         try:
-                            from subtrans.rag import KnowledgeBase
-                            kb_silver = KnowledgeBase()
-                            silver_cnt = kb_silver.promote_cascade_repairs(
+                            silver_cnt = episode_kb.promote_cascade_repairs(
                                 dialogue_cues, glossary=glossary, series=self.series, episode=base_name
                             )
                             stats["rag_silver_promoted"] = silver_cnt
@@ -849,10 +881,8 @@ class TranslationPipeline:
                 per_cue_violations = []
                 for c_item in active_dialogue_cues:
                     per_cue_violations.extend(lint_cue(c_item, glossary=glossary))
-                if per_cue_violations:
-                    from subtrans.rag import KnowledgeBase
-                    kb = KnowledgeBase()
-                    learned_count = kb.learn_from_linter_violations(
+                if per_cue_violations and episode_kb is not None:
+                    learned_count = episode_kb.learn_from_linter_violations(
                         per_cue_violations, cues, series=self.series, episode=base_name
                     )
                     if learned_count > 0:

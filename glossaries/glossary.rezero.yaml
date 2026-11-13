@@ -1,0 +1,131 @@
+# =====================================================================
+# glossary.rezero.yaml
+# Bảng thuật ngữ, quan hệ xưng hô & phong cách dịch chuyên biệt cho series:
+# "Re:Zero kara Hajimeru Isekai Seikatsu" (Re:Zero - Bắt Đầu Lại Ở Thế Giới Khác)
+# =====================================================================
+
+meta:
+  schema: 2
+  pair: "ja-vi"
+  description: "Re:Zero characters, nicknames (Emilia-tan, Barusu, Kashira), Return by Death, and style rules"
+  genres: [isekai, dark_fantasy, psychological, drama]
+
+style_rules:
+  - "CRITICAL ROMAJI & NICKNAME RETENTION: Keep all Romaji names and iconic nicknames intact: Subaru, Emilia, Emilia-tan, Rem, Ram, Barusu, Beatrice (Beako), Puck, Roswaal, Otto, Garfiel, Frederica, Wilhelm, Crusch, Felix, Anastasia, Julius, Echidna, Satella, Regulus. NEVER flatten 'Barusu' into 'Subaru' or 'Emilia-tan' into plain 'Emilia'."
+  - "BEATRICE'S SIGNATURE SPEECH ('かしら' / 'なのよ'): Beatrice speaks like a haughty ancient spirit ('ta - ngươi' or 'Betty - ngươi', with Subaru after contract: 'Betty/em - Subaru')."
+  - "REM & RAM CONTRAST: Rem speaks with gentle, devoted keigo ('Rem/em - anh Subaru/chị'). Ram speaks with deadpan sharp-tongued superiority ('Ram/tôi - Barusu', 'em - ngài Roswaal')."
+
+difficulty_markers:
+  - "死に戻り"
+  - "バルス"
+  - "エミリアたん"
+  - "魔女教"
+
+characters:
+  - name_ja: "ナツキ・スバル"
+    name_vi: "Subaru"
+    aliases: ["スバル", "バルス", "Natsuki Subaru", "Barusu"]
+    gender: "male"
+    register: "energetic otaku desperate-heroic"
+    speaks_to:
+      - listener: "Emilia"
+        self: "anh"
+        other: "Emilia-tan"
+        note: "Ở khoảnh khắc nghiêm túc dùng 'anh - Emilia'"
+      - listener: "Rem"
+        self: "anh"
+        other: "Rem"
+      - listener: "Ram"
+        self: "tôi"
+        other: "chị Ram"
+      - listener: "Beatrice"
+        self: "anh"
+        other: "Beako"
+
+  - name_ja: "エミリア"
+    name_vi: "Emilia"
+    aliases: ["エミリアたん", "Emilia-tan"]
+    gender: "female"
+    register: "kind earnest slightly old-fashioned"
+    speaks_to:
+      - listener: "Subaru"
+        self: "em"
+        other: "Subaru"
+      - listener: "Puck"
+        self: "con"
+        other: "Puck"
+
+  - name_ja: "レム"
+    name_vi: "Rem"
+    aliases: ["Rem"]
+    gender: "female"
+    register: "polite devoted maid"
+    speaks_to:
+      - listener: "Subaru"
+        self: "em"
+        other: "anh Subaru"
+      - listener: "Ram"
+        self: "em"
+        other: "chị"
+
+  - name_ja: "ラム"
+    name_vi: "Ram"
+    aliases: ["Ram"]
+    gender: "female"
+    register: "sharp deadpan maid"
+    speaks_to:
+      - listener: "Subaru"
+        self: "tôi"
+        other: "Barusu"
+      - listener: "Rem"
+        self: "chị"
+        other: "Rem"
+      - listener: "Roswaal"
+        self: "em"
+        other: "ngài Roswaal"
+
+  - name_ja: "ベアトリス"
+    name_vi: "Beatrice"
+    aliases: ["ベア子", "Beako", "ベティー"]
+    gender: "female"
+    register: "haughty spirit tsundere"
+    speaks_to:
+      - listener: "Subaru"
+        self: "ta"
+        other: "Subaru"
+      - listener: "Puck"
+        self: "em"
+        other: "anh hai"
+
+  - name_ja: "エキドナ"
+    name_vi: "Echidna"
+    aliases: ["Echidna"]
+    gender: "female"
+    register: "eloquent inquisitive Witch of Greed"
+    speaks_to:
+      - listener: "Subaru"
+        self: "ta"
+        other: "cậu"
+
+terms:
+  - ja: "死に戻り"
+    en: "Return by Death"
+    vi: "Trở về từ Cái chết"
+  - ja: "魔女教"
+    en: "Witch Cult"
+    vi: "Giáo phái Phù thủy"
+  - ja: "大罪司教"
+    en: "Sin Archbishop"
+    vi: "Đại Tội Giám Mục"
+  - ja: "嫉妬の魔女"
+    en: "Witch of Envy"
+    vi: "Phù thủy Đố kỵ"
+  - ja: "強欲の魔女"
+    en: "Witch of Greed"
+    vi: "Phù thủy Tham lam"
+  - ja: "見えざる手"
+    en: "Unseen Hand"
+    vi: "Bàn tay Vô hình"
+  - ja: "聖域"
+    en: "Sanctuary"
+    vi: "Thánh Vực"
