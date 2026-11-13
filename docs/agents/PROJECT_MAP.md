@@ -1,11 +1,11 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `a535105`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `bb646e2`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
 - [`upscale.py`](../../upscale.py): `build_arg_parser`/`parse_args` nhận CLI; `main` điều phối queue, deadline, retry, mode phụ đề và cleanup. `check_deadline_and_eta` kiểm tra ETA trước mỗi tập.
-- [`upscale.bat`](../../upscale.bat): chạy từ root; chọn Python trong `.venv`, `venv`, rồi PATH.
+- [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): chạy từ root; chọn Python trong `.venv`, `venv`, rồi PATH (`upscale_turbo.bat` bật `--zero-disk`).
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) → [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI với subcommand `run`, `batch`, `eval`, `rag` và các công cụ khác. Đọc [AGENTS Subtrans](../../subtrans/AGENTS.md) trước sửa.
 
 ```text
@@ -28,24 +28,24 @@ subtrans.cli → TranslationPipeline
 
 | File trong `src/` | Trách nhiệm và symbol để tìm |
 | --- | --- |
-| [`config.py`](../../src/config.py) | Hằng số runtime, `get_hevc_rate_args`, `validate_environment`; pending subtitles và khóa `.gpu_active.lock` kiểm tra PID sống (`is_gpu_lock_held_by_other`). |
-| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; worker extract/encode, checkpoint, backpressure, deadline và quality gates. |
-| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `extract_frames`, `encode_chunk_hevc`, `concat_segments`, `mux_final_container`, `embed_subtitle_track`. |
+| [`config.py`](../../src/config.py) | Hằng số runtime, `configure_cuda_fast_math` (Ampere FP16 `HMMA.F16` + cuDNN benchmark), `get_hevc_rate_args`, `validate_environment`; khóa `.gpu_active.lock` kiểm tra PID sống. |
+| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; worker extract/encode, Zero-Disk NVDEC raw RGB24 pipe, TensorRT 10 FP16, checkpoint, backpressure và quality gates. |
+| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `extract_frames`, `extract_frames_raw_rgb24`, `encode_chunk_hevc`, `concat_segments`, `mux_final_container`, `embed_subtitle_track`. |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `get_default_model_id`, `resolve_model_for_video`, `verify_weights_sha256`, `list_models_formatted`; neo đường dẫn tương đối về `ROOT_DIR`. |
-| [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3`, `AnimeJaNaiCompact2x`, `GPUPersistentWorker`, `get_gpu_worker`, `get_cuda_inference_engine`, `upscale_frames_with_fallback`, `GPUError`; Pinned `uint8` H2D/D2H + chuẩn hóa FP16 trên GPU, xác minh SHA-256 khi tải weights. |
+| [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (vi phân lô đuôi 8K 2-frame), `AnimeJaNaiCompact2x`, `GPUPersistentWorker` (TensorRT 10 auto-runner + Pinned D2H 1-sync), `get_cuda_inference_engine`, `upscale_frames_with_fallback`. |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: runner NCNN Vulkan dự phòng; không phải engine PyTorch chính. |
 | [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `resolve_dedup_policy`, `detect_global_motion_frames`, `detect_drift_policy_actions`, `detect_dis_policy_actions`; `scan_dedup_plan`/`load_or_create_plan`, `prune_redundant_frames`, concat script/re-expansion và background preflight. |
 | [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays`, `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit`; ΔY/correlation guard. |
 | [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity` và helpers MD5 audio, probe stream, subtitle packets, seek volume, window interleaving; xem giới hạn gate trong DECISIONS. |
-| [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` quản lý thư mục `tempfile` và exit hooks; `cleanup_orphan_ramdisks` là placeholder. Không có mount RAM disk trong bản hiện tại. |
+| [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` tự dò đĩa RAM vật lý/`UPSCALER_RAMDISK_DIR` hoặc định tuyến về `scratch/rolling_buffer` trên NVMe Gen4 (`E:`); `cleanup_orphan_ramdisks` dọn thư mục mồ côi. |
 | [`cleanup.py`](../../src/cleanup.py) | `cleanup_checkpoint_dir`, `cleanup_subtitle_extracts`, `organize_output_artifacts`, `clean_all_temporary_data`, `get_path_size`; có xóa file/symlink target, không dùng để khảo sát. |
-| [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `check_power_source`, `check_disk_space`, `run_preflight_checks`, `send_system_notification`; Win32 anti-sleep và kiểm tra tài nguyên. |
+| [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos` (tắt EcoQoS giữ tiến trình trên P-Cores i5-12600K), `check_power_source`, `check_disk_space`, `run_preflight_checks`. |
 | [`scheduler.py`](../../src/scheduler.py) | `find_cached_plan`, `preflight_video_plan`, `BackgroundQueuePreflightManager`, `compute_overnight_schedule`, `check_gemini_quota_for_queue`, `format_schedule_decision_table`. |
 | [`logger.py`](../../src/logger.py) | `RunLogger`, format/progress helpers, `get_swap_usage`, `get_thermal_state`; ghi log theo tập và cập nhật `latest.log`. |
 | [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text`; còn dữ liệu lịch sử hardcoded, không mặc nhiên là đo đạc mới. |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`; sidecar/container JA/EN, ưu tiên EN khi thiếu JA theo mặc định; Whisper tùy điều kiện. |
-| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper`, `DoubleBufferedPipeUpscaler` (`ensure_resolution` hỗ trợ độ phân giải động, tái sử dụng Pinned Buffer). |
-| [`build_trt_engine.py`](../../src/build_trt_engine.py) | ONNX export, TensorRT build/cache/runtime wrapper, `get_hybrid_engine_or_wrapper`; không suy ra CLI đã tích hợp TensorRT chỉ vì module tồn tại. |
+| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper` (cắt lát 2-frame giảm 75% đỉnh VRAM 8K), `DoubleBufferedPipeUpscaler` (`ensure_resolution`, tái sử dụng Pinned Buffer). |
+| [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, ONNX export (`dynamo=False`), TensorRT 10.16 (`execute_async_v3`) & 8.x runtime wrapper, cache `.engine` theo `(model_id, hw, batch, gpu, trt_ver)`, `get_hybrid_engine_or_wrapper`. |
 
 `src/__init__.py` là package marker. Symbol nhỏ/nested không liệt kê hết: dùng `rg -n '^(class |def |    def )' src/<file>.py` khi đi sâu.
 
@@ -79,6 +79,7 @@ subtrans.cli → TranslationPipeline
 - [`scripts/`](../../scripts):
   - `agent_context.py`: Bootstrap Agent, kiểm tra tính toàn vẹn bộ nhớ (`--check`), trích xuất cấu trúc code AST (`--symbols`), tìm kiếm symbol (`--find`), và cài đặt pre-commit hook (`--install-hooks`).
   - `verify_offline.py`: Kiểm thử an toàn sandbox offline ngắt kết nối mạng.
+  - `unlock_rtx3060_admin.ps1`: Kích hoạt HAGS (`HwSchMode=2`), xuất/nạp profile tắt `CUDA - Force P2 State` và chẩn đoán RAM XMP / Resizable BAR / TensorRT.
   - `batch_translate_all.py` điều phối dịch tuần tự; `set_track_defaults.py` đổi default track MKV; `organize_vietnamese_subs.py` sắp xếp phụ đề; `upscale_x4_single.py` tiện ích upscale riêng. Đọc tham số/đường dẫn và side effect trước chạy.
 - [`benchmarks/README.md`](../../benchmarks/README.md): nhóm `upscale/` đo model, dedup, latency và chaos resume; `subtrans/` đánh giá pronoun; `research/` hiệu chuẩn DIS/so sánh hình ảnh. Không thuộc test mặc định và không phải lệnh bootstrap.
 - [`pytest.ini`](../../pytest.ini): thu thập `tests/` và `subtrans/tests/`. Video tests chia nhóm dedup/GOP, resume/storage, model/color, mux; subtitle tests chia parser/writer/glossary, API stub/quota/cache, cascade/RAG/eval.

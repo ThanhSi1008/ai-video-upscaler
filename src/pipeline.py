@@ -55,6 +55,7 @@ from src.ffmpeg_ops import (
     split_video_segments,
     get_segments_frame_counts,
     extract_frames,
+    extract_frames_raw_rgb24,
     encode_chunk_hevc,
     concat_segments,
     mux_final_container
@@ -106,7 +107,8 @@ def run_upscale_pipeline(
     keep_temp: bool = False,
     dedup_policy: Optional[str] = None,
     batch_size: Optional[int] = None,
-    zero_disk: bool = False
+    zero_disk: bool = False,
+    use_tensorrt: bool = True,
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
@@ -357,10 +359,9 @@ def run_upscale_pipeline(
             else:
                 # Định nghĩa các worker function cho từng stage của kiến trúc Overlapped Double-Buffering
                 def worker_extract(item):
-                    """CPU Decode Worker: Trích xuất và lọc deduplication vào RAM Disk độc lập."""
+                    """Decode Worker: Ở chế độ --zero-disk giải mã thẳng RGB24 vào RAM qua NVDEC pipe (0 byte PNG trên SSD)."""
                     c_idx, c_seg_file, _ = item
                     c_in_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_in")
-                    os.makedirs(c_in_dir, exist_ok=True)
                     c_plan = (
                         dedup_plan["chunks"][c_idx]
                         if (dedup and dedup_plan and c_idx < len(dedup_plan.get("chunks", [])))
@@ -368,6 +369,30 @@ def run_upscale_pipeline(
                     )
                     kept_indices = c_plan["kept_indices"] if c_plan else None
 
+                    if zero_disk and engine == "cuda":
+                        t0 = time.time()
+                        raw_rgb = extract_frames_raw_rgb24(
+                            c_seg_file,
+                            width=int(meta.get("width", 1920)),
+                            height=int(meta.get("height", 1080)),
+                            kept_indices=kept_indices,
+                        )
+                        t_ext = time.time() - t0
+                        f_count = len(raw_rgb)
+                        exp_frames = c_plan["total_frames"] if c_plan else f_count
+                        return {
+                            "idx": c_idx,
+                            "seg_file": c_seg_file,
+                            "in_dir": c_in_dir,
+                            "raw_rgb_frames": raw_rgb,
+                            "frame_count": f_count,
+                            "ai_frames": f_count,
+                            "expected_frames": exp_frames,
+                            "ext_time": t_ext,
+                            "chunk_plan": c_plan,
+                        }
+
+                    os.makedirs(c_in_dir, exist_ok=True)
                     # Đảm bảo RAM Disk có tối thiểu không gian an toàn cho 1080p frames (~350MB) trước khi extract
                     t_wait_ext = time.time()
                     while (shutil.disk_usage(cache_root).free / (1024 * 1024)) < 450.0:
@@ -386,6 +411,7 @@ def run_upscale_pipeline(
                         "idx": c_idx,
                         "seg_file": c_seg_file,
                         "in_dir": c_in_dir,
+                        "raw_rgb_frames": None,
                         "frame_count": f_count,
                         "ai_frames": ai_count,
                         "expected_frames": exp_frames,
@@ -592,17 +618,22 @@ def run_upscale_pipeline(
                                         import cv2
                                         import psutil
                                         import torch
-                                        from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler, SRVGGNetCompactTRTWrapper
+                                        from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
+                                        from src.build_trt_engine import get_hybrid_engine_or_wrapper
                                         from src.cuda_engine import get_cuda_inference_engine
                                         from src.output_sanity import check_frame_sanity_arrays, OutputSanityError, write_failed_sanity_audit
 
-                                        in_files = sorted([os.path.join(c_in_dir, f) for f in os.listdir(c_in_dir) if f.lower().endswith(f".{fmt}")])
-                                        unique_frames_rgb = []
-                                        for f in in_files:
-                                            bgr = cv2.imread(f, cv2.IMREAD_COLOR)
-                                            if bgr is None:
-                                                raise RuntimeError(f"Không thể đọc khung hình trích xuất: {f}")
-                                            unique_frames_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                                        in_files = []
+                                        if extracted.get("raw_rgb_frames") is not None:
+                                            unique_frames_rgb = extracted["raw_rgb_frames"]
+                                        else:
+                                            in_files = sorted([os.path.join(c_in_dir, f) for f in os.listdir(c_in_dir) if f.lower().endswith(f".{fmt}")]) if os.path.exists(c_in_dir) else []
+                                            unique_frames_rgb = []
+                                            for f in in_files:
+                                                bgr = cv2.imread(f, cv2.IMREAD_COLOR)
+                                                if bgr is None:
+                                                    raise RuntimeError(f"Không thể đọc khung hình trích xuất: {f}")
+                                                unique_frames_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
                                         runs = extracted["chunk_plan"].get("runs", []) if extracted.get("chunk_plan") else []
                                         repeat_counts = [r["count"] for r in runs] if runs else [1] * len(unique_frames_rgb)
 
@@ -611,16 +642,30 @@ def run_upscale_pipeline(
                                             if unique_frames_rgb
                                             else (int(meta.get("height", 1080)), int(meta.get("width", 1920)))
                                         )
-                                        cuda_engine = get_cuda_inference_engine(model_info, precision=precision, batch_size=batch_size)
+                                        cuda_engine = get_cuda_inference_engine(
+                                            model_info,
+                                            precision=precision,
+                                            batch_size=batch_size,
+                                            use_tensorrt=use_tensorrt,
+                                        )
                                         eff_bs = batch_size or cuda_engine.batch_size or 8
+                                        runner_key = (model_info["id"], int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
 
-                                        # Khởi tạo & tái sử dụng Pinned Memory Buffers (Ping-Pong) xuyên suốt toàn bộ các chunk của tập
+                                        # Khởi tạo & tái sử dụng Engine (TensorRT 10 FP16 / Hybrid Wrapper) + Pinned Buffers xuyên suốt tập
                                         if (
                                             getattr(cuda_engine, "_zero_disk_upscaler", None) is None
-                                            or cuda_engine._zero_disk_upscaler.batch_size != eff_bs
+                                            or getattr(cuda_engine, "_zero_disk_key", None) != runner_key
                                         ):
-                                            wrapped_model = SRVGGNetCompactTRTWrapper(cuda_engine.model, scale=2.0)
+                                            wrapped_model = get_hybrid_engine_or_wrapper(
+                                                cuda_engine.model,
+                                                max_batch=eff_bs,
+                                                force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                                model_id=model_info["id"],
+                                                input_hw=(in_h, in_w),
+                                                scale=2.0,
+                                            )
                                             cuda_engine._zero_disk_wrapper = wrapped_model
+                                            cuda_engine._zero_disk_key = runner_key
                                             cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
                                                 wrapped_model,
                                                 batch_size=eff_bs,
@@ -709,13 +754,16 @@ def run_upscale_pipeline(
                                                 )
 
                                         os.replace(tmp_seg_out, c_seg_out)
+                                        num_unique_frames = len(unique_frames_rgb)
+                                        extracted["raw_rgb_frames"] = None
+                                        del unique_frames_rgb
                                         cuda_engine.restart_if_needed(logger=logger)
                                         rss_now = psutil.Process().memory_info().rss / (1024 * 1024)
 
                                         ai_result = {
                                             "elapsed_seconds": t_pipe_elapsed,
-                                            "fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
-                                            "steady_fps": (len(unique_frames_rgb) / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
+                                            "fps": (num_unique_frames / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
+                                            "steady_fps": (num_unique_frames / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
                                             "t0_seconds": 0.0,
                                             "peak_rss_mb": rss_now
                                         }
@@ -729,7 +777,8 @@ def run_upscale_pipeline(
                                             batch_size=batch_size,
                                             fmt=fmt,
                                             logger=logger,
-                                            mid_chunk_callback=_mid_chunk_bp_check
+                                            mid_chunk_callback=_mid_chunk_bp_check,
+                                            use_tensorrt=use_tensorrt,
                                         )
 
                                         # Tích lũy kích thước frame PNG thực tế
@@ -817,9 +866,23 @@ def run_upscale_pipeline(
                                                 pass
                                             future_encode = None
                                         # Tái tạo lại frame trích xuất nếu cần
-                                        if not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
+                                        kept_idx_retry = (
+                                            extracted.get("chunk_plan", {}).get("kept_indices")
+                                            if extracted.get("chunk_plan")
+                                            else None
+                                        )
+                                        if zero_disk and engine == "cuda":
+                                            if extracted.get("raw_rgb_frames") is None:
+                                                extracted["raw_rgb_frames"] = extract_frames_raw_rgb24(
+                                                    c_seg_file,
+                                                    width=int(meta["width"]),
+                                                    height=int(meta["height"]),
+                                                    kept_indices=kept_idx_retry,
+                                                    hwaccel=True,
+                                                )
+                                        elif not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
                                             os.makedirs(c_in_dir, exist_ok=True)
-                                            extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=extracted.get("chunk_plan", {}).get("kept_indices") if extracted.get("chunk_plan") else None)
+                                            extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=kept_idx_retry)
                                         time.sleep(1.0)
                                         continue
                                     elif is_enospc:

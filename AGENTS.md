@@ -22,9 +22,10 @@
 ### A. Lệnh Vận Hành Thường Dùng (PowerShell / CMD)
 
 ```powershell
-# Nâng cấp 1 tập video đơn lẻ:
+# Nâng cấp 1 tập video đơn lẻ (Chuẩn / Turbo Zero-Disk TensorRT):
 python upscale.py path/to/source.mkv -o out/
 .\upscale.bat path/to/source.mkv
+.\upscale_turbo.bat path/to/source.mkv
 
 # Xem trước nhanh 10 giây ở 30% phim:
 python upscale.py path/to/source.mkv --preview 10
@@ -52,7 +53,9 @@ pytest
 | `--queue` | `None` | Danh sách file video chạy nối tiếp qua đêm |
 | `--engine` | `cuda` | Engine suy luận: `cuda` (NVIDIA CUDA FP16) hoặc `cpu` |
 | `--model` | `animevideov3` | Model Super-Resolution đăng ký trong `models/models.yaml` |
-| `--batch-size` | `6` (RTX 3060) | Kích thước batch cho AI Inference GPU (Tensor Cores) |
+| `--batch-size` | `8` (RTX 3060) | Kích thước batch cho AI Inference GPU (Tensor Cores) |
+| `--zero-disk` | `False` | Giải mã NVDEC pipe -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (0 PNG đĩa) |
+| `--no-tensorrt` | `False` | Tắt tự động biên dịch/chạy TensorRT 10 FP16 và dùng thuần PyTorch CUDA FP16 |
 | `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite`) hoặc `high` (`gemini-3.8-flash`) |
 | `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua video upscale |
 | `--subs-upgrade` | `False` | Nâng cấp phụ đề VI hiện có lên bản dịch Gemini |
@@ -75,9 +78,9 @@ pytest
 
 > **Chi tiết vị trí từng file, hàm và cấu trúc module:** Xem [`docs/agents/PROJECT_MAP.md`](docs/agents/PROJECT_MAP.md).
 
-- **`upscale.py` / `src/`:** Pipeline phóng to video (CUDA FP16 Native, NVENC 10-bit, Dedup DIS Flow, Rolling Segments).
+- **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 / CUDA FP16, Zero-Disk Pipe, NVENC 10-bit, Dedup DIS Flow, Rolling Segments).
 - **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
-- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `batch_translate_all.py`, `set_track_defaults.py`).
+- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `unlock_rtx3060_admin.ps1`, `batch_translate_all.py`, `set_track_defaults.py`).
 - **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.
 - **`tests/` & `subtrans/tests/`:** 100% Pytest tự động hóa kiểm thử đơn vị và tích hợp.
 
@@ -113,14 +116,11 @@ pytest
 ## 5. Ranh Giới Hành Động Cho AI Agent (Agent Boundaries)
 
 * **Kỷ Luật Commit Từng Yêu Cầu (Mandatory Commit Per Request):**
-  * Sau khi hoàn thành **MỖI** yêu cầu (dù từ Người dùng trực tiếp hay từ AI nghiên cứu), **bắt buộc phải commit Git ngay lập tức**. Tuyệt đối không dồn gộp nhiều yêu cầu hoặc nhiều đợt sửa đổi vào một commit chung.
-  * Thông điệp commit (commit message & body) phải trình bày rõ ràng 3 yếu tố:
-    1. **Nguồn yêu cầu:** Do Người dùng yêu cầu hay AI nghiên cứu đề xuất.
-    2. **Hành động cụ thể:** Đã làm gì, đã fix những lỗi gì, đã tối ưu hoặc tái cấu trúc những module nào.
-    3. **Số liệu & Kết quả:** Đính kèm số liệu kiểm chứng (kết quả `pytest`, dung lượng bộ nhớ giải phóng, fps, trạng thái audit, v.v.).
-* **Bảo vệ Gemini API Key:** Key lấy từ biến môi trường `GEMINI_API_KEY` hoặc file `.env`. Nghiêm cấm in, ghi log, hoặc commit API key ra màn hình và file lưu trữ.
-* **Bảo vệ Quota Ban Ngày:** Tuyệt đối không chạy lệnh gọi API Gemini thật trong khoảng từ **14:00 đến đêm chạy**. Mọi kiểm thử chức năng bắt buộc dùng cờ `--dry-run` hoặc stub backend.
-* **Bảo toàn Checkpoint Resume:** Tuyệt đối không xóa hay sửa đổi các file trong thư mục `.temp_<basename>` trên SSD khi chưa có sự xác nhận của người dùng.
+  * Hoàn thành **MỖI** yêu cầu (từ Người dùng hoặc AI nghiên cứu) **bắt buộc commit Git ngay**, không dồn gộp nhiều yêu cầu vào một commit.
+  * Commit message phải nêu rõ 3 mục: (1) **Nguồn yêu cầu**; (2) **Hành động cụ thể** (module tối ưu, lỗi đã fix); (3) **Số liệu & Kết quả** (`pytest`, byte budget, fps/audit).
+* **Bảo vệ Gemini API Key:** Lấy từ `GEMINI_API_KEY` hoặc `.env`. Nghiêm cấm in, ghi log hoặc commit key.
+* **Bảo vệ Quota Ban Ngày:** Cấm gọi Gemini API thật từ **14:00 đến đêm chạy**; kiểm thử bắt buộc dùng `--dry-run` hoặc stub.
+* **Bảo toàn Checkpoint Resume:** Không xóa/sửa `.temp_<basename>` khi chưa có xác nhận người dùng.
 * **Hỏi Ý Kiến Trước Khi Thực Hiện:**
   * Chạy các tác vụ GPU/AI dài (> 100 frames).
   * Thay đổi model SR mặc định hoặc các tham số chất lượng mã hóa NVENC.

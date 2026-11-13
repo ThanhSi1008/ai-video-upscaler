@@ -44,10 +44,13 @@ logs/*
 tests/**/*.png
 tests/*.png
 
-# Model weights
+# Model weights & compiled TensorRT/ONNX artifacts
 *.pth
 *.bin
 *.param
+*.engine
+*.nip
+models/*.onnx
 !bin/realesrgan/models/*.bin
 !bin/realesrgan/models/*.param
 

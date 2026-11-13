@@ -43,15 +43,26 @@ class RealESRAnimeVideoV3(nn.Module):
         self.body.append(nn.Conv2d(64, 48, 3, 1, 1))
         self.upsampler = nn.PixelShuffle(4)
 
+    def _tail_4x_to_2x(self, feat_slice: torch.Tensor, x_slice: torch.Tensor) -> torch.Tensor:
+        out = self.upsampler(feat_slice)
+        base = F.interpolate(x_slice, scale_factor=4.0, mode='nearest')
+        out_4x = out + base
+        return F.interpolate(out_4x, scale_factor=0.5, mode='bicubic', align_corners=False)
+
     def forward(self, x):
         feat = x
         for layer in self.body:
             feat = layer(feat)
-        out = self.upsampler(feat)
-        base = F.interpolate(x, scale_factor=4.0, mode='nearest')
-        out_4x = out + base
-        out_2x = F.interpolate(out_4x, scale_factor=0.5, mode='bicubic', align_corners=False)
-        return out_2x
+        # Cắt lát nhánh phóng đại 8K trung gian mỗi 2 frames khi batch lớn trên Full HD
+        # để tiết kiệm ~4.5 GB VRAM mà vẫn khớp bit-exact 100%
+        if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
+            B, _, H, W = x.shape
+            out_buf = torch.empty((B, 3, H * 2, W * 2), dtype=x.dtype, device=x.device)
+            for s in range(0, B, 2):
+                e = min(s + 2, B)
+                out_buf[s:e].copy_(self._tail_4x_to_2x(feat[s:e], x[s:e]))
+            return out_buf
+        return self._tail_4x_to_2x(feat, x)
 
 
 class AnimeJaNaiCompact2x(nn.Module):
@@ -98,7 +109,8 @@ class GPUPersistentWorker:
         precision: str = "fp16",
         max_chunks_before_restart: int = 10,
         device: Optional[str] = None,
-        batch_size: Optional[int] = None
+        batch_size: Optional[int] = None,
+        use_tensorrt: bool = True,
     ):
         self.model_id = model_id
         self.weights_path = weights_path
@@ -106,6 +118,8 @@ class GPUPersistentWorker:
         self.max_chunks_before_restart = max_chunks_before_restart
         self.chunks_processed = 0
         self.total_restarts = 0
+        self.use_tensorrt = bool(use_tensorrt)
+        self._trt_runners: Dict[Any, Any] = {}
         
         # Nhận diện device: Ưu tiên NVIDIA CUDA, fallback CPU
         if device:
@@ -116,9 +130,8 @@ class GPUPersistentWorker:
             self.device = torch.device("cpu")
 
         if self.device.type == "cuda":
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            from src.config import configure_cuda_fast_math
+            configure_cuda_fast_math()
 
         if batch_size is not None:
             self.batch_size = max(1, int(batch_size))
@@ -282,6 +295,33 @@ class GPUPersistentWorker:
         total_frames = len(img_files)
         target_dtype = torch.float16 if self.precision == "fp16" else torch.float32
         pinned_in: Optional[torch.Tensor] = None
+        pinned_out: Optional[torch.Tensor] = None
+
+        def _resolve_runner(in_h: int, in_w: int):
+            if (
+                self.device.type == "cuda"
+                and self.precision == "fp16"
+                and getattr(self, "use_tensorrt", False)
+                and isinstance(self.model, nn.Module)
+                and not os.environ.get("PYTEST_CURRENT_TEST")
+            ):
+                runners = getattr(self, "_trt_runners", None)
+                if runners is None:
+                    runners = {}
+                    self._trt_runners = runners
+                key = (int(in_h), int(in_w), int(b_size))
+                if key not in runners:
+                    from src.build_trt_engine import get_hybrid_engine_or_wrapper
+                    runners[key] = get_hybrid_engine_or_wrapper(
+                        self.model,
+                        max_batch=b_size,
+                        force_pytorch=False,
+                        model_id=getattr(self, "model_id", "realesr-animevideov3"),
+                        input_hw=(in_h, in_w),
+                        scale=2.0,
+                    )
+                return runners[key]
+            return self.model
 
         try:
             for b_start in range(0, total_frames, b_size):
@@ -323,17 +363,45 @@ class GPUPersistentWorker:
                     if self.device.type == "cuda":
                         tensor = tensor.to(memory_format=torch.channels_last)
 
-                # 2. Suy luận GPU (NVIDIA CUDA / CPU)
+                active_runner = _resolve_runner(h0, w0) if same_shape else self.model
+
+                # 2. Suy luận GPU + Kiểm tra hữu hạn bất đồng bộ + Lượng tử hóa uint8 BGR trên VRAM (chỉ 1 lần sync D2H)
                 with torch.inference_mode():
-                    out_tensor = self.model(tensor)
+                    out_tensor = active_runner(tensor)
+                    finite_flag = torch.isfinite(out_tensor).all()
+                    gpu_bgr_out = (
+                        out_tensor.clamp(0.0, 1.0)
+                        .mul(255.0)
+                        .round()
+                        .to(torch.uint8)[:, [2, 1, 0], :, :]
+                        .permute(0, 2, 3, 1)
+                        .contiguous()
+                    )
                     if self.device.type == "cuda":
-                        torch.cuda.synchronize(self.device)
+                        out_h, out_w = gpu_bgr_out.shape[1:3]
+                        if (
+                            pinned_out is None
+                            or pinned_out.shape[0] < cur_b
+                            or pinned_out.shape[1:3] != (out_h, out_w)
+                        ):
+                            pinned_out = torch.empty(
+                                (max(b_size, cur_b), out_h, out_w, 3),
+                                dtype=torch.uint8,
+                                pin_memory=True,
+                            )
+                        pinned_out[:cur_b].copy_(gpu_bgr_out, non_blocking=True)
+                        torch.cuda.current_stream(self.device).synchronize()
+                        is_finite = bool(finite_flag.item())
+                        out_bgr_u8 = pinned_out[:cur_b].numpy().copy()
+                    else:
+                        is_finite = bool(finite_flag.item())
+                        out_bgr_u8 = gpu_bgr_out.cpu().numpy()
 
                 if b_start == 0:
                     steady_start = time.time()
 
                 # 3. Kiểm tra NaN / Inf (Safety Gate)
-                if torch.isnan(out_tensor).any() or torch.isinf(out_tensor).any():
+                if not is_finite:
                     sample_name = os.path.basename(batch_files[0])
                     raise GPUError(f"Phát hiện giá trị bất thường (NaN/Inf) tại khung hình lô: '{sample_name}'")
 
@@ -345,19 +413,6 @@ class GPUPersistentWorker:
                     d_alloc = torch.cuda.max_memory_allocated(self.device) / (1024 * 1024)
                     if d_alloc > driver_alloc_peak:
                         driver_alloc_peak = d_alloc
-
-                # 5. Lượng tử hóa uint8 + lật RGB -> BGR ngay trên thiết bị tính toán (giảm 75% PCIe D2H & bỏ cvtColor CPU)
-                with torch.inference_mode():
-                    out_bgr_u8 = (
-                        out_tensor.clamp(0.0, 1.0)
-                        .mul(255.0)
-                        .round()
-                        .to(torch.uint8)[:, [2, 1, 0], :, :]
-                        .permute(0, 2, 3, 1)
-                        .contiguous()
-                        .cpu()
-                        .numpy()
-                    )
                 for b_idx, fpath in enumerate(batch_files):
                     fname = os.path.basename(fpath)
                     out_path = os.path.join(output_dir, fname)
@@ -418,7 +473,8 @@ def get_gpu_worker(
     precision: str = "fp16",
     max_chunks_before_restart: int = 10,
     device: Optional[str] = None,
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None,
+    use_tensorrt: bool = True,
 ) -> GPUPersistentWorker:
     """Lấy hoặc khởi tạo instance Singleton cho GPUPersistentWorker."""
     global _GLOBAL_GPU_WORKER
@@ -432,15 +488,19 @@ def get_gpu_worker(
             precision=precision,
             max_chunks_before_restart=max_chunks_before_restart,
             device=device,
-            batch_size=batch_size
+            batch_size=batch_size,
+            use_tensorrt=use_tensorrt,
         )
+    else:
+        _GLOBAL_GPU_WORKER.use_tensorrt = bool(use_tensorrt)
     return _GLOBAL_GPU_WORKER
 
 
 def get_cuda_inference_engine(
     model_info: Dict[str, Any],
     precision: str = "fp16",
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None,
+    use_tensorrt: bool = True,
 ) -> GPUPersistentWorker:
     """Khởi tạo hoặc lấy worker CUDA cho mô hình đã chỉ định."""
     return get_gpu_worker(
@@ -448,7 +508,8 @@ def get_cuda_inference_engine(
         weights_path=model_info["weights_path"],
         precision=precision,
         device="cuda",
-        batch_size=batch_size
+        batch_size=batch_size,
+        use_tensorrt=use_tensorrt,
     )
 
 
@@ -461,7 +522,8 @@ def upscale_frames_with_fallback(
     batch_size: Optional[int] = None,
     fmt: str = "png",
     logger=None,
-    mid_chunk_callback=None
+    mid_chunk_callback=None,
+    use_tensorrt: bool = True,
 ) -> Dict[str, Any]:
     """
     Hàm giao tiếp chính thực hiện suy luận khung hình cho 1 chunk:
@@ -493,14 +555,15 @@ def upscale_frames_with_fallback(
             thread_cfg="1:2:2"
         )
 
-    # 2. Thử nghiệm trên PyTorch (NVIDIA CUDA / CPU)
+    # 2. Thử nghiệm trên PyTorch / TensorRT (NVIDIA CUDA / CPU)
     try:
         worker = get_gpu_worker(
             model_id=model_id,
             weights_path=weights_path,
             precision=precision,
             device=engine if engine in ["cuda", "cpu"] else None,
-            batch_size=batch_size
+            batch_size=batch_size,
+            use_tensorrt=use_tensorrt,
         )
         res = worker.upscale_directory(
             input_dir=input_dir,

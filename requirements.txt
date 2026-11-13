@@ -25,3 +25,7 @@ openai-whisper
 # Testing & Linting
 pytest>=8.0.0
 ruff>=0.8.0
+
+# Optional Hardware Acceleration (RTX 3060 Ampere TensorRT 10 FP16 & Triton)
+# Install via:
+#   pip install --extra-index-url https://pypi.nvidia.com onnx onnxscript tensorrt-cu12 triton-windows

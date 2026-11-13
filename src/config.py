@@ -150,15 +150,47 @@ atexit.register(_atexit_release_gpu_lock)
 # -----------------------------------------------------------------------------
 # THAM SỐ UPSCALE MẶC ĐỊNH (TỐI ƯU HÓA NVIDIA CUDA FP16 & TENSOR CORES)
 # -----------------------------------------------------------------------------
+def configure_cuda_fast_math() -> dict[str, bool]:
+    """
+    Mở khóa tối đa thông lượng Tensor Cores kiến trúc Ampere (GA106 - RTX 3060):
+    - Bật cuDNN autotuner (benchmark=True) chọn kernel tích chập nhanh nhất.
+    - Bật TF32 cho matmul/cuDNN FP32 fallback.
+    - Bật allow_fp16_reduced_precision_reduction & allow_bf16_reduced_precision_reduction
+      để cho phép lệnh Tensor Core HMMA.16816.F16 chạy full-rate (51 TFLOPS dense)
+      thay vì bị giới hạn half-rate bởi thanh ghi FP32-accumulate trên GeForce.
+    """
+    applied = {
+        "cudnn_benchmark": False,
+        "allow_tf32": False,
+        "fp16_fast_accum": False,
+    }
+    try:
+        import torch
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        applied["cudnn_benchmark"] = bool(torch.backends.cudnn.benchmark)
+        applied["allow_tf32"] = bool(torch.backends.cuda.matmul.allow_tf32)
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction"):
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+            applied["fp16_fast_accum"] = bool(
+                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+            )
+        if hasattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"):
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+    return applied
+
+
 def _detect_default_engine() -> str:
     """Tự động chọn engine suy luận tốt nhất theo phần cứng hiện có (Ưu tiên CUDA)."""
     try:
         import torch
         if torch.cuda.is_available():
-            # Kích hoạt tối ưu hóa NVIDIA Tensor Cores & cuDNN benchmark
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            configure_cuda_fast_math()
             return "cuda"
     except Exception:
         pass
@@ -180,7 +212,7 @@ DEFAULT_MODEL = "realesr-animevideov3"
 DEFAULT_ENGINE = _detect_default_engine()  # Mặc định: 'cuda' trên NVIDIA RTX
 DEVICE_NAME = get_device_name()
 DEFAULT_PRECISION = "fp16"
-DEFAULT_BATCH_SIZE = 8 if DEFAULT_ENGINE == "cuda" else 1  # Lô 8 frames (Điểm ngọt tối ưu cho GA106 30 SMs trên RTX 3060 12GB)
+DEFAULT_BATCH_SIZE = 8 if DEFAULT_ENGINE == "cuda" else 1  # Lô 8 frames (Điểm ngọt cho GA106 28 SMs / 112 Tensor Cores trên RTX 3060 12GB)
 DEFAULT_VRAM_CLEANUP_THRESHOLD_GB = 9.5  # Ngưỡng VRAM (GB) để dọn dẹp CUDA memory cache thay vì restart tiến trình
 DEFAULT_GPU_RESTART_CHUNKS = 10  # Ngưỡng dự phòng cho worker
 

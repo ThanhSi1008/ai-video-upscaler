@@ -165,6 +165,66 @@ def _build_balanced_select_expr(indices: List[int]) -> str:
     return f"({left})+({right})"
 
 
+def extract_frames_raw_rgb24(
+    seg_path: str,
+    width: int,
+    height: int,
+    kept_indices: Optional[List[int]] = None,
+    hwaccel: Optional[bool] = None,
+) -> List[Any]:
+    """
+    Giải mã trực tiếp khung hình video sang mảng RGB24 trong RAM qua pipe stdout (0 byte ghi đĩa):
+    - Khai thác phần cứng NVDEC (-hwaccel cuda) kết hợp chuẩn màu BT.709 TV Limited -> PC Full Range.
+    - Loại bỏ hoàn toàn chi phí nén PNG của FFmpeg, ghi/đọc SSD và cv2.imread/cvtColor.
+    - Tự động fallback về giải mã CPU nếu nguồn là 10-bit H.264 (Hi10P) không hỗ trợ bởi NVDEC.
+    """
+    import numpy as np
+
+    frame_bytes = int(width) * int(height) * 3
+    if frame_bytes <= 0:
+        return []
+    if kept_indices is not None and len(kept_indices) == 0:
+        return []
+
+    color_vf = "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc"
+    if kept_indices is not None and len(kept_indices) > 0:
+        select_expr = _build_balanced_select_expr(kept_indices)
+        vf_filter = f"select='{select_expr}',{color_vf}"
+    else:
+        vf_filter = color_vf
+
+    def _run_pipe(use_hwaccel: bool) -> Optional[bytes]:
+        hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
+        cmd = [
+            "ffmpeg", "-v", "error",
+            *hw_args,
+            "-i", seg_path,
+            "-vf", vf_filter,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "pipe:1",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if res.returncode != 0 or not res.stdout:
+            return None
+        return res.stdout
+
+    prefer_hw = hwaccel if hwaccel is not None else (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc")
+    raw_buf = _run_pipe(use_hwaccel=True) if prefer_hw else None
+    if raw_buf is None:
+        raw_buf = _run_pipe(use_hwaccel=False)
+    if not raw_buf:
+        raise RuntimeError(f"Không thể giải mã luồng rawvideo RGB24 từ phân đoạn: {seg_path}")
+
+    n_frames = len(raw_buf) // frame_bytes
+    usable_bytes = n_frames * frame_bytes
+    arr_4d = np.frombuffer(raw_buf, dtype=np.uint8, count=usable_bytes).reshape(
+        (n_frames, int(height), int(width), 3)
+    )
+    return [np.ascontiguousarray(arr_4d[idx]) for idx in range(n_frames)]
+
+
 def extract_frames(seg_path: str, frames_dir: str, fmt: str = "png", kept_indices: List[int] = None) -> int:
     """
     Trích xuất khung hình từ phân đoạn video vào thư mục đệm.

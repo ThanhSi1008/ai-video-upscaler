@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-13
 >
-> **Commit Baseline:** `a535105` (`feat(agents): thiet lap ha tang AI Agents, plugins va quy chuan IDE toan dien`)
+> **Commit Baseline:** `bb646e2` (`perf(project): trien khai toan dien 3 goi toi uu Pareto cho Video Pipeline va Subtrans`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`265 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`288 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
 - **Trạng thái Git:** Sạch sẽ, kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
 
 ---
@@ -19,8 +19,9 @@
 
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
-| **PyTorch CUDA FP16 & Pinned I/O** | `src/cuda_engine.py`, `src/models_resolver.py` | PASS | `RealESRAnimeVideoV3`, `AnimeJaNaiCompact2x` (`janai-fix`), truyền BGR `uint8` qua Pinned Memory + chuẩn hóa FP16 trên GPU (giảm 75% PCIe H2D/D2H), kiểm chứng SHA-256 weights. |
-| **Dedup, DIS Flow & Win32 Preflight** | `src/dedup.py`, `src/scheduler.py` | PASS | Split theo GOP, `mpdecimate`, DIS optical flow (`--dis-thresh 0.30`), Preflight nền chuẩn Windows (`BELOW_NORMAL_PRIORITY_CLASS`, truyền tham số qua `sys.argv`). |
+| **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `RealESRAnimeVideoV3` & `AnimeJaNaiCompact2x` (cắt lát 2-frame đuôi 8K tiết kiệm ~4.5 GB VRAM), `configure_cuda_fast_math` (`HMMA.F16` 51 TFLOPS), TensorRT 10.16 (`execute_async_v3` + `_PureFP16TRTExportModule`), Pinned `uint8` H2D & 1-sync D2H. |
+| **Zero-Disk Pipe & Gen4 NVMe Buffer** | `src/trt_zero_copy_upscaler.py`, `src/ffmpeg_ops.py`, `src/ramdisk.py` | PASS | Giải mã `extract_frames_raw_rgb24` (`-hwaccel cuda` BT.709 pipe) -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (`upscale_turbo.bat`); tự định tuyến đệm cuốn chiếu về NVMe Gen4 `WD_BLACK SN7100` (`E:\scratch\rolling_buffer`). |
+| **Dedup, DIS Flow & Alder Lake P-Core** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Split theo GOP, `mpdecimate`, DIS optical flow (`--dis-thresh 0.30`), `configure_alder_lake_pcore_qos` tắt EcoQoS giữ tiến trình trên P-Cores `i5-12600K` + script Admin `scripts/unlock_rtx3060_admin.ps1`. |
 | **10-bit NVENC BT.709** | `src/ffmpeg_ops.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, multipass `fullres`/`qres`), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
 | **Bit-exact Mux & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Bắt buộc cờ `-max_interleave_delta 0`, audit MD5 âm thanh, font đính kèm và số lượng frame. |
 | **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$); khóa `.gpu_active.lock` kiểm tra PID sống (`psutil.pid_exists`) chống xóa nhầm khi import. |
@@ -36,10 +37,10 @@
 
 ## 3. Các Thành Phần Thử Nghiệm / Cần Lưu Ý (Unverified / Experimental)
 
-1. **Zero-Disk Pipe V2 & TensorRT Engine (`src/trt_zero_copy_upscaler.py`, `src/build_trt_engine.py`):**
-   - Đã hoàn thiện kiến trúc V2 (hỗ trợ `scale=2.0`, độ phân giải động `ensure_resolution`, tái sử dụng Pinned Buffer xuyên suốt tập, ghi `.tmp.mp4` nguyên tử) và vượt qua unit test CPU; cần người dùng duyệt chạy thử nghiệm thực tế trên GPU trước khi đặt làm mặc định sản xuất.
-2. **RAMDisk Context Manager (`src/ramdisk.py`):**
-   - Hiện sử dụng `tempfile.TemporaryDirectory` trên SSD/NVMe thông thường với dọn dẹp cuốn chiếu, chưa mount đĩa RAM ảo vật lý trên Windows.
+1. **Zero-Disk Pipe V2 & TensorRT 10.16 Engine (`src/trt_zero_copy_upscaler.py`, `src/build_trt_engine.py`):**
+   - Đã cài đặt `tensorrt-cu12==10.16.1.11` + `triton-windows==3.2.0.post21` trong `.venv`, hoàn thiện toàn trình NVDEC raw RGB24 pipe -> TensorRT 10 FP16 (`execute_async_v3`) -> `p010le` pipe -> NVENC (`upscale_turbo.bat` / `--zero-disk`, `--no-tensorrt`) và vượt qua toàn bộ unit test offline; giữ `--zero-disk` mặc định `False` trên CLI cho đến khi người dùng xác nhận trên video thật.
+2. **RAMDisk & Bộ Đệm NVMe Gen4 (`src/ramdisk.py`):**
+   - Tự dò ổ đĩa RAM vật lý (`UPSCALER_RAMDISK_DIR` hoặc nhãn `"RAM"`), mặc định định tuyến về `E:\ai-video-upscaler\scratch\rolling_buffer` trên NVMe Gen4 `WD_BLACK SN7100` (nhanh gấp ~3 lần ổ hệ thống `C:` Gen3).
 3. **Bảo vệ Gemini Quota ban ngày:**
    - Tuyệt đối không chạy lệnh gọi API Gemini thật trong khoảng từ **14:00 đến đêm chạy**. Mọi kiểm thử chức năng bắt buộc dùng cờ `--dry-run` hoặc mock backend.
 4. **Không chạy kiểm thử GPU khi pipeline đang chạy:**

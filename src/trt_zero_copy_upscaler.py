@@ -65,23 +65,16 @@ class GPUColorConverterP010LE:
         ).view(1, 3, 1, 1)
 
     @torch.inference_mode()
-    def rgb_to_p010le(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Input:  rgb_tensor: [B, 3, H, W] (float16 hoặc float32, miền [0.0, 1.0])
-        Output: p010_frame: [B, H * 3 // 2, W] (int16/uint16, chuẩn Semi-Planar P010LE)
-        """
-        B, _, H, W = rgb_tensor.shape
-        rgb_f32 = rgb_tensor.float()
+    def _convert_slice(self, rgb_slice: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = rgb_slice.shape
+        rgb_f32 = rgb_slice.float()
 
         # 1. Tính kênh Luma Y [B, H, W] ở độ phân giải đầy đủ
         y = (rgb_f32 * self.y_weights).sum(dim=1, keepdim=True) + 64.0
-        # Cắt miền giới hạn TV range Y in [64, 940]
         y_10bit = torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32)
-        # p010le lưu giá trị 10-bit ở 10 bit cao nhất (MSB), tức dịch trái 6 bit (<< 6)
         y_p010 = (y_10bit << 6).squeeze(1).to(torch.int16)  # [B, H, W]
 
         # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling cho RGB trước khi nhân ma trận UV
-        # Tiết kiệm 75% phép tính cho 2 kênh màu
         rgb_sub = F.avg_pool2d(rgb_f32, kernel_size=2, stride=2)  # [B, 3, H/2, W/2]
 
         u = (rgb_sub * self.u_weights).sum(dim=1, keepdim=True) + 512.0
@@ -93,13 +86,28 @@ class GPUColorConverterP010LE:
         u_p010 = (u_10bit << 6).squeeze(1).to(torch.int16)  # [B, H/2, W/2]
         v_p010 = (v_10bit << 6).squeeze(1).to(torch.int16)  # [B, H/2, W/2]
 
-        # 3. Đan xen Semi-Planar (UV Interleaved):
-        # Mặt phẳng UV có kích thước [B, H/2, W] với các cặp (U0, V0, U1, V1, ...)
+        # 3. Đan xen Semi-Planar (UV Interleaved): [B, H/2, W]
         uv_p010 = torch.stack((u_p010, v_p010), dim=-1).view(B, H // 2, W)
 
-        # 4. Ghép mặt phẳng Y [B, H, W] và mặt phẳng UV [B, H/2, W] thành một tensor liên tục
-        p010_frame = torch.cat((y_p010, uv_p010), dim=1)  # [B, H * 3 // 2, W]
-        return p010_frame.contiguous()
+        # 4. Ghép mặt phẳng Y [B, H, W] và mặt phẳng UV [B, H/2, W]
+        return torch.cat((y_p010, uv_p010), dim=1).contiguous()
+
+    @torch.inference_mode()
+    def rgb_to_p010le(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Input:  rgb_tensor: [B, 3, H, W] (float16 hoặc float32, miền [0.0, 1.0])
+        Output: p010_frame: [B, H * 3 // 2, W] (int16/uint16, chuẩn Semi-Planar P010LE)
+        Tối ưu Micro-Slice 2 frames cho độ phân giải 4K để giữ bộ đệm trung gian gọn trong VRAM/L2.
+        """
+        B, _, H, W = rgb_tensor.shape
+        if B <= 2 or (H * W) <= (540 * 960):
+            return self._convert_slice(rgb_tensor)
+
+        out_buf = torch.empty((B, H * 3 // 2, W), dtype=torch.int16, device=rgb_tensor.device)
+        for s in range(0, B, 2):
+            e = min(s + 2, B)
+            out_buf[s:e].copy_(self._convert_slice(rgb_tensor[s:e]))
+        return out_buf
 
 
 # =============================================================================
@@ -124,18 +132,12 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
             self.upscale = 4 if isinstance(self.upsampler, nn.PixelShuffle) and self.upsampler.upscale_factor == 4 else 2
         self.target_scale = float(scale) if scale is not None else 2.0
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat = x
-        for layer in self.body:
-            feat = layer(feat)
-        out = self.upsampler(feat)
-
-        # Ép nhánh cộng phần dư (Residual Base) tính ở FP32
-        base = F.interpolate(x.float(), scale_factor=float(self.upscale), mode="nearest")
+    def _tail_upsample(self, feat_slice: torch.Tensor, x_slice: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+        out = self.upsampler(feat_slice)
+        base = F.interpolate(x_slice.float(), scale_factor=float(self.upscale), mode="nearest")
         out_f32 = out.float() + base
 
         if abs(float(self.upscale) - self.target_scale) > 1e-4:
-            # Thu nhỏ 4x về target_scale (mặc định 2x = 4K) bằng Bicubic ở FP32
             out_target = F.interpolate(
                 out_f32,
                 scale_factor=self.target_scale / float(self.upscale),
@@ -144,8 +146,27 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
             )
         else:
             out_target = out_f32
+        return out_target.to(out_dtype)
 
-        return out_target.to(torch.float16 if x.dtype == torch.float16 else torch.float32)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out_dtype = torch.float16 if x.dtype == torch.float16 else torch.float32
+        feat = x
+        for layer in self.body:
+            feat = layer(feat)
+
+        B, _, H, W = x.shape
+        # Khi không đang trace ONNX và batch lớn trên ảnh Full HD, cắt lát đuôi 8K mỗi 2 frames
+        # giúp giảm ~75% đỉnh VRAM trung gian (~4.5 GB tiết kiệm) mà kết quả khớp bit-exact 100%.
+        if (not torch.onnx.is_in_onnx_export()) and B > 2 and self.upscale >= 4 and (H * W) >= (540 * 960):
+            out_h = int(round(H * self.target_scale))
+            out_w = int(round(W * self.target_scale))
+            out_buf = torch.empty((B, 3, out_h, out_w), dtype=out_dtype, device=x.device)
+            for s in range(0, B, 2):
+                e = min(s + 2, B)
+                out_buf[s:e].copy_(self._tail_upsample(feat[s:e], x[s:e], out_dtype))
+            return out_buf
+
+        return self._tail_upsample(feat, x, out_dtype)
 
 
 # =============================================================================

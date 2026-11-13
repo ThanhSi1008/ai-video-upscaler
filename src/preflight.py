@@ -2,7 +2,7 @@
 """
 src/preflight.py
 Hệ thống kiểm tra an toàn trước khi chạy (Pre-flight Health Checks) và quản lý năng lượng:
-1. Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState)
+1. Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState) & khóa P-Core HighQoS cho Intel Gen 12+
 2. Kiểm tra nguồn điện sạc (AC Power vs Battery)
 3. Kiểm tra dung lượng ổ đĩa trống an toàn (Free Disk Space)
 4. Gửi thông báo hệ thống và âm báo khi hoàn thành
@@ -18,16 +18,65 @@ from typing import Dict, Any, Optional
 from src.logger import format_bytes
 
 
+def configure_alder_lake_pcore_qos(enable_boost: bool = True) -> Optional[int]:
+    """
+    Tắt chế độ EcoQoS / Execution Speed Throttling của Windows 11 Thread Director
+    trên vi xử lý lai Intel Gen 12+ (Core i5-12600K 6P+4E), ngăn hệ điều hành
+    đẩy luồng điều phối CUDA & FFmpeg xuống nhân tiết kiệm điện E-Core khi thu nhỏ cửa sổ.
+    Trả về PriorityClass trước đó để khôi phục khi kết thúc.
+    """
+    if sys.platform != "win32" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    prev_prio = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        h_proc = kernel32.GetCurrentProcess()
+
+        class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+            _fields_ = [
+                ("Version", wintypes.ULONG),
+                ("ControlMask", wintypes.ULONG),
+                ("StateMask", wintypes.ULONG),
+            ]
+
+        state = PROCESS_POWER_THROTTLING_STATE(
+            Version=1,
+            ControlMask=0x1,  # PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            StateMask=0 if enable_boost else 0x1,
+        )
+        kernel32.SetProcessInformation(
+            h_proc,
+            4,  # ProcessPowerThrottling
+            ctypes.byref(state),
+            ctypes.sizeof(state),
+        )
+
+        if enable_boost:
+            ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+            NORMAL_PRIORITY_CLASS = 0x00000020
+            cur = int(kernel32.GetPriorityClass(h_proc))
+            if cur in (0, NORMAL_PRIORITY_CLASS):
+                prev_prio = cur or NORMAL_PRIORITY_CLASS
+                kernel32.SetPriorityClass(h_proc, ABOVE_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+    return prev_prio
+
+
 class AntiSleepContext:
     """
     Context manager tự động ngăn Windows sleep khi đang chạy tác vụ nặng:
-    Sử dụng Windows API native ctypes.windll.kernel32.SetThreadExecutionState.
+    Sử dụng Windows API native ctypes.windll.kernel32.SetThreadExecutionState + HighQoS P-Core.
     Tự động thoát và phục hồi trạng thái khi tiến trình hoàn tất hoặc bị ngắt (Ctrl+C).
     """
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
         self._win_prev = None
+        self._prev_prio = None
 
     def __enter__(self):
         if not self.enabled:
@@ -42,6 +91,7 @@ class AntiSleepContext:
                 self._win_prev = ctypes.windll.kernel32.SetThreadExecutionState(
                     ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
                 )
+                self._prev_prio = configure_alder_lake_pcore_qos(enable_boost=True)
                 atexit.register(self.cleanup)
             except Exception:
                 pass
@@ -58,13 +108,14 @@ class AntiSleepContext:
                 import ctypes
                 ES_CONTINUOUS = 0x80000000
                 ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                if self._prev_prio is not None:
+                    ctypes.windll.kernel32.SetPriorityClass(
+                        ctypes.windll.kernel32.GetCurrentProcess(),
+                        int(self._prev_prio),
+                    )
+                    self._prev_prio = None
             except Exception:
                 pass
-
-
-
-
-
 
 
 def check_power_source() -> Dict[str, Any]:
@@ -120,16 +171,12 @@ def send_system_notification(title: str, message: str, sound: str = "Glass"):
             pass
 
 
-
-
-
-
 def run_preflight_checks(output_dir: str, duration_seconds: float, bitrate: str, logger=None) -> bool:
     """
     Thực thi toàn bộ các bước kiểm tra an toàn trước khi chạy.
     In thông báo rõ ràng ra Terminal và file log.
     """
-    print("\n🔍 ĐANG KIỂM TRA ĐIỀU KIỆN HỆ THỐNG TRƯỚC KHI CHẠY (PRE-FLIGHT CHECKS)...")
+    print("\n🔍 ĐANG KIỂM TRA ĐIỂM KIỂM SOÁT HỆ THỐNG TRƯỚC KHI CHẠY (PRE-FLIGHT CHECKS)...")
 
     # 1. Kiểm tra nguồn điện
     power = check_power_source()

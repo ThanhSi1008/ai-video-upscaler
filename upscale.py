@@ -123,13 +123,13 @@ def check_deadline_and_eta(
     if decision_eta > seconds_left:
         if allow_partial:
             print(f"\n⏳ [ALLOW PARTIAL] Tập '{os.path.basename(video_path)}':")
-            print(f"   • Cần: ~{eta_med/60:.1f}m (kỳ vọng trung vị) | Quyết định hạn chót: {decision_eta/60:.1f}m (P5 1.62 fps + 5m subs + 7% margin) cho {n_unique} unique frames [{source_tag}]")
+            print(f"   • Cần: ~{eta_med/60:.1f}m (kỳ vọng trung vị) | Quyết định hạn chót: {decision_eta/60:.1f}m (P5 {fps_p5:.2f} fps + 5m subs + 7% margin) cho {n_unique} unique frames [{source_tag}]")
             print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
             print(f"   -> Chế độ --allow-partial đang BẬT: Sẽ chạy đến hạn chót {deadline_str}, dừng sạch ở ranh giới chunk và giữ segment!\n")
             return True, True, deadline_dt
         else:
             print(f"\n⏰ [DEADLINE SKIP] Tập '{os.path.basename(video_path)}':")
-            print(f"   • Dự toán cần: {decision_eta/60:.1f} phút (P5 1.62 fps + 5m subs + 7% margin) cho ~{n_unique} unique frames [{source_tag}]")
+            print(f"   • Dự toán cần: {decision_eta/60:.1f} phút (P5 {fps_p5:.2f} fps + 5m subs + 7% margin) cho ~{n_unique} unique frames [{source_tag}]")
             print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
             print(f"   -> Bỏ qua tập này để không bị dở dang ca qua đêm! (Dùng --allow-partial nếu muốn chạy một phần)\n")
             return False, False, deadline_dt
@@ -393,7 +393,13 @@ def build_arg_parser():
         "--zero-disk",
         action="store_true",
         default=False,
-        help="Kích hoạt pipeline Zero-Disk: Dùng DoubleBufferedPipeUpscaler xuất luồng p010le trực tiếp qua stdin pipe tới NVENC, triệt tiêu 100%% file PNG trung gian trên SSD"
+        help="Kích hoạt pipeline Zero-Disk: Giải mã NVDEC raw RGB24 pipe -> TensorRT/CUDA FP16 -> p010le pipe -> NVENC, triệt tiêu 100%% file PNG trung gian trên SSD"
+    )
+    parser.add_argument(
+        "--no-tensorrt",
+        action="store_true",
+        default=False,
+        help="Tắt tự động biên dịch/suy luận bằng NVIDIA TensorRT FP16 và dùng thuần PyTorch CUDA FP16"
     )
 
     return parser
@@ -616,13 +622,28 @@ def main():
         print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào hoặc dùng cờ --queue.")
         sys.exit(1)
 
+    video_overhead = 930.0  # Hiệu chỉnh theo 2 tập đêm 1 [691s, 1166s], cỡ mẫu n=2
     if args.engine == "cuda":
-        fps_median = 12.0
-        fps_p5 = 10.0
+        has_trt = False
+        if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
+            import importlib.util
+            has_trt = importlib.util.find_spec("tensorrt") is not None
+        if has_trt and getattr(args, "zero_disk", False):
+            fps_median = 22.0
+            fps_p5 = 16.0
+            video_overhead = 420.0
+        elif has_trt:
+            fps_median = 18.0
+            fps_p5 = 14.0
+            video_overhead = 660.0
+        else:
+            fps_median = 12.0
+            fps_p5 = 10.0
+            if getattr(args, "zero_disk", False):
+                video_overhead = 540.0
     else:
         fps_median = 1.35
         fps_p5 = 1.25
-    video_overhead = 930.0  # Hiệu chỉnh theo 2 tập đêm 1 [691s, 1166s], cỡ mẫu n=2
     subtitles_overhead = 300.0
 
     if args.benchmark_mode:
@@ -750,7 +771,8 @@ def main():
                 keep_temp=args.keep_temp,
                 dedup_policy=args.dedup_policy,
                 batch_size=args.batch_size,
-                zero_disk=getattr(args, "zero_disk", False)
+                zero_disk=getattr(args, "zero_disk", False),
+                use_tensorrt=not getattr(args, "no_tensorrt", False),
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
             if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
@@ -833,6 +855,7 @@ def main():
                     keep_temp=args.keep_temp,
                     dedup_policy=args.dedup_policy,
                     zero_disk=getattr(args, "zero_disk", False),
+                    use_tensorrt=not getattr(args, "no_tensorrt", False),
                 )
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))
