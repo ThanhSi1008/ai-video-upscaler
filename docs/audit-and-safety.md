@@ -9,88 +9,71 @@
 
 | File mã nguồn | Vai trò & Trách nhiệm chính |
 | :--- | :--- |
-| [`src/output_sanity.py`](../src/output_sanity.py) | Output Sanity Guard: Chốt chặn kiểm định độ sáng $|\Delta Y| \le 6/255$ và tương quan $\ge 0.98$, chống video đen/mờ |
-| [`src/mux_audit.py`](../src/mux_audit.py) | Stream Copy Integrity Audit: Đối soát bit-exact audio, sub, font đính kèm và tổng số khung hình video |
-| [`src/cleanup.py`](../src/cleanup.py) | Auto Cleanup: Dọn sạch `.temp_<basename>` (thu hồi ~6.6GB/tập) và gom file báo cáo vào thư mục con `audit/` |
-| [`src/preflight.py`](../src/preflight.py) | Preflight Checks: Kiểm tra nguồn sạc AC, dung lượng đĩa trống, Win32 SetThreadExecutionState chống sleep máy, âm báo Windows |
-| [`src/night_report.py`](../src/night_report.py) | Night Telemetry Reporter: Tổng hợp số đo ca đêm, phân tích GPU active, tỷ lệ dedup và xuất báo cáo Markdown |
+| [`src/output_sanity.py`](../src/output_sanity.py) | Output Sanity Guard: Kiểm định độ sáng $|\Delta Y| \le 6/255$ và tương quan Pearson $r \ge 0.98$ (hỗ trợ cả file ảnh lẫn mảng GPU `270x480` không cần suy luận lặp) |
+| [`src/mux_audit.py`](../src/mux_audit.py) | Parallel Stream Copy Integrity Audit: Đối soát đa luồng frame count, MD5 toàn bộ luồng audio trong 1 lượt `-f streamhash`, phụ đề, font chữ và interleaving |
+| [`src/cleanup.py`](../src/cleanup.py) | Auto Cleanup: Dọn sạch `.temp_<basename>` sau khi Mux Audit `PASS` và gom báo cáo kỹ thuật vào thư mục con `audit/` |
+| [`src/preflight.py`](../src/preflight.py) | Preflight Checks: Khóa luồng trên P-Cores (`configure_alder_lake_pcore_qos`), chống sleep Win32 `SetThreadExecutionState`, kiểm tra nguồn sạc AC & đĩa trống |
+| [`src/config.py`](../src/config.py) | Khóa độc quyền GPU theo PID sống (`.gpu_active.lock`) và tự động thu hồi qua `atexit` |
+| [`src/night_report.py`](../src/night_report.py) | Night Telemetry Reporter: Tổng hợp số đo ca đêm, tỷ lệ dedup và báo cáo kiểm định |
 
 ---
 
 ## 2. Output Sanity Guard ([`src/output_sanity.py`](../src/output_sanity.py))
 
-### A. Vấn Đề Lịch Sử Cần Triệt Tiêu
-Trong các thử nghiệm model trước đây (AnimeJaNai thiếu phép cộng residual nearest $\times 2$), video 4K đầu ra bị đen toàn bộ (luma chỉ đạt 0.04–0.35) nhưng pipeline vẫn chạy hết và xuất xưởng file hỏng.
+### A. Mục Đích Bảo Vệ
+Ngăn chặn triệt để rủi ro mô hình xuất video đen, trắng xóa hoặc sai lệch cấu trúc/màu sắc nghiêm trọng trước khi tốn hàng giờ mã hóa toàn tập.
 
-### B. Tiêu Chuẩn Kiểm Định Bắt Buộc
-Hàm `verify_output_sanity` được kích hoạt tự động:
-1. **Thời điểm kiểm tra:** Ngay sau khi hoàn tất **Chunk 1**, và kiểm tra định kỳ sau mỗi **10 chunks** tiếp theo.
-2. **Quy trình đo đạc:**
-   - Trích xuất 1 frame 4K đã upscale và 1 frame 1080p nguồn tương ứng.
-   - Downscale frame 4K về 1080p bằng bicubic và chuyển sang không gian màu xám (Luma Y).
-   - Đo độ lệch độ sáng tuyệt đối trung bình: $|\Delta Y| = |\text{mean}(Y_{4K}) - \text{mean}(Y_{1080p})|$.
-   - Đo hệ số tương quan Pearson: $r(Y_{4K}, Y_{1080p})$.
-3. **Chốt chặn an toàn:**
-   - $|\Delta Y| \le 6.0 / 255$ (độ lệch sáng không quá ~2.35%).
-   - Hệ số tương quan $r \ge 0.98$.
+### B. Cơ Chế Kiểm Định Tức Thì (0 Lượt Suy Luận Phụ Ở Zero-Disk)
+Các hàm `check_frame_sanity` (trên đĩa) và `check_frame_sanity_arrays` (trực tiếp trong RAM) tự động kích hoạt:
+1. **Thời điểm kiểm tra:** Ngay tại **Chunk đầu tiên (`c_idx == 0`)**, và lặp lại định kỳ sau mỗi **10 chunks** tiếp theo.
+2. **Tối ưu 0-Reinference ở chế độ `--zero-disk`:** Ngay trong Batch 0 trên GPU, `DoubleBufferedPipeUpscaler` dùng `F.avg_pool2d` thu nhỏ trực tiếp khung hình 4K đầu tiên về `480x270` và rút bất đồng bộ về CPU cùng luồng `stream_d2h`, giúp kiểm tra Sanity hoàn tất trước cả khi chờ NVENC đóng gói xong mà không tốn thêm lượt gọi TensorRT nào.
+3. **Ngưỡng chốt chặn cứng:**
+   - Độ lệch sáng trung bình tuyệt đối: $|\Delta Y| \le 6.0 / 255$ (~2.35%).
+   - Hệ số tương quan cấu trúc Pearson: $r(Y_{4K}, Y_{1080p}) \ge 0.98$.
 4. **Hành vi khi vi phạm:**
-   - Dừng khẩn cấp toàn bộ pipeline ngay lập tức (`raise RuntimeError`).
-   - Ghi nhận `audit.json: {"sanity": "FAIL (OUTPUT_SANITY)"}`.
-   - **Nghiêm cấm bước Mux và nghiêm cấm chuyển model**.
+   - Huỷ ngay tiến trình mã hóa phân đoạn hiện tại, ghi biên bản lỗi qua `write_failed_sanity_audit` và ném ngoại lệ `OutputSanityError` để dừng khẩn cấp toàn pipeline (nghiêm cấm Mux thành phẩm lỗi).
 
 ---
 
-## 3. Cổng Kiểm Toán Xuất Xưởng Mux Audit ([`src/mux_audit.py`](../src/mux_audit.py))
+## 3. Kiểm Toán Xuất Xưởng Đa Luồng Mux Audit ([`src/mux_audit.py`](../src/mux_audit.py))
 
-Sau khi mux xong file video 4K thành phẩm (`.mkv`), hàm `verify_mux_integrity` quét toàn bộ container:
-1. **Khớp Số Lượng Khung Hình Video (`video_frame_count`):**
-   - Đếm số lượng frame thực tế của video 4K thành phẩm qua FFprobe.
-   - Bắt buộc phải **bằng chính xác 100%** số lượng khung hình của video nguồn gốc.
-   - Bất kỳ sự lệch frame nào (kể cả $\pm 1$ frame) đều bị đánh rớt `FAIL` ngay lập tức.
-2. **Toàn Vẹn Luồng Âm Thanh (Audio Streams):**
-   - Đối soát số lượng track audio (tiếng Nhật 2.0 FLAC, thuyết minh, bình luận).
-   - Xác thực mã băm MD5 độc lập từng track audio để đảm bảo không bị câm tiếng do lỗi interleaving.
-3. **Toàn Vẹn Phụ Đề & Font Chữ Đính Kèm (Subtitles & Fonts):**
-   - Kiểm tra số lượng track phụ đề gốc (ASS/SRT).
-   - Đếm số lượng font chữ nhúng (attachments TTF/OTF), đối soát khớp 100% với file nguồn (ví dụ: 15 fonts trên bản BD).
-4. **Ghi Nhận Kết Quả:**
-   - Xuất file `<basename>.audit.json` và `<basename>.audit.md`. Chỉ khi `status == "PASS"`, file thành phẩm mới được bàn giao.
+Sau khi ghép nối container 4K `.mkv` bằng `mux_segments_directly`, hàm `verify_mux_integrity` thực thi kiểm toán song song bằng `ThreadPoolExecutor`:
+1. **Khớp Tuyệt Đối Số Khung Hình (`nb_frames`):**
+   - Tái sử dụng metadata nguồn đã probe để tránh quét lặp và đối soát số lượng khung hình của file 4K thành phẩm. Lệch dù chỉ $\pm 1$ frame lập tức đánh `FAIL`.
+2. **Đối Soát MD5 Toàn Bộ Luồng Audio Trong 1 Lượt Đọc (`get_all_audio_streams_md5`):**
+   - Sử dụng muxer `-map 0:a -c copy -f streamhash -hash md5 -` của FFmpeg để băm đồng thời tất cả các track âm thanh (Nhật, Anh, bình luận...) chỉ trong **1 lượt đọc tuần tự container duy nhất**.
+3. **Kiểm Tra Đan Xen Packet Đa Cửa Sổ Song Song (`check_window_interleaving`):**
+   - Quét song song 5 cửa sổ thời gian trải dọc tập phim để xác nhận cờ `-max_interleave_delta 0` hoạt động chuẩn xác, không xảy ra hiện tượng gom cục audio gây câm tiếng cục bộ.
+4. **Bảo Toàn Phụ Đề, Chapters & Font Chữ Đính Kèm:**
+   - Đối soát khớp 100% số lượng luồng phụ đề (ASS/SRT), Chapters và toàn bộ font chữ nhúng (TTF/OTF). Chỉ khi `status == "PASS"` mới cho phép bước dọn dẹp tự động chạy.
 
 ---
 
 ## 4. Tự Động Dọn Dẹp & Thu Hồi Ổ Cứng SSD ([`src/cleanup.py`](../src/cleanup.py))
 
-Kích hoạt tự động ngay sau khi Mux Audit xác nhận `PASS`:
-1. **Xóa Sạch Thư Mục Tạm `.temp_<basename>`:**
-   - Thu hồi sạch sẽ **~6.6 GB/tập** dung lượng SSD (các file HEVC segment `up_*.mp4`, concat demuxer lists).
-   - Quét sạch cả symlinks, thư mục con thực tế và các thư mục rỗng.
-2. **Gom Gọn Thư Mục Xuất Xưởng:**
-   - Tự động di chuyển các file báo cáo kỹ thuật (`.audit.json`, `.audit.md`, `.cast.yaml`) vào thư mục con `audit/`.
-   - Giữ thư mục xuất xưởng hoàn toàn gọn gàng, chỉ chứa duy nhất video `.mkv` và file phụ đề `.vi.srt`.
-3. **Cờ Điều Khiển:**
-   - `--keep-temp`: Giữ lại thư mục tạm và checkpoint khi người dùng cần debug.
-   - `--clean-temp` / `--cleanup`: Quét và dọn sạch toàn bộ thư mục `.temp_*` cũ còn sót lại trong thư mục xuất xưởng rồi thoát ngay.
+1. **Xóa Sạch Thư Mục Tạm `.temp_<basename>` Khi Mux Audit `PASS`:**
+   - Thu hồi toàn bộ dung lượng các phân đoạn `raw_segs/` và `upscaled_segs/` (trừ khi bật `--keep-temp`).
+2. **Gom Gọn Thư Mục Xuất Xưởng (`organize_output_artifacts`):**
+   - Tự động chuyển `.audit.json`, `.audit.md`, `.cast.yaml` vào thư mục con `audit/`, giữ thư mục đích chỉ chứa file xem phim `.mkv` và `.vi.srt`.
+   - Hỗ trợ quét dọn độc lập qua cờ `--clean-temp` / `--cleanup` (có chốt bảo vệ không xóa file khi đi kèm `--dry-run`).
 
 ---
 
 ## 5. Cổng Backpressure & Chống Lỗi Tràn Đĩa ENOSPC
 
 Trong [`src/pipeline.py`](../src/pipeline.py):
-* **Sàn An Toàn Kích Thước PNG:** `DEFAULT_PNG_UNIT_SIZE_MB = 16.0 MB` (đo đạc thực tế frame 4K phức tạp đạt tối đa 13.77 MB).
-* **Công thức Ước Tính Dung Lượng Cần Thiết:**
-  $$\text{need} = n_{unique} \times \max(\text{recent}, \; P_{95}, \; 16.0) \times 1.2$$
-* **Kiểm Tra Giữa Chunk:** Trước khi trích xuất khung hình mới lên bộ đệm, hệ thống kiểm tra dung lượng còn trống. Nếu không đủ:
-  - Tạm dừng và đợi chunk trước đó hoàn tất encode HEVC để dọn dẹp frame giải phóng dung lượng đệm.
-  - Cơ chế retry tối đa **2 lần**; nếu vẫn thiếu tài nguyên, đánh dấu `failed-resumable` và chuyển sang tập tiếp theo, sau đó tự thử lại ở cuối hàng đợi.
-  - Thoát mã non-zero và in rõ bảng báo cáo chưa hoàn tất.
+* **Sàn An Toàn Kích Thước PNG (Chế độ Standard):** `DEFAULT_PNG_UNIT_SIZE_MB = 16.0 MB`, ước tính nhu cầu:
+  $$\text{need} = n_{\text{unique}} \times \max(\text{recent}, \; P_{95}, \; 16.0) \times 1.2$$
+* **Chế độ Zero-Disk:** Không sinh PNG trung gian trên đĩa nên chỉ yêu cầu biên an toàn nhỏ (`max(256 MB, n_unique * 0.5 MB)`) cho phân đoạn MP4 nén.
+* **Tự phục hồi ENOSPC:** Khi thiếu không gian đệm, tự động đồng bộ chờ `EncodeWorker` giải phóng chunk trước, hủy tạm prefetch PNG nếu cần và thử lại tối đa **2 lần**; nếu vẫn cạn đĩa thì ném `FailedResumableError` để bảo toàn các `up_*.mp4` đã xong và tự động thử lại ở cuối hàng đợi `--queue`.
 
 ---
 
-## 6. Vòng Đời Tiến Trình & Quản Trị Tài Nguyên
+## 6. Độc Quyền GPU Theo PID, Khóa P-Core & Chống Sleep Máy
 
-1. **Độc Quyền GPU NVIDIA:**
-   - Chỉ duy nhất 1 tiến trình infer GPU NVIDIA được phép hoạt động tại một thời điểm.
-   - Giải phóng bộ nhớ VRAM sau khi hoàn tất bước AI SR của video, cho phép phân hệ dịch phụ đề (subtrans) có thể sử dụng tài nguyên mà không gây xung đột.
-2. **Chống Sleep Máy Tuyệt Đối (`AntiSleepContext`):**
-   - [`src/preflight.py`](../src/preflight.py) gọi Win32 API native `SetThreadExecutionState` trong Context Manager.
-   - Tự động hoàn trả trạng thái ban đầu của hệ thống kể cả khi tiến trình bị ngắt bởi `SIGINT` (`Ctrl+C`).
+1. **Khóa Độc Quyền GPU Kiểm Chứng PID (`.gpu_active.lock`):**
+   - `acquire_gpu_lock()` ghi PID hiện tại và kiểm tra trạng thái sống thực tế của tiến trình giữ khóa (tự động thu hồi khóa mồ côi nếu phiên trước bị mất điện), ngăn chặn xung đột VRAM giữa Video Upscale và Whisper STT.
+2. **Khóa Nhân Hiệu Năng Cao Alder Lake P-Core (`configure_alder_lake_pcore_qos`):**
+   - Tắt cờ `PROCESS_POWER_THROTTLING_EXECUTION_SPEED` (EcoQoS) và đặt `ABOVE_NORMAL_PRIORITY_CLASS` trên Windows 11 để Thread Director không đẩy luồng điều phối CUDA xuống nhân tiết kiệm điện E-Core khi cửa sổ Terminal thu nhỏ chạy qua đêm.
+3. **Chống Sleep Máy An Toàn (`AntiSleepContext`):**
+   - Gọi Win32 API native `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` và khôi phục nguyên trạng qua Context Manager + `atexit` kể cả khi bấm `Ctrl+C`.

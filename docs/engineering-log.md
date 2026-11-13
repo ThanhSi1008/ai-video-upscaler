@@ -2,6 +2,7 @@
 
 > **Tài liệu lưu trữ toàn bộ số đo thực nghiệm, benchmark đối đầu, soak test và lịch sử kiểm định của dự án.**
 > Tham chiếu từ: [AGENTS.md](../AGENTS.md) và [subtrans/AGENTS.md](../subtrans/AGENTS.md).
+> **Lưu ý phạm vi lịch sử:** Các Mục 1–11 giữ nguyên số đo gốc theo từng mốc thực nghiệm (Tháng 10/2026: `batch_size=6`, `multipass qres`, 155 unit tests) để đối chiếu tiến trình kỹ thuật. Kiến trúc sản xuất hiện hành (Tháng 11/2026: TensorRT 10.16 FP16, Zero-Disk Pipe, `batch_size=8`, `CQ 18 fullres`, Cyclic Cel Memoization, 1-Pass Concat-Mux, 319 offline tests) được ghi nhận tại **Mục 12** bên dưới.
 
 ---
 
@@ -269,3 +270,26 @@
 * **`subtrans/tests/test_cascade.py` (10 tests):** Kiểm tra tính điểm độ khó baseline, các thành phần trọng số, lọc ứng viên cần sửa, ngưỡng lọc tùy chỉnh, bỏ qua khi toàn bộ câu đạt chuẩn, dry-run repair pass, API repair thành công, dự phòng khi API lỗi, tích hợp glossary trong repair, và phản hồi ID cục bộ.
 * **`subtrans/tests/test_eval_runner.py` (6 tests):** Kiểm tra nạp file YAML, tính toàn vẹn của 6 regression cases, tính toàn vẹn của 13 pronoun benchmark cues, so khớp đại từ & tên Romaji, tổng kết rỗng và thực thi runner.
 * **Tổng số kiểm thử đạt chuẩn:** **155 passed, 2 skipped** (thời gian chạy: 44.31 giây).
+
+---
+
+## 12. Mở Khóa Phần Cứng RTX 3060, TensorRT 10 Zero-Disk, Tối Ưu Kịch Trần 6 Thuật Toán & Khóa Sổ Kiểm Toán Cuối (`2026-11-13`)
+
+### A. Mở Khóa Phần Cứng & Driver Windows 11 (`unlock_rtx3060_admin.bat` / `scripts/unlock_rtx3060_admin.ps1`)
+* **HAGS & Power Topology:** Kích hoạt `HwSchMode = 2` (Hardware-Accelerated GPU Scheduling), khóa `PCIe Link State Power Management = Off` trên `Ultimate Performance`, và áp dụng `configure_alder_lake_pcore_qos` trong `src/preflight.py` (tắt `PROCESS_POWER_THROTTLING_EXECUTION_SPEED` để giữ tiến trình điều phối FFmpeg/Python trên 6 nhân P-Core Golden Cove của Core i5-12600K thay vì bị Windows 11 Thread Director đẩy xuống E-Core khi ở nền).
+* **Gỡ Khóa Xung VRAM CUDA P2 -> P0:** Xuất profile UTF-16 LE `scripts/rtx3060_cuda_p0_unlock.nip` và tự động nạp vào NVIDIA Base Profile qua `nvidiaProfileInspector.exe` (`CUDA - Force P2 State = Off`), mở khóa xung bộ nhớ GDDR6 khi chạy ngữ cảnh CUDA từ `7301 MHz` (P2) lên `7500 MHz` (P0, băng thông đỉnh `360 GB/s`).
+* **CUDA Runtime & Fast Math (`src/config.py`):** Thiết lập `CUDA_MODULE_LOADING=LAZY` (tiết kiệm ~300–500 MB VRAM khởi tạo), `CUDA_CACHE_MAXSIZE=2GB` trên NVMe Gen4, bật `allow_fp16_reduced_precision_reduction=True` cho phép lệnh Tensor Core Ampere `HMMA.16816.F16` đạt full-rate, và nâng `DEFAULT_BATCH_SIZE = 8` trên RTX 3060 12GB.
+
+### B. TensorRT 10.16 FP16, Triton JIT `p010le` & 3-Stage Overlapped Zero-Disk Pipe (`13b5183` ➔ `d258b19`)
+* **Biên dịch TensorRT 10.16 (`src/build_trt_engine.py`):** Tự động xuất ONNX tĩnh/động (`dynamo=False`) và biên dịch `.engine` FP16 (`builder_optimization_level=5`, hợp nhất `Conv3x3 + PReLU` trong SRAM để khử ~58 lần đọc/ghi GDDR6 trung gian). `TRTRuntimeEngineWrapper` sử dụng vòng đệm đôi 2-slot VRAM (`_out_ring`) và bộ nhớ đệm địa chỉ/kích thước tensor (`_cached_in_shape`, `_cached_in_ptr`, `_cached_out_ptr`), triệt tiêu cấp phát VRAM động và giảm overhead gọi C++ API mỗi batch.
+* **Zero-Disk Pipe & Cắt Lát Đỉnh VRAM 8K (`src/trt_zero_copy_upscaler.py`):** Giải mã trực tiếp `NVDEC -> RGB24 raw pipe` (`readinto` zero-copy), đẩy `uint8` HWC lên GPU trước khi hoán vị sang `FP16 NCHW` (giảm 50% băng thông PCIe H2D và đọc/ghi VRAM), cắt lát vi mô 2-frame cho bước `4x 8K -> 2x 4K` Bicubic (hạ 75% đỉnh VRAM trung gian), rồi chuyển đổi trực tiếp sang `YUV420P10LE` (`p010le` BT.709 Limited Range) trên GPU bằng kernel **Triton JIT** để bơm thẳng vào `hevc_nvenc` (0 file PNG trên SSD).
+* **Gối Đầu 3 Tầng Thực Sự (`src/pipeline.py`):** Cả chế độ Chuẩn lẫn `--zero-disk` đều nạp trước chunk `N+1` trên CPU/NVDEC (`future_extract`) và xả bất đồng bộ tiến trình `NVENC` của chunk `N-1` (`worker_finalize_zero_disk` / `worker_encode_and_cleanup`) song song 100% với suy luận GPU của chunk `N`.
+* **Lý do giữ vững `FP16` và `NVENC p6 fullres CQ 18` ([ADR-008](agents/DECISIONS.md)):** Không lượng tử hóa `INT8 PTQ` vì `SRVGGNetCompact` dùng 30 lớp `PReLU` có miền âm không chặn gây banding/color-shift trên bầu trời anime 10-bit; không hạ `NVENC` từ `p6` xuống `p1–p3` vì ASIC NVENC chuyên dụng mã hóa nhanh gấp nhiều lần tốc độ suy luận AI (`t_NVENC < t_AI` được che khuất hoàn toàn bởi 3-Stage Overlap), trong khi `CQ 18 + fullres + lookahead 32 + Spatial/Temporal AQ` giảm dung lượng file mà vẫn giữ nét vẽ sắc bén.
+
+### C. Tối Ưu Kịch Trần 6 Thuật Toán Video, Dedup & Kiểm Định (`13b5183` ➔ `d258b19`)
+1. **Cyclic Cel Memoization (`A->B->A`):** `deduplicate_cyclic_frames` băm `BLAKE2b` + kiểm chứng SIMD pixel-exact phát hiện các chu kỳ hoạt họa lặp lại (mấp máy môi, chớp mắt, tóc bay `A->B->C->A->B->C`). Đường Zero-Disk dùng giải thuật tối ưu **Belady's `OPT`** giữ frame trong VRAM/RAM; đường PNG dùng **NTFS Hardlink (`os.link`)** tốn 0 byte và 0 ms ghi đĩa.
+2. **GOP-RLE Re-partition `< 1 ms` & 0-Wait Queue Preflight (`src/dedup.py`, `src/scheduler.py`):** Lưu chuỗi RLE nguyên bản `raw_actions_rle` trong `plan.json` để tái phân hoạch tức thì khi số frame thực tế từng GOP lệch ước lượng mà không bao giờ phải quét lại video 2 phút; worker nền `run_preflight_worker_cli` tách sẵn `raw_segs/` và truyền đúng `dedup_policy` cho các tập kế tiếp trong `--queue`.
+3. **1-Pass Fused Dedup + Early-Exit DIS Flow (`src/dedup.py`):** Hợp nhất `mpdecimate` và xuất ảnh xám `480x270` qua bộ lọc `split` trong 1 lượt giải mã FFmpeg duy nhất; chỉ gọi `DISOpticalFlow` trên các frame bị `mpdecimate` đánh dấu `drop` và thoát sớm khi tích lũy đủ chuyển động camera pan/zoom.
+4. **1-Pass Concat-Mux (`mux_segments_directly`):** Ghép trực tiếp `concat_list.txt` cùng audio/sub/font/chapters gốc ra container `.mkv` đích trong 1 lượt duy nhất, xóa bỏ hoàn toàn bước ghi và đọc lại ~8 GB file tạm `merged_4k.mp4`.
+5. **0-Reinference Sanity & Parallel `streamhash` Mux Audit (`src/output_sanity.py`, `src/mux_audit.py`):** Tái sử dụng ngay ảnh thu nhỏ `270x480` tính bằng `F.avg_pool2d` trên GPU của lô đầu tiên để kiểm tra `|ΔY| <= 6/255` và `corr >= 0.98` (0 suy luận lặp); băm MD5 toàn bộ các luồng âm thanh đa ngôn ngữ trong 1 lượt đọc duy nhất bằng `-map 0:a -f streamhash -` kết hợp `ThreadPoolExecutor` kiểm tra đan xen packet song song.
+6. **Kiểm chứng tự động cô lập (`scripts/verify_offline.py`):** Đạt **PASS 100%** với **`319 passed, 11 skipped, 1 deselected` trong `82.01s`** (`ruff check`: `0 errors`; `subtrans.py eval`: `6/6` regression cases & `22/22` pronoun cues PASS).

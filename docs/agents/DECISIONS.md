@@ -1,6 +1,7 @@
 # Hồ Sơ Quyết Định Kiến Trúc (Architectural Decision Records - ADR)
 
-> **Cập nhật ngày:** 2026-10-29  
+> **Cập nhật ngày:** 2026-11-13
+>
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [STATE](STATE.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Video Pipeline](../video-pipeline.md) | [Dedup Architecture](../dedup-architecture.md) | [Audit & Safety](../audit-and-safety.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
 ---
@@ -55,3 +56,19 @@
   - Tách thành 2 event độc lập trong `subtrans/parser.py`, lưu người nói vào `Cue.speaker`.
   - Dịch độc lập từng câu để không bỏ sót thoại của nhân vật phụ.
   - Gom lại thành Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`) ở `subtrans/writer.py` khi thời gian đồng thời.
+
+### ADR-008: TensorRT 10 FP16 (`HMMA.F16`) + NVENC `p6 fullres CQ 18` — Không Lượng Tử Hóa `INT8` Hay Hạ Preset NVENC
+- **Bối cảnh:** RTX 3060 (GA106) mở khóa gấp đôi tốc độ Tensor Core ở `FP16 accumulate` (`51 TFLOPS` so với `25.4 TFLOPS` `FP32 accumulate`). Đặt vấn đề có nên ép tiếp xuống `INT8 PTQ` hoặc hạ preset NVENC `p6 -> p1..p3` để tăng tốc thêm không.
+- **Quyết định:**
+  - Giữ chuẩn **TensorRT 10.16 FP16** (`builder_optimization_level=5`, vòng đệm VRAM `_out_ring` 2-slot) kết hợp mở khóa xung VRAM **P0 (`7500 MHz`)** và **HAGS (`HwSchMode=2`)**; **không dùng `INT8 PTQ`**.
+  - Giữ chuẩn **NVENC `preset p6`, `multipass fullres`, `CQ 18`, `rc-lookahead 32`, `spatial-aq 1` (`aq-strength 6`), `temporal-aq 1`**.
+- **Lý do vật lý & toán học:**
+  - Trên `realesr-animevideov3` (32 lớp nối tiếp không có `BatchNorm` + 33 lớp `PReLU` dốc âm theo kênh), `INT8 PTQ` vừa bị nghẽn `Q/DQ Reformat` giữa `Conv` và `PReLU`, vừa gây xung đột giữa biên độ nét mực đen/tia sáng (outliers) với vùng chuyển sắc mịn bầu trời đêm -> sinh vân bậc thang 8-bit (`color banding`), phá hỏng chuỗi xuất **10-bit `p010le`**.
+  - Mạch ASIC NVENC Gen 7 ở `p6` nén 4K 10-bit đạt **~55–70 fps** và chạy bất đồng bộ song song với AI (~22–28 fps hiệu dụng). Theo định luật $\min(R_{\text{AI}}, R_{\text{NVENC}})$, hạ `p6 -> p1` tiết kiệm **0.0 giây** nhưng làm xuất hiện nhiễu hạt muỗi quanh nét vẽ đen và tăng 25–40% dung lượng file.
+
+### ADR-009: Kiến Trúc Zero-Disk 3-Stage Overlapped Pipe, Cyclic Cel Memoization (`A->B->A`) & 1-Pass Concat-Mux
+- **Bối cảnh:** Trên máy dùng RAM `DDR4-2133` (2 thanh khác hãng không bật được XMP 3200), việc ghi/đọc PNG 4K trung gian và hoán vị mảng trên CPU gây nghẽn băng thông RAM và hao mòn SSD.
+- **Quyết định:**
+  - **Zero-Disk Pipe (`--zero-disk` / `upscale_turbo.bat`):** Đọc luồng RGB24 trực tiếp vào mảng NumPy cấp phát sẵn (`readinto` 0-copy), truyền tuần tự `NHWC` qua Pinned Memory lên GPU, hoán vị ở `uint8`, chuyển màu BT.709 `p010le` bằng kernel **Triton JIT** ngay trên VRAM và bơm thẳng sang ống `hevc_nvenc`.
+  - **Gối đầu 3 tầng thực sự & Queue GOP-RLE:** Prefetch `Decode(N+1)` ngay trước khi GPU suy luận `Chunk N`, đẩy bước đóng gói đuôi MP4 sang `EncodeWorker`; lưu chuỗi nén `raw_actions_rle` trong `plan.json` để tái phân hoạch GOP trong `< 1 ms` và tách sẵn `raw_segs` cho tập kế tiếp trong `--queue`.
+  - **Cyclic Cel Memoization & 1-Pass Mux:** Băm `BLAKE2b` + kiểm tra nhiễu lượng tử OpenCV SIMD kết hợp thuật toán loại bỏ tối ưu **Belady's OPT** để không suy luận lại các bức vẽ lặp chu kỳ `A->B->A` (nhép miệng/chớp mắt); ghép trực tiếp `up_*.mp4` với audio/sub/font gốc bằng `mux_segments_directly` (khử ~8 GB ghi/đọc `merged_4k.mp4`) và đối soát MD5 đa luồng bằng 1 lượt `-f streamhash`.

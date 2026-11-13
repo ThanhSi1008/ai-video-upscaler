@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `13b5183`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `d258b19`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -11,11 +11,13 @@
 ```text
 upscale.py:main
   → pipeline.run_upscale_pipeline
-  → probe + resolve model + preflight + manifest
-  → split video theo GOP + đếm packet từng segment + dedup plan
-  → extract frames → PyTorch inference → encode/re-expand → rolling cleanup
-  → concat → mux stream copy → mux audit → cleanup khi đạt và không keep-temp
-  → Stage B phụ đề trong subprocess sau khi queue video kết thúc (nếu bật)
+  → probe + resolve model + preflight (Alder Lake P-Core QoS + AntiSleep) + manifest
+  → split video theo GOP (hoặc kế thừa raw_segs từ Queue Preflight) + dedup plan (raw_actions_rle)
+  → 3-Stage Overlapped Loop:
+      [Zero-Disk] NVDEC RGB24 pipe (N+1) ‖ TensorRT 10 FP16 + Triton P010LE (N) ‖ Async NVENC flush (N-1)
+      [Chuẩn]     FFmpeg PNG extract (N+1) ‖ TensorRT/PyTorch FP16 + Cyclic Hardlink (N) ‖ NVENC + Rolling Cleanup (N-1)
+  → 1-Pass Concat-Mux (mux_segments_directly) → Parallel Mux Audit (streamhash MD5) → cleanup khi PASS
+  → Stage B phụ đề trong subprocess (đồng bộ sau queue hoặc song song qua --async-subs)
 
 subtrans.cli → TranslationPipeline
   → parse/align → cast + glossary → Gemini translation/cache

@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-13
 >
-> **Commit Baseline:** `13b5183` (`perf(algorithm): toi uu kich tran 6 thuat toan Cyclic Cel Memoization, 1-Pass Concat-Mux va Parallel Audit`)
+> **Commit Baseline:** `d258b19` (`perf(pipeline): khoa so kiem toan cuoi 3-Stage Overlap, GOP-RLE Queue Preflight va TensorRT Zero-Alloc Ring`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -22,7 +22,7 @@
 | **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, TensorRT 10.16 (`builder_optimization_level=5`, `_out_ring` 2-slot 0-alloc, shape/address cache, `execute_async_v3`), kế thừa `UPSCALER_HEVC_ENCODER`. |
 | **Zero-Disk Pipe & 3-Stage Overlap** | `src/trt_zero_copy_upscaler.py`, `src/pipeline.py`, `src/ffmpeg_ops.py` | PASS | Gối đầu 3 tầng thực sự (`Decode N+1` + `GPU N` + `worker_finalize_zero_disk`), `uint8` NCHW transpose giảm 50% băng thông VRAM, Belady's OPT Cyclic Memoization + 0-reinference Sanity (`upscale_turbo.bat`). |
 | **Dedup, GOP-RLE & Queue Preflight** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | `deduplicate_cyclic_frames` (`A->B->A`), `raw_actions_rle` tái phân hoạch GOP `< 1 ms`, `run_preflight_worker_cli` tách sẵn `raw_segs` + GOP trong `--queue`, 1-Pass fused `mpdecimate+gray`, Early-Exit DIS Flow. |
-| **10-bit NVENC BT.709** | `src/ffmpeg_ops.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, multipass `fullres`/`qres`), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
+| **10-bit NVENC BT.709** | `src/ffmpeg_ops.py`, `src/config.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, `CQ 18`, `maxrate 45M`, multipass `fullres`, lookahead `32`, Spatial/Temporal AQ), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
 | **Bit-exact 1-Pass Mux & Parallel Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | `mux_segments_directly` (1-Pass Concat+Mux, khử 8 GB `merged_4k.mp4`), `-max_interleave_delta 0`, 1-Pass `-f streamhash` MD5 và `ThreadPoolExecutor` audit đa luồng. |
 | **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$, 0 infer lặp trên Zero-Disk); khóa `.gpu_active.lock` kiểm tra PID sống. |
 | **Gemini 3-Key Subtrans V2 (36 RPM)** | `subtrans/gemini_backend.py`, `subtrans/pipeline.py`, `subtrans/cast_sheet.py` | PASS | Xoay vòng 3-Key modulo + ít tải nhất + đổi key khi `429 PerMinute`, theo dõi cạn RPD theo `(model, key_hash)`, tiền tố tĩnh `>4.096` tokens Implicit Context Caching (`cached_tokens`), `ThinkingConfig(MINIMAL/LOW)`, CoT `p1`/`p2` tường minh trong `HysteresisCastManager` và cắt ngữ cảnh tại điểm chuyển cảnh (`>=4500ms`). |

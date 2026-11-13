@@ -13,7 +13,7 @@
 * **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows 11)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
 * **Tôn chỉ Pareto:** Cân bằng chất lượng anime và thời gian. Không hy sinh nét vẽ lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
-  * RTX 3060 (PyTorch CUDA FP16 `batch_size=6` ~4.8–5.2 fps suy luận, ~10–12+ fps hiệu dụng với Dedup & `cv2.imwrite`): **~6–8 tập/đêm** (~45–60 phút/tập ~17.000 unique frames).
+  * RTX 3060 (`batch_size=8`, TensorRT 10 FP16 + `--zero-disk` / PyTorch CUDA FP16, Dedup + Cyclic Cel): **~6–12+ tập/đêm** tùy chế độ Chuẩn hoặc Turbo Zero-Disk.
 
 ---
 
@@ -40,10 +40,9 @@ python upscale.py path/to/source.mkv -o out/
 python subtrans.py path/to/source.mkv -o out/
 .\subtrans.bat path/to/source.mkv
 
-# Kiểm tra bộ nhớ Agent và chạy kiểm thử an toàn offline:
-python scripts/agent_context.py --check
-python scripts/verify_offline.py
-pytest
+# Kiểm tra bộ nhớ Agent và chạy kiểm thử an toàn offline (không chạy bare pytest trên root):
+.\.venv\Scripts\python.exe scripts/agent_context.py --check
+.\.venv\Scripts\python.exe scripts/verify_offline.py
 ```
 
 ### B. Bảng Cờ CLI Chính (`upscale.py`)
@@ -56,7 +55,7 @@ pytest
 | `--batch-size` | `8` (RTX 3060) | Kích thước batch cho AI Inference GPU (Tensor Cores) |
 | `--zero-disk` | `False` | Giải mã NVDEC pipe -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (0 PNG đĩa) |
 | `--no-tensorrt` | `False` | Tắt tự động biên dịch/chạy TensorRT 10 FP16 và dùng thuần PyTorch CUDA FP16 |
-| `--subs-quality` | `fast` | Chất lượng dịch: `fast` (`gemini-3.5-flash-lite`) hoặc `high` (`gemini-3.8-flash`) |
+| `--subs-quality` | `normal` | Chất lượng dịch: `normal`/`fast` (`gemini-3.5-flash-lite`) hoặc `high` (`gemini-3.8-flash`) |
 | `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua video upscale |
 | `--subs-upgrade` | `False` | Nâng cấp phụ đề VI hiện có lên bản dịch Gemini |
 | `--auto-align-en` | `True` | Ghim mốc thời gian phụ đề Whisper/JA theo track EN phòng thu |
@@ -102,7 +101,7 @@ pytest
    * Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full -> YUV Limited `p010le`).
    * Metadata gắn cờ: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
 4. **Mã hóa phần cứng 10-bit NVENC:**
-   * Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng pixel `p010le`, preset `p6` (chất lượng cao), multipass `qres`, lookahead `24` và `spatial-aq 1`.
+   * Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng `p010le`, preset `p6`, `CQ 18` (`maxrate 45M`), multipass `fullres`, lookahead `32` và AQ kép (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
 5. **Vòng đời an toàn (Process Lifecycle & Anti-Sleep):**
    * Sử dụng Win32 API native `SetThreadExecutionState` ngăn hệ thống đi vào chế độ ngủ (sleep/suspend) trong suốt quá trình chạy.
    * Tất cả tài nguyên đệm tạm và tiến trình con phải nằm trong Context Manager với `atexit` để thu hồi sạch sẽ kể cả khi bị `Ctrl+C` (SIGINT).
@@ -133,7 +132,7 @@ pytest
 
 | Phân hệ chuyên sâu | Tài liệu tham chiếu | Trọng tâm kỹ thuật |
 | :--- | :--- | :--- |
-| **GPU & Video Pipeline** | [`docs/video-pipeline.md`](docs/video-pipeline.md) | PyTorch CUDA FP16 (`src/cuda_engine.py`), batch size 6–8, `janai-fix` residual +2x, NVENC 10-bit p010le, ma trận BT.709. |
+| **GPU & Video Pipeline** | [`docs/video-pipeline.md`](docs/video-pipeline.md) | TensorRT 10 / CUDA FP16, Zero-Disk Pipe, `batch_size=8`, `janai-fix` +2x, NVENC 10-bit `p010le` (`CQ 18` `fullres`), BT.709. |
 | **Dedup & DIS Flow** | [`docs/dedup-architecture.md`](docs/dedup-architecture.md) | Split segment theo GOP, scan `mpdecimate` (768:320:0.33), dòng chảy quang học DIS lia/zoom, tái tạo Concat Demuxer. |
 | **Dịch Thuật Subtrans** | [`subtrans/AGENTS.md`](subtrans/AGENTS.md) | Gemini 3-key round-robin, trích xuất 5.1 FC mono + bandpass, regex lọc ảo giác Whisper & tiếng hét lặp token, Monotonic DTW auto-align. |
 | **Audit & An Toàn** | [`docs/audit-and-safety.md`](docs/audit-and-safety.md) | Output Sanity Guard ($|\Delta Y| \le 6$, corr $\ge 0.98$), Mux Audit bit-exact stream copy, auto-cleanup, AntiSleep native Win32. |

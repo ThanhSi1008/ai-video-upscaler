@@ -10,12 +10,12 @@ description: >-
 
 ## 1. Non-Negotiable Hardware & Quality Invariants
 
-- **100% Local Execution:** Windows 11, Intel Core i5-12600K (AVX2 `cv2.imwrite`), NVIDIA RTX 3060 12GB (`cuda` FP16, `batch_size=6`). Never propose Cloud GPUs or load local LLMs concurrently.
+- **100% Local Execution:** Windows 11, Intel Core i5-12600K (P-Core HighQoS, AVX2 `cv2.imwrite`), NVIDIA RTX 3060 12GB (TensorRT 10 FP16 / PyTorch `cuda` FP16, `batch_size=8`, `--zero-disk` optional). Never propose Cloud GPUs or load local LLMs concurrently.
 - **Approval Gate:** Ask the user before running real GPU inference > 100 frames or changing default SR models / NVENC quality flags.
 - **Checkpoint Safety:** Never delete or modify `.temp_<basename>/` (`manifest.json`, `plan.json`, `raw_segs/`, `upscaled_segs/`) without explicit user confirmation.
 - **Two-Way BT.709 Matrix:**
   - Extract: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc`
-  - Encode: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (`p010le`, `hevc_nvenc`, `main10`, `p6`, `multipass=qres`, `rc-lookahead=24`, `spatial-aq=1`, `-tag:v hvc1`).
+  - Encode: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (`p010le`, `hevc_nvenc`, `main10`, `p6`, `cq=18`, `multipass=fullres`, `rc-lookahead=32`, `spatial-aq=1`, `aq-strength=6`, `temporal-aq=1`, `-tag:v hvc1`).
 - **Bit-Exact Stream Copy Mux:**
   - Always include: `-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0`
 
