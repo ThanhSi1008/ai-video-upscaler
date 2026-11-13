@@ -139,3 +139,99 @@ cues:
     en: "Lady Reirin, please stay strong!"
     allowed_pronouns: ["tiểu thư", "người", "nương nương"]
     expected_names: ["Reirin"]
+
+  - id: "futsutsuka_06"
+    series: "futsutsuka"
+    speaker: "Reirin"
+    addressee: "Emperor"
+    mode: "spoken"
+    ja: "陛下、わたくしにお任せくださいませ。"
+    en: "Your Majesty, please leave this to me."
+    allowed_pronouns: ["bệ hạ", "thần thiếp", "thiếp", "tôi"]
+    expected_names: []
+
+  - id: "futsutsuka_07"
+    series: "futsutsuka"
+    speaker: "Keigetsu"
+    addressee: "Reirin"
+    mode: "spoken"
+    ja: "玲(れい)琳(りん)、貴(き)様(さま)だけは許さない！"
+    en: "Reirin, I will never forgive you!"
+    allowed_pronouns: ["ngươi", "mày", "cô"]
+    expected_names: ["Reirin"]
+
+  # --- Series: Fate / Fantasy Noble & Combat Archetypes ---
+  - id: "fate_01"
+    series: "fate"
+    speaker: "Gilgamesh"
+    addressee: "Enemies"
+    mode: "spoken"
+    ja: "貴様ら、雑種の分際で余に逆らうか！"
+    en: "You mongrels dare defy me?!"
+    allowed_pronouns: ["ta", "lũ ngươi", "các ngươi", "chúng mày"]
+    expected_names: []
+
+  - id: "fate_02"
+    series: "fate"
+    speaker: "Saber"
+    addressee: "Master"
+    mode: "spoken"
+    ja: "問おう。そなたが私のマスターか？"
+    en: "I ask of you. Are you my Master?"
+    allowed_pronouns: ["ngài", "ngươi", "ta", "tôi"]
+    expected_names: []
+
+  - id: "mushoku_01"
+    series: "mushoku"
+    speaker: "Eris"
+    addressee: "Rudeus"
+    mode: "spoken"
+    ja: "ルーデウス、あたいについてきなさい！"
+    en: "Rudeus, follow me!"
+    allowed_pronouns: ["ta", "bổn tiểu thư", "tôi", "cậu", "ngươi"]
+    expected_names: ["Rudeus"]
+
+  # --- V2 Max-Quality Edge Cases: DMMTV CC, Kansai-ben, Archaic & Katakana Boundary ---
+  - id: "dmmtv_cc_01"
+    series: "futsutsuka"
+    speaker: "Reirin"
+    addressee: null
+    mode: "inner"
+    ja: "(筆記音)\n＜この薬草なら慧月様の毒を解けるかもしれない…＞"
+    en: "(Writing sound) This medicinal herb might cure Lady Keigetsu's poison..."
+    allowed_pronouns: ["tôi", "mình"]
+    expected_names: ["Keigetsu"]
+    raw_cc_sound_prefix: true
+
+  - id: "kansai_01"
+    series: "conan"
+    speaker: "Heiji"
+    addressee: "Kazuha"
+    mode: "spoken"
+    ja: "和葉、なんでやねん！俺の話を聞けや！"
+    en: "Kazuha, what the heck! Listen to me!"
+    allowed_pronouns: ["tôi", "tui", "tao", "bà", "cậu"]
+    expected_names: ["Kazuha"]
+    expected_hint_substr: "DIALECT:kansai_ben"
+
+  - id: "samurai_01"
+    series: "rurouni"
+    speaker: "Kenshin"
+    addressee: "Kaoru"
+    mode: "spoken"
+    ja: "薫殿、某にお任せあれ。"
+    en: "Miss Kaoru, leave it to me."
+    allowed_pronouns: ["tại hạ", "kẻ hèn này", "ta", "tôi", "cô"]
+    expected_names: ["Kaoru"]
+    expected_hint_substr: "1P:soregashi"
+
+  - id: "katakana_loanword_01"
+    series: "rezero"
+    speaker: "Subaru"
+    addressee: "Emilia"
+    mode: "spoken"
+    ja: "このプログラムとパネルを確認してくれ。"
+    en: "Please check this program and panel."
+    allowed_pronouns: ["tôi", "em", "cậu"]
+    expected_names: []
+    non_vocative_loanwords: ["Ram", "Nell"]

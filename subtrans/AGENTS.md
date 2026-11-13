@@ -6,9 +6,9 @@
 ## 0. Nạp lại ngữ cảnh và nguồn kiểm chứng
 
 - Bắt đầu/resume/subagent: đọc [START_HERE](../docs/agents/START_HERE.md), handoff của task và file này; đối chiếu code trước khi sửa. Không dùng lịch sử chat làm bộ nhớ duy nhất.
-- Đối chiếu code tại baseline **`2d27aa4`**: `TranslationPipeline.__init__` lấy thứ tự model từ `models.yaml:chain`, lọc `local`/`preview`, rồi sắp Lite trước (`normal`) hoặc Flash trước (`high`). `config.yaml` giữ batch, timeout và tùy chọn; CLI override trong `cli.py`. Model/quota ở đây là cấu hình repo, chưa xác minh khả dụng hay hạn mức nhà cung cấp trong phiên này.
+- Đối chiếu code tại baseline **`c4918d6`**: `TranslationPipeline.__init__` lấy thứ tự model từ `models.yaml:chain`, lọc `local`/`preview`, rồi sắp Lite trước (`normal`/`fast`) hoặc Flash trước (`high`). `config.yaml` giữ batch, timeout và tùy chọn; CLI override trong `cli.py`. Model/quota ở đây là cấu hình repo, chưa xác minh khả dụng hay hạn mức nhà cung cấp trong phiên này.
 - Khởi động offline: dùng `--help`; **không chạy `check`/`models`**, vì chúng gọi API thật. `check` còn hiển thị mảnh key. Không đọc/in `.env` hay API key; mọi test dùng stub.
-- `--dry-run` không gọi API nhưng vẫn ghi cast giả, subtitle/audit, telemetry và có thể sửa `pending_subs.json`. Dùng output riêng. `--cache-db` chỉ đổi cache pipeline; backend/RAG còn tạo DB mặc định. Khi test phải cách ly `cache.DB_PATH`, `rag.KNOWLEDGE_DB_PATH` và file quota; không sửa/xóa dữ liệu vận hành để kiểm thử.
+- `--dry-run` không gọi API nhưng vẫn ghi cast giả, subtitle/audit, telemetry (tuyệt đối không chạm `pending_subs.json`). Dùng output riêng. `TranslationCache` và `KnowledgeBase` bật sẵn `WAL`; `generate_qa_report` nhận trực tiếp `cache` của pipeline. Khi test vẫn phải cách ly qua `scripts/verify_offline.py`; không sửa/xóa dữ liệu vận hành để kiểm thử.
 - `--local`/`--review` và cấu hình Ollama là dấu vết cũ, không phải backend được phép dùng. Cổng chất lượng tại `pipeline.py`: bản dịch thật >=95%, nghi vấn <10%; còn lại xuất `.vi.partial.*` và ghi hàng đợi pending.
 
 ---
@@ -83,11 +83,13 @@ subtrans/
 └── report.py               # Stage C: Báo cáo QA audit Markdown (out/<name>.audit.md & --review-file)
 ```
 
-> **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng.  
-> **Schema "Suy luận trước, dịch sau":** `SubtitleOutputItem` đặt các trường `speaker`, `addressee`, `mode`, `en_conflict` lên TRƯỚC trường bản dịch `vi`, giúp mô hình giải quyết ngữ cảnh nhân vật và zero-pronouns trước khi sinh bản dịch tiếng Việt.  
-> **Linter V1 Hậu Kiểm:** Tự động bắt lỗi sót ký tự CJK, vi phạm CPS > 20 (trần cứng > 25), lỗi Unicode chưa chuẩn hóa NFC, mất tên Romaji khi gọi tên, và các từ Hán-Việt dịch thô cấm dùng.  
-> **Smart Cloud Cascade (P2):** Draft Pass bằng `gemini-3.5-flash-lite` (tiết kiệm quota, 500 RPD/key), tự động tính điểm độ khó $S(cue)$ (sau khi chạy auto-fix) và gom tối đa 20% số cue khó gửi vào Repair Pass của `gemini-3.8-flash`. Cổng Re-lint so sánh theo danh tính vi phạm `_ident`, chặn trôi dạt ngữ nghĩa và lệch chữ số.  
-> **Lightweight RAG & Error Bank (P3):** Lưu trữ câu song ngữ (`gold_units` có status `draft`, `reviewed`, `gold`) và quy tắc bẫy lỗi (`error_bank`). Chỉ nạp `gold`/`reviewed` vào prompt, loại trừ tập đang đo (`exclude_episode`), cách ly cache nháp bằng `rag_hash`.
+> **Quy định LLM Cốt Lõi:** **100% sử dụng Cloud API (Gemini Cloud: Flash-Lite, Flash), TUYỆT ĐỐI BỎ QUA MODEL LOCAL (Ollama / TranslateGemma)** theo chỉ định trực tiếp từ Người dùng. Mọi lệnh gọi GenAI (`gemini_backend.py`, `cast_sheet.py`, `cascade.py`) đều gắn `get_anime_safety_settings()` (`BLOCK_NONE`), `extract_genai_response_text()` chống lỗi `response.text=None` và `max_output_tokens=16384`.
+>
+> **Implicit Context Caching (> 4.096 tokens) & Schema "Suy luận trước, dịch sau":** `build_episode_system_prompt` xây dựng tiền tố quy tắc tĩnh `> 4.096` tokens (`SYSTEM_INSTRUCTION`, quy tắc biên dịch chuyên sâu, `style_rules`, `address_rules` deep-merged, `<episode_cast>`) kèm ghi nhận `cached_content_token_count` vào SQLite & báo cáo QA. `SubtitleOutputItem` suy luận `speaker`, `addressee`, `mode`, `p1`, `p2`, `en_conflict` trước `vi`; `HysteresisCastManager.observe_batch_cues` học trực tiếp cặp đại từ `(p1, p2)` xác thực và ngữ cảnh giữa các batch được cắt sạch tại điểm chuyển cảnh (`gap >= 4500ms`).
+>
+> **Cache Ngữ Cảnh (`v2.2`), Furigana & Whisper/DTW V2:** `compute_contextual_cue_sig` phân biệt câu ngắn khuyết đại từ theo `(speaker, mode_hint, prev_ja, next_ja)`, giữ `inline_cached_context` khi partial cache hit và ghi ngược kết quả sửa `Cascade` vào `TranslationCache`. `strip_ja_furigana` xuyên suốt toàn hệ thống; `parser.py` lọc âm thanh CC `(筆記音)`, nhận diện `mode_hint="inner"` cho `＜...＞`/`Italics`, hỗ trợ `faster-whisper` + Silero VAD + `initial_prompt` từ Glossary, tách `1:2` theo khoảng lặng `>= 250ms` và bù lệch `Piecewise 2-Segment Auto-Offset`.
+>
+> **Linter V2, Smart Cloud Cascade & Hybrid BM25 RAG:** Bắt lỗi sót CJK (gồm CJK Ext-A & `「」`), CPS, NFC, mất tên Romaji vocative (có ranh giới từ Katakana & `Character.aliases`), `RULE_GLOSSARY_TERM` và `RULE_PRONOUN_CONSISTENCY`; chạy Linter hậu `optimize_cues_for_playback`. Cascade dùng `ThinkingConfig(LOW)` trên `gemini-3.8-flash` và cách ly lệch con số (`digit_mismatch`). `KnowledgeBase` truy hồi Hybrid BM25 + cặp vai, chống tự nhiễm độc `error_bank` và tự động tuyển chọn câu sửa sạch làm mẫu `silver`; `subtrans.py eval` tự kiểm chứng sống 6 ca hồi quy và 22 cues benchmark.
 
 ---
 
@@ -97,7 +99,7 @@ subtrans/
 * **Mặc định cấu hình (`--subs-quality normal`, tài liệu cũ gọi Fast):** `gemini-3.5-flash-lite`; 500 RPD/key là số liệu lưu trong repo, không bảo đảm quota hiện thời.
 * **Chế độ Chất lượng cao (`--subs-quality high`):** `gemini-3.8-flash`.
 * **Fallback cấu hình:** `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`; xem `models.yaml:chain`.
-* **Quy tắc Thinking:** `thinking_level=MINIMAL` cho dòng `gemini-3.5-flash-lite`; `thinking_budget=0` cho dòng 3.8/3.7/3.6.
+* **Quy tắc Thinking:** `thinking_level=MINIMAL` cho dòng `gemini-3.5-flash-lite`; `thinking_level=LOW` cho dòng `gemini-3.8/3.7/3.6/3.5-flash` (suy luận zero-pronoun chính xác mà không tốn token rỗng).
 * **Cấm sử dụng:** Tuyệt đối không dùng dòng `gemini-2.*` cũ làm mặc định. Không dùng alias `gemini-flash-latest` nếu thiếu cờ `--allow-latest-alias`.
 
 ### B. Phân Phối Tải & Xử Lý Lỗi 429

@@ -37,8 +37,14 @@ def _clean_single_dialogue_line(text: str) -> str:
     if text.strip() in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
         return ""
 
-    # 1. Strip HTML tags like <i>, </i>, <b>, <font color="...">, etc.
-    text = re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", text)
+    # 1. Strip actual HTML tags like <i>, </i>, <b>, <font color="...">, <ruby>, etc.
+    #    Avoid wiping anime telepathy/system angle brackets such as <Rudeus!> or <Appraisal>.
+    text = re.sub(
+        r"</?(?:i|b|u|s|font|span|br|ruby|rt|rp|em|strong|sub|sup|p|div)\b[^>]*>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     # 2. Strip ASS tags like {\an8}, {\pos(1,2)}, etc.
     text = re.sub(r"\{[^\}]*\}", "", text)
@@ -50,9 +56,10 @@ def _clean_single_dialogue_line(text: str) -> str:
     text = re.sub(r"[♪♫♬♩#]", "", text)
 
     # 5. Strip bracketed sound effects/descriptions: [cười], (tiếng nổ), [Sound], (laugh)
+    # Use strict word boundaries so parenthetical character names like (Clara), (Lala), (Tousetsu) are preserved.
     text = re.sub(r"\[[^\]]*\]", "", text)
     stripped = re.sub(
-        r"\([^\)]*(?:tiếng|cười|khóc|thở|nói|nhạc|âm thanh|la|hét|laugh|music|sigh|gasp|screaming)[^\)]*\)",
+        r"\([^\)]*(?<!\w)(?:tiếng\s+\w+|cười|khóc|thở\s+dài|hơi\s+thở|nhạc|âm\s+thanh|la\s+hét|gào\s+hét|laugh(?:ing|s)?|music|sigh(?:s|ing)?|gasp(?:s|ing)?|scream(?:s|ing)?)(?!\w)[^\)]*\)",
         "",
         text,
         flags=re.IGNORECASE,
@@ -77,12 +84,14 @@ def _clean_single_dialogue_line(text: str) -> str:
     text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     text = re.sub(r"\s+", " ", text).strip()
 
-    # 8. Strip enclosing quotation marks around entire dialogue lines (SRT standard)
-    if (text.startswith('"') and text.endswith('"')) or \
-       (text.startswith("'") and text.endswith("'")) or \
-       (text.startswith('“') and text.endswith('”')) or \
-       (text.startswith('«') and text.endswith('»')):
-        text = text[1:-1].strip()
+    # 8. Strip enclosing quotation marks or fullwidth inner-monologue brackets around an ENTIRE line only
+    #    (Never strip when the closing quote appears mid-line, e.g., "'Sư phụ' và 'Đệ tử'")
+    for open_q, close_q in (('"', '"'), ("'", "'"), ("“", "”"), ("«", "»"), ("＜", "＞")):
+        if text.startswith(open_q) and text.endswith(close_q) and len(text) >= 2:
+            interior = text[1:-1]
+            if close_q not in interior and open_q not in interior:
+                text = interior.strip()
+                break
 
     return unicodedata.normalize("NFC", text)
 
@@ -205,19 +214,32 @@ def optimize_cues_for_playback(
             if min_w >= 4 and len(words1 & words2) / min_w >= 0.60:
                 has_high_word_overlap = True
 
+        # Preserve intentional dramatic short repetitions across sequential pauses
+        # (e.g. "Subaru..." -> [150ms gap] -> "Subaru!" or "Đợi đã!" -> [200ms gap] -> "Đợi đã!")
+        is_dramatic_repeat = (
+            norm_curr == norm_next
+            and not is_simultaneous
+            and gap >= 80
+            and len(clean_curr) <= 22
+            and (gap >= 150 or clean_curr != clean_next)
+        )
+
         is_same_content = (
-            (norm_curr == norm_next and (next_cue.start <= curr.end + 500 or start_diff <= 1500))
-            or (
-                start_diff <= 800
-                and len(norm_curr) >= 15
-                and len(norm_next) >= 15
-                and (norm_next.startswith(norm_curr) or norm_curr.startswith(norm_next))
-            )
-            or (
-                (is_simultaneous or start_diff <= 1200)
-                and (
-                    (len(common_prefix) >= 15 and (len(common_words) >= 3 or common_len >= min_len * 0.5))
-                    or has_high_word_overlap
+            not is_dramatic_repeat
+            and (
+                (norm_curr == norm_next and (next_cue.start <= curr.end + 500 or start_diff <= 1500))
+                or (
+                    start_diff <= 800
+                    and len(norm_curr) >= 15
+                    and len(norm_next) >= 15
+                    and (norm_next.startswith(norm_curr) or norm_curr.startswith(norm_next))
+                )
+                or (
+                    (is_simultaneous or start_diff <= 1200)
+                    and (
+                        (len(common_prefix) >= 15 and (len(common_words) >= 3 or common_len >= min_len * 0.5))
+                        or has_high_word_overlap
+                    )
                 )
             )
         )
@@ -300,11 +322,21 @@ def optimize_cues_for_playback(
             p_norm = re.sub(r"[^\w\s]", "", prev.vi or "").strip().lower()
             c_norm = re.sub(r"[^\w\s]", "", c.vi or "").strip().lower()
             start_diff = abs(c.start - prev.start)
-            is_post_dup = (p_norm == c_norm and c.start <= prev.end + 500) or (
-                start_diff <= 800
-                and len(p_norm) >= 15
-                and len(c_norm) >= 15
-                and (c_norm.startswith(p_norm) or p_norm.startswith(c_norm))
+            post_gap = c.start - prev.end
+            is_dramatic_post_repeat = (
+                p_norm == c_norm
+                and post_gap >= 80
+                and len(prev.vi or "") <= 22
+                and (post_gap >= 150 or (prev.vi or "").strip() != (c.vi or "").strip())
+            )
+            is_post_dup = not is_dramatic_post_repeat and (
+                (p_norm == c_norm and c.start <= prev.end + 500)
+                or (
+                    start_diff <= 800
+                    and len(p_norm) >= 15
+                    and len(c_norm) >= 15
+                    and (c_norm.startswith(p_norm) or p_norm.startswith(c_norm))
+                )
             )
             if is_post_dup:
                 prev.end = max(prev.end, c.end)
@@ -408,6 +440,29 @@ def wrap_subtitle_line(
     return text
 
 
+_VI_CONTINUATION_LOWERCASE_WORDS = {
+    "anh", "em", "cậu", "tớ", "tôi", "ta", "ngươi", "cô", "chú", "bác", "ông", "bà",
+    "chị", "hắn", "nó", "họ", "chúng", "mình", "mày", "tao", "ngài", "người", "vị",
+    "kẻ", "nhưng", "mà", "và", "vì", "nếu", "khi", "vậy", "thế", "không", "đừng",
+    "hãy", "mau", "đi", "ở", "tại", "có", "là", "đây", "đó", "đã", "đang", "sẽ",
+    "chỉ", "cũng", "vẫn", "thật", "sao", "ai", "cái", "con", "những", "các",
+}
+
+
+def _lowercase_continuation_preserving_proper_nouns(part2: str, after_comma: bool = False) -> str:
+    """Lowercases continuation start unless it begins with a capitalized proper noun (e.g. Subaru, Fran)."""
+    if not part2:
+        return part2
+    m_word = re.match(r"^([^\W\d_]+)", part2, flags=re.UNICODE)
+    if not m_word:
+        return part2
+    first_word = m_word.group(1)
+    if first_word[0].isupper():
+        if first_word.lower() not in _VI_CONTINUATION_LOWERCASE_WORDS and (after_comma or len(first_word) >= 2):
+            return part2
+    return part2[0].lower() + part2[1:]
+
+
 def split_sentence_across_cues(sentence: str, num_cues: int = 2) -> List[str]:
     """
     Splits a single sentence across multiple cues at natural phrase boundaries.
@@ -435,8 +490,9 @@ def split_sentence_across_cues(sentence: str, num_cues: int = 2) -> List[str]:
         part1 = sentence[:split_start].strip() + (punct if punct.startswith(".") else ",")
         part2 = sentence[split_end:].strip()
         if part2:
-            # Lowercase the first letter of continuation cue if not capitalized name
-            part2 = part2[0].lower() + part2[1:]
+            part2 = _lowercase_continuation_preserving_proper_nouns(
+                part2, after_comma=not punct.startswith(".")
+            )
         return [part1, part2]
 
     # Fallback: split at nearest space
@@ -445,7 +501,7 @@ def split_sentence_across_cues(sentence: str, num_cues: int = 2) -> List[str]:
     part1 = " ".join(words[:mid]) + ","
     part2 = " ".join(words[mid:])
     if part2:
-        part2 = part2[0].lower() + part2[1:]
+        part2 = _lowercase_continuation_preserving_proper_nouns(part2, after_comma=True)
     return [part1, part2]
 
 
@@ -539,19 +595,22 @@ def write_subtitles(
             max_line_chars=max_line_chars,
         )
 
-    # ASS format fallback (preserves styles and tags if needed)
+    # ASS format fallback (preserves dialogue styles AND original typesetting/sign events)
     if optimize_playback:
         processed_cues = optimize_cues_for_playback(cues)
         from subtrans.linter import auto_fix_cues
         processed_cues, _ = auto_fix_cues(processed_cues)
     else:
         processed_cues = [
-            c for c in cues if not getattr(c, "is_dropped_sound", False)
+            c for c in cues if not getattr(c, "is_dropped_sound", False) and not getattr(c, "is_skipped", False)
         ]
     ssa = copy.deepcopy(original_ja_ssa)
     ssa.events.clear()
     for cue in processed_cues:
-        clean_text = clean_and_normalize_vietnamese(cue.vi or cue.ja, preserve_dual=True)
+        raw_vi = (cue.vi or "").strip()
+        if not raw_vi or raw_vi in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
+            raw_vi = cue.en or cue.ja or ""
+        clean_text = clean_and_normalize_vietnamese(raw_vi, preserve_dual=True)
         if effective_wrap and "\n" not in clean_text:
             clean_text = wrap_subtitle_line(clean_text, wrap_chars=effective_wrap)
         elif smart_wrap and "\n" not in clean_text and len(clean_text) > max_line_chars:
@@ -564,6 +623,21 @@ def write_subtitles(
             style=cue.style or "Default",
         )
         ssa.events.append(evt)
+
+    # Preserve skipped studio typesetting / sign events (not dropped sound cues) in ASS output
+    for cue in cues:
+        if getattr(cue, "is_skipped", False) and not getattr(cue, "is_dropped_sound", False):
+            sign_raw = (cue.raw_text or cue.ja or "").strip()
+            if sign_raw:
+                ssa.events.append(
+                    pysubs2.SSAEvent(
+                        start=cue.start,
+                        end=cue.end,
+                        text=sign_raw,
+                        style=cue.style or "Default",
+                    )
+                )
+    ssa.events.sort(key=lambda e: (e.start, e.end))
 
     if output_path.suffix.lower() != ".ass":
         output_path = output_path.with_suffix(".ass")

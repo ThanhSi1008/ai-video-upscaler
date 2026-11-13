@@ -23,7 +23,14 @@ from pydantic import BaseModel, Field
 
 from subtrans.models import Cue, Glossary
 from subtrans.linter import lint_cue, LintViolation, CRITICAL_RULES, ALL_RULE_IDS, RULE_HIGH_CPS
-from subtrans.gemini_backend import GeminiTranslator, filter_relevant_glossary
+from subtrans.gemini_backend import (
+    GeminiTranslator,
+    filter_relevant_glossary,
+    get_anime_safety_settings,
+    extract_genai_response_text,
+    get_thinking_config,
+)
+from subtrans.ja_morph_tagger import strip_ja_furigana, extract_ja_linguistic_hints
 
 logger = logging.getLogger("subtrans.cascade")
 
@@ -104,6 +111,7 @@ def score_cue_difficulty(
                 score += 4.0
                 features["linter_errors"] += 1
             elif v.severity == "WARNING":
+                score += 1.5
                 features["linter_warnings"] += 1
 
     if cue.uncertain:
@@ -114,6 +122,7 @@ def score_cue_difficulty(
         features["uncertain_reason"] = cue.uncertain_reason
 
     if getattr(cue, "en_conflict", False):
+        score += 4.0
         features["en_conflict"] = True
 
     ja_len = len(cue.ja or "")
@@ -121,11 +130,12 @@ def score_cue_difficulty(
     if ja_len > 35 or en_len > 70:
         features["long_line"] = True
 
-    # Series-specific difficulty markers from YAML config (NOT hardcoded, no lone 殿)
+    # Series-specific difficulty markers from YAML config (furigana-transparent)
     ja_text = cue.ja or ""
+    ja_clean = strip_ja_furigana(ja_text)
     if difficulty_markers:
         for m in difficulty_markers:
-            if m and m in ja_text:
+            if m and (m in ja_text or m in ja_clean):
                 score += 2.0
                 features["marker_matched"] = True
                 features["matched_marker"] = m
@@ -264,6 +274,7 @@ def run_cascade_repair_pass(
     difficulty_threshold: float = 4.0,
     series: Optional[str] = None,
     episode_basename: str = "",
+    dynamic_cast_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Runs the Cloud Cascade Repair/Editor Pass on cues needing review.
@@ -397,6 +408,17 @@ def run_cascade_repair_pass(
                 "mode": cue.mode or "spoken",
                 "issues": issues,
             }
+            ja_hints = extract_ja_linguistic_hints(cue.ja) if cue.ja else None
+            if ja_hints:
+                item["ja_hints"] = ja_hints
+            if cue.speaker and cue.speaker.strip().lower() != "unknown":
+                item["speaker_cc"] = strip_ja_furigana(cue.speaker.strip())
+            if getattr(cue, "p1", None):
+                item["p1"] = cue.p1
+            if getattr(cue, "p2", None):
+                item["p2"] = cue.p2
+            if getattr(cue, "mode_hint", None):
+                item["mode_hint"] = cue.mode_hint
             repair_items.append(item)
 
         # Dynamic affirmative cast & glossary blocks
@@ -437,8 +459,21 @@ def run_cascade_repair_pass(
             if cast_lines:
                 cast_block = "<cast>\n" + "\n".join(cast_lines) + "\n</cast>\n\n"
 
+        dyn_cast_block = (
+            f"<dynamic_cast>\n{dynamic_cast_context.strip()}\n</dynamic_cast>\n\n"
+            if dynamic_cast_context and dynamic_cast_context.strip()
+            else ""
+        )
+        addr_block = ""
+        if glossary and glossary.address_rules and glossary.address_rules.relations:
+            rel_lines = [
+                f"- {r.case}: {r.self} / {r.other}" + (f" ({r.note})" if r.note else "")
+                for r in glossary.address_rules.relations
+            ]
+            addr_block = "<address_rules>\n" + "\n".join(rel_lines) + "\n</address_rules>\n\n"
+
         prompt_str = (
-            f"{cast_block}{glossary_block}"
+            f"{cast_block}{dyn_cast_block}{addr_block}{glossary_block}"
             f"<cues>\n{json.dumps({'cues_to_review': repair_items}, ensure_ascii=False, separators=(',', ':'))}\n</cues>"
         )
 
@@ -447,13 +482,19 @@ def run_cascade_repair_pass(
             from subtrans.cache import execute_and_log_api_request
             from subtrans.throttle import call_with_retry, DailyQuotaExhaustedError
 
-            config_kwargs = {
+            config_kwargs: Dict[str, Any] = {
                 "system_instruction": REPAIR_SYSTEM_INSTRUCTION,
                 "response_mime_type": "application/json",
                 "response_schema": list[RepairOutputItem],
+                "safety_settings": get_anime_safety_settings(),
                 "temperature": 0.0,
-                "thinking_config": types.ThinkingConfig(thinking_budget=0),
+                "max_output_tokens": 16384,
             }
+            if getattr(repair_translator, "http_options", None) is not None:
+                config_kwargs["http_options"] = repair_translator.http_options
+            thinking_cfg = get_thinking_config(repair_translator.model)
+            if thinking_cfg is not None:
+                config_kwargs["thinking_config"] = thinking_cfg
 
             api_keys_list = getattr(repair_translator, "api_keys", []) or []
             repair_cache = getattr(repair_translator, "cache", None)
@@ -489,6 +530,8 @@ def run_cascade_repair_pass(
                         model_name=repair_translator.model,
                         max_retries=2,
                         cache=repair_cache,
+                        key_id=curr_kid,
+                        all_key_ids=getattr(repair_translator, "key_ids", None),
                     )
 
                 try:
@@ -517,7 +560,7 @@ def run_cascade_repair_pass(
                             continue
                     raise
 
-            raw_text = response.text.strip()
+            raw_text = extract_genai_response_text(response)
             data = json.loads(raw_text)
             id_to_fixed = {it["id"]: it for it in data if "id" in it and "vi" in it}
 
@@ -546,9 +589,21 @@ def run_cascade_repair_pass(
                     cue.repair_reason_code = reason_code
 
                     if accepted:
+                        source_digits = set(
+                            re.findall(r"\d+", f"{cue.ja or ''} {cue.en or ''} {cue.draft_vi or ''}")
+                        )
+                        fixed_digits = set(re.findall(r"\d+", fixed_vi))
+                        hallucinated_digits = bool(fixed_digits - source_digits)
+                        if hallucinated_digits:
+                            cue.is_digit_mismatch = True
+
                         cue.vi = fixed_vi
-                        cue.uncertain = False
-                        cue.uncertain_reason = "repaired"
+                        if reason_code == "accepted_digit_mismatch" or hallucinated_digits:
+                            cue.uncertain = True
+                            cue.uncertain_reason = "digit_mismatch"
+                        else:
+                            cue.uncertain = False
+                            cue.uncertain_reason = "repaired"
                         cue.model_used = f"{repair_translator.model} (repair)"
                         repaired_count += 1
                     else:

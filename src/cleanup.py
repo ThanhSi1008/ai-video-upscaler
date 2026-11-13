@@ -38,13 +38,13 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
     """
     Dọn dẹp an toàn và triệt để thư mục checkpoint tạm (.temp_<basename>)
     cùng các symlink và tệp đệm trên SSD sau khi hoàn tất muxing & Mux Audit PASS.
-    
+
     Hỗ trợ xử lý:
     - Thư mục thông thường trên SSD.
     - Symlinks trỏ đến thư mục checkpoint ở vị trí khác (resolve target và xóa cả hai).
     - Dọn dẹp thư mục cha nếu sau khi xóa thư mục tạm thì thư mục cha rỗng (trừ .DS_Store).
     - Quét dọn các symlink mồ côi dạng .temp_* liên quan trong output_dir.
-    
+
     Trả về số byte đã giải phóng.
     """
     if not work_dir or not os.path.lexists(work_dir):
@@ -141,8 +141,8 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
 
 def cleanup_subtitle_extracts(vid_dir: str, base_name: str, logger=None) -> int:
     """
-    Dọn dẹp các tệp phụ đề tạm (extracted_en.ass, extracted_ja.ass) được trích xuất
-    trong quá trình xử lý subtrans trong thư mục .temp_<base_name>.
+    Dọn dẹp các tệp phụ đề tạm (extracted_en.ass, extracted_ja.ass, *.whisper_ja.srt)
+    được trích xuất trong quá trình xử lý subtrans trong thư mục .temp_<base_name>.
     """
     safe_base = base_name.rstrip('. ')
     tmp_dir = os.path.join(vid_dir, f".temp_{safe_base}")
@@ -150,7 +150,17 @@ def cleanup_subtitle_extracts(vid_dir: str, base_name: str, logger=None) -> int:
         return 0
 
     freed = 0
-    for fname in ["extracted_en.ass", "extracted_ja.ass", "extracted_en.srt", "extracted_ja.srt"]:
+    static_names = {"extracted_en.ass", "extracted_ja.ass", "extracted_en.srt", "extracted_ja.srt"}
+    candidate_files = list(static_names)
+    if os.path.isdir(tmp_dir):
+        try:
+            for entry in os.listdir(tmp_dir):
+                if entry.endswith(".whisper_ja.srt") and entry not in static_names:
+                    candidate_files.append(entry)
+        except Exception:
+            pass
+
+    for fname in candidate_files:
         fp = os.path.join(tmp_dir, fname)
         if os.path.exists(fp):
             try:

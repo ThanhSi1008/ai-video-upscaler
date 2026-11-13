@@ -241,11 +241,15 @@ def test_gemini_uncertain_categories():
 
 
 def test_gemini_thinking_config_mapping():
-    """Verifies that thinking config is set to MINIMAL for flash-lite and disabled (budget=0) for other models."""
+    """Verifies ThinkingConfig uses MINIMAL for flash-lite, LOW for Gemini 3.x Flash, and budget=0 for legacy 2.5."""
     cfg_lite = get_thinking_config("gemini-3.5-flash-lite")
     assert cfg_lite is not None
     assert cfg_lite.thinking_level.name == "MINIMAL"
 
-    cfg_flash = get_thinking_config("gemini-3.8-flash")
-    assert cfg_flash is not None
-    assert cfg_flash.thinking_budget == 0
+    cfg_flash_38 = get_thinking_config("gemini-3.8-flash")
+    assert cfg_flash_38 is not None
+    assert cfg_flash_38.thinking_level.name == "LOW"
+
+    cfg_flash_25 = get_thinking_config("gemini-2.5-flash")
+    assert cfg_flash_25 is not None
+    assert cfg_flash_25.thinking_budget == 0

@@ -53,7 +53,8 @@ def isolated_environment(environ: dict[str, str]) -> dict[str, str]:
              and key.upper() not in {"GOOGLE_APPLICATION_CREDENTIALS", "PYTHONPATH",
                                      "PYTEST_ADDOPTS", "PYTEST_PLUGINS"}}
     clean.update(CUDA_VISIBLE_DEVICES="-1", RUN_GPU_TESTS="0", PYTHON_DOTENV_DISABLED="1",
-                 PYTHONUTF8="1", PYTHONIOENCODING="utf-8", PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+                 SUBTRANS_DISABLE_DOTENV="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
+                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
     return clean
 
 

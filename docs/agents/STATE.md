@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-13
 >
-> **Commit Baseline:** `bb646e2` (`perf(project): trien khai toan dien 3 goi toi uu Pareto cho Video Pipeline va Subtrans`)
+> **Commit Baseline:** `c4918d6` (`fix(scripts): cai dat san nvidiaProfileInspector v3.0.2.3 va hoan thien unlock_rtx3060_admin`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`288 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`298 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
 - **Trạng thái Git:** Sạch sẽ, kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
 
 ---
@@ -25,11 +25,11 @@
 | **10-bit NVENC BT.709** | `src/ffmpeg_ops.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, multipass `fullres`/`qres`), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
 | **Bit-exact Mux & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Bắt buộc cờ `-max_interleave_delta 0`, audit MD5 âm thanh, font đính kèm và số lượng frame. |
 | **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$); khóa `.gpu_active.lock` kiểm tra PID sống (`psutil.pid_exists`) chống xóa nhầm khi import. |
-| **Gemini 3-Key Subtrans (36 RPM)** | `subtrans/gemini_backend.py`, `subtrans/pipeline.py` | PASS | Luân phiên 3 API key mở khóa trọn vẹn 36 RPM (Lite) / 12 RPM (Flash), compact JSON payload, log RPD chuẩn 1x, hỗ trợ alias `--subs-quality fast`. |
-| **SQLite WAL Batch Cache & Glossary** | `subtrans/cache.py`, `subtrans/glossary.py` | PASS | SQLite `WAL` + `get_cues_batch`/`set_cues_batch` kèm CoT metadata, băm SHA-256 nội dung Glossary, giải tham chiếu text-pointer `.yaml` trên Windows, truyền đủ `gender`/`register`/`note`. |
-| **Smart Cascade & RAG Series Filter** | `subtrans/cascade.py`, `subtrans/rag.py` | PASS | Format chuẩn `<glossary>` & `<cast>` đầy đủ `speaks_to`, xoay vòng đa key cho Repair Pass, lọc `error_bank` theo đúng `series`, cô lập hoàn toàn `--dry-run`. |
-| **Whisper 5.1 FC & Banded DTW** | `src/subtitles.py`, `subtrans/parser.py`, `subtrans/dtw_auto_align.py` | PASS | Trích xuất phụ đề theo `codec_name` (bỏ qua bitmap PGS), lùi CPU khi GPU đang giữ lock, ghi đè chuẩn `c.en` sau DTW + truyền `cast_names_ja_en` + cửa sổ nhanh DTW. |
-| **Multi-Speaker & Dual Dialogue**| `subtrans/parser.py`, `subtrans/writer.py` | PASS | Bóc tách người nói vào `Cue.speaker`, Smart Semantic Wrap (>72 chars), bảo toàn timeline Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`). |
+| **Gemini 3-Key Subtrans V2 (36 RPM)** | `subtrans/gemini_backend.py`, `subtrans/pipeline.py`, `subtrans/cast_sheet.py` | PASS | Xoay vòng 3-Key modulo + ít tải nhất + đổi key khi `429 PerMinute`, theo dõi cạn RPD theo `(model, key_hash)`, tiền tố tĩnh `>4.096` tokens Implicit Context Caching (`cached_tokens`), `ThinkingConfig(MINIMAL/LOW)`, CoT `p1`/`p2` tường minh trong `HysteresisCastManager` và cắt ngữ cảnh tại điểm chuyển cảnh (`>=4500ms`). |
+| **Contextual Cache (`v2.2`) & Glossary** | `subtrans/cache.py`, `subtrans/glossary.py`, `subtrans/ja_morph_tagger.py` | PASS | Khóa cache ngữ cảnh `compute_contextual_cue_sig`, `inline_cached_context` khi partial hit, ghi ngược `Cascade` vào cache, deep-merge `AddressRules`, `strip_ja_furigana` xuyên suốt, nhận diện Kansai-ben & `soregashi`. |
+| **Smart Cascade, Linter V2 & Hybrid RAG** | `subtrans/cascade.py`, `subtrans/linter.py`, `subtrans/rag.py` | PASS | Ranh giới từ Katakana chống báo giả, `Character.aliases`, `RULE_GLOSSARY_TERM` & `RULE_PRONOUN_CONSISTENCY`, cách ly lệch con số trong Cascade, Hybrid BM25 RAG + tự động tuyển chọn mẫu `silver`, `22/22` cues & `6/6` ca hồi quy trong `eval/runner.py`. |
+| **Faster-Whisper, DTW 1:2 & Piecewise** | `src/subtitles.py`, `subtrans/parser.py`, `subtrans/dtw_auto_align.py` | PASS | Hỗ trợ `faster-whisper` + Silero VAD + `initial_prompt` từ Glossary, lọc âm thanh CC `(筆記音)`, gắn `mode_hint="inner"` cho `＜...＞`/`Italics`, tách `1:2` theo khoảng lặng `>=250ms` và `Piecewise 2-Segment Auto-Offset`. |
+| **Playback Writer, Async Stage B & Queue**| `subtrans/writer.py`, `src/pending_queue.py`, `upscale.py` | PASS | Bảo toàn `<Rudeus!>`, cặp nháy giữa câu, lời gọi cảm xúc lặp lại & Typesetting `.ass`; tách `src/pending_queue.py` (không nạp `torch`), cô lập `PYTHON_DOTENV_DISABLED`, hỗ trợ `--async-subs` & `--target-4k`. |
 | **Agent Tooling, Hooks & MCP** | `scripts/agent_context.py`, `.agents/` | PASS | AST lookup (`--symbols`, `--find`), kiểm định byte budget & độ mới baseline (`--check`), 4 skills, plugin bảo vệ `upscaler-guard` và MCP read-only `upscaler-mcp`. |
 | **Anti-Sleep & Dry-Run Safety** | `src/preflight.py`, `upscale.py` | PASS | Win32 API native `SetThreadExecutionState`, chốt chặn `--dry-run` trước mọi nhánh xóa tạm/gọi API, khôi phục `--subs-pending` cho cả `video_path` và `ja_path`. |
 

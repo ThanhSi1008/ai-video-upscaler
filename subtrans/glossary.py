@@ -190,6 +190,7 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
                 Character(
                     name_ja=str(c.get("name_ja", "")),
                     name_vi=str(c.get("name_vi", "")),
+                    aliases=[str(a) for a in c.get("aliases", []) if a],
                     gender=c.get("gender"),
                     speaking_style=c.get("register") or c.get("speaking_style"),
                     note=c.get("note"),
@@ -210,10 +211,39 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
         return None
 
 
+def _merge_pronoun_rules(base_list: List[PronounRule], override_list: List[PronounRule]) -> List[PronounRule]:
+    merged: Dict[str, PronounRule] = {r.ja: r for r in (base_list or [])}
+    for r in override_list or []:
+        merged[r.ja] = r
+    return list(merged.values())
+
+
+def _merge_address_rules(base_addr: Optional[AddressRules], override_addr: Optional[AddressRules]) -> Optional[AddressRules]:
+    """Deep-merges base and series-override AddressRules without wiping base pronoun/honorific tables."""
+    if not base_addr and not override_addr:
+        return None
+    if not base_addr:
+        return override_addr
+    if not override_addr:
+        return base_addr
+
+    rel_map: Dict[str, RelationRule] = {r.case: r for r in (base_addr.relations or [])}
+    for r in override_addr.relations or []:
+        rel_map[r.case] = r
+
+    return AddressRules(
+        principle=override_addr.principle or base_addr.principle,
+        first_person=_merge_pronoun_rules(base_addr.first_person, override_addr.first_person),
+        second_person=_merge_pronoun_rules(base_addr.second_person, override_addr.second_person),
+        honorifics=_merge_pronoun_rules(base_addr.honorifics, override_addr.honorifics),
+        relations=list(rel_map.values()),
+    )
+
+
 def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> Optional[Glossary]:
     """
     Merges base glossary with series-specific override glossary.
-    Override terms and characters take precedence over base entries.
+    Override terms and characters take precedence over base entries, while AddressRules are deep-merged.
     """
     if not base and not override:
         return None
@@ -233,8 +263,8 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
     # Combine difficulty markers (deduplicated)
     diff_markers = list(dict.fromkeys(override.difficulty_markers + base.difficulty_markers))
 
-    # Address rules: prefer override's address rules if present, otherwise base
-    addr = override.address_rules or base.address_rules
+    # Deep-merge address rules so partial series overrides keep base honorifics & pronoun tables
+    addr = _merge_address_rules(base.address_rules, override.address_rules)
 
     # Merge terms: override terms replace base terms with same ja
     term_dict: Dict[str, GlossaryTerm] = {t.ja: t for t in base.terms}
@@ -242,10 +272,14 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
         term_dict[ot.ja] = ot  # overrides matching ja
     merged_terms = list(term_dict.values())
 
-    # Merge characters: override characters replace base characters by name_ja (or name_vi fallback)
+    # Merge characters: override characters replace base characters by name_ja (or name_vi fallback), preserving aliases
     char_dict: Dict[str, Character] = {(c.name_ja or c.name_vi): c for c in base.characters}
     for oc in override.characters:
-        char_dict[oc.name_ja or oc.name_vi] = oc
+        key = oc.name_ja or oc.name_vi
+        existing = char_dict.get(key)
+        if existing and not oc.aliases and existing.aliases:
+            oc = oc.model_copy(update={"aliases": list(existing.aliases)})
+        char_dict[key] = oc
     merged_characters = list(char_dict.values())
 
     return Glossary(
@@ -256,3 +290,8 @@ def merge_glossaries(base: Optional[Glossary], override: Optional[Glossary]) -> 
         terms=merged_terms,
         characters=merged_characters,
     )
+
+
+# Backward-compatible helper aliases used by src/subtitles.py Whisper prompt builder
+find_matching_glossary = find_series_glossary
+load_glossary_file = load_glossary

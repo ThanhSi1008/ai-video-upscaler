@@ -13,12 +13,17 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 import pysubs2
 from subtrans.models import Cue
+from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters
 
 logger = logging.getLogger("subtrans.parser")
 
 DEFAULT_SKIP_STYLES = r"(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_\s\-]|$)"
-TYPESET_TAG_REGEX = re.compile(r"\\(pos|move)\b", re.IGNORECASE)
+TYPESET_TAG_REGEX = re.compile(r"\\(pos|move|org|clip|iclip|p[1-9])\b", re.IGNORECASE)
 ASS_TAG_REGEX = re.compile(r"\{[^\}]*\}")
+NON_SPEAKER_ACTOR_REGEX = re.compile(
+    r"^(?:sign|signs|comment|title|op|ed|ntp|sfx|text|caption|note|insert|screen|eyecatch|song|lyrics|karaoke|default|main)$",
+    re.IGNORECASE,
+)
 
 
 def clean_subtitle_text(text: str) -> str:
@@ -48,7 +53,7 @@ def should_skip_cue(style: str, raw_text: str, skip_styles_regex: str = DEFAULT_
 
 
 SOUND_KEYWORDS_REGEX = re.compile(
-    r"(息|せき|咳|ため息|泣き声|笑い声|声|音|足音|鳥|叫び|うめき|喘ぎ|すする|啜り|ハア|ハァ|ゴホ|ケホ|ヒソヒソ|ざわめき|物音|ドア|雷|雨|風|ベル|拍手|歓声|悲鳴|鳴き声)",
+    r"(息|せき|咳|ため息|泣き声|笑い声|声|音|足音|鳥|叫び|うめき|喘ぎ|すする|啜り|ハア|ハァ|ゴホ|ケホ|ゲホ|ヒソヒソ|ざわめき|物音|ドア|雷|雨|風|ベル|拍手|歓声|悲鳴|鳴き声|チャイム|電話|爆発|衝撃)",
     re.IGNORECASE,
 )
 LAUGHTER_TOKENS = (
@@ -56,10 +61,53 @@ LAUGHTER_TOKENS = (
     r"[はァぁハへヘくクひヒけケわワあアほホふフぐグうウいイッっー～]*"
 )
 PURE_INTERJECTION_REGEX = re.compile(
-    rf"^((ハア|ハァ|はあ|はぁ|ふう|ふぅ|フウ|フゥ|うっ|くっ|あっ|えっ|ん|んっ|フッ|ふっ|へっ|へ|ほっ|ほ|ちっ|チッ|はむっ|うう|う～|わあ|わぁ|きゃっ|ぎゃっ|ええっ|えっ|ひっ|ひぃ|{LAUGHTER_TOKENS})[\s…\.\-—!！?？ー～]*)+$",
+    rf"^((ハア|ハァ|はあ|はぁ|ふう|ふぅ|フウ|フゥ|うっ|くっ|ぐっ|あっ|えっ|ん|んっ|ンッ|ンン|フン|フッ|ふっ|へっ|へ|ほっ|ほ|ちっ|チッ|はむっ|むぐ|ゲホッ|ゴホッ|げほっ|ごほっ|うう|う～|わあ|わぁ|きゃっ|ぎゃっ|ええっ|えっ|ひっ|ひぃ|{LAUGHTER_TOKENS})[\s…\.\-—!！?？ー～]*)+$",
     re.IGNORECASE,
 )
 MUSIC_OR_SYMBOL_REGEX = re.compile(r"^[♪～\s\-_~♩♫♬]+$")
+
+
+def is_sound_effect_label(label: str) -> bool:
+    """
+    Phân biệt chú thích âm thanh SDH trong ngoặc đơn (VD: '筆記音', 'ため息', '扉が開く音', '咳払い')
+    với tên nhân vật thật (VD: '絹秀', '珊瑚(さんご)', 'スバル') trong phụ đề DMMTV/Netflix CC.
+    """
+    if not label:
+        return False
+    clean = strip_ja_furigana(label.strip())
+    if not clean:
+        return False
+    if PURE_INTERJECTION_REGEX.match(clean) or MUSIC_OR_SYMBOL_REGEX.match(clean):
+        return True
+    if SOUND_KEYWORDS_REGEX.search(clean):
+        return True
+    if re.search(r"(?:SE|BGM|SFX)$", clean, re.IGNORECASE):
+        return True
+    return False
+
+
+def detect_dialogue_mode_hint(style: str, raw_text: str, clean_ja: str) -> Tuple[Optional[str], str]:
+    """
+    Nhận diện gợi ý chế độ thoại (`inner`, `flashback`, `narration`) từ style ASS, thẻ `{\\i1}`
+    hoặc dấu ngoặc độc thoại nội tâm chuẩn truyền hình Nhật `＜...＞` (và bóc vỏ `＜＞` sạch sẽ).
+    """
+    st = (style or "").strip()
+    mode_hint: Optional[str] = None
+    if re.search(r"(?i)(flashback|recollection|memory)", st):
+        mode_hint = "flashback"
+    elif re.search(r"(?i)(narration|narrator|voiceover)", st):
+        mode_hint = "narration"
+    elif re.search(r"(?i)(italic|inner|thought|monologue)", st) or re.search(r"\{\\i1\b", raw_text or ""):
+        mode_hint = "inner"
+
+    text_out = clean_ja
+    m_fw = re.match(r"^＜([^＜＞]+)＞$", (clean_ja or "").strip())
+    if m_fw:
+        text_out = m_fw.group(1).strip()
+        if mode_hint is None:
+            mode_hint = "inner"
+
+    return mode_hint, text_out
 
 WHISPER_HALLUCINATION_REGEX = re.compile(
     r"(ご視聴(いただき)?ありがとう|"
@@ -162,6 +210,11 @@ def is_multi_speaker_or_multi_event_text(raw_text: str) -> Tuple[bool, List[str]
     # Nếu tất cả các dòng đều bắt đầu bằng speaker prefix hoặc sound cue [（(]...[）)]
     all_prefixed = all(bool(prefix_pattern.match(l)) for l in lines)
     if all_prefixed:
+        return True, lines
+
+    # Trường hợp dòng 1 là chú thích âm thanh trọn ngoặc đơn '(筆記音)' và dòng 2 là độc thoại '＜...＞' hoặc lời thoại
+    first_only_sound = bool(re.match(r"^[（\(][^）\)]+[）\)]$", lines[0])) and is_sound_effect_label(lines[0][1:-1])
+    if first_only_sound:
         return True, lines
 
     return False, []
@@ -271,13 +324,11 @@ def snap_whisper_cues_to_en(
     if not dialogue_cues:
         return 0
 
-    # Thuật toán Monotonic DTW Auto-Align toàn cục:
-    from subtrans.dtw_auto_align import align_ja_to_en_monotonic_dtw, SubCue
+    from subtrans.dtw_auto_align import SubCue, get_dtw_alignment_plan
     ja_sub_cues = [SubCue(start_ms=c.start, end_ms=c.end, text=c.ja) for c in dialogue_cues]
     en_sub_cues = [SubCue(start_ms=ec["start"], end_ms=ec["end"], text=ec["text"]) for ec in clean_en_cues]
 
-    from subtrans.dtw_auto_align import get_dtw_alignment_map
-    cue_map = get_dtw_alignment_map(
+    cue_map, split_1_to_2_map = get_dtw_alignment_plan(
         ja_sub_cues,
         en_sub_cues,
         cast_names_ja_en=cast_names_ja_en or (),
@@ -285,8 +336,31 @@ def snap_whisper_cues_to_en(
 
     # Cập nhật mốc thời gian và EN reference chuẩn phòng thu theo đúng chỉ mục cue gốc
     snapped_count = 0
+    spawned_cues: List[Cue] = []
     for idx, c in enumerate(dialogue_cues):
-        if idx in cue_map and cue_map[idx] is not None:
+        if idx in split_1_to_2_map:
+            parts = split_1_to_2_map[idx]
+            s1, e1, ja1, en1 = parts[0]
+            s2, e2, ja2, en2 = parts[1]
+            c.start = s1
+            c.end = e1
+            c.ja = ja1
+            if en1:
+                c.en = en1
+            c2 = Cue(
+                id=c.id,
+                start=s2,
+                end=e2,
+                style=c.style,
+                ja=ja2,
+                en=en2 or None,
+                speaker=c.speaker,
+                mode_hint=c.mode_hint,
+                raw_text=ja2,
+            )
+            spawned_cues.append(c2)
+            snapped_count += 2
+        elif idx in cue_map and cue_map[idx] is not None:
             new_start, new_end, paired_en = cue_map[idx]
             c.start = new_start
             c.end = new_end
@@ -313,6 +387,12 @@ def snap_whisper_cues_to_en(
                 logger.debug(
                     f"Orphan Whisper cue #{c.id} ('{c.ja}') dropped: dist_to_en={min_dist}ms, len={len(c.ja)}"
                 )
+
+    if spawned_cues:
+        cues.extend(spawned_cues)
+        cues.sort(key=lambda c: (c.start, c.end, c.id))
+        for new_id, c_item in enumerate(cues):
+            c_item.id = new_id
 
     # Pass 3: Đảm bảo tính đơn điệu và khoảng cách tối thiểu giữa các cue liên tiếp
     # Sửa lỗi Pass 3 (Nhiệm vụ 5): Chỉ chuẩn hóa trên active_cues (không bị skip và không bị drop sound)
@@ -362,6 +442,7 @@ def parse_and_align_subtitles(
     auto_align_whisper_to_en: bool = True,
     is_whisper: Optional[bool] = None,
     cast_names_ja_en: Optional[List[Tuple[str, str]]] = None,
+    piecewise_ja_offsets: Optional[List[Dict[str, int]]] = None,
 ) -> Tuple[List[Cue], pysubs2.SSAFile, Optional[pysubs2.SSAFile]]:
     """
     Parses Japanese and optional English subtitles, cleans text, and aligns them by time overlap.
@@ -369,7 +450,20 @@ def parse_and_align_subtitles(
         (cues, original_ja_ssa, original_en_ssa)
     """
     ja_ssa = pysubs2.load(ja_path)
-    if ja_offset_ms != 0:
+    # Loại bỏ các dòng Comment: trong file ASS/SSA trước khi xử lý (chú thích của fansub / karaoke template)
+    ja_ssa.events = [ev for ev in ja_ssa.events if not getattr(ev, "is_comment", False)]
+    if piecewise_ja_offsets and len(piecewise_ja_offsets) >= 2:
+        split_ms = int(piecewise_ja_offsets[0].get("until_ms", 0))
+        off_before = int(piecewise_ja_offsets[0].get("offset_ms", 0))
+        off_after = int(piecewise_ja_offsets[1].get("offset_ms", 0))
+        for ev in ja_ssa.events:
+            shift_val = off_before if ev.start < split_ms else off_after
+            ev.start = max(0, ev.start + shift_val)
+            ev.end = max(ev.start + 1, ev.end + shift_val)
+        logger.info(
+            f"Đã dịch chuyển Piecewise 2-Segment phụ đề tiếng Nhật: <{split_ms}ms ({off_before}ms), >={split_ms}ms ({off_after}ms)."
+        )
+    elif ja_offset_ms != 0:
         ja_ssa.shift(ms=ja_offset_ms)
         logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
     ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
@@ -382,6 +476,8 @@ def parse_and_align_subtitles(
     en_cues = []
     if en_ssa:
         for idx, event in enumerate(en_ssa):
+            if getattr(event, "is_comment", False):
+                continue
             clean_en = clean_subtitle_text(event.text)
             if not clean_en:
                 continue
@@ -406,13 +502,22 @@ def parse_and_align_subtitles(
         clean_ja = clean_subtitle_text(raw_text)
         is_skip = should_skip_cue(event.style, raw_text, skip_styles_regex)
 
-        # Tách tiền tố người nói nếu có (ví dụ: -（絹秀）Lời thoại)
-        prefix, rest = strip_speaker_prefix(clean_ja)
+        # Trích xuất cột Actor/Name của file .ass nếu chứa tên nhân vật hợp lệ
         speaker_name: Optional[str] = None
+        actor_raw = (getattr(event, "name", None) or "").strip()
+        if actor_raw and not NON_SPEAKER_ACTOR_REGEX.match(actor_raw) and not is_sound_effect_label(actor_raw):
+            speaker_name = actor_raw
+
+        # Tách tiền tố người nói hoặc âm thanh nếu có (ví dụ: -（絹秀）Lời thoại hoặc （筆記音）＜...＞)
+        prefix, rest = strip_speaker_prefix(clean_ja)
         if prefix:
-            speaker_name = prefix
+            if not is_sound_effect_label(prefix):
+                speaker_name = prefix
         if rest:
             clean_ja = rest
+
+        # Nhận diện mode_hint (inner/flashback/narration) và bóc sạch ngoặc độc thoại '＜...＞'
+        mode_hint, clean_ja = detect_dialogue_mode_hint(event.style, raw_text, clean_ja)
 
         # Kiểm tra sound cue / SDH
         is_sound = is_pure_sound_cue(clean_ja, is_whisper=bool(is_whisper))
@@ -432,10 +537,11 @@ def parse_and_align_subtitles(
                     overlap_end = min(event.end, ec["end"])
                     overlap_duration = max(0, overlap_end - overlap_start)
 
+                    min_dur = max(1, min(dur_ja, ec["duration"]))
                     if (
                         overlap_duration >= (ec["duration"] * overlap_threshold)
                         or overlap_duration >= (dur_ja * overlap_threshold)
-                        or overlap_duration >= 300
+                        or (overlap_duration >= 300 and (overlap_duration / min_dur) >= 0.25)
                     ):
                         matching_en_cues.append(ec)
 
@@ -475,6 +581,7 @@ def parse_and_align_subtitles(
             is_skipped=is_skip,
             is_dropped_sound=is_dropped_sound,
             speaker=speaker_name,
+            mode_hint=mode_hint,
             raw_text=raw_text
         )
         cues.append(cue)
@@ -526,6 +633,22 @@ def parse_and_align_subtitles(
             )
 
     return cues, ja_ssa, en_ssa
+
+
+def is_en_fallback_source(cues: List[Cue]) -> bool:
+    """
+    Phát hiện trường hợp luồng phụ đề truyền vào `ja_path` thực chất là phụ đề tiếng Anh phòng thu
+    (ví dụ: container MKV không có softsub JA nên dùng trực tiếp `en_sub` làm gốc đồng bộ khung hình).
+    Trả về True khi tập có câu thoại hoạt động nhưng 0% câu thoại chứa ký tự CJK và có chữ cái Latin.
+    """
+    active = [c for c in cues if not c.is_skipped and not getattr(c, "is_dropped_sound", False) and (c.ja or "").strip()]
+    if not active:
+        return False
+    cjk_count = sum(1 for c in active if has_cjk_characters(c.ja))
+    if cjk_count > 0:
+        return False
+    latin_count = sum(1 for c in active if re.search(r"[A-Za-z]{2,}", c.ja or ""))
+    return latin_count >= max(1, int(len(active) * 0.5))
 
 
 def compute_alignment_match_rate(
@@ -580,8 +703,18 @@ def detect_auto_offset(
     except Exception as e:
         return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
 
-    ja_events = [e for e in ja_ssa if clean_subtitle_text(e.text) and not should_skip_cue(e.style, e.text, skip_styles_regex)]
-    en_events = [e for e in en_ssa if clean_subtitle_text(e.text) and not should_skip_cue(e.style, e.text, skip_styles_regex)]
+    ja_events = [
+        e for e in ja_ssa
+        if not getattr(e, "is_comment", False)
+        and clean_subtitle_text(e.text)
+        and not should_skip_cue(e.style, e.text, skip_styles_regex)
+    ]
+    en_events = [
+        e for e in en_ssa
+        if not getattr(e, "is_comment", False)
+        and clean_subtitle_text(e.text)
+        and not should_skip_cue(e.style, e.text, skip_styles_regex)
+    ]
 
     if not ja_events or not en_events:
         return 0, False, "Không tìm thấy thoại hợp lệ trong file JA hoặc EN", {}
@@ -677,6 +810,62 @@ def detect_auto_offset(
     else:
         is_applied = False
         reason_str = f"Không áp dụng do: {', '.join(failed_reasons)} (offset đo được: {med_ms}ms)"
+
+        # Fallback Piecewise 2-Segment: Phát hiện bước nhảy sponsor card tại OP / Eyecatch
+        # (VD: Cold Open 0ms, sau OP lệch -10000ms khiến single-offset thất bại)
+        sorted_all_pairs = sorted(candidate_pairs, key=lambda p: p[0])
+        if len(sorted_all_pairs) >= 30 and len(ja_events) >= 24:
+            unique_starts = sorted({j.start for j in ja_events})
+            step_stride = max(1, len(unique_starts) // 16)
+            candidate_splits = unique_starts[step_stride:-step_stride:step_stride]
+            best_pw = None
+            for sp_ms in candidate_splits:
+                left_p = [p for p in sorted_all_pairs if p[0] < sp_ms]
+                right_p = [p for p in sorted_all_pairs if p[0] >= sp_ms]
+                if len(left_p) < 12 or len(right_p) < 12:
+                    continue
+                l_mode, _ = Counter(round(p[1], 1) for p in left_p).most_common(1)[0]
+                r_mode, _ = Counter(round(p[1], 1) for p in right_p).most_common(1)[0]
+                l_cluster = [p[1] for p in left_p if abs(p[1] - l_mode) <= 0.5]
+                r_cluster = [p[1] for p in right_p if abs(p[1] - r_mode) <= 0.5]
+                if len(l_cluster) < 12 or len(r_cluster) < 12 or (len(l_cluster) + len(r_cluster)) < 30:
+                    continue
+                off1_sec = statistics.median(l_cluster)
+                off2_sec = statistics.median(r_cluster)
+                off1_ms = round(off1_sec * 1000)
+                off2_ms = round(off2_sec * 1000)
+                if abs(off2_ms - off1_ms) < 1000 or max(abs(off1_ms), abs(off2_ms)) < 1000:
+                    continue
+                if (max(l_cluster) - min(l_cluster)) > 1.0 or (max(r_cluster) - min(r_cluster)) > 1.0:
+                    continue
+                ja_left = [j for j in ja_events if j.start < sp_ms]
+                ja_right = [j for j in ja_events if j.start >= sp_ms]
+                if not ja_left or not ja_right:
+                    continue
+                r_left = compute_alignment_match_rate(ja_left, en_events, offset_ms=off1_ms)
+                r_right = compute_alignment_match_rate(ja_right, en_events, offset_ms=off2_ms)
+                pw_rate = (r_left * len(ja_left) + r_right * len(ja_right)) / len(ja_events)
+                pw_gain = (pw_rate - rate_before) * 100.0
+                if pw_gain >= 15.0 and (pw_rate - rate_after) * 100.0 >= 5.0:
+                    if best_pw is None or pw_rate > best_pw[0]:
+                        best_pw = (pw_rate, pw_gain, sp_ms, off1_ms, off2_ms, len(l_cluster) + len(r_cluster))
+
+            if best_pw is not None:
+                pw_rate, pw_gain, sp_ms, off1_ms, off2_ms, pw_pairs = best_pw
+                is_applied = True
+                med_ms = off2_ms if abs(off2_ms) >= abs(off1_ms) else off1_ms
+                stats["piecewise_segments"] = [
+                    {"until_ms": sp_ms, "offset_ms": off1_ms},
+                    {"from_ms": sp_ms, "offset_ms": off2_ms},
+                ]
+                stats["rate_after"] = pw_rate
+                stats["rate_diff_points"] = pw_gain
+                stats["pairs_count"] = pw_pairs
+                reason_str = (
+                    f"Áp dụng Piecewise 2-Segment Auto-Offset tại {sp_ms}ms: "
+                    f"đoạn 1={off1_ms}ms, đoạn 2={off2_ms}ms ({pw_pairs} cặp, "
+                    f"tỷ lệ khớp {rate_before*100:.1f}% -> {pw_rate*100:.1f}%, +{pw_gain:.1f} điểm)"
+                )
 
     return med_ms, is_applied, reason_str, stats
 

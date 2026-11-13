@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
-# Load .env from workspace root or subtrans/
-load_dotenv()
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(Path(__file__).parent.parent / ".env")
+# Load .env explicitly from subtrans/ or repo root unless disabled in isolated offline tests
+if (
+    os.environ.get("PYTHON_DOTENV_DISABLED") != "1"
+    and os.environ.get("SUBTRANS_DISABLE_DOTENV") != "1"
+):
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 MODELS_CONFIG_PATH = Path(__file__).parent / "models.yaml"

@@ -25,7 +25,10 @@ class Cue(BaseModel):
     uncertain: bool = False
     speaker: Optional[str] = None
     addressee: Optional[str] = None
+    p1: Optional[str] = None  # CoT Vietnamese 1st-person pronoun (e.g. em, ta, thần thiếp)
+    p2: Optional[str] = None  # CoT Vietnamese 2nd-person pronoun (e.g. sư phụ, ngươi, bệ hạ)
     mode: Optional[str] = "spoken"
+    mode_hint: Optional[str] = None  # Deterministic parser hint: inner | flashback | narration | quoted
     en_conflict: bool = False
     uncertain_reason: Optional[str] = "none"
     raw_text: Optional[str] = None  # Original raw text for skipped cues
@@ -87,6 +90,7 @@ class CharacterSpeaksTo(BaseModel):
 class Character(BaseModel):
     name_ja: str
     name_vi: str
+    aliases: List[str] = Field(default_factory=list)
     gender: Optional[str] = None
     speaking_style: Optional[str] = None
     note: Optional[str] = None

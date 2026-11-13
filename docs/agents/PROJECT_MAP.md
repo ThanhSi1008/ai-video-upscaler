@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `bb646e2`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `c4918d6`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -43,7 +43,8 @@ subtrans.cli → TranslationPipeline
 | [`scheduler.py`](../../src/scheduler.py) | `find_cached_plan`, `preflight_video_plan`, `BackgroundQueuePreflightManager`, `compute_overnight_schedule`, `check_gemini_quota_for_queue`, `format_schedule_decision_table`. |
 | [`logger.py`](../../src/logger.py) | `RunLogger`, format/progress helpers, `get_swap_usage`, `get_thermal_state`; ghi log theo tập và cập nhật `latest.log`. |
 | [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text`; còn dữ liệu lịch sử hardcoded, không mặc nhiên là đo đạc mới. |
-| [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`; sidecar/container JA/EN, ưu tiên EN khi thiếu JA theo mặc định; Whisper tùy điều kiện. |
+| [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`, `_build_whisper_initial_prompt`; hỗ trợ `faster-whisper` + Silero VAD (fallback `openai-whisper`), ưu tiên EN 0ms lệch mặc định hoặc `--prefer-whisper`. |
+| [`pending_queue.py`](../../src/pending_queue.py) | `load_pending_subs`, `save_pending_subs`, `add_pending_sub`, `remove_pending_sub`; module stdlib-only quản lý `pending_subs.json` không kích hoạt import `torch`/CUDA. |
 | [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper` (cắt lát 2-frame giảm 75% đỉnh VRAM 8K), `DoubleBufferedPipeUpscaler` (`ensure_resolution`, tái sử dụng Pinned Buffer). |
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, ONNX export (`dynamo=False`), TensorRT 10.16 (`execute_async_v3`) & 8.x runtime wrapper, cache `.engine` theo `(model_id, hw, batch, gpu, trt_ver)`, `get_hybrid_engine_or_wrapper`. |
 
@@ -53,12 +54,12 @@ subtrans.cli → TranslationPipeline
 
 | Cụm | Điểm đọc |
 | --- | --- |
-| Điều phối/cấu hình/schema | `subtrans/pipeline.py`, `cli.py`, `config.py`, `config.yaml`, `models.yaml`, `models.py`. |
-| Nhập và căn thời gian | `parser.py`, `dtw_auto_align.py`; model `Cue` là dữ liệu xuyên pipeline. |
-| Ngữ cảnh nhân vật/ngôn ngữ | `cast_sheet.py`, `dynamic_cast.py`, `ja_morph_tagger.py`, `glossary.py`, `glossary.yaml`. |
-| Dịch và độ bền API | `gemini_backend.py`, `translator.py`, `throttle.py`, `cache.py`; không dùng lớp legacy như bằng chứng cho backend được phép. |
-| Hậu kiểm/tri thức | `linter.py`, `validation.py`, `cascade.py`, `rag.py`, `writer.py`, `report.py`. |
-| Đánh giá | `subtrans/eval/runner.py`, `metrics.py`, các YAML suites; `subtrans/tests/` và `subtrans/samples/`. |
+| Điều phối/cấu hình/schema | `subtrans/pipeline.py` (scene-cut clamp `>=4500ms`, inline cached context, Cascade write-back), `cli.py`, `config.py` (`PYTHON_DOTENV_DISABLED` guard), `config.yaml`, `models.yaml`, `models.py` (`p1`, `p2`, `mode_hint`, `Character.aliases`). |
+| Nhập và căn thời gian | `parser.py` (CC sound prefix filter, `detect_dialogue_mode_hint`, Piecewise 2-Segment Auto-Offset), `dtw_auto_align.py` (`get_dtw_alignment_plan` 1:2 pause split, `split_en_reference_for_2_to_1`); model `Cue` xuyên pipeline. |
+| Ngữ cảnh nhân vật/ngôn ngữ | `cast_sheet.py` (3-key rotation, `CastSheetResponse`), `dynamic_cast.py` (`observe_batch_cues` ưu tiên CoT `p1`/`p2`), `ja_morph_tagger.py` (`strip_ja_furigana`, Kansai-ben, `soregashi`), `glossary.py` (`_merge_address_rules`). |
+| Dịch và độ bền API | `gemini_backend.py` (`build_episode_system_prompt` `>4.096` tokens Implicit Caching, `ThinkingConfig` MINIMAL/LOW, 3-key modulo & RPM failover), `translator.py`, `throttle.py` (per-key RPD), `cache.py` (`compute_contextual_cue_sig`, `cached_tokens`). |
+| Hậu kiểm/tri thức | `linter.py` (Katakana boundary, `RULE_GLOSSARY_TERM`, `RULE_PRONOUN_CONSISTENCY`), `validation.py`, `cascade.py` (digit quarantine, contextual repair), `rag.py` (Hybrid BM25, `promote_cascade_repairs` silver), `writer.py` (ASS sign preservation), `report.py`. |
+| Đánh giá | `subtrans/eval/runner.py` (`verify_regression_case`, `verify_pronoun_cue`), `metrics.py`, `regression_suite.yaml` (6 ca), `pronoun_suite.yaml` (22 cues); `subtrans/tests/`, `tests/test_subtrans_deep_upgrades.py`, `tests/test_subtrans_v2_max_quality.py`. |
 | Thuật ngữ theo series | [`glossaries/README.md`](../../glossaries/README.md), `glossaries/base.yaml`, `glossary.*.yaml`; phân biệt với base glossary trong `subtrans/`. |
 
 ## Nguồn sự thật và dữ liệu vận hành

@@ -7,9 +7,13 @@ Validation rules shared across all translation backends.
 import re
 from typing import List, Dict, Any, Tuple
 
-# Regex to detect leftover Japanese characters:
-# Hiragana: \u3040-\u309F, Katakana: \u30A0-\u30FF, Kanji: \u4E00-\u9FAF
-JAPANESE_CHAR_REGEX = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]")
+# Regex to detect leftover Japanese/CJK characters & brackets:
+# Hiragana: \u3040-\u309F, Katakana: \u30A0-\u30FF\u31F0-\u31FF,
+# CJK Ext-A & Unified & Compat: \u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF,
+# Japanese corner/lenticular brackets: \u300C-\u300F\u3010\u3011, Hangul: \uAC00-\uD7AF
+JAPANESE_CHAR_REGEX = re.compile(
+    r"[\u300C-\u300F\u3010\u3011\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF]"
+)
 CHATTER_REGEX = re.compile(r"(?i)(here is the translation|translation:|vietnamese:|dịch:|^```)", re.IGNORECASE)
 
 

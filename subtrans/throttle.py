@@ -175,6 +175,13 @@ class RateLimiter:
         self.interval = 60.0
         self.timestamps = deque()
 
+    def available_slots(self) -> int:
+        """Trả về số slot RPM còn trống ngay tức thì trong cửa sổ trượt 60s."""
+        now = time.monotonic()
+        while self.timestamps and (now - self.timestamps[0]) > self.interval:
+            self.timestamps.popleft()
+        return max(0, self.max_rpm - len(self.timestamps))
+
     def wait_if_needed(self):
         """Blocks until a request slot is available in the sliding 60s window."""
         now = time.monotonic()
@@ -203,31 +210,44 @@ def call_with_retry(
     max_delay: float = 60.0,
     model_name: str = "gemini",
     cache: Optional[TranslationCache] = None,
+    key_id: str = "",
+    all_key_ids: Optional[list] = None,
 ) -> Any:
     """
     Executes a callable with rate limiting and intelligent 429 handling.
-    - If 429 contains PerDay -> auto updates config, marks model exhausted until PT reset,
+    - If 429 contains PerDay -> marks (key_id, model) exhausted until PT reset; only marks
+      global model_exhaustion when all keys are exhausted (or when no key_id is provided),
       and raises DailyQuotaExhaustedError IMMEDIATELY (no retries/pause).
     - If 429 contains PerMinute -> sleeps retryDelay and retries.
     """
     cache = cache or TranslationCache()
 
-    # Pre-check: Nếu model đã bị đánh dấu hết hạn mức ngày trong DB, chuyển ngay!
-    # Không chặn khi đang chạy trong môi trường kiểm thử pytest
-    if not os.environ.get("PYTEST_CURRENT_TEST") and cache.is_model_exhausted(model_name):
-        ex_info = cache.get_model_exhaustion_info(model_name) or {}
-        next_pt, next_vn = get_next_pt_reset()
-        logger.warning(
-            f"Model '{model_name}' đã được đánh dấu hết hạn mức ngày trước đó (đến {next_vn.strftime('%H:%M %d/%m')}). "
-            f"Bỏ qua ngay lập tức để chuyển model kế tiếp!"
-        )
-        raise DailyQuotaExhaustedError(
-            model=model_name,
-            quota_id=ex_info.get("quota_id", "CachedExhaustion"),
-            quota_value=ex_info.get("quota_value", ""),
-            reset_pt_str=next_pt.strftime("%Y-%m-%d %H:%M PT"),
-            reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
-        )
+    # Pre-check: Nếu key cụ thể hoặc toàn bộ model đã hết hạn mức ngày trong DB, chuyển ngay!
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        if key_id and cache.is_key_model_exhausted(key_id, model_name):
+            next_pt, next_vn = get_next_pt_reset()
+            raise DailyQuotaExhaustedError(
+                model=model_name,
+                quota_id="CachedKeyExhaustion",
+                quota_value="",
+                reset_pt_str=next_pt.strftime("%Y-%m-%d %H:%M PT"),
+                reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
+            )
+        if cache.is_model_exhausted(model_name):
+            if not all_key_ids or cache.are_all_keys_exhausted(all_key_ids, model_name):
+                ex_info = cache.get_model_exhaustion_info(model_name) or {}
+                next_pt, next_vn = get_next_pt_reset()
+                logger.warning(
+                    f"Model '{model_name}' đã được đánh dấu hết hạn mức ngày trước đó (đến {next_vn.strftime('%H:%M %d/%m')}). "
+                    f"Bỏ qua ngay lập tức để chuyển model kế tiếp!"
+                )
+                raise DailyQuotaExhaustedError(
+                    model=model_name,
+                    quota_id=ex_info.get("quota_id", "CachedExhaustion"),
+                    quota_value=ex_info.get("quota_value", ""),
+                    reset_pt_str=next_pt.strftime("%Y-%m-%d %H:%M PT"),
+                    reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
+                )
 
     for attempt in range(max_retries + 1):
         if rate_limiter:
@@ -276,14 +296,31 @@ def call_with_retry(
                             rpd_source=f"đọc từ lỗi 429 ({quota_id})"
                         )
 
-                    # Đánh dấu model hết hạn mức trong SQLite cache
-                    cache.mark_model_exhausted(
-                        model=model_name,
-                        exhausted_until_pt=next_pt,
-                        quota_id=quota_id or "PerDay",
-                        quota_value=quota_value or "",
-                        reason=f"429 PerDay: {quota_id}"
-                    )
+                    # Đánh dấu (key_id, model) hoặc model toàn cục hết hạn mức trong SQLite cache
+                    if key_id and key_id != "none":
+                        cache.mark_key_model_exhausted(
+                            key_id=key_id,
+                            model=model_name,
+                            quota_id=quota_id or "PerDay",
+                            quota_value=quota_value or "",
+                            reason=f"429 PerDay: {quota_id}",
+                        )
+                        if all_key_ids and cache.are_all_keys_exhausted(all_key_ids, model_name):
+                            cache.mark_model_exhausted(
+                                model=model_name,
+                                exhausted_until_pt=next_pt,
+                                quota_id=quota_id or "PerDay",
+                                quota_value=quota_value or "",
+                                reason=f"All keys 429 PerDay: {quota_id}",
+                            )
+                    else:
+                        cache.mark_model_exhausted(
+                            model=model_name,
+                            exhausted_until_pt=next_pt,
+                            quota_id=quota_id or "PerDay",
+                            quota_value=quota_value or "",
+                            reason=f"429 PerDay: {quota_id}",
+                        )
 
                     # Log request lỗi vào DB
                     cache.log_request(
@@ -293,7 +330,8 @@ def call_with_retry(
                         status="exhausted_429_perday",
                         error_type="429_PerDay",
                         quota_id=quota_id or "",
-                        quota_value=quota_value or ""
+                        quota_value=quota_value or "",
+                        key_id=key_id,
                     )
 
                     # Ném DailyQuotaExhaustedError ngay lập tức, không thử lại, không pause!

@@ -4,6 +4,8 @@ models:
     rpm: 5
     tpm: 250000
     rpd: 20
+    max_output_tokens: 16384
+    thinking_level: low
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
     rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
@@ -12,6 +14,8 @@ models:
     rpm: 5
     tpm: 250000
     rpd: 20
+    max_output_tokens: 16384
+    thinking_level: low
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active_with_spikes
     note: Thường xuyên gặp 503 UNAVAILABLE (high demand spike)
@@ -20,6 +24,8 @@ models:
     rpm: 5
     tpm: 250000
     rpd: 20
+    max_output_tokens: 16384
+    thinking_level: low
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.5-flash:
@@ -27,6 +33,8 @@ models:
     rpm: 5
     tpm: 250000
     rpd: 20
+    max_output_tokens: 16384
+    thinking_level: low
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-2.5-flash:
@@ -34,6 +42,8 @@ models:
     rpm: 5
     tpm: 250000
     rpd: 20
+    max_output_tokens: 8192
+    thinking_budget: 0
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.5-flash-lite:
@@ -41,6 +51,8 @@ models:
     rpm: 15
     tpm: 250000
     rpd: 500
+    max_output_tokens: 16384
+    thinking_level: minimal
     verified_source: ảnh AI Studio của người dùng 2026-10-07
     status: active
   gemini-3.1-flash-lite:
@@ -48,6 +60,8 @@ models:
     rpm: 15
     tpm: 250000
     rpd: 500
+    max_output_tokens: 16384
+    thinking_level: minimal
     rpd_source: chưa xác minh (nguồn bên thứ ba)
     status: active
   translategemma:12b:

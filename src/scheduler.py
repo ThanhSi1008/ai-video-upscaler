@@ -397,39 +397,55 @@ def compute_overnight_schedule(
     }
 
 
-def check_gemini_quota_for_queue(queue_len: int) -> Dict[str, Any]:
+def check_gemini_quota_for_queue(
+    queue_len: int,
+    subs_quality: str = "normal",
+    cache: Optional[Any] = None,
+) -> Dict[str, Any]:
     """
-    Kiểm tra hạn mức Gemini theo giờ Thái Bình Dương (PT) và cảnh báo nếu
-    hạn mức còn lại của model chính không đủ cho số tập trong hàng đợi.
+    Kiểm tra hạn mức Gemini theo giờ Thái Bình Dương (PT) dựa trên chế độ chất lượng thực tế
+    (`normal`/`fast` -> `gemini-3.5-flash-lite`, `high` -> `gemini-3.8-flash`) và nhân đúng số lượng API keys.
     """
     try:
-        from subtrans.cache import TranslationCache, get_next_pt_reset, get_now_pt
-        from subtrans.config import load_models_config
-        cache = TranslationCache()
-        cues_today = cache.get_cues_today_pt()
-        reqs_today = cache.get_requests_today_pt()
+        from subtrans.cache import TranslationCache, get_next_pt_reset, compute_key_id
+        from subtrans.config import load_models_config, get_gemini_api_keys
+        cache_inst = cache if cache is not None else TranslationCache()
+        cues_today = cache_inst.get_cues_today_pt()
+        reqs_today = cache_inst.get_requests_today_pt()
         models_cfg = load_models_config()
         configured_models = models_cfg.get("models", {})
+        api_keys = get_gemini_api_keys()
         next_pt, next_vn = get_next_pt_reset()
-        now_pt = get_now_pt()
     except Exception:
+        cache_inst = None
         cues_today = {}
         reqs_today = {}
         configured_models = {}
+        api_keys = []
         next_pt, next_vn = None, None
-        now_pt = None
+        compute_key_id = lambda k: ""
 
-    # Với batch_size = 100, tập ~300 cues chỉ cần 3 batch requests (+ 0 request Cast Sheet nếu tái sử dụng)
-    est_batches_needed = queue_len * 3
-    primary_model = "gemini-3.8-flash"
+    num_keys = max(1, len(api_keys))
+    # Với batch_size = 100, tập ~300 cues cần ~3-4 batch requests (+ 0-1 request Cast/Cascade)
+    est_batches_needed = queue_len * 4
+    primary_model = "gemini-3.8-flash" if subs_quality == "high" else "gemini-3.5-flash-lite"
+    default_per_key_rpd = 20 if primary_model == "gemini-3.8-flash" else 500
     primary_info = configured_models.get(primary_model, {})
-    primary_limit_rpd = primary_info.get("rpd", 20)
-    if not isinstance(primary_limit_rpd, int):
-        primary_limit_rpd = 20
+    per_key_rpd = primary_info.get("rpd", default_per_key_rpd)
+    if not isinstance(per_key_rpd, int):
+        per_key_rpd = default_per_key_rpd
+    primary_limit_rpd = per_key_rpd * num_keys
 
     primary_reqs_used = reqs_today.get(primary_model, 0)
     primary_cues_used = cues_today.get(primary_model, 0)
-    is_exhausted = cache.is_model_exhausted(primary_model) if 'cache' in locals() else False
+    if cache_inst is not None:
+        if api_keys:
+            key_hashes = [compute_key_id(k) for k in api_keys]
+            is_exhausted = cache_inst.are_all_keys_exhausted(key_hashes, primary_model)
+        else:
+            is_exhausted = cache_inst.is_model_exhausted(primary_model)
+    else:
+        is_exhausted = False
     primary_exhausted = is_exhausted or (primary_reqs_used >= primary_limit_rpd)
     primary_remaining = max(0, primary_limit_rpd - primary_reqs_used) if not primary_exhausted else 0
 
@@ -438,18 +454,20 @@ def check_gemini_quota_for_queue(queue_len: int) -> Dict[str, Any]:
     warnings = []
     if primary_exhausted:
         warnings.append(
-            f"⚠️ Model chính '{primary_model}' đã hết hạn mức ngày ({primary_limit_rpd} RPD / Free Tier; khóa đến {reset_str}). "
-            f"Hàng đợi phụ đề sẽ tự động chuyển sang chuỗi fallback: gemini-3.7-flash -> 3.6-flash -> 3.5-flash -> 3.5-flash-lite (500 RPD)!"
+            f"⚠️ Model chính '{primary_model}' đã hết hạn mức ngày ({primary_limit_rpd} RPD / {num_keys} key; khóa đến {reset_str}). "
+            f"Hàng đợi phụ đề sẽ tự động chuyển sang chuỗi fallback kế tiếp trong models.yaml!"
         )
     elif primary_remaining < est_batches_needed:
         warnings.append(
-            f"⚠️ Hạn mức còn lại của model chính '{primary_model}' ({primary_remaining} reqs) nhỏ hơn "
+            f"⚠️ Hạn mức còn lại của model chính '{primary_model}' ({primary_remaining}/{primary_limit_rpd} reqs trên {num_keys} key) nhỏ hơn "
             f"nhu cầu dự kiến (~{est_batches_needed} reqs cho {queue_len} tập @ 100 cues/batch). "
-            f"Các tập sau sẽ tự động kế thừa chuỗi fallback B2!"
+            f"Các tập sau sẽ tự động kế thừa chuỗi fallback!"
         )
 
     return {
         "primary_model": primary_model,
+        "num_keys": num_keys,
+        "per_key_limit_rpd": per_key_rpd,
         "primary_limit_rpd": primary_limit_rpd,
         "primary_reqs_used": primary_reqs_used,
         "primary_cues_used": primary_cues_used,

@@ -20,11 +20,11 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRe
 
 from subtrans.config import load_config, load_models_config, get_gemini_api_key
 from subtrans.models import Cue, Glossary
-from subtrans.parser import parse_and_align_subtitles, detect_auto_offset
-from subtrans.cache import TranslationCache, compute_cue_cache_key
+from subtrans.parser import parse_and_align_subtitles, detect_auto_offset, is_en_fallback_source
+from subtrans.cache import TranslationCache, compute_cue_cache_key, compute_contextual_cue_sig
 from subtrans.gemini_backend import GeminiTranslator
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError, DailyQuotaExhaustedError
-from subtrans.writer import write_subtitles
+from subtrans.writer import write_subtitles, optimize_cues_for_playback
 from subtrans.report import generate_qa_report
 from subtrans.glossary import (
     load_glossary,
@@ -34,7 +34,7 @@ from subtrans.glossary import (
     resolve_glossary_target,
     compute_glossary_hash,
 )
-from subtrans.cast_sheet import generate_cast_sheet, load_or_generate_series_cast_sheet
+from subtrans.cast_sheet import generate_cast_sheet, load_or_generate_series_cast_sheet, extract_series_name
 
 logger = logging.getLogger("subtrans.pipeline")
 console = Console()
@@ -199,12 +199,14 @@ class TranslationPipeline:
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
+        GeminiTranslator.reset_session_rotation_events()
         self._init_primary_backend()
 
-        # Kiểm tra tự động phát hiện lệch thời gian (--auto-offset)
+        # Kiểm tra tự động phát hiện lệch thời gian (--auto-offset, hỗ trợ cả Piecewise 2-Segment)
         auto_offset_applied = False
         offset_reason = "Không có phụ đề EN tham chiếu để so sánh"
         det_offset = 0
+        piecewise_ja_offsets = None
         if en_path:
             det_offset, can_apply, reason_str, off_stats = detect_auto_offset(str(ja_path), str(en_path))
             if sub_offset_ms != 0:
@@ -214,6 +216,7 @@ class TranslationPipeline:
                 if can_apply:
                     sub_offset_ms = det_offset
                     auto_offset_applied = True
+                    piecewise_ja_offsets = off_stats.get("piecewise_segments")
                     offset_reason = f"Tự động áp dụng {det_offset}ms ({reason_str})"
                     console.print(f"  • [bold green]Auto-offset ĐƯỢC ÁP DỤNG:[/bold green] {det_offset}ms ({reason_str})")
                 else:
@@ -239,7 +242,12 @@ class TranslationPipeline:
 
         # Extract series name and propagate to Gemini backends
         series_match = re.search(r"^(.*?)(?:_S\d+|[ _]E\d+|\.\w+$)", base_name, re.IGNORECASE)
-        self.series = series_match.group(1).replace("_", " ").strip() if series_match else None
+        extracted_series = extract_series_name(base_name)
+        self.series = (
+            series_match.group(1).replace("_", " ").strip()
+            if series_match
+            else (extracted_series if extracted_series and extracted_series != base_name else None)
+        )
 
         base_glossary = load_glossary(DEFAULT_BASE_GLOSSARY_PATH) if DEFAULT_BASE_GLOSSARY_PATH.exists() else None
         if not glossary_path:
@@ -292,6 +300,7 @@ class TranslationPipeline:
                 sound_cues=sound_cues,
                 auto_align_whisper_to_en=self.auto_align_whisper_to_en,
                 cast_names_ja_en=cast_names_ja_en,
+                piecewise_ja_offsets=piecewise_ja_offsets,
             )
         stage_times["stage_1_parse"] = time.monotonic() - t_s1
 
@@ -301,11 +310,16 @@ class TranslationPipeline:
             console.print(f"[yellow]ℹ️  Limited run to first {self.limit_cues} cues.[/yellow]")
 
         dialogue_cues = [c for c in cues if not c.is_skipped]
+        en_only_source = is_en_fallback_source(cues)
         console.print(f"  • Total Cues: {len(cues)} ({len(dialogue_cues)} dialogue lines to translate)")
+        if en_only_source:
+            console.print(
+                "  • [cyan]EN-Only Source Mode:[/cyan] Nguồn gốc là phụ đề tiếng Anh phòng thu "
+                "-> Dịch EN->VI bảo toàn timeline 0ms lệch & đối chiếu Glossary tiếng Anh."
+            )
 
         # Stage A: Cast Sheet generation (Quản lý theo bộ <series>.cast.yaml, chỉ gọi API khi có nhân vật mới)
         t_sa = time.monotonic()
-        base_name = output_basename or ja_path.stem
         audit_cast_file = self.output_dir / "audit" / f"{base_name}.cast.yaml"
         cast_file = audit_cast_file if audit_cast_file.exists() else self.output_dir / f"{base_name}.cast.yaml"
         if not self.local_only:
@@ -353,6 +367,7 @@ class TranslationPipeline:
             "local": 0,
             "cache_hits": 0,
             "reviewed": 0,
+            "en_only_source": en_only_source,
             "model_counts": {},
         }
 
@@ -394,7 +409,73 @@ class TranslationPipeline:
             canonical_chars = json.dumps([c.model_dump() for c in glossary.characters], sort_keys=True)
             cast_sheet_hash = hashlib.sha256(canonical_chars.encode("utf-8")).hexdigest()[:16]
         glossary_hash = compute_glossary_hash(glossary)
-        prompt_version = "v2.0"
+        prompt_version = "v2.2"
+        diag_pos_map = {c.id: idx for idx, c in enumerate(dialogue_cues)}
+        cue_cache_keys_by_id: Dict[int, str] = {}
+
+        def _cue_context_sig(c_obj: Cue) -> str:
+            d_pos = diag_pos_map.get(c_obj.id, -1)
+            prev_ja = dialogue_cues[d_pos - 1].ja if d_pos > 0 else ""
+            next_ja = dialogue_cues[d_pos + 1].ja if 0 <= d_pos < len(dialogue_cues) - 1 else ""
+            return compute_contextual_cue_sig(
+                ja=c_obj.ja,
+                speaker=c_obj.speaker,
+                mode_hint=getattr(c_obj, "mode_hint", None),
+                prev_ja=prev_ja,
+                next_ja=next_ja,
+            )
+
+        def _build_scene_clamped_context(target_subset: List[Cue], scene_gap_ms: int = 4500) -> List[Cue]:
+            """
+            Xây dựng cửa sổ ngữ cảnh +/-10 câu có cắt tại ranh giới chuyển cảnh (im lặng >= 4.5s)
+            và giữ nguyên các câu đã trúng cache nằm xen kẽ bên trong phạm vi batch.
+            """
+            if not target_subset:
+                return []
+            target_ids = {c.id for c in target_subset}
+            first_pos = diag_pos_map.get(target_subset[0].id, 0)
+            last_pos = diag_pos_map.get(target_subset[-1].id, len(dialogue_cues) - 1)
+
+            # 1. History trước batch (tối đa 10 câu, dừng khi gap >= 4500ms nhưng giữ ít nhất 2 câu kề nếu gap < 12s)
+            history_cues: List[Cue] = []
+            curr_anchor = dialogue_cues[first_pos]
+            for step, p_idx in enumerate(range(first_pos - 1, max(-1, first_pos - 11), -1)):
+                cand = dialogue_cues[p_idx]
+                gap_ms = curr_anchor.start - cand.end
+                if step >= 2 and gap_ms >= scene_gap_ms:
+                    break
+                if gap_ms >= 12000:
+                    break
+                history_cues.append(cand)
+                curr_anchor = cand
+            history_cues.reverse()
+
+            # 2. Các câu trúng cache nằm xen giữa các câu chưa dịch bên trong batch (lấy +/-2 quanh câu chưa dịch)
+            inline_cues: List[Cue] = []
+            if (last_pos - first_pos + 1) > len(target_subset):
+                needed_inline_positions = set()
+                for tc in target_subset:
+                    tp = diag_pos_map.get(tc.id, -1)
+                    if tp >= 0:
+                        for neighbor_p in range(max(first_pos, tp - 2), min(last_pos, tp + 2) + 1):
+                            if dialogue_cues[neighbor_p].id not in target_ids:
+                                needed_inline_positions.add(neighbor_p)
+                inline_cues = [dialogue_cues[p] for p in sorted(needed_inline_positions)]
+
+            # 3. Lookahead sau batch (tối đa 10 câu, dừng khi gap >= 4500ms)
+            lookahead_cues: List[Cue] = []
+            curr_anchor = dialogue_cues[last_pos]
+            for step, n_idx in enumerate(range(last_pos + 1, min(len(dialogue_cues), last_pos + 11))):
+                cand = dialogue_cues[n_idx]
+                gap_ms = cand.start - curr_anchor.end
+                if step >= 2 and gap_ms >= scene_gap_ms:
+                    break
+                if gap_ms >= 12000:
+                    break
+                lookahead_cues.append(cand)
+                curr_anchor = cand
+
+            return history_cues + inline_cues + lookahead_cues
 
         # Khởi tạo HysteresisCastManager đóng kín vòng lặp phản hồi quan hệ nhân vật
         from subtrans.dynamic_cast import HysteresisCastManager
@@ -470,10 +551,13 @@ class TranslationPipeline:
                             prompt_version=prompt_version,
                             stage="draft",
                             rag_hash=rag_hash,
+                            context_sig=_cue_context_sig(cue),
                         ),
                     )
                     for cue in batch
                 ]
+                for c_item, ck_item in cue_keys:
+                    cue_cache_keys_by_id[c_item.id] = ck_item
                 if subs_upgrade and is_lower_model:
                     cached_map = {}
                 elif use_batch_cache:
@@ -484,6 +568,7 @@ class TranslationPipeline:
                         val = self.cache.get_cue(ck)
                         if isinstance(val, str) and val:
                             cached_map[ck] = (val, {})
+                cached_in_batch: List[Cue] = []
                 for cue, ckey in cue_keys:
                     cached_entry = cached_map.get(ckey)
                     if cached_entry and cached_entry[0]:
@@ -497,6 +582,10 @@ class TranslationPipeline:
                                 cue.speaker = meta["speaker"]
                             if meta.get("addressee") is not None:
                                 cue.addressee = meta["addressee"]
+                            if meta.get("p1"):
+                                cue.p1 = meta["p1"]
+                            if meta.get("p2"):
+                                cue.p2 = meta["p2"]
                             if meta.get("mode"):
                                 cue.mode = meta["mode"]
                             if "uncertain" in meta:
@@ -505,29 +594,28 @@ class TranslationPipeline:
                                 cue.uncertain_reason = meta["uncertain_reason"]
                             if "en_conflict" in meta:
                                 cue.en_conflict = bool(meta["en_conflict"])
+                        cached_in_batch.append(cue)
                         stats["cache_hits"] += 1
                         stats["model_counts"]["cache"] = stats["model_counts"].get("cache", 0) + 1
                         progress.advance(task, 1)
                     else:
                         uncached_cues.append(cue)
 
+                if cast_manager and cached_in_batch:
+                    cast_manager.observe_batch_cues(cached_in_batch)
+
                 if not uncached_cues:
                     continue
 
-                # 2. Extract surrounding context symmetrically (+/-10 cues per ADDENDUM 6)
-                first_id = uncached_cues[0].id
-                last_id = uncached_cues[-1].id
-                context = [c for c in cues if (first_id - 10 <= c.id < first_id) or (last_id < c.id <= last_id + 10)]
+                # 2. Extract scene-clamped surrounding context (+/-10 cues + inline cached neighbors)
+                context = _build_scene_clamped_context(uncached_cues)
 
                 translated_texts: List[str] = []
                 backend_used = active_backend_mode
                 model_used = candidate_gemini_models[curr_gemini_idx] if candidate_gemini_models else "none"
 
-                # Bơm ngữ cảnh xưng hô phân tầng động từ HysteresisCastManager vào batch prompt
-                if cast_manager and glossary:
-                    dyn_cast_ctx = cast_manager.to_prompt_context()
-                    if dyn_cast_ctx and dyn_cast_ctx not in glossary.style_rules:
-                        glossary.style_rules.append(dyn_cast_ctx)
+                # Trích xuất ngữ cảnh xưng hô động từ HysteresisCastManager (không mutate glossary.style_rules để bảo toàn Implicit Cache)
+                dyn_cast_ctx = cast_manager.to_prompt_context() if cast_manager else ""
 
                 if active_backend_mode == "gemini":
                     translated = False
@@ -539,17 +627,23 @@ class TranslationPipeline:
                             continue
                         is_native_gemini = isinstance(backend, GeminiTranslator)
                         try:
-                            translated_texts = call_with_retry(
-                                fn=(
-                                    lambda: backend.translate_batch(uncached_cues, context, glossary, rag_bundle=rag_bundle)
-                                    if is_native_gemini
-                                    else backend.translate_batch(uncached_cues, context, glossary)
-                                ),
-                                rate_limiter=None if (self.dry_run or is_native_gemini) else self.rate_limiter,
-                                max_retries=self.max_retries_per_model,
-                                model_name=target_model,
-                                cache=self.cache,
-                            )
+                            if is_native_gemini:
+                                translated_texts = backend.translate_batch(
+                                    uncached_cues,
+                                    context,
+                                    glossary,
+                                    rag_bundle=rag_bundle,
+                                    dynamic_cast_context=dyn_cast_ctx,
+                                    en_only_source=en_only_source,
+                                )
+                            else:
+                                translated_texts = call_with_retry(
+                                    fn=lambda: backend.translate_batch(uncached_cues, context, glossary),
+                                    rate_limiter=None if self.dry_run else self.rate_limiter,
+                                    max_retries=self.max_retries_per_model,
+                                    model_name=target_model,
+                                    cache=self.cache,
+                                )
                             if self.dry_run or not is_native_gemini:
                                 status_str = "dry_run" if self.dry_run else "success"
                                 self.cache.log_request(
@@ -612,10 +706,14 @@ class TranslationPipeline:
                             prompt_version=prompt_version,
                             stage="draft",
                             rag_hash=rag_hash,
+                            context_sig=_cue_context_sig(cue),
                         )
+                        cue_cache_keys_by_id[cue.id] = ckey
                         cue_meta = {
                             "speaker": cue.speaker,
                             "addressee": cue.addressee,
+                            "p1": getattr(cue, "p1", None),
+                            "p2": getattr(cue, "p2", None),
                             "mode": cue.mode,
                             "uncertain": bool(cue.uncertain),
                             "uncertain_reason": cue.uncertain_reason,
@@ -623,6 +721,9 @@ class TranslationPipeline:
                         }
                         batch_cache_rows.append((ckey, backend_used, model_used, vi, cue_meta))
                     progress.advance(task, 1)
+
+                if cast_manager and backend_used != "untranslated":
+                    cast_manager.observe_batch_cues(uncached_cues)
 
                 if batch_cache_rows:
                     if isinstance(self.cache, TranslationCache):
@@ -653,8 +754,47 @@ class TranslationPipeline:
                     glossary=glossary,
                     series=self.series,
                     episode_basename=base_name,
+                    dynamic_cast_context=cast_manager.to_prompt_context() if cast_manager else None,
                 )
                 stats["cascade_repaired"] = repair_stats.get("repaired_count", 0)
+
+                # Lưu ngược các câu đã được Flash biên tập đạt chuẩn vào SQLite Cache & tuyển chọn Silver RAG
+                if stats["cascade_repaired"] > 0 and not self.dry_run:
+                    repaired_cache_rows = []
+                    for rc in dialogue_cues:
+                        ck = cue_cache_keys_by_id.get(rc.id)
+                        if (
+                            ck
+                            and "(repair)" in (rc.model_used or "")
+                            and not rc.uncertain
+                            and not getattr(rc, "is_large_edit", False)
+                            and not getattr(rc, "is_digit_mismatch", False)
+                            and rc.vi
+                        ):
+                            rc_meta = {
+                                "speaker": rc.speaker,
+                                "addressee": rc.addressee,
+                                "p1": getattr(rc, "p1", None),
+                                "p2": getattr(rc, "p2", None),
+                                "mode": rc.mode,
+                                "uncertain": False,
+                                "uncertain_reason": "repaired",
+                                "en_conflict": bool(getattr(rc, "en_conflict", False)),
+                            }
+                            repaired_cache_rows.append((ck, "gemini", rc.model_used, rc.vi, rc_meta))
+                    if repaired_cache_rows and isinstance(self.cache, TranslationCache):
+                        self.cache.set_cues_batch(repaired_cache_rows)
+
+                    if self.enable_rag:
+                        try:
+                            from subtrans.rag import KnowledgeBase
+                            kb_silver = KnowledgeBase()
+                            silver_cnt = kb_silver.promote_cascade_repairs(
+                                dialogue_cues, glossary=glossary, series=self.series, episode=base_name
+                            )
+                            stats["rag_silver_promoted"] = silver_cnt
+                        except Exception as e_sil:
+                            logger.debug(f"Could not promote cascade silver units: {e_sil}")
         stage_times["stage_review"] = time.monotonic() - t_srev
 
         # Stage 4: Writing output (Item 4b: Chốt chặn kiểm định chất lượng nội dung)
@@ -672,7 +812,7 @@ class TranslationPipeline:
         uncertain_rate = (len(uncertain_cues) / total_active) if total_active > 0 else 0.0
 
         is_qualified = (real_rate >= 0.95 and uncertain_rate < 0.10)
-        from src.config import add_pending_sub, remove_pending_sub
+        from src.pending_queue import add_pending_sub, remove_pending_sub
         import datetime
 
         if is_qualified:
@@ -699,29 +839,27 @@ class TranslationPipeline:
                 + ("" if self.dry_run else "   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n")
             )
 
-        # Stage 4: Linter V1 Quality Verification & Subtitle Writing
-        from subtrans.linter import lint_subtitles, auto_fix_cues
+        # Stage 4: Optimize Playback -> Write Subtitle -> Linter V1 Final Audit
+        from subtrans.linter import lint_subtitles, lint_cue, auto_fix_cues
         cues, fixes_count = auto_fix_cues(cues)
-        lint_violations = lint_subtitles(cues, glossary=glossary)
-        if lint_violations:
-            lint_errors = [v for v in lint_violations if v.severity == "ERROR"]
-            lint_warnings = [v for v in lint_violations if v.severity == "WARNING"]
-            console.print(
-                f"[yellow]📋 [LINTER V1] Phát hiện {len(lint_violations)} cảnh báo/lỗi "
-                f"({len(lint_errors)} lỗi, {len(lint_warnings)} cảnh báo, {fixes_count} auto-fixes).[/yellow]"
-            )
 
-        # Gói 2: Tự động học bẫy lỗi từ Linter Violations vào Error Bank (chỉ khi chạy thật)
-        if lint_violations and self.enable_rag and not self.dry_run:
+        # Gói 2: Tự động học bẫy lỗi từ per-cue Linter Violations (trước khi gộp Dual Dialogue để giữ 1-1 JA)
+        if self.enable_rag and not self.dry_run:
             try:
-                from subtrans.rag import KnowledgeBase
-                kb = KnowledgeBase()
-                learned_count = kb.learn_from_linter_violations(lint_violations, cues, series=self.series, episode=base_name)
-                if learned_count > 0:
-                    console.print(
-                        f"[bold green]🧠 [RAG FEEDBACK] Đã tự động nạp {learned_count} bẫy lỗi từ Linter vào Error Bank "
-                        f"(.cache/knowledge.db) cho series '{self.series or 'chung'}'.[/bold green]"
+                per_cue_violations = []
+                for c_item in active_dialogue_cues:
+                    per_cue_violations.extend(lint_cue(c_item, glossary=glossary))
+                if per_cue_violations:
+                    from subtrans.rag import KnowledgeBase
+                    kb = KnowledgeBase()
+                    learned_count = kb.learn_from_linter_violations(
+                        per_cue_violations, cues, series=self.series, episode=base_name
                     )
+                    if learned_count > 0:
+                        console.print(
+                            f"[bold green]🧠 [RAG FEEDBACK] Đã tự động nạp {learned_count} bẫy lỗi từ Linter vào Error Bank "
+                            f"(.cache/knowledge.db) cho series '{self.series or 'chung'}'.[/bold green]"
+                        )
             except Exception as e:
                 logger.debug(f"Could not auto-learn from linter violations: {e}")
 
@@ -733,6 +871,18 @@ class TranslationPipeline:
                 output_format=out_ext,
                 wrap_chars=self.wrap_chars,
                 smart_wrap=self.smart_wrap,
+            )
+
+        # Kiểm định Linter V1 trên chuỗi cue đã tối ưu hóa hiển thị thực tế (sau Dual Dialogue & Zero-Overlap)
+        playback_audited_cues, post_fixes = auto_fix_cues(optimize_cues_for_playback(cues))
+        lint_violations = lint_subtitles(playback_audited_cues, glossary=glossary)
+        total_fixes = fixes_count + post_fixes
+        stats["lint_errors_count"] = sum(1 for v in lint_violations if v.severity == "ERROR")
+        stats["lint_warnings_count"] = sum(1 for v in lint_violations if v.severity == "WARNING")
+        if lint_violations:
+            console.print(
+                f"[yellow]📋 [LINTER V1] Sau tối ưu hiển thị còn {len(lint_violations)} cảnh báo/lỗi "
+                f"({stats['lint_errors_count']} lỗi, {stats['lint_warnings_count']} cảnh báo, {total_fixes} auto-fixes).[/yellow]"
             )
         stage_times["stage_4_write"] = time.monotonic() - t_s4
 
@@ -758,6 +908,8 @@ class TranslationPipeline:
         stats["dry_run"] = self.dry_run
         stats["pacific_time_cues"] = self.cache.get_cues_today_pt()
         stats["pacific_time_requests"] = self.cache.get_requests_today_pt()
+        if isinstance(self.cache, TranslationCache):
+            stats["token_telemetry_pt"] = self.cache.get_token_telemetry_today_pt()
         stats["is_qualified"] = is_qualified
         stats["real_rate"] = real_rate
         stats["uncertain_rate"] = uncertain_rate
@@ -791,6 +943,7 @@ class TranslationPipeline:
                 glossary=glossary,
                 review_file=self.review_file,
                 stage_times=stage_times,
+                cache=self.cache,
             )
         stage_times["stage_c_report"] = time.monotonic() - t_sc
 

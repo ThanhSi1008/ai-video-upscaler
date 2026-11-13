@@ -18,6 +18,7 @@ import pysubs2
 from subtrans.models import Cue, Glossary
 from subtrans.validation import JAPANESE_CHAR_REGEX
 from subtrans.writer import format_timestamp_srt
+from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters
 
 
 def format_timestamp(ms: int) -> str:
@@ -40,6 +41,7 @@ def generate_qa_report(
     glossary: Optional[Glossary] = None,
     review_file: bool = False,
     stage_times: Optional[Dict[str, float]] = None,
+    cache: Optional[Any] = None,
 ) -> Path:
     """
     Generates a structured Markdown audit report (out/<name>.audit.md)
@@ -85,16 +87,18 @@ def generate_qa_report(
         if en_path and not c.en:
             missing_en.append(c)
 
-        # Check glossary terms (allow vi or any alt)
+        # Check glossary terms (allow vi or any alt; furigana-transparent + EN-fallback aware)
         if glossary and glossary.terms:
+            ja_clean = strip_ja_furigana(ja_text)
+            en_ref = c.en or (ja_text if not has_cjk_characters(ja_text) else "")
             for term in glossary.terms:
-                if len(term.ja) == 1:
-                    # Single character terms require English context or exact match
-                    if c.en and term.en and re.search(r"\b" + re.escape(term.en) + r"\b", c.en, re.IGNORECASE):
+                t_ja_clean = strip_ja_furigana(term.ja or "")
+                if len(t_ja_clean) == 1:
+                    if en_ref and term.en and re.search(r"\b" + re.escape(term.en) + r"\b", en_ref, re.IGNORECASE):
                         valid_translations = [term.vi.lower()] + [a.lower() for a in term.alt]
                         if not any(v in vi_text.lower() for v in valid_translations):
                             glossary_violations.append((c, term))
-                elif term.ja in ja_text:
+                elif t_ja_clean and (t_ja_clean in ja_clean or (term.ja and term.ja in ja_text)):
                     valid_translations = [term.vi.lower()] + [a.lower() for a in term.alt]
                     if not any(v in vi_text.lower() for v in valid_translations):
                         glossary_violations.append((c, term))
@@ -186,6 +190,26 @@ def generate_qa_report(
         "",
     ])
 
+    # Section: Implicit Context Caching & Token Telemetry (PT)
+    token_telemetry = stats.get("token_telemetry_pt", {})
+    if not token_telemetry and cache is not None and hasattr(cache, "get_token_telemetry_today_pt"):
+        token_telemetry = cache.get_token_telemetry_today_pt()
+    if token_telemetry:
+        lines.extend([
+            "### ⚡ Hiệu Suất Gemini Implicit Context Caching & Token (Hôm Nay PT)",
+            "",
+            "| Model | Input Tokens | Cached Input Tokens | Cache Hit Rate (%) | Output Tokens | Thinking Tokens |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |",
+        ])
+        for t_mod, t_vals in token_telemetry.items():
+            p_tok = int(t_vals.get("prompt_tokens", 0))
+            c_tok = int(t_vals.get("cached_tokens", 0))
+            o_tok = int(t_vals.get("candidates_tokens", 0))
+            th_tok = int(t_vals.get("thinking_tokens", 0))
+            hit_pct = (c_tok / p_tok * 100.0) if p_tok > 0 else 0.0
+            lines.append(f"| `{t_mod}` | {p_tok:,} | {c_tok:,} | **{hit_pct:.1f}%** | {o_tok:,} | {th_tok:,} |")
+        lines.append("")
+
     # Section: Pacific Time Quota & Usage
     pt_cues = stats.get("pacific_time_cues", {})
     pt_reqs = stats.get("pacific_time_requests", {})
@@ -195,7 +219,7 @@ def generate_qa_report(
     configured_models = models_cfg.get("models", {})
     next_pt, next_vn = get_next_pt_reset()
     now_pt = get_now_pt()
-    cache_inst = TranslationCache()
+    cache_inst = cache if isinstance(cache, TranslationCache) else TranslationCache()
 
     lines.extend([
         f"### Hạn Mức Gemini API Theo Ngày Thái Bình Dương (Pacific Time - PT)",

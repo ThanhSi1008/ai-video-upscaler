@@ -19,6 +19,7 @@ import pysubs2
 
 from subtrans.models import Cue
 from subtrans.eval.metrics import normalize_nfc
+from subtrans.ja_morph_tagger import strip_ja_furigana
 
 logger = logging.getLogger("subtrans.rag")
 
@@ -105,6 +106,8 @@ class KnowledgeBase:
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS gold_units (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,11 +293,14 @@ class KnowledgeBase:
 
     @staticmethod
     def _extract_bigrams(text: str) -> List[str]:
-        """Extracts character bigrams from Japanese text, ignoring whitespace/punctuation."""
+        """Extracts character 2-grams and 3-grams from Japanese text, ignoring whitespace/punctuation."""
         cleaned = re.sub(r"[\s\d\W]+", "", text)
         if len(cleaned) < 2:
             return [cleaned] if cleaned else []
-        return [cleaned[i:i+2] for i in range(len(cleaned) - 1)]
+        tokens = [cleaned[i : i + 2] for i in range(len(cleaned) - 1)]
+        if len(cleaned) >= 3:
+            tokens.extend(cleaned[i : i + 3] for i in range(len(cleaned) - 2))
+        return tokens
 
     def retrieve_few_shots(
         self,
@@ -306,33 +312,48 @@ class KnowledgeBase:
     ) -> List[Dict[str, str]]:
         """
         Retrieves relevant few-shot examples from gold_units matching cues in the batch.
-        Uses BM25 scoring over character bigrams with IDF weighting.
-        Only retrieves units with status IN ('gold', 'reviewed') (NEVER retrieves 'draft').
+        Uses Hybrid BM25 scoring over character 2/3-grams + exact Kanji/Katakana term match
+        + (speaker, addressee) relational pair bonus.
+        Only retrieves units with status IN ('gold', 'reviewed', 'silver') (NEVER retrieves 'draft').
         Strictly isolates series and excludes the current episode being evaluated to prevent test leakage.
         """
         if not cues:
             return []
 
-        # Extract Japanese keywords (Kanji >= 2 chars, Katakana >= 2 chars) to check eligibility
-        batch_ja = " ".join(c.ja for c in cues)
-        keywords = set(re.findall(r"[\u4E00-\u9FAF]{2,}|[\u30A0-\u30FF]{2,}", batch_ja))
+        # Extract Japanese keywords (Kanji >= 2 chars, Katakana >= 2 chars; furigana-transparent)
+        batch_ja = " ".join(strip_ja_furigana(c.ja or "") for c in cues)
+        keywords = set(re.findall(r"[\u3400-\u4DBF\u4E00-\u9FFF]{2,}|[\u30A0-\u30FF]{2,}", batch_ja))
         if not keywords:
             return []
 
-        # Compute query bigrams
+        batch_speakers = {
+            strip_ja_furigana(c.speaker.strip()).lower()
+            for c in cues
+            if getattr(c, "speaker", None) and c.speaker.strip().lower() != "unknown"
+        }
+        batch_pairs = {
+            (strip_ja_furigana(c.speaker.strip()).lower(), c.addressee.strip().lower())
+            for c in cues
+            if getattr(c, "speaker", None)
+            and getattr(c, "addressee", None)
+            and c.speaker.strip().lower() != "unknown"
+            and c.addressee.strip().lower() != "unknown"
+        }
+
+        # Compute query n-grams
         query_bigrams: List[str] = []
         for kw in keywords:
             query_bigrams.extend(self._extract_bigrams(kw))
         if not query_bigrams:
             return []
 
-        # Fetch candidate gold units (status must be 'reviewed' or 'gold', never 'draft')
+        # Fetch candidate gold/reviewed/silver units (never 'draft')
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             query = """
-                SELECT id, ja_text, en_text, vi_text, series, episode
+                SELECT id, ja_text, en_text, vi_text, series, episode, speaker, addressee, status
                 FROM gold_units
-                WHERE status IN ('reviewed', 'gold')
+                WHERE status IN ('reviewed', 'gold', 'silver')
             """
             params: List[Any] = []
             if series:
@@ -347,12 +368,15 @@ class KnowledgeBase:
         if not candidates:
             return []
 
-        # Build candidate document bigram representations
+        # Build candidate document n-gram representations (furigana-transparent)
         doc_bigrams: Dict[int, List[str]] = {}
-        for cid, ja_text, en_text, vi_text, s_val, ep_val in candidates:
-            doc_bigrams[cid] = self._extract_bigrams(ja_text)
+        doc_clean_ja: Dict[int, str] = {}
+        for cid, ja_text, en_text, vi_text, s_val, ep_val, spk_val, addr_val, st_val in candidates:
+            c_ja = strip_ja_furigana(ja_text)
+            doc_clean_ja[cid] = c_ja
+            doc_bigrams[cid] = self._extract_bigrams(c_ja)
 
-        # Compute document frequencies and BM25 IDF for query bigrams
+        # Compute document frequencies and BM25 IDF for query n-grams
         N = len(candidates)
         avgdl = sum(len(bg) for bg in doc_bigrams.values()) / max(1, N)
         k1 = 1.2
@@ -363,16 +387,15 @@ class KnowledgeBase:
         for qb in unique_q_bigrams:
             df[qb] = sum(1 for cid in doc_bigrams if qb in doc_bigrams[cid])
 
-        # BM25 Scoring
+        # Hybrid BM25 + Exact Term + Speaker/Addressee Pair Scoring
         scored_candidates: List[Tuple[float, Dict[str, str]]] = []
         import math
-        for cid, ja_text, en_text, vi_text, s_val, ep_val in candidates:
+        for cid, ja_text, en_text, vi_text, s_val, ep_val, spk_val, addr_val, st_val in candidates:
             d_bgs = doc_bigrams[cid]
             dl = len(d_bgs)
             if dl == 0:
                 continue
 
-            # TF count for this doc
             tf: Dict[str, int] = {}
             for bg in d_bgs:
                 tf[bg] = tf.get(bg, 0) + 1
@@ -387,11 +410,36 @@ class KnowledgeBase:
                     den = term_tf + k1 * (1.0 - b + b * (dl / max(1.0, avgdl)))
                     score += idf * (num / den)
 
+            if score <= 0.0:
+                continue
+
+            # Exact multi-char term match bonus
+            c_ja = doc_clean_ja[cid]
+            exact_hits = sum(1 for kw in keywords if kw in c_ja)
+            if exact_hits:
+                score += 0.65 * exact_hits
+
+            # Speaker / Addressee relational match bonus
+            c_spk = strip_ja_furigana((spk_val or "").strip()).lower()
+            c_addr = (addr_val or "").strip().lower()
+            if c_spk and c_addr and (c_spk, c_addr) in batch_pairs:
+                score += 0.60
+            elif c_spk and c_spk in batch_speakers:
+                score += 0.25
+
+            # Prefer human gold / reviewed over auto-curated silver
+            tier_weight = 1.20 if st_val == "gold" else (1.05 if st_val == "reviewed" else 0.90)
+            score *= tier_weight
+
             if score >= min_score:
                 item = {"ja": ja_text, "vi": vi_text}
                 if en_text:
                     item["en"] = en_text
                     item["en_ref"] = en_text
+                if spk_val:
+                    item["speaker"] = spk_val
+                if addr_val:
+                    item["addressee"] = addr_val
                 scored_candidates.append((score, item))
 
         # Sort by BM25 score descending
@@ -529,10 +577,21 @@ class KnowledgeBase:
             cue = cue_map.get(getattr(v, "cue_id", -1))
             if not cue or not cue.ja or not cue.vi:
                 continue
+            if getattr(cue, "used_en_fallback", False) or cue.vi.strip() in (
+                "[Chưa dịch]",
+                "(Chưa dịch)",
+                "[Untranslated]",
+                "[DRY-RUN]",
+            ):
+                continue
 
             rule_id = getattr(v, "rule_id", "")
             ja_text = cue.ja.strip()
             vi_text = cue.vi.strip()
+
+            # Guard against error_bank self-poisoning: skip non-deterministic WARNING rules on uncertain drafts
+            if rule_id == "LINT_GLOSSARY_TERM" and getattr(cue, "uncertain", False):
+                continue
 
             if rule_id == "LINT_BANNED_TERM":
                 match = re.search(r"['\"]([^'\"]+)['\"]", getattr(v, "message", ""))
@@ -571,9 +630,10 @@ class KnowledgeBase:
                 match = re.search(r"called '([^']+)'", getattr(v, "message", ""))
                 char_name = match.group(1) if match else ""
                 if char_name:
+                    ja_clean = strip_ja_furigana(ja_text)
                     if self.add_error_pattern(
                         category="vocative_name",
-                        ja_pattern=re.escape(ja_text[:30]),
+                        ja_pattern=re.escape(ja_clean[:30]),
                         bad_pattern=r"\b(anh|em|cậu|cô|mày|hắn|nó)\b",
                         good_pattern=char_name,
                         explanation=f"Khi câu tiếng Nhật gọi đích danh '{char_name}', bắt buộc giữ tên Romaji '{char_name}'.",
@@ -581,9 +641,77 @@ class KnowledgeBase:
                     ):
                         learned_count += 1
 
+            elif rule_id == "LINT_GLOSSARY_TERM":
+                m_term = re.search(
+                    r"glossary term '([^']+)' but expected translation '([^']+)'",
+                    getattr(v, "message", ""),
+                )
+                if m_term:
+                    term_ja, term_vi = m_term.group(1), m_term.group(2)
+                    if self.add_error_pattern(
+                        category="glossary_term",
+                        ja_pattern=re.escape(strip_ja_furigana(term_ja)),
+                        bad_pattern=re.escape(vi_text[:40]),
+                        good_pattern=term_vi,
+                        explanation=f"Thuật ngữ '{term_ja}' bắt buộc dịch chuẩn theo Glossary là '{term_vi}'.",
+                        series=series,
+                    ):
+                        learned_count += 1
+
         if learned_count:
             logger.info(f"🧠 [RAG LEARN] Đã tự động nạp {learned_count} bẫy lỗi từ linter vào error_bank (series={series})")
         return learned_count
+
+    def promote_cascade_repairs(
+        self,
+        cues: List[Cue],
+        glossary: Optional[Any] = None,
+        series: Optional[str] = None,
+        episode: Optional[str] = None,
+        max_per_episode: int = 12,
+    ) -> int:
+        """
+        Auto-curates high-confidence Cascade Flash-repaired cues (0 lint violations, non-uncertain,
+        non-large-edit, non-digit-mismatch) into gold_units with status='silver' for future episodes.
+        """
+        if not cues:
+            return 0
+        from subtrans.linter import lint_cue
+
+        promoted = 0
+        norm_series = series.lower().strip() if series else None
+        for cue in cues:
+            if promoted >= max_per_episode:
+                break
+            if (
+                "(repair)" not in (getattr(cue, "model_used", "") or "")
+                or getattr(cue, "uncertain", False)
+                or getattr(cue, "is_large_edit", False)
+                or getattr(cue, "is_digit_mismatch", False)
+                or getattr(cue, "metadata_disagreement", False)
+                or getattr(cue, "repair_reason_code", "") not in ("accepted_lint_clean", "accepted_valid")
+            ):
+                continue
+            ja_clean = strip_ja_furigana(cue.ja or "").strip()
+            vi_clean = (cue.vi or "").strip()
+            if len(ja_clean) < 4 or not vi_clean:
+                continue
+            if lint_cue(cue, glossary=glossary):
+                continue
+            if self.add_gold_unit(
+                ja_text=cue.ja or ja_clean,
+                vi_text=vi_clean,
+                en_text=cue.en,
+                series=norm_series,
+                episode=episode,
+                speaker=cue.speaker if (cue.speaker and cue.speaker.lower() != "unknown") else None,
+                addressee=cue.addressee,
+                status="silver",
+            ):
+                promoted += 1
+        if promoted:
+            logger.info(f"🥈 [RAG SILVER] Đã tự động tuyển chọn {promoted} câu Cascade sạch làm mẫu silver (series={norm_series}).")
+        return promoted
 
     def retrieve_cautions(
         self,
@@ -597,7 +725,8 @@ class KnowledgeBase:
         if not cues:
             return []
 
-        batch_ja = " ".join(c.ja for c in cues)
+        batch_ja_raw = " ".join(c.ja or "" for c in cues)
+        batch_ja_clean = " ".join(strip_ja_furigana(c.ja or "") for c in cues)
         cautions: List[Dict[str, str]] = []
 
         with sqlite3.connect(self.db_path) as conn:
@@ -610,7 +739,7 @@ class KnowledgeBase:
             cursor.execute(query, params)
             for cat, ja_pat, bad_pat, good_pat, expl in cursor.fetchall():
                 try:
-                    if re.search(ja_pat, batch_ja):
+                    if re.search(ja_pat, batch_ja_clean) or re.search(ja_pat, batch_ja_raw):
                         cautions.append({
                             "category": cat,
                             "rule": expl,

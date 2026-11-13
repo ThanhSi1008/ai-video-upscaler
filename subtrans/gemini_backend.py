@@ -22,7 +22,11 @@ from subtrans.models import Cue, Glossary
 from subtrans.translator import BaseTranslator
 from subtrans.validation import validate_translations
 from subtrans.cache import execute_and_log_api_request
-from subtrans.ja_morph_tagger import extract_ja_linguistic_hints
+from subtrans.ja_morph_tagger import (
+    extract_ja_linguistic_hints,
+    strip_ja_furigana,
+    has_cjk_characters,
+)
 
 logger = logging.getLogger("subtrans.gemini")
 
@@ -38,20 +42,22 @@ SYSTEM_INSTRUCTION = (
     "5. Punctuation: use '...' (three ASCII dots, never unicode ellipsis); use '—' at end of interrupted speech; '?!' allowed; max two consecutive ! or ?.\n"
     "6. Sentences split across cues: translate at sentence level, then divide across the SAME cues at natural phrase boundaries. "
     "The continuation cue MUST start in lowercase; the preceding fragment MUST end with ',' or '...'. Never move content beyond that split.\n"
-    "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English reference track (e.g. 'Fran', 'Urushi', 'Jean', 'Reirin', 'Keigetsu', 'Rudeus', 'Emilia'). "
-    "NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (ABSOLUTELY NO 'Pháp Lạp', 'Ô Lỗ Thi', 'Linh Lâm', 'Huệ Nguyệt', 'Tuệ Nguyệt', 'Kim', 'Hoàng'). "
-    "Keep places, guilds, and organization names in Romaji/English romanization (e.g. 'thị trấn Alessa', 'thị trấn cảng Dars', 'Đảo nổi').\n"
-    "8. Addressing by proper name (Vocative): When Japanese dialogue addresses someone by their proper name (e.g. フラン -> Fran, ジャン -> Jean, ネルさん -> chị Nell / Nell, 玲琳 -> Reirin), ALWAYS KEEP the Romaji proper name directly in the Vietnamese dialogue line (e.g. 'Fran, em có sao không?', 'Jean, cẩn thận!', 'Cảm ơn chị Nell', 'Reirin, chuyện gì vậy?'). NEVER drop or replace the proper name with generic standalone pronouns ('anh/chị/em/cậu/cô/mày') to avoid wrong pronoun assumptions and preserve audio-subtitle sync.\n"
-    "9. Register & pacing: Match character personality and pacing. For quiet/stoic characters (like Fran), keep lines short, direct, and natural. "
-    "Differentiate internal monologues (tôi/mình) from telepathic/spoken dialogue based on the relationship table.\n"
+    "7. Names, clans, and nicknames: ALWAYS keep Romaji spelling matching the English/Cast reference track (e.g. 'Rudeus', 'Emilia', 'Subaru', 'Fran', 'Reirin'). "
+    "NEVER translate proper character names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words unless explicitly specified in the series glossary. "
+    "Keep places, guilds, and organization names consistent with the series glossary.\n"
+    "8. Addressing by proper name (Vocative): When Japanese dialogue addresses someone by their proper name (e.g. フラン -> Fran, スバル -> Subaru, ネルさん -> chị Nell / Nell, 玲琳 -> Reirin), ALWAYS KEEP the Romaji proper name directly in the Vietnamese dialogue line (e.g. 'Fran, em có sao không?', 'Subaru, cẩn thận!', 'Cảm ơn chị Nell', 'Reirin, chuyện gì vậy?'). NEVER drop or replace the proper name with generic standalone pronouns ('anh/chị/em/cậu/cô/mày') to avoid wrong pronoun assumptions and preserve audio-subtitle sync.\n"
+    "9. Register & pacing: Match each character's personality, speaking_style, and pacing from <episode_cast>. Keep stoic/terse characters concise and natural; preserve noble/archaic registers when indicated. "
+    "Differentiate internal monologues ('mode': 'inner', e.g. tôi/mình/ta) from telepathic ('comm') and spoken dialogue based on `mode_hint` and the relationship table.\n"
     "10. Context-First Reasoning (Chain-of-Thought): Prior to outputting 'vi', you MUST analyze and output:\n"
-    "    - 'speaker': character name speaking (e.g. Fran, Teacher, Reirin, or 'unknown').\n"
+    "    - 'speaker': character name speaking (from `speaker_cc`, <episode_cast>, or 'unknown').\n"
     "    - 'addressee': character recipient being spoken to (or null if talking to self / general audience).\n"
     "    - 'mode': dialogue mode ('spoken', 'inner', 'narration', 'spell', 'flashback', 'comm', 'lyrics', 'onscreen').\n"
+    "    - 'p1': exact Vietnamese 1st-person pronoun used in this line (e.g. 'anh', 'em', 'ta', 'tôi', 'tớ', 'mình', 'thần thiếp', or null if omitted).\n"
+    "    - 'p2': exact Vietnamese 2nd-person pronoun/title used in this line (e.g. 'em', 'anh', 'ngươi', 'cậu', 'sư phụ', 'bệ hạ', or null if omitted).\n"
     "    - 'en_conflict': true if the English reference diverges significantly from or contradicts the authentic Japanese nuance, else false.\n"
     "    - 'vi': the Vietnamese dialogue translation adhering strictly to the above rules.\n"
     "    - 'uncertain': 'none' if confident; or 'pronoun', 'referent', 'wordplay', 'archaic', 'term', 'other' if unsure.\n"
-    "11. Japanese Linguistic Hints & Register (Zero-Pronouns): When cues contain `ja_hints` (e.g. `1P:ore`, `2P:kisama/temee/anta/omae`, `SFP` tone markers), use them as decisive semantic anchors for Vietnamese pronouns and sentence register, avoiding mechanical translations of English 'you/I' into generic 'bạn/tôi'.\n"
+    "11. Japanese Linguistic Hints & Register (Zero-Pronouns): When cues contain `ja_hints` (e.g. `1P:ore`, `2P:kisama/temee/anta/omae`, `SFP` tone markers) or `mode_hint` (`inner`/`narration`/`flashback`), use them as decisive semantic anchors for Vietnamese pronouns and sentence register, avoiding mechanical translations of English 'you/I' into generic 'bạn/tôi'.\n"
     "Output must be a valid JSON array matching the provided schema."
 )
 
@@ -68,6 +74,8 @@ class SubtitleOutputItem(BaseModel):
         "spoken", "inner", "narration", "spell",
         "flashback", "comm", "lyrics", "onscreen"
     ] = "spoken"
+    p1: Optional[str] = None
+    p2: Optional[str] = None
     en_conflict: bool = False
     vi: str
     uncertain: UncertainCategory = "none"
@@ -87,10 +95,14 @@ class SubtitleOutputItem(BaseModel):
 
 
 def _apply_item_metadata_to_cue(cue: Cue, item: Dict[str, Any]) -> None:
-    """Applies inferred metadata (speaker, addressee, mode, en_conflict, uncertain) from LLM output to Cue."""
+    """Applies inferred metadata (speaker, addressee, mode, p1, p2, en_conflict, uncertain) from LLM output to Cue."""
     cue.speaker = item.get("speaker") or cue.speaker or "unknown"
     cue.addressee = item.get("addressee") or cue.addressee
-    cue.mode = item.get("mode") or cue.mode or "spoken"
+    cue.mode = item.get("mode") or cue.mode or cue.mode_hint or "spoken"
+    if item.get("p1"):
+        cue.p1 = str(item["p1"]).strip()
+    if item.get("p2"):
+        cue.p2 = str(item["p2"]).strip()
     cue.en_conflict = bool(item.get("en_conflict", False))
     unc = item.get("uncertain", "none")
     if unc is True:
@@ -104,37 +116,290 @@ def _apply_item_metadata_to_cue(cue: Cue, item: Dict[str, Any]) -> None:
         cue.uncertain_reason = "none"
 
 
+def get_anime_safety_settings() -> List[types.SafetySetting]:
+    """
+    Cấu hình Safety Settings chuẩn cho dịch phụ đề anime (hành động, dark-fantasy, lịch sử):
+    Ngăn bộ lọc mặc định chặn nhầm lời thoại chiến đấu ('殺すぞ', '死ね', '皆殺し') gây response.text = None.
+    """
+    return [
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+    ]
+
+
+def extract_genai_response_text(response: Any) -> str:
+    """
+    Trích xuất văn bản JSON từ phản hồi Google GenAI an toàn.
+    Nếu response.text là None hoặc rỗng (ví dụ bị safety block / empty candidate),
+    ném ValueError rõ ràng để cơ chế Bisect hoặc Fail-Open xử lý êm thay vì crash AttributeError.
+    """
+    raw = getattr(response, "text", None)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    finish_reason = "unknown"
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            finish_reason = str(getattr(candidates[0], "finish_reason", "unknown"))
+    except Exception:
+        pass
+    raise ValueError(f"Empty or blocked Gemini response (finish_reason={finish_reason})")
+
+
+STATIC_ANIME_TRANSLATION_HANDBOOK = (
+    "<vietnamese_anime_translation_handbook>\n"
+    "## SECTION A: ZERO-PRONOUN RESOLUTION & VIETNAMESE REGISTER MATRIX\n"
+    "Japanese anime dialogue omits explicit 1st-person and 2nd-person pronouns in ~65-75% of sentences (zero-pronouns). "
+    "English reference subtitles flatten almost every pair into 'I' and 'you'. You MUST reconstruct the exact Vietnamese "
+    "dyadic relationship pair `(p1, p2)` before writing `vi`, governed by the following hierarchy of truth:\n"
+    "  Priority 1: `<episode_cast>` explicit `speaks_to` pair (`self` / `other`) and `<dynamic_cast>` verified session pairs.\n"
+    "  Priority 2: Explicit `speaker_cc` (from Japanese Closed Captions / ASS Actor) + `mode_hint` (`inner`, `narration`, `flashback`).\n"
+    "  Priority 3: `ja_hints` morphological markers (`1P:*`, `2P:*`, `HON:*`, `KIN:*`, `REGISTER:*`, `SFP:*`, `DIALECT:*`).\n"
+    "  Priority 4: `<address_rules>` archetype table and immediate scene context (`context_before` / `context_after`).\n\n"
+    "### Canonical Genre & Social Hierarchy Pronoun Matrix\n"
+    "1. **Master & Disciple / Living Weapon & Wielder (Sư đồ / Chủ khí)**:\n"
+    "   - Young disciple -> Master (`師匠`): `p1='em'` (or `'con'` if paternal age gap), `p2='sư phụ'`. Never `'tôi/thầy'` in fantasy combat.\n"
+    "   - Master -> Young female disciple: `p1='ta'` (or `'thầy'`), `p2='em'` / `'con'` / proper Romaji name (`Fran`).\n"
+    "2. **Imperial Palace / Inner Court / Noble Houses (Cung đình / Hậu cung / Quý tộc cổ trang)**:\n"
+    "   - Consort / Concubine -> Emperor (`陛下`): `p1='thần thiếp'` (formal) or `'thiếp'` (intimate), `p2='bệ hạ'`.\n"
+    "   - Emperor -> Consort: `p1='trẫm'` (court edict) or `'ta'` (private), `p2='nàng'` / `'ái phi'` / title.\n"
+    "   - Maid / Retainer -> Noble Lady (`お嬢様` / `〜様`): `p1='nô tỳ'` / `'em'` / `'thuộc hạ'`, `p2='tiểu thư'` / `'nương nương'` / `'đại nhân'`.\n"
+    "   - Noble Lady -> Rival Noble Lady (polite surface, cold subtext `わたくし` / `あなた様`): `p1='tôi'` / `'ta'`, `p2='cô'` / `'tỷ'` / `'muội'`.\n"
+    "   - Crown Prince / Young Lord -> Fiancée (`そなた`): `p1='ta'`, `p2='nàng'` (affectionate/formal) or `'cô'` (distant).\n"
+    "3. **Isekai / High Fantasy Guilds, Knights & Royalty (Dị giới / Hiệp sĩ / Mạo hiểm giả)**:\n"
+    "   - Knight / Subordinate -> King, Demon Lord, Commander (`陛下`, `閣下`, `我が君`): `p1='thuộc hạ'` / `'thần'`, `p2='bệ hạ'` / `'ngài'` / `'chúa công'`.\n"
+    "   - Arrogant King / Demon Lord / Ancient Dragon (`余`, `我`, `わらわ` -> `貴様ら`, `雑種`): `p1='ta'` / `'bổn vương'`, `p2='ngươi'` / `'lũ ngươi'` / `'lũ tạp chủng'`.\n"
+    "   - Senior Adventurer -> Teenager (`お嬢ちゃん`, `坊主`): `p1='ta'` / `'chị'` / `'bác'`, `p2='nhóc'` / `'cô bé'` / `'cậu nhóc'`.\n"
+    "   - Party Peers (same age band): Male-Male casual (`俺` -> `お前`) = `'tôi/ông'` or `'tớ/cậu'` (if gentle) or `'tao/mày'` (only if rough delinquents/brawling); "
+    "Male-Female peers = `'tôi/cô'`, `'tớ/cậu'`, or `'anh/em'` ONLY once romantic or clear older-brother seniority is established.\n"
+    "4. **Samurai / Wuxia / Historical Edo (Kiếm hiệp / Võ sĩ cổ trang)**:\n"
+    "   - Wandering Samurai (`拙者`, `某` -> `〜殿`, `お主`): `p1='tại hạ'`, `p2='các hạ'` / `'cô'` / `'tiểu thư'` / `'ngươi'`.\n"
+    "   - Elder Grandmaster (`わし` -> `お主`, `小僧`): `p1='lão'` / `'ta'`, `p2='ngươi'` / `'tiểu tử'`.\n"
+    "5. **Modern School / Slice of Life / Detective (Học đường / Đời thường / Trinh thám)**:\n"
+    "   - Classmates (`僕/私` -> `君/〜さん`): `'tớ/cậu'` or `'mình/cậu'` (friendly), `'tôi/cậu'` or `'tôi/cô'` (reserved/tsundere).\n"
+    "   - Junior -> Senior (`先輩`): `p1='em'`, `p2='anh'` / `'chị'` / `'tiền bối'` (keep `'anh/chị + Romaji'` when name is called).\n"
+    "   - Childhood Friends in Kansai-ben (`DIALECT:kansai_ben`: `なんでやねん`, `せやな`, `あかん`, `ほんま`): keep brisk, punchy spoken rhythm "
+    "(`'Sao lại thế hả?!'`, `'Thiệt tình!'`, `'Đúng rồi đó'`, `'Không ổn đâu'`), using natural close-friend pronouns (`'tôi/bà'`, `'tớ/cậu'`, `'ông/tui'`).\n"
+    "6. **Internal Monologue, Narration & Telepathy (`mode` & `mode_hint` Disambiguation)**:\n"
+    "   - When `mode_hint='inner'` (triggered by `＜...＞` full-width brackets or italic thought styles) or character speaks to self (`addressee=null`):\n"
+    "     * Humble/modern protagonist (`俺`, `僕`, `私` thinking to self): `p1='mình'` or `'tôi'`, `p2=null`.\n"
+    "     * Noble/ancient/villain monologue (`我`, `余`, `わらわ` thinking to self): `p1='ta'`, `p2=null`.\n"
+    "     * NEVER invent a `p2` ('anh/em/cậu') in pure internal monologue unless mentally addressing a specific named person.\n"
+    "   - When `mode='comm'` (telepathy between bonded partners, e.g., Shishou <-> Fran): use their exact spoken dyadic pair (`ta/em`, `em/sư phụ`), NOT solitary `'mình'`!\n"
+    "   - When `mode='narration'` (`mode_hint='narration'`): objective epic/literary Vietnamese prose, third-person reference.\n\n"
+    "## SECTION B: ANTI-CALQUE & NATURAL SPOKEN VIETNAMESE CRAFT RULES\n"
+    "1. **Eliminate Translationese & Stiff Sino-Vietnamese Calques**:\n"
+    "   - NEVER write `'thế giới quan'` for `世界観` in normal speech -> write `'thế giới'` or `'quy luật của thế giới này'`.\n"
+    "   - NEVER write `'sự tồn tại của anh ấy'` for `彼の存在` -> write `'con người anh ấy'` or `'sự hiện diện của hắn'`.\n"
+    "   - NEVER write `'không có khả năng là...'` for `はずがない` -> write `'làm gì có chuyện...'`, `'không đời nào...'`, `'sao có thể...'`.\n"
+    "   - NEVER write `'tôi nghĩ rằng là một điều tốt'` -> write `'tôi thấy vậy cũng tốt mà'`, `'như vậy càng hay'`.\n"
+    "   - NEVER transliterate non-Chinese fantasy character names into Hán-Việt (`フラン` -> `'Fran'`, NEVER `'Pháp Lạp'`; `ウルシ` -> `'Urushi'`, NEVER `'Ô Lỗ Thi'`; "
+    "`玲琳` -> `'Reirin'`, NEVER `'Linh Lâm'`; `慧月` -> `'Keigetsu'`, NEVER `'Huệ Nguyệt'`; `スバル` -> `'Subaru'`; `エミリア` -> `'Emilia'`).\n"
+    "2. **Japanese Sentence-Final Particles (SFP) -> Authentic Vietnamese Modal Particles**:\n"
+    "   - `〜よ / 〜だよ / 〜わよ` (assertion/reminder) -> `'... đấy'`, `'... đó'`, `'... mà'`, `'... cơ mà'`.\n"
+    "   - `〜ね / 〜だね / 〜わね` (seeking agreement/gentle observation) -> `'... nhỉ'`, `'... ha'`, `'... đúng không'`, `'... nhé'`.\n"
+    "   - `〜ぞ / 〜ぜ` (masculine resolve/warning) -> `'... đấy!'`, `'... đây!'`, `'... thôi nào!'`, `'... cho xem!'`.\n"
+    "   - `〜かな / 〜かしら` (wondering aloud) -> `'Không biết... nhỉ?'`, `'Liệu có... không ta?'`, `'Chẳng rõ... nữa'`.\n"
+    "   - `〜じゃないか / 〜じゃん` (rhetorical realization) -> `'Chẳng phải... sao?!'`, `'... còn gì nữa!'`.\n"
+    "   - `〜てくれ / 〜てくれないか` -> `'Hãy... giúp ta'`, `'... giùm tôi nhé'`, `'Nhờ cậu...'`.\n"
+    "   - `〜やがる` (hostile contempt) -> `'Dám... sao?!'`, `'Tên khốn đó lại dám...'`.\n"
+    "3. **Strict Vocative Name Retention & Katakana Loanword Awareness**:\n"
+    "   - Whenever the Japanese speaker calls a person's name (`フラン、危ない！`, `ネルさん、お願い`, `ジャン・ドゥービーだ`), the Vietnamese line MUST contain "
+    "that exact Romaji name (`'Fran, cẩn thận!'`, `'Chị Nell, nhờ chị nhé'`, `'Ta là Jean Doubee!'`).\n"
+    "   - Do NOT confuse Katakana common loanwords with short character names: `プログラム` = `'chương trình'` (NOT character `'Ram'`), "
+    "`パネル` / `トンネル` = `'bảng điều khiển'` / `'đường hầm'` (NOT character `'Nell'`), `フランチャイズ` = `'nhượng quyền'` (NOT `'Fran'`).\n"
+    "4. **Numbers, Units, Ranks & Temporal Precision**:\n"
+    "   - Preserve EVERY number, rank, floor, percentage, currency, and time expression faithfully (`300人` -> `'300 tên'`, `Sランク` -> `'hạng S'`, "
+    "`第7階層` -> `'tầng thứ 7'`, `3年前` -> `'3 năm trước'`). Never round, omit, or hallucinate numbers.\n"
+    "5. **Reading Speed (CPS <= 20 chars/sec) & Split-Cue Continuity**:\n"
+    "   - For brisk 1.0s-1.5s exclamations, keep Vietnamese crisp and punchy (`まさか！` -> `'Không thể nào!'`; `くそっ！` -> `'Chết tiệt!'`; `行くぞ！` -> `'Đi thôi!'`).\n"
+    "   - When one sentence spans Cue N and Cue N+1: Cue N MUST end with `','` or `'...'`, and Cue N+1 MUST begin in lowercase (unless Cue N+1 begins with a "
+    "capitalized Romaji proper name such as `'Subaru'` or `'Fran'`). Never duplicate words already spoken in Cue N into Cue N+1.\n\n"
+    "## SECTION C: GOLDEN CHAIN-OF-THOUGHT TRANSLATION EXEMPLARS\n"
+    "- Exemplar 1 (Vocative + Master/Disciple): JA=`師匠、あの魔獣の核を吸収する？` | EN=`Master, are we absorbing that magic beast's core?` "
+    "-> speaker=`Fran`, addressee=`Shishou`, mode=`spoken`, p1=`em`, p2=`sư phụ`, en_conflict=`false`, vi=`Sư phụ, mình hấp thụ ma thạch của con ma thú đó nhé?`, uncertain=`none`.\n"
+    "- Exemplar 2 (Inner Monologue `＜...＞` after CC Sound Tag): JA=`この薬草なら慧月様の毒を解けるかもしれない…` (`mode_hint='inner'`) | EN=`This herb might cure Lady Keigetsu's poison...` "
+    "-> speaker=`Reirin`, addressee=`null`, mode=`inner`, p1=`mình`, p2=`null`, en_conflict=`false`, vi=`Với loại thảo dược này, biết đâu mình có thể giải độc cho tiểu thư Keigetsu...`, uncertain=`none`.\n"
+    "- Exemplar 3 (JA-EN Nuance Conflict — EN flattens hostile `貴様` to 'you'): JA=`玲琳、貴様さえいなければ！` | EN=`Reirin, if only you weren't around!` "
+    "-> speaker=`Keigetsu`, addressee=`Reirin`, mode=`spoken`, p1=`ta`, p2=`ngươi`, en_conflict=`true`, vi=`Reirin, giá mà ngươi không tồn tại trên đời này!`, uncertain=`none`.\n"
+    "- Exemplar 4 (Archaic Samurai `某` + Polite Imperative): JA=`薫殿、某にお任せあれ。` | EN=`Miss Kaoru, leave this to me.` "
+    "-> speaker=`Kenshin`, addressee=`Kaoru`, mode=`spoken`, p1=`tại hạ`, p2=`cô`, en_conflict=`false`, vi=`Cô Kaoru, cứ giao việc này cho tại hạ.`, uncertain=`none`.\n"
+    "- Exemplar 5 (Arrogant Monarch `余` + Plural Contempt `貴様ら`): JA=`貴様ら、雑種の分際で余に逆らうか！` | EN=`You mongrels dare defy me?!` "
+    "-> speaker=`Gilgamesh`, addressee=`Enemies`, mode=`spoken`, p1=`ta`, p2=`lũ ngươi`, en_conflict=`false`, vi=`Lũ tạp chủng các ngươi mà cũng dám chống lại ta sao?!`, uncertain=`none`.\n"
+    "- Exemplar 6 (Split Sentence Across Two Cues): Cue 101 JA=`あの時、俺を助けてくれたのは…` -> vi=`Người đã cứu tôi vào khoảnh khắc ấy...` | "
+    "Cue 102 JA=`間違いなくエミリアだったんだ。` -> vi=`chắc chắn chính là Emilia.` (lowercase continuation, proper name `Emilia` capitalized).\n"
+    "- Exemplar 7 (Short Zero-Pronoun Line Anchored by Neighbor Context): Context prev=`ネルさん、受付をお願い` -> Current JA=`ありがとう` (speaker=`Fran`) "
+    "-> speaker=`Fran`, addressee=`Nell`, mode=`spoken`, p1=`em`, p2=`chị`, en_conflict=`false`, vi=`Cảm ơn chị nhé.`, uncertain=`none`.\n"
+    "</vietnamese_anime_translation_handbook>"
+)
+
+
+def build_episode_system_prompt(
+    glossary: Optional[Glossary] = None,
+    gloss_skill_names: bool = False,
+    en_only_source: bool = False,
+) -> str:
+    """
+    Xây dựng System Prompt tĩnh ổn định theo từng tập phim (> 4,096 tokens tĩnh) để kích hoạt
+    tối đa Gemini Implicit Context Caching xuyên suốt toàn bộ các batch trong tập:
+    1. SYSTEM_INSTRUCTION chuẩn gốc + STATIC_ANIME_TRANSLATION_HANDBOOK chuyên sâu.
+    2. Quy tắc phong cách riêng của bộ anime (glossary.style_rules).
+    3. Quy tắc xưng hô tổng quát (address_rules: principle, first_person, second_person, relations).
+    4. Bảng quan hệ nhân vật cố định của tập (<episode_cast>) & thuật ngữ cố định.
+    """
+    blocks: List[str] = [SYSTEM_INSTRUCTION, STATIC_ANIME_TRANSLATION_HANDBOOK]
+
+    if gloss_skill_names:
+        blocks.append(
+            "SKILL NAMES RULE: When a named attack/spell occurs and the EN reference provides the name, "
+            "write in Vietnamese followed by the English name in parentheses, e.g. 'Độ Không Tuyệt Đối! (Absolute Zero)'."
+        )
+
+    if en_only_source:
+        blocks.append(
+            "ENGLISH-ONLY SOURCE FALLBACK MODE: The input 'ja' field in this episode contains official English studio "
+            "subtitles (no Japanese text track was available in the container). Infer authentic anime relationship "
+            "registers, seniority, and Vietnamese pronouns (anh/em/ta/ngươi/tớ/cậu/sư phụ/tiểu thư/ngài) from "
+            "the character cast table and scene context—NEVER translate English 'I/you' mechanically into flat 'tôi/bạn'."
+        )
+
+    if glossary and glossary.style_rules:
+        blocks.append("Additional Series Style Rules:\n" + "\n".join(glossary.style_rules))
+
+    if glossary and glossary.address_rules:
+        ar = glossary.address_rules
+        ar_lines: List[str] = []
+        if ar.principle:
+            ar_lines.append(f"Principle: {ar.principle}")
+        if ar.first_person:
+            p1_strs = [
+                f"- {p.ja} -> {p.vi}"
+                + (f" (alt: {', '.join(p.alt)})" if p.alt else "")
+                + (f" [{p.note}]" if p.note else "")
+                for p in ar.first_person
+            ]
+            ar_lines.append("First-Person Pronouns (1P):\n" + "\n".join(p1_strs))
+        if ar.second_person:
+            p2_strs = [
+                f"- {p.ja} -> {p.vi}"
+                + (f" (alt: {', '.join(p.alt)})" if p.alt else "")
+                + (f" [{p.note}]" if p.note else "")
+                for p in ar.second_person
+            ]
+            ar_lines.append("Second-Person Pronouns (2P):\n" + "\n".join(p2_strs))
+        if ar.honorifics:
+            hon_strs = [
+                f"- {h.ja} -> {h.vi}"
+                + (f" (alt: {', '.join(h.alt)})" if h.alt else "")
+                + (f" [{h.note}]" if h.note else "")
+                for h in ar.honorifics
+            ]
+            ar_lines.append("Honorifics:\n" + "\n".join(hon_strs))
+        if ar.relations:
+            rel_strs = [f"- {r.case}: self='{r.self}', other='{r.other}'" + (f" ({r.note})" if r.note else "") for r in ar.relations]
+            ar_lines.append("Relationship Archetypes:\n" + "\n".join(rel_strs))
+        if ar_lines:
+            blocks.append("<address_rules>\n" + "\n".join(ar_lines) + "\n</address_rules>")
+
+    if glossary and glossary.characters:
+        cast_lines: List[str] = []
+        for c in glossary.characters:
+            meta = [str(x) for x in (c.gender, c.speaking_style, c.note) if x]
+            if getattr(c, "aliases", None):
+                meta.append("aliases: " + ", ".join(c.aliases))
+            meta_str = f" [{'; '.join(meta)}]" if meta else ""
+            speaks = (
+                " | speaks_to: " + "; ".join(f"{s.self}/{s.other} -> {s.listener}" for s in c.speaks_to)
+                if c.speaks_to
+                else ""
+            )
+            cast_lines.append(f"- {c.name_ja} -> {c.name_vi}{meta_str}{speaks}")
+        if cast_lines:
+            blocks.append("<episode_cast>\n" + "\n".join(cast_lines) + "\n</episode_cast>")
+
+    if glossary and glossary.terms:
+        term_lines: List[str] = []
+        for t in glossary.terms:
+            en_part = f" ({t.en})" if t.en else ""
+            alt_part = f" [alt: {', '.join(t.alt)}]" if t.alt else ""
+            note_part = f" — {t.note}" if t.note else ""
+            term_lines.append(f"- {t.ja}{en_part} -> {t.vi}{alt_part}{note_part}")
+        if term_lines:
+            blocks.append("<series_glossary_terms>\n" + "\n".join(term_lines) + "\n</series_glossary_terms>")
+
+    blocks.append("Output must be a valid JSON array matching the provided schema.")
+    return "\n\n".join(blocks)
+
+
 def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> Dict[str, Any]:
-    """Filters glossary to only include terms, characters, and honorifics present in the current batch."""
+    """Filters glossary to only include terms, characters, pronouns, and honorifics present in the current batch."""
     if not glossary:
         return {}
 
-    batch_ja_text = " ".join(c.ja for c in cues)
-    batch_en_text = " ".join(c.en for c in cues if c.en).lower()
+    raw_ja_list = [c.ja for c in cues if c.ja]
+    batch_ja_text = " ".join(raw_ja_list)
+    batch_ja_clean = strip_ja_furigana(batch_ja_text)
+
+    # Khi chạy chế độ fallback EN-only (c.en trống và c.ja không có CJK), dùng cả c.ja để khớp thuật ngữ tiếng Anh!
+    en_fragments: List[str] = []
+    for c in cues:
+        if c.en:
+            en_fragments.append(c.en)
+        elif c.ja and not has_cjk_characters(c.ja):
+            en_fragments.append(c.ja)
+    batch_en_text = " ".join(en_fragments).lower()
+
+    def _ja_contains(needle: str) -> bool:
+        if not needle:
+            return False
+        norm_needle = strip_ja_furigana(needle)
+        return (
+            needle in batch_ja_text
+            or needle in batch_ja_clean
+            or (norm_needle != "" and norm_needle in batch_ja_clean)
+        )
 
     relevant_terms = []
     for term in glossary.terms:
         matches = False
         en_word_match = False
-        if term.en and re.search(r"\b" + re.escape(term.en) + r"\b", batch_en_text, re.IGNORECASE):
+        if term.en and batch_en_text and re.search(r"\b" + re.escape(term.en) + r"\b", batch_en_text, re.IGNORECASE):
             en_word_match = True
 
         if len(term.ja) == 1:
             # Single kanji terms (like 気 for ki/qi) need English context or alias match
             if en_word_match:
                 matches = True
-            elif term.aliases and any(re.search(r"\b" + re.escape(a) + r"\b", batch_en_text, re.IGNORECASE) for a in term.aliases):
+            elif term.aliases and batch_en_text and any(
+                re.search(r"\b" + re.escape(a) + r"\b", batch_en_text, re.IGNORECASE) for a in term.aliases
+            ):
                 matches = True
-            elif not batch_en_text and term.ja in batch_ja_text:
+            elif not batch_en_text and _ja_contains(term.ja):
                 matches = True
         else:
-            if term.ja and term.ja in batch_ja_text:
+            if term.ja and _ja_contains(term.ja):
                 matches = True
             elif en_word_match:
                 matches = True
             elif term.aliases:
                 for alias in term.aliases:
-                    if alias in batch_ja_text or re.search(r"\b" + re.escape(alias) + r"\b", batch_en_text, re.IGNORECASE):
+                    if _ja_contains(alias) or (
+                        batch_en_text and re.search(r"\b" + re.escape(alias) + r"\b", batch_en_text, re.IGNORECASE)
+                    ):
                         matches = True
                         break
 
@@ -166,46 +431,89 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
         relevant_characters.append(char_entry)
 
     res: Dict[str, Any] = {}
-    if relevant_terms:
-        res["terms"] = relevant_terms
     if relevant_characters:
         res["characters"] = relevant_characters
+    if relevant_terms:
+        res["terms"] = relevant_terms
 
     if glossary.address_rules:
-        addr = {}
+        addr: Dict[str, Any] = {}
         if glossary.address_rules.principle:
             addr["principle"] = glossary.address_rules.principle
+
+        matching_1p = []
+        for p in glossary.address_rules.first_person:
+            tokens = [tok.strip() for tok in p.ja.split("/") if tok.strip()]
+            if any(_ja_contains(tok) for tok in tokens):
+                matching_1p.append({"ja": p.ja, "vi": p.vi, "alt": p.alt, "note": p.note})
+        if matching_1p:
+            addr["relevant_first_person"] = matching_1p
+
+        matching_2p = []
+        for p in glossary.address_rules.second_person:
+            tokens = [tok.strip() for tok in p.ja.split("/") if tok.strip()]
+            if any(_ja_contains(tok) for tok in tokens):
+                matching_2p.append({"ja": p.ja, "vi": p.vi, "alt": p.alt, "note": p.note})
+        if matching_2p:
+            addr["relevant_second_person"] = matching_2p
+
         matching_honorifics = []
         for h in glossary.address_rules.honorifics:
-            h_key = h.ja.replace("〜", "").replace("~", "").split("/")[0].strip()
-            if h_key and (h_key in batch_ja_text or h_key.lower() in batch_en_text):
+            h_keys = [k.replace("〜", "").replace("~", "").strip() for k in h.ja.split("/") if k.strip()]
+            if any(
+                k and (_ja_contains(k) or (batch_en_text and k.lower() in batch_en_text))
+                for k in h_keys
+            ):
                 matching_honorifics.append({"ja": h.ja, "vi": h.vi, "alt": h.alt, "note": h.note})
         if matching_honorifics:
             addr["relevant_honorifics"] = matching_honorifics
+
+        if glossary.address_rules.relations:
+            addr["relation_archetypes"] = [
+                {"case": r.case, "self": r.self, "other": r.other}
+                for r in glossary.address_rules.relations
+            ]
+
         if addr:
             res["address_guidance"] = addr
 
     return res
 
 
-def get_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
+def get_thinking_config(
+    model_name: str,
+    level_override: Optional[str] = None,
+) -> Optional[types.ThinkingConfig]:
     """
-    Configures lowest reasonable thinking setting for translation per ADDENDUM 8:
-    - Minimizes latency and quota usage (thinking tokens count towards output token limit).
-    - For flash-lite: uses ThinkingLevel.MINIMAL.
-    - For standard 3.x/2.5 models: sets thinking_budget=0 to disable thinking.
+    Cấu hình Thinking chuẩn xác theo họ model Gemini 3.5 / 3.8 chính thức (google-genai >= 2.30):
+    - flash-lite (3.5/3.1): ThinkingLevel.MINIMAL (độ trễ thấp nhất, không lẹm output token).
+    - gemini-3.* (3.8/3.7/3.6/3.5-flash): ThinkingLevel.LOW mặc định (hoặc MEDIUM cho Cascade repair),
+      tuyệt đối không dùng MINIMAL hay thinking_budget=0 trên 3.8-flash để tránh lỗi 400 hoặc suy luận lệch.
+    - gemini-2.5*: thinking_budget=0.
     """
-    m = model_name.lower()
+    m = (model_name or "").lower()
+    if level_override:
+        lv = level_override.strip().upper()
+        if hasattr(types.ThinkingLevel, lv):
+            if lv == "MINIMAL" and "flash-lite" not in m and "gemini-3." in m:
+                lv = "LOW"
+            return types.ThinkingConfig(thinking_level=getattr(types.ThinkingLevel, lv))
     if "flash-lite" in m:
         return types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
-    else:
-        return types.ThinkingConfig(thinking_budget=0)
+    if "gemini-3." in m:
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+    return types.ThinkingConfig(thinking_budget=0)
 
 
 class GeminiTranslator(BaseTranslator):
     """Google Gemini translation backend with structured schema output and automatic split-retry."""
 
     all_rotation_events: List[Dict[str, Any]] = []
+
+    @classmethod
+    def reset_session_rotation_events(cls) -> None:
+        """Làm sạch nhật ký xoay khóa toàn cục khi bắt đầu tập phim mới (ngăn rò rỉ giữa các tập)."""
+        cls.all_rotation_events = []
 
     def __init__(
         self,
@@ -269,6 +577,7 @@ class GeminiTranslator(BaseTranslator):
             if not self.cache.is_key_model_exhausted(kid, self.model):
                 self.current_key_idx = idx
                 break
+        self._visited_rotation_indices: set = {self.current_key_idx}
 
         self.api_key: Optional[str] = self.api_keys[self.current_key_idx] if self.api_keys else None
 
@@ -296,8 +605,8 @@ class GeminiTranslator(BaseTranslator):
 
     def select_next_round_robin_key(self, reason: str = "") -> bool:
         """
-        Luân phiên (Round-Robin) sang API Key kế tiếp trong danh sách chưa bị cạn kiệt.
-        Giúp phân bổ đều request giữa các key, nhân số RPM khả dụng và tránh nghẽn.
+        Luân phiên (Round-Robin) sang API Key kế tiếp trong danh sách chưa bị cạn kiệt,
+        ưu tiên key đang còn nhiều slot RPM trống nhất (Least-Loaded) và giữ thứ tự vòng tròn khi ngang nhau.
         """
         if not self.api_keys or len(self.api_keys) <= 1:
             return False
@@ -306,42 +615,62 @@ class GeminiTranslator(BaseTranslator):
         old_kid = self.key_ids[old_idx] if self.key_ids else "none"
         n_keys = len(self.api_keys)
 
+        best_candidate: Optional[Tuple[int, int, int, str]] = None
         for offset in range(1, n_keys + 1):
             cand_idx = (old_idx + offset) % n_keys
             cand_kid = self.key_ids[cand_idx]
             if not self.cache.is_key_model_exhausted(cand_kid, self.model):
-                self.current_key_idx = cand_idx
-                self.api_key = self.api_keys[cand_idx]
-                self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
-                if cand_idx != old_idx and reason:
-                    event = {
-                        "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                        "model": self.model,
-                        "from_key_id": old_kid,
-                        "to_key_id": cand_kid,
-                        "reason": reason,
-                    }
-                    self.rotation_events.append(event)
-                    GeminiTranslator.all_rotation_events.append(event)
-                    logging.getLogger("subtrans.gemini").info(
-                        f"🔄 [ROUND-ROBIN] Luân phiên khóa '{self.model}': {old_kid} ➔ {cand_kid} ({reason})"
-                    )
-                return True
+                limiter = self.rate_limiters.get(cand_kid)
+                avail = limiter.available_slots() if limiter else 1
+                score_tuple = (avail, -offset, cand_idx, cand_kid)
+                if best_candidate is None or (score_tuple[0], score_tuple[1]) > (best_candidate[0], best_candidate[1]):
+                    best_candidate = score_tuple
+
+        if best_candidate is not None:
+            _, _, cand_idx, cand_kid = best_candidate
+            self.current_key_idx = cand_idx
+            self._visited_rotation_indices = {cand_idx}
+            self.api_key = self.api_keys[cand_idx]
+            self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
+            if cand_idx != old_idx and reason:
+                event = {
+                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "model": self.model,
+                    "from_key_id": old_kid,
+                    "to_key_id": cand_kid,
+                    "reason": reason,
+                }
+                self.rotation_events.append(event)
+                GeminiTranslator.all_rotation_events.append(event)
+                logging.getLogger("subtrans.gemini").info(
+                    f"🔄 [ROUND-ROBIN] Luân phiên khóa '{self.model}': {old_kid} ➔ {cand_kid} ({reason})"
+                )
+            return True
         return False
 
     def rotate_key(self, reason: str = "") -> bool:
         """
-        Xoay sang API Key tiếp theo trong danh sách chưa bị cạn hạn mức cho model này.
-        Trả về True nếu còn key khả dụng, False nếu đã hết danh sách key.
+        Xoay vòng modulo sang API Key tiếp theo chưa thử trong chu kỳ và chưa bị cạn hạn mức cho model này
+        (hỗ trợ quay vòng từ Key #3 về Key #1 khi Round-Robin đang đứng ở cuối danh sách).
         """
+        if not self.api_keys or len(self.api_keys) <= 1:
+            return False
         import datetime
         old_idx = self.current_key_idx
         old_kid = self.key_ids[old_idx] if self.key_ids else "none"
+        n_keys = len(self.api_keys)
+        visited = getattr(self, "_visited_rotation_indices", {old_idx})
+        visited.add(old_idx)
 
-        for next_idx in range(old_idx + 1, len(self.api_keys)):
+        for offset in range(1, n_keys):
+            next_idx = (old_idx + offset) % n_keys
+            if next_idx in visited:
+                continue
             next_kid = self.key_ids[next_idx]
             if not self.cache.is_key_model_exhausted(next_kid, self.model):
                 self.current_key_idx = next_idx
+                visited.add(next_idx)
+                self._visited_rotation_indices = visited
                 self.api_key = self.api_keys[self.current_key_idx]
                 self.client = genai.Client(api_key=self.api_key, http_options=self.http_options)
                 event = {
@@ -374,7 +703,9 @@ class GeminiTranslator(BaseTranslator):
             "response_mime_type": "application/json",
             "response_schema": list[SubtitleOutputItem],
             "temperature": self.temperature,
+            "max_output_tokens": 16384,
             "http_options": self.http_options,
+            "safety_settings": get_anime_safety_settings(),
         }
         thinking_cfg = get_thinking_config(self.model)
         if thinking_cfg:
@@ -385,6 +716,12 @@ class GeminiTranslator(BaseTranslator):
         if self.cache.is_key_model_exhausted(curr_kid, self.model):
             if not self.rotate_key(reason="Pre-check: Khóa hiện tại đã hết hạn mức ngày"):
                 next_pt, next_vn = get_next_pt_reset()
+                self.cache.mark_model_exhausted(
+                    model=self.model,
+                    exhausted_until_pt=next_pt,
+                    quota_id="AllKeysExhausted",
+                    reason="All configured API keys exhausted daily quota",
+                )
                 raise DailyQuotaExhaustedError(
                     model=self.model,
                     quota_id="AllKeysExhausted",
@@ -418,7 +755,7 @@ class GeminiTranslator(BaseTranslator):
                     cache=self.cache,
                     key_id=curr_kid,
                 )
-                raw_text = response.text.strip()
+                raw_text = extract_genai_response_text(response)
                 data = json.loads(raw_text)
                 # Sau khi batch hoàn tất thành công, xoay vòng Round-Robin sang key tiếp theo (nếu bật round_robin)
                 if getattr(self, "round_robin", False) and len(self.api_keys) > 1:
@@ -446,8 +783,15 @@ class GeminiTranslator(BaseTranslator):
                             transient_attempt = 0
                             continue
                         else:
-                            # Hết toàn bộ khóa của model này -> ném DailyQuotaExhaustedError để chuyển sang model kế
+                            # Hết toàn bộ khóa của model này -> đánh dấu model_exhaustion và ném DailyQuotaExhaustedError
                             next_pt, next_vn = get_next_pt_reset()
+                            self.cache.mark_model_exhausted(
+                                model=self.model,
+                                exhausted_until_pt=next_pt,
+                                quota_id=quota_id or "PerDay",
+                                quota_value=quota_value or "",
+                                reason=f"All keys 429 PerDay ({quota_id})",
+                            )
                             raise DailyQuotaExhaustedError(
                                 model=self.model,
                                 quota_id=quota_id or "PerDay",
@@ -456,10 +800,18 @@ class GeminiTranslator(BaseTranslator):
                                 reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
                             )
                     else:
-                        # (b) 429 PerMinute -> chờ retryDelay, KHÔNG xoay khóa
+                        # (b) 429 PerMinute -> nếu bật round_robin và có key khác còn slot trống thì sang key rảnh ngay,
+                        # còn khi tắt round_robin thì chờ retryDelay và giữ nguyên khóa hiện tại.
+                        if getattr(self, "round_robin", False) and len(self.api_keys) > 1:
+                            prev_idx = self.current_key_idx
+                            if self.select_next_round_robin_key(reason=f"429 PerMinute ({quota_id})") and self.current_key_idx != prev_idx:
+                                next_kid = self.key_ids[self.current_key_idx]
+                                limiter = self.rate_limiters.get(next_kid)
+                                if not limiter or limiter.available_slots() > 0:
+                                    continue
                         wait_sec = float(retry_delay) if retry_delay else 10.0
                         logging.getLogger("subtrans.gemini").warning(
-                            f"⏳ [429 PER-MINUTE] Model '{self.model}' trên key {curr_kid} cần chờ {wait_sec:.1f}s (KHÔNG xoay khóa)..."
+                            f"⏳ [429 PER-MINUTE] Model '{self.model}' trên key {curr_kid} cần chờ {wait_sec:.1f}s..."
                         )
                         time.sleep(wait_sec)
                         continue
@@ -491,6 +843,8 @@ class GeminiTranslator(BaseTranslator):
         context: List[Cue],
         glossary: Optional[Glossary] = None,
         rag_bundle: Optional[Tuple[List[Dict[str, str]], List[Dict[str, str]], str]] = None,
+        dynamic_cast_context: Optional[str] = None,
+        en_only_source: Optional[bool] = None,
     ) -> List[str]:
         """Translates batch of cues (100–150 cues) with immediate bisecting (split in half) on cue/ID mismatch."""
         if not cues:
@@ -505,44 +859,36 @@ class GeminiTranslator(BaseTranslator):
                 c.uncertain = False
             return [f"[DRY-RUN VI] {c.en or c.ja}" for c in cues]
 
+        if en_only_source is None:
+            en_only_source = all(not has_cjk_characters(c.ja or "") for c in cues if (c.ja or "").strip()) and any(
+                bool(re.search(r"[A-Za-z]{2,}", c.ja or "")) for c in cues
+            )
+
         def _format_target_cue(c: Cue) -> Dict[str, Any]:
-            item = {"id": c.id, "ja": c.ja}
+            item: Dict[str, Any] = {"id": c.id, "ja": c.ja}
             if c.en:
                 item["en"] = c.en
-            hints = extract_ja_linguistic_hints(c.ja)
-            if hints:
-                item["ja_hints"] = hints
+            if c.speaker and c.speaker.strip().lower() not in ("", "unknown"):
+                item["speaker_cc"] = strip_ja_furigana(c.speaker.strip())
+            if getattr(c, "mode_hint", None):
+                item["mode_hint"] = c.mode_hint
+            if not en_only_source:
+                hints = extract_ja_linguistic_hints(c.ja)
+                if hints:
+                    item["ja_hints"] = hints
             return item
 
         expected_ids = [c.id for c in cues]
-        payload = {
-            "cues_to_translate": [_format_target_cue(c) for c in cues]
-        }
 
-        # Add surrounding context (up to +/-10 cues per ADDENDUM 6)
-        if context:
-            first_id = cues[0].id
-            last_id = cues[-1].id
-            ctx_items = []
-            for c in context:
-                ctx_item = {"id": c.id, "ja": c.ja, "context": True}
-                if c.en:
-                    ctx_item["en"] = c.en
-                if getattr(c, "vi", None) and c.vi.strip() and not c.vi.startswith("[Chưa dịch"):
-                    ctx_item["vi_ref"] = c.vi
-                if c.id < first_id:
-                    ctx_item["role"] = "history_readonly"
-                elif c.id > last_id:
-                    ctx_item["role"] = "lookahead_readonly"
-                ctx_items.append(ctx_item)
-            payload["surrounding_context"] = ctx_items
+        # Sắp xếp các khóa trong payload từ TĨNH NHẤT -> ĐỘNG NHẤT để tối đa hóa Gemini Implicit Prefix Caching!
+        payload: Dict[str, Any] = {}
 
-        # Add relevant glossary entries
+        # 1. Glossary (characters cố định đầu tiên, tiếp đến terms/address_guidance của batch)
         rel_glossary = filter_relevant_glossary(cues, glossary)
         if rel_glossary:
             payload["glossary"] = rel_glossary
 
-        # Add RAG few-shot examples and error cautions from KnowledgeBase
+        # 2. RAG few-shot examples và error cautions từ KnowledgeBase
         self.last_rag_hash = "no_rag"
         if rag_bundle is not None:
             few_shots, cautions, self.last_rag_hash = rag_bundle
@@ -550,7 +896,7 @@ class GeminiTranslator(BaseTranslator):
                 payload["approved_reference_examples"] = few_shots
             if cautions:
                 payload["error_prevention_cautions"] = cautions
-        elif self.enable_rag:
+        elif self.enable_rag and not en_only_source:
             try:
                 import hashlib
                 from subtrans.rag import KnowledgeBase
@@ -573,27 +919,58 @@ class GeminiTranslator(BaseTranslator):
             except Exception as e:
                 logger.debug(f"RAG retrieval skipped: {e}")
 
+        # 3. Dynamic Cast Overrides (tách khỏi glossary.style_rules để không làm hỏng prefix tĩnh của system_instruction!)
+        if dynamic_cast_context and dynamic_cast_context.strip():
+            payload["dynamic_cast_relations"] = dynamic_cast_context.strip()
+
+        # 4. Surrounding context (+/-10 cues per ADDENDUM 6)
+        if context:
+            first_id = cues[0].id
+            last_id = cues[-1].id
+            ctx_items = []
+            for c in context:
+                ctx_item: Dict[str, Any] = {"id": c.id, "ja": c.ja, "context": True}
+                if c.en:
+                    ctx_item["en"] = c.en
+                if c.speaker and c.speaker.strip().lower() not in ("", "unknown"):
+                    ctx_item["speaker_cc"] = strip_ja_furigana(c.speaker.strip())
+                if getattr(c, "p1", None):
+                    ctx_item["p1"] = c.p1
+                if getattr(c, "p2", None):
+                    ctx_item["p2"] = c.p2
+                if getattr(c, "vi", None) and c.vi.strip() and not c.vi.startswith("[Chưa dịch"):
+                    ctx_item["vi_ref"] = c.vi
+                if c.id < first_id:
+                    ctx_item["role"] = "history_readonly"
+                elif c.id > last_id:
+                    ctx_item["role"] = "lookahead_readonly"
+                ctx_items.append(ctx_item)
+            payload["surrounding_context"] = ctx_items
+
+        # 5. Cues cần dịch (thay đổi nhiều nhất giữa các batch -> đặt ở cuối payload!)
+        payload["cues_to_translate"] = [_format_target_cue(c) for c in cues]
+
+        # Giữ phần dẫn đầu prompt_lines ngắn gọn, bất biến và KHÔNG chứa dấu '{' để tương thích parser JSON
         prompt_lines = [
             "Translate the following subtitle batch into Vietnamese.",
-            "Follow character relationships, pronouns, and glossary strictly.",
-            "JAPANESE LINGUISTIC HINTS: When 'ja_hints' is present on a cue (e.g. 1P:ore, 2P:kisama/temee/anta/omae, SFP tone markers), prioritize them over generic English pronouns ('I/you') to render authentic Japanese relationship register and emotional intensity.",
+            "Follow character relationships, pronouns, speaker_cc labels, mode_hint, ja_hints, and glossary strictly.",
             "CONTEXT RULES: Cues in 'surrounding_context' are READ-ONLY for dialogue continuity. NEVER translate or include cues marked with context=true in your output.",
-            "CRITICAL NAMING RULE: Always keep character names, family/clan names, and organization names in Romaji matching the English reference track (e.g. Fran, Urushi, Jean, Reirin, Keigetsu, Rudeus). NEVER translate proper names into Sino-Vietnamese (Hán-Việt) or literal Vietnamese words (DO NOT use Pháp Lạp, Ô Lỗ Thi, Linh Lâm, Huệ Nguyệt, Tuệ Nguyệt).",
-            "ADDRESSING BY NAME: Whenever someone is addressed by their proper name in Japanese (vocative), ALWAYS preserve that Romaji proper name directly in the Vietnamese subtitle line (e.g. 'Fran, ...', 'Jean, ...', 'chị Nell, ...'). Do NOT replace proper names with generic standalone pronouns.",
-            "When unsure of a rendering, set 'uncertain': true instead of inventing meaning.",
+            "CRITICAL NAMING & VOCATIVE RULE: Always keep proper names in Romaji matching <episode_cast> / EN reference and preserve Romaji names directly in Vietnamese lines when addressed by name.",
+            "When unsure of a rendering, categorize 'uncertain' instead of inventing meaning.",
         ]
         if self.gloss_skill_names:
             prompt_lines.append(
-                "SKILL NAMES: When a named attack/spell occurs and the EN reference provides the name, "
-                "write in Vietnamese followed by the English name in parentheses, e.g. 'Độ Không Tuyệt Đối! (Absolute Zero)'."
+                "SKILL NAMES: Write named attacks/spells in Vietnamese followed by the English name in parentheses."
             )
         prompt_lines.append(f"\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
         prompt_str = "\n".join(prompt_lines)
 
-        # Build system prompt from glossary style_rules if provided (append to maintain SYSTEM_INSTRUCTION rules)
-        system_prompt = SYSTEM_INSTRUCTION
-        if glossary and glossary.style_rules:
-            system_prompt = SYSTEM_INSTRUCTION + "\n\nAdditional Series Style Rules:\n" + "\n".join(glossary.style_rules) + "\nOutput must be a valid JSON array matching the provided schema."
+        # Build episode-stable system prompt for Gemini Implicit Context Caching
+        system_prompt = build_episode_system_prompt(
+            glossary=glossary,
+            gloss_skill_names=self.gloss_skill_names,
+            en_only_source=bool(en_only_source),
+        )
 
         # Attempt 1: Call API
         try:
@@ -631,11 +1008,25 @@ class GeminiTranslator(BaseTranslator):
 
             # Nửa đầu (Left): Giữ lịch sử trước đó + bổ sung lookahead từ các câu đầu của right_cues
             left_context = [c for c in (context or []) if c.id < left_cues[0].id] + right_cues[:10]
-            left_half = self.translate_batch(left_cues, left_context, glossary, rag_bundle=None)
+            left_half = self.translate_batch(
+                left_cues,
+                left_context,
+                glossary,
+                rag_bundle=None,
+                dynamic_cast_context=dynamic_cast_context,
+                en_only_source=en_only_source,
+            )
 
             # Nửa sau (Right): Bắc cầu 10 câu cuối của left_cues (đã có bản dịch vi và metadata) làm lịch sử liền kề
             right_context = left_cues[-10:] + [c for c in (context or []) if c.id > right_cues[-1].id]
-            right_half = self.translate_batch(right_cues, right_context, glossary, rag_bundle=None)
+            right_half = self.translate_batch(
+                right_cues,
+                right_context,
+                glossary,
+                rag_bundle=None,
+                dynamic_cast_context=dynamic_cast_context,
+                en_only_source=en_only_source,
+            )
             return left_half + right_half
 
         # Nếu chỉ có 1 cue duy nhất mà thất bại, thử lại lần cuối với prompt nghiêm ngặt

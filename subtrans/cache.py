@@ -52,6 +52,42 @@ def compute_key_id(api_key: str) -> str:
     return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()[:8]
 
 
+def compute_contextual_cue_sig(
+    ja: str,
+    speaker: Optional[str] = None,
+    mode_hint: Optional[str] = None,
+    prev_ja: Optional[str] = None,
+    next_ja: Optional[str] = None,
+    max_ambiguous_chars: int = 28,
+) -> str:
+    """
+    Sinh chữ ký ngữ cảnh gọn cho các câu ngắn/khuyết đại từ (VD: 'うん。', '行くぞ！', '大丈夫？')
+    hoặc câu có gắn nhãn người nói/độc thoại để ngăn chặn va chạm SQLite cache giữa các nhân vật khác nhau.
+    Các câu dài tự thân đầy đủ ngữ nghĩa và không có speaker/mode đặc biệt trả về chuỗi rỗng "" để tối đa tái sử dụng cache.
+    """
+    from subtrans.ja_morph_tagger import strip_ja_furigana
+
+    clean_ja = strip_ja_furigana((ja or "").strip())
+    spk = strip_ja_furigana((speaker or "").strip())
+    if spk.lower() == "unknown":
+        spk = ""
+    m_hint = (mode_hint or "").strip().lower()
+
+    is_short_ambiguous = len(clean_ja) <= max_ambiguous_chars
+    if not is_short_ambiguous and not spk and not m_hint:
+        return ""
+
+    parts = {
+        "spk": spk,
+        "mode": m_hint,
+        "prev": strip_ja_furigana((prev_ja or "").strip())[:32] if is_short_ambiguous else "",
+        "next": strip_ja_furigana((next_ja or "").strip())[:24] if is_short_ambiguous else "",
+    }
+    if not any(parts.values()):
+        return ""
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
 def compute_cue_cache_key(
     model: str,
     ja: str,
@@ -61,9 +97,10 @@ def compute_cue_cache_key(
     prompt_version: str = "v2.0",
     stage: str = "draft",
     rag_hash: str = "",
+    context_sig: str = "",
 ) -> str:
-    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, stage, and rag snapshot."""
-    canonical = json.dumps({
+    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, stage, rag snapshot, and optional speaker/scene context signature."""
+    payload: Dict[str, Any] = {
         "model": model,
         "ja": ja.strip(),
         "en": (en or "").strip(),
@@ -72,7 +109,10 @@ def compute_cue_cache_key(
         "prompt_version": prompt_version,
         "stage": stage,
         "rag_hash": rag_hash if stage == "draft" else "",
-    }, sort_keys=True, ensure_ascii=False)
+    }
+    if context_sig:
+        payload["context_sig"] = context_sig
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -170,6 +210,8 @@ class TranslationCache:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN total_tokens INTEGER DEFAULT 0")
             if "thinking_tokens" not in cols:
                 conn.execute("ALTER TABLE api_requests ADD COLUMN thinking_tokens INTEGER DEFAULT 0")
+            if "cached_tokens" not in cols:
+                conn.execute("ALTER TABLE api_requests ADD COLUMN cached_tokens INTEGER DEFAULT 0")
 
             # Backfill pt_date bằng ZoneInfo("America/Los_Angeles") cho các bản ghi cũ
             today_pt = get_today_pt_str()
@@ -320,19 +362,20 @@ class TranslationCache:
         candidates_tokens: int = 0,
         total_tokens: int = 0,
         thinking_tokens: int = 0,
+        cached_tokens: int = 0,
     ):
         """Ghi nhận một lời gọi API vào cơ sở dữ liệu để theo dõi hạn mức và token sử dụng."""
         pt_date = get_today_pt_str()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 INSERT INTO api_requests (
                     model, backend, cues_count, status, error_type, quota_id, quota_value, pt_date, key_id,
-                    prompt_tokens, candidates_tokens, total_tokens, thinking_tokens
+                    prompt_tokens, candidates_tokens, total_tokens, thinking_tokens, cached_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 model, backend, cues_count, status, error_type, quota_id, str(quota_value), pt_date, key_id,
-                prompt_tokens, candidates_tokens, total_tokens, thinking_tokens
+                prompt_tokens, candidates_tokens, total_tokens, thinking_tokens, cached_tokens
             ))
             conn.commit()
 
@@ -358,7 +401,7 @@ class TranslationCache:
         """Kiểm tra xem (key_id, model) có bị cạn hạn mức trong ngày PT hiện tại không."""
         today_pt = get_today_pt_str()
         now_pt = get_now_pt()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT exhausted_until_pt FROM key_exhaustion
@@ -374,6 +417,13 @@ class TranslationCache:
                 return now_pt < exhausted_until
             except Exception:
                 return False
+
+    def are_all_keys_exhausted(self, key_ids: List[str], model: str) -> bool:
+        """Trả về True khi TẤT CẢ key_ids hợp lệ trong danh sách đều đã cạn RPD cho model hiện tại."""
+        valid_ids = [kid for kid in key_ids if kid and kid != "none"]
+        if not valid_ids:
+            return self.is_model_exhausted(model)
+        return all(self.is_key_model_exhausted(kid, model) for kid in valid_ids)
 
     def mark_model_exhausted(
         self,
@@ -453,7 +503,7 @@ class TranslationCache:
         Sử dụng cột pt_date được tính qua zoneinfo.ZoneInfo('America/Los_Angeles') - KHÔNG dùng offset cố định -7.
         """
         pt_date = get_today_pt_str()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT model, COUNT(*)
@@ -464,9 +514,38 @@ class TranslationCache:
             """, (pt_date,))
             return {row[0]: row[1] for row in cursor.fetchall()}
 
+    def get_token_telemetry_today_pt(self) -> Dict[str, Dict[str, int]]:
+        """Tổng hợp token đầu vào, token trúng bộ đệm ẩn (cached_tokens), output và thinking theo từng model trong ngày PT."""
+        pt_date = get_today_pt_str()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    model,
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(cached_tokens), 0),
+                    COALESCE(SUM(candidates_tokens), 0),
+                    COALESCE(SUM(thinking_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0)
+                FROM api_requests
+                WHERE pt_date = ?
+                  AND status != 'dry_run'
+                GROUP BY model
+            """, (pt_date,))
+            return {
+                row[0]: {
+                    "prompt_tokens": int(row[1] or 0),
+                    "cached_tokens": int(row[2] or 0),
+                    "candidates_tokens": int(row[3] or 0),
+                    "thinking_tokens": int(row[4] or 0),
+                    "total_tokens": int(row[5] or 0),
+                }
+                for row in cursor.fetchall()
+            }
+
     def count(self) -> int:
         """Returns total cached items."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM translations")
             row = cursor.fetchone()
@@ -506,12 +585,14 @@ def execute_and_log_api_request(
         candidates_tokens = 0
         total_tokens = 0
         thinking_tokens = 0
+        cached_tokens = 0
         if hasattr(res, "usage_metadata") and res.usage_metadata:
             meta = res.usage_metadata
             prompt_tokens = _to_int(getattr(meta, "prompt_token_count", 0))
             candidates_tokens = _to_int(getattr(meta, "candidates_token_count", 0))
             total_tokens = _to_int(getattr(meta, "total_token_count", 0))
             thinking_tokens = _to_int(getattr(meta, "thinking_token_count", 0))
+            cached_tokens = _to_int(getattr(meta, "cached_content_token_count", 0))
             if not thinking_tokens and hasattr(meta, "candidates_tokens_details"):
                 details = meta.candidates_tokens_details
                 if hasattr(details, "thinking_token_count"):
@@ -534,6 +615,7 @@ def execute_and_log_api_request(
             candidates_tokens=candidates_tokens,
             total_tokens=total_tokens,
             thinking_tokens=thinking_tokens,
+            cached_tokens=cached_tokens,
         )
         return res
     except Exception as e:

@@ -117,27 +117,79 @@ def save_state(state: dict):
         json.dump(state, f, indent=2, ensure_ascii=False)
     temp_file.replace(STATE_FILE)
 
-def run_translation_for_file(fpath: str, max_retries: int = 3) -> dict:
+QUOTA_EXHAUSTION_MARKERS = (
+    "cạn kiệt hạn mức ngày",
+    "toàn bộ các model gemini trong chuỗi đã hết hạn mức",
+    "dailyquotaexhaustederror",
+)
+
+PARTIAL_SUB_MARKERS = (
+    "chưa đủ điều kiện nhúng",
+    "chưa đạt chuẩn nhúng",
+)
+
+
+def is_daily_quota_exhausted_output(output_text: str) -> bool:
+    low = (output_text or "").lower()
+    return any(m in low for m in QUOTA_EXHAUSTION_MARKERS)
+
+
+def is_partial_subtitle_output(output_text: str) -> bool:
+    low = (output_text or "").lower()
+    return any(m in low for m in PARTIAL_SUB_MARKERS)
+
+
+def run_translation_for_file(
+    fpath: str,
+    max_retries: int = 3,
+    auto_offset: bool = True,
+    no_embed: bool = False,
+    prefer_whisper: bool = False,
+    subs_quality: str = "normal",
+) -> dict:
     cmd = [
         str(PYTHON_BIN),
         str(UPSCALE_PY),
         "--subs-only", fpath,
         "-o", str(SUB_OUT_DIR),
-        "--subs-quality", "normal"
+        "--subs-quality", subs_quality,
     ]
+    if auto_offset:
+        cmd.append("--auto-offset")
+    if no_embed:
+        cmd.append("--no-embed")
+    if prefer_whisper:
+        cmd.append("--prefer-whisper")
     
     last_err = ""
     for attempt in range(1, max_retries + 1):
         t0 = time.time()
         res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
         elapsed = time.time() - t0
+        combined_out = f"{res.stdout or ''}\n{res.stderr or ''}"
         
-        if res.returncode == 0 and has_vietnamese_sub(fpath):
+        if res.returncode == 0 and (no_embed or has_vietnamese_sub(fpath)):
             return {
                 "status": "SUCCESS",
                 "duration_seconds": round(elapsed, 1),
                 "attempt": attempt,
                 "error": None
+            }
+
+        if is_daily_quota_exhausted_output(combined_out):
+            return {
+                "status": "QUOTA_EXHAUSTED",
+                "duration_seconds": round(elapsed, 1),
+                "attempt": attempt,
+                "error": "Toàn bộ chuỗi model Gemini đã cạn hạn mức ngày (RPD). Dừng hàng đợi chờ reset 00:00 PT.",
+            }
+
+        if res.returncode == 0 and is_partial_subtitle_output(combined_out):
+            return {
+                "status": "PARTIAL_PENDING",
+                "duration_seconds": round(elapsed, 1),
+                "attempt": attempt,
+                "error": "Phụ đề xuất ở chế độ .partial.srt (đã lưu vào pending_subs.json, không retry lãng phí quota).",
             }
             
         last_err = res.stderr[-500:] if res.stderr else res.stdout[-500:]
@@ -152,7 +204,19 @@ def run_translation_for_file(fpath: str, max_retries: int = 3) -> dict:
         "error": last_err.strip()
     }
 
-def main():
+def build_cli_parser():
+    import argparse
+    parser = argparse.ArgumentParser(description="Batch Subtitle Translation Orchestrator for Raw Sources")
+    parser.add_argument("--no-auto-offset", action="store_true", help="Tắt tự động phát hiện và bù độ lệch phụ đề JA-EN")
+    parser.add_argument("--no-embed", action="store_true", help="Không nhúng phụ đề vào container MKV gốc")
+    parser.add_argument("--prefer-whisper", action="store_true", help="Ưu tiên Whisper STT + DTW khi thiếu track JA")
+    parser.add_argument("--subs-quality", choices=["normal", "fast", "high"], default="normal", help="Chế độ chất lượng dịch")
+    parser.add_argument("--max-retries", type=int, default=3, help="Số lần thử lại tối đa cho lỗi mạng tạm thời")
+    return parser
+
+
+def main(argv=None):
+    args = build_cli_parser().parse_args(argv)
     print("=" * 80, flush=True)
     print("🎬 TRI-SUB AI BATCH TRANSLATOR - SEQUENTIAL RUNNER", flush=True)
     print(f"📁 Target Folder: {RAW_SOURCES_DIR}", flush=True)
@@ -176,7 +240,7 @@ def main():
             print(f"[{idx}/{len(queue)}] ⏭️ ĐÃ DỊCH XONG TRƯỚC ĐÓ: {rel_path}", flush=True)
             continue
             
-        if has_vietnamese_sub(fpath):
+        if not args.no_embed and has_vietnamese_sub(fpath):
             print(f"[{idx}/{len(queue)}] ⏭️ CONTAINER ĐÃ CÓ PHỤ ĐỀ TIẾNG VIỆT: {rel_path}", flush=True)
             state["history"][rel_path] = {
                 "status": "SUCCESS",
@@ -189,7 +253,14 @@ def main():
             continue
 
         print(f"\n[{idx}/{len(queue)}] 🚀 BẮT ĐẦU DỊCH: {rel_path}...", flush=True)
-        res = run_translation_for_file(fpath)
+        res = run_translation_for_file(
+            fpath,
+            max_retries=args.max_retries,
+            auto_offset=not args.no_auto_offset,
+            no_embed=args.no_embed,
+            prefer_whisper=args.prefer_whisper,
+            subs_quality="normal" if args.subs_quality == "fast" else args.subs_quality,
+        )
         
         state["history"][rel_path] = {
             "status": res["status"],
@@ -201,6 +272,18 @@ def main():
         if res["status"] == "SUCCESS":
             state["completed"] += 1
             print(f"[{idx}/{len(queue)}] ✅ HOÀN THÀNH ({res['duration_seconds']}s): {fname}", flush=True)
+        elif res["status"] == "QUOTA_EXHAUSTED":
+            print(
+                f"\n🛑 [{idx}/{len(queue)}] CẠN HẠN MỨC NGÀY (RPD) TRÊN TOÀN BỘ CHUỖI GEMINI KHI DỊCH '{fname}'.\n"
+                "   • Đã bảo toàn toàn bộ câu đã dịch trong SQLite cache & pending_subs.json.\n"
+                "   • Dừng sớm hàng đợi an toàn (chờ 00:00 PT / 14:00-15:00 giờ VN rồi chạy lại).",
+                flush=True,
+            )
+            save_state(state)
+            break
+        elif res["status"] == "PARTIAL_PENDING":
+            state["failed"] += 1
+            print(f"[{idx}/{len(queue)}] ⏸️ TẠM LƯU PARTIAL: {fname} ({res.get('error')})", flush=True)
         else:
             state["failed"] += 1
             print(f"[{idx}/{len(queue)}] ❌ THẤT BẠI: {fname} (Lỗi: {res.get('error')})", flush=True)

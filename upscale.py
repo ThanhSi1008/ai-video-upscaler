@@ -38,9 +38,8 @@ from src.config import (
     DEFAULT_BATCH_SIZE,
     DEVICE_NAME,
     HEVC_ENCODER,
-    load_pending_subs,
-    remove_pending_sub,
 )
+from src.pending_queue import load_pending_subs, remove_pending_sub
 from src.pipeline import run_upscale_pipeline, FailedResumableError
 from src.ffmpeg_ops import probe_video
 from src.dedup import spawn_background_preflight
@@ -341,6 +340,12 @@ def build_arg_parser():
         help="Tắt tính năng tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu"
     )
     parser.add_argument(
+        "--prefer-whisper",
+        action="store_true",
+        default=False,
+        help="Khi MKV thiếu phụ đề JA (chỉ có audio JA + sub EN), chạy Whisper STT + DTW align EN để giữ đầy đủ đại từ/kính ngữ tiếng Nhật"
+    )
+    parser.add_argument(
         "--no-embed",
         action="store_true",
         default=False,
@@ -370,6 +375,17 @@ def build_arg_parser():
         "--subs-pending",
         action="store_true",
         help="Chạy lại quy trình dịch phụ đề cho các tập ghi nhận trong pending_subs.json"
+    )
+    parser.add_argument(
+        "--target-4k",
+        default=None,
+        help="Đường dẫn container MKV 4K đích cụ thể để nhúng phụ đề trong chế độ --subs-only / Stage B"
+    )
+    parser.add_argument(
+        "--async-subs",
+        action="store_true",
+        default=False,
+        help="Chạy bất đồng bộ tiến trình dịch phụ đề Cloud Gemini của tập N song song khi GPU đang upscale tập N+1 (tự tắt nếu bật --prefer-whisper)"
     )
     parser.add_argument(
         "--keep-temp",
@@ -405,6 +421,82 @@ def build_arg_parser():
     return parser
  
  
+def _resolve_sub_output_dir_and_target_4k(
+    output_arg: Optional[str],
+    default_dir: str,
+    base_vid_name: str,
+    explicit_target_4k: Optional[str] = None,
+) -> Tuple[Path, str]:
+    """Chuẩn hóa thư mục xuất phụ đề và đường dẫn container 4K đích kể cả khi -o là file .mkv cụ thể."""
+    resolved_dir = Path(default_dir)
+    candidate_4k = None
+
+    if explicit_target_4k:
+        candidate_4k = os.path.abspath(explicit_target_4k)
+        parent = os.path.dirname(candidate_4k)
+        if parent:
+            resolved_dir = Path(parent)
+
+    if output_arg:
+        abs_out = os.path.abspath(output_arg)
+        if output_arg.lower().endswith((".mkv", ".mp4")) or os.path.isfile(abs_out):
+            resolved_dir = Path(os.path.dirname(abs_out) or default_dir)
+            if not candidate_4k:
+                candidate_4k = abs_out
+        else:
+            resolved_dir = Path(abs_out)
+
+    if not candidate_4k:
+        candidate_4k = os.path.join(str(resolved_dir), f"{base_vid_name}_4K.mkv")
+
+    return resolved_dir, candidate_4k
+
+
+def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) -> List[str]:
+    """Tạo lệnh subprocess --subs-only cho một tập video đã hoàn tất 4K."""
+    abs_out_vid = os.path.abspath(out_vid)
+    sub_out_dir = os.path.dirname(abs_out_vid)
+    sub_cmd = [
+        sys.executable,
+        os.path.abspath(__file__),
+        "--subs-only",
+        src_vid,
+        "-o", sub_out_dir,
+        "--target-4k", abs_out_vid,
+        "--sound-cues", args.sound_cues,
+        "--subs-quality", args.subs_quality,
+    ]
+    if args.subs_upgrade:
+        sub_cmd.append("--subs-upgrade")
+    if getattr(args, "no_embed", False):
+        sub_cmd.append("--no-embed")
+    if not getattr(args, "auto_align_en", True):
+        sub_cmd.append("--no-auto-align-en")
+    if getattr(args, "prefer_whisper", False):
+        sub_cmd.append("--prefer-whisper")
+
+    queue_auto_offset = not getattr(args, "no_auto_offset", False)
+    manual_offset_applied = False
+    if args.sub_offset_ms:
+        if len(videos) == 1 or (
+            args.sub_offset_target and args.sub_offset_target.lower() in os.path.basename(src_vid).lower()
+        ):
+            manual_offset_applied = True
+            print(f"  • [OFFSET] Áp dụng cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms cho: '{os.path.basename(src_vid)}'")
+            sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
+        elif not args.sub_offset_target:
+            print(
+                f"  ⚠️ [QUEUE OFFSET WARNING] Cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms được truyền trong hàng đợi "
+                f"nhiều tập nhưng KHÔNG có --sub-offset-target. Để bảo toàn đồng bộ của các tập khác, offset thủ công "
+                f"KHÔNG áp dụng toàn cục cho '{os.path.basename(src_vid)}' (dùng --auto-offset tính riêng)."
+            )
+
+    if not manual_offset_applied and queue_auto_offset:
+        sub_cmd.append("--auto-offset")
+
+    return sub_cmd
+
+
 def parse_args(args=None):
     parsed = build_arg_parser().parse_args(args)
     if getattr(parsed, "subs_quality", None) == "fast":
@@ -466,24 +558,39 @@ def main():
             ja_s = it.get("ja_path")
             en_s = it.get("en_path")
             base_name_rec = it.get("base_name")
+            saved_out_dir = it.get("output_dir")
 
             if vid_p and os.path.exists(vid_p):
-                ja_s, en_s = find_or_extract_subtitles(vid_p)
+                ja_s, en_s = find_or_extract_subtitles(
+                    vid_p,
+                    prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
+                )
+                if ja_s == en_s:
+                    en_s = None
                 base_vid = os.path.splitext(os.path.basename(vid_p))[0]
-                default_out_d = Path(os.path.dirname(os.path.abspath(vid_p)))
+                default_out_d = saved_out_dir if (saved_out_dir and os.path.isdir(saved_out_dir)) else os.path.dirname(os.path.abspath(vid_p))
             elif ja_s and os.path.exists(ja_s):
                 vid_p = None
+                if ja_s == en_s:
+                    en_s = None
                 stem = base_name_rec or os.path.splitext(os.path.basename(ja_s))[0]
                 base_vid = stem[:-3] if stem.endswith("_4K") else stem
-                default_out_d = Path(os.path.dirname(os.path.abspath(ja_s)))
+                default_out_d = saved_out_dir if (saved_out_dir and os.path.isdir(saved_out_dir)) else os.path.dirname(os.path.abspath(ja_s))
             else:
                 continue
 
             if not ja_s or not os.path.exists(ja_s):
                 continue
 
-            out_d = Path(args.output) if args.output and os.path.isdir(args.output) else default_out_d
-            out_basename = base_name_rec if base_name_rec else f"{base_vid}_4K"
+            out_d, target_4k = _resolve_sub_output_dir_and_target_4k(
+                args.output,
+                str(default_out_d),
+                base_vid,
+                getattr(args, "target_4k", None),
+            )
+            out_basename = base_name_rec if base_name_rec else (
+                os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else f"{base_vid}_4K"
+            )
             sub_pipe = TranslationPipeline(
                 local_only=False,
                 output_dir=out_d,
@@ -494,20 +601,22 @@ def main():
                 subs_quality=getattr(args, "subs_quality", "normal"),
                 auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
             )
+            pending_auto_offset = not getattr(args, "no_auto_offset", False)
             res = sub_pipe.run(
                 ja_path=Path(ja_s),
                 en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
                 output_basename=out_basename,
                 subs_upgrade=True,
                 sub_offset_ms=args.sub_offset_ms,
-                auto_offset=True,
+                auto_offset=pending_auto_offset,
                 sound_cues=args.sound_cues,
                 video_path=Path(vid_p) if vid_p else None,
             )
             srt_p = res.get('subtitle_path') or res.get('output_path')
+            if vid_p:
+                cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(vid_p)), base_vid)
             if not getattr(args, "dry_run", False) and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
                 remove_pending_sub(base_name_rec or vid_p or out_basename)
-                target_4k = os.path.join(out_d, f"{base_vid}_4K.mkv")
                 if os.path.exists(target_4k) and not getattr(args, "no_embed", False):
                     from src.ffmpeg_ops import embed_subtitle_track
                     embed_subtitle_track(target_4k, str(srt_p), original_source_path=vid_p)
@@ -525,7 +634,10 @@ def main():
         print(f"\n{'='*75}")
         print(f"📝 [SUBS-ONLY] BẮT ĐẦU DỊCH PHỤ ĐỀ ĐỘC LẬP CHO: {os.path.basename(target_subs_vid)}")
         print(f"{'='*75}")
-        ja_sub, en_sub = find_or_extract_subtitles(target_subs_vid)
+        ja_sub, en_sub = find_or_extract_subtitles(
+            target_subs_vid,
+            prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
+        )
         if not ja_sub:
             print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
             sys.exit(1)
@@ -540,7 +652,15 @@ def main():
 
         from subtrans.pipeline import TranslationPipeline
         vid_dir = os.path.dirname(os.path.abspath(target_subs_vid))
-        sub_out_dir = Path(args.output) if args.output and os.path.isdir(args.output) else Path(vid_dir)
+        base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
+        sub_out_dir, target_4k = _resolve_sub_output_dir_and_target_4k(
+            args.output,
+            vid_dir,
+            base_vid_name,
+            getattr(args, "target_4k", None),
+        )
+        if not getattr(args, "dry_run", False):
+            os.makedirs(sub_out_dir, exist_ok=True)
         sub_pipeline = TranslationPipeline(
             local_only=False,
             output_dir=sub_out_dir,
@@ -551,10 +671,12 @@ def main():
             subs_quality=getattr(args, "subs_quality", "normal"),
             auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
         )
-        base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
-        use_auto_offset = bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False
-        target_4k = os.path.join(sub_out_dir, f"{base_vid_name}_4K.mkv")
-        out_base = f"{base_vid_name}_4K" if os.path.exists(target_4k) else base_vid_name
+        use_auto_offset = (
+            False
+            if getattr(args, "no_auto_offset", False)
+            else (bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False)
+        )
+        out_base = os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else base_vid_name
         res = sub_pipeline.run(
             ja_path=Path(ja_sub),
             en_path=Path(en_sub) if en_sub else None,
@@ -592,12 +714,12 @@ def main():
                     else:
                         print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container MKV, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
-            # Luôn đồng bộ file phụ đề .vi.srt cùng tên ngay cạnh video gốc để các trình phát video tự động nhận
-            raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
-            if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
-                import shutil
-                shutil.copy2(str(srt_path), raw_side_srt)
-                print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
+                # Chỉ đồng bộ file .vi.srt cạnh video gốc khi bản dịch đạt chuẩn (KHÔNG copy đè .partial.srt)
+                raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
+                if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
+                    import shutil
+                    shutil.copy2(str(srt_path), raw_side_srt)
+                    print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
         cleanup_subtitle_extracts(vid_dir, base_vid_name)
         if not getattr(args, "no_organize_audit", False):
             organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
@@ -719,8 +841,15 @@ def main():
             bg_preflight.start()
 
     completed_videos = []
+    async_sub_procs = []          # [(src_vid, out_vid, Popen, launch_ts)]
     failed_resumable_videos = {}  # vid -> (up_segs_dir, chunk_idx)
     unfinished_videos = {}        # vid -> reason
+    can_overlap_async_subs = bool(
+        getattr(args, "async_subs", False)
+        and args.subs_after_upscale
+        and not getattr(args, "prefer_whisper", False)
+        and len(videos) > 1
+    )
 
     for idx, vid in enumerate(videos):
         print(f"\n{'='*75}")
@@ -781,6 +910,14 @@ def main():
                     del unfinished_videos[vid]
                 if vid in failed_resumable_videos:
                     del failed_resumable_videos[vid]
+                if can_overlap_async_subs and idx < len(videos) - 1:
+                    bg_sub_cmd = _build_stage_b_sub_cmd(args, videos, vid, out_file)
+                    print(f"\n⚡ [ASYNC-SUBS] Khởi chạy nền dịch phụ đề Cloud Gemini cho '{os.path.basename(vid)}' song song tập kế tiếp...")
+                    try:
+                        bg_proc = subprocess.Popen(bg_sub_cmd)
+                        async_sub_procs.append((vid, out_file, bg_proc, datetime.now()))
+                    except Exception as bg_err:
+                        print(f"⚠️ [ASYNC-SUBS] Không thể chạy nền cho '{os.path.basename(vid)}' ({bg_err}), sẽ chạy ở Stage B cuối hàng đợi.")
             else:
                 unfinished_videos[vid] = "Dừng sạch ranh giới phân đoạn theo --allow-partial"
                 print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
@@ -873,43 +1010,31 @@ def main():
     # -------------------------------------------------------------------------
     if args.subs_after_upscale and completed_videos:
         print(f"\n{'='*75}")
-        print("📝 [STAGE B] BẮT ĐẦU DỊCH PHỤ ĐỀ TRONG TIẾN TRÌNH CON ĐỘC LẬP (SAU KHI CẢ HÀNG ĐỢI XONG)")
+        print("📝 [STAGE B] HOÀN TẤT & ĐỒNG BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ ĐỘC LẬP")
         print(f"{'='*75}")
 
         sub_timeout = 1560  # Watchdog 25 phút + 60s buffer
-        queue_auto_offset = not getattr(args, "no_auto_offset", False)
+        launched_async_srcs = set()
+
+        for src_vid, out_vid, bg_proc, _launch_ts in async_sub_procs:
+            launched_async_srcs.add(src_vid)
+            print(f"\n⏳ [ASYNC-SUBS] Đang chờ tiến trình nền phụ đề của '{os.path.basename(src_vid)}' hoàn tất...")
+            try:
+                ret = bg_proc.wait(timeout=sub_timeout)
+                if ret == 0:
+                    print(f"✅ [ASYNC-SUBS] Phụ đề hoàn tất thành công cho '{os.path.basename(src_vid)}'.")
+                else:
+                    print(f"⚠️ [ASYNC-SUBS] Tiến trình phụ đề thoát với mã lỗi {ret}. Video 4K vẫn được bảo toàn nguyên vẹn!")
+            except subprocess.TimeoutExpired:
+                bg_proc.kill()
+                print(f"⏱️ [ASYNC-SUBS] Quá thời gian ({sub_timeout}s), đã ngắt an toàn tiến trình nền của '{os.path.basename(src_vid)}'!")
+            except Exception as bg_wait_err:
+                print(f"⚠️ [ASYNC-SUBS] Lỗi khi đồng bộ tiến trình phụ đề nền: {bg_wait_err}")
 
         for src_vid, out_vid in completed_videos:
-            sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
-            sub_cmd = [
-                sys.executable,
-                os.path.abspath(__file__),
-                "--subs-only",
-                src_vid,
-                "-o", sub_out_dir,
-                "--sound-cues", args.sound_cues,
-                "--subs-quality", args.subs_quality,
-            ]
-            if args.subs_upgrade:
-                sub_cmd.append("--subs-upgrade")
-            if getattr(args, "no_embed", False):
-                sub_cmd.append("--no-embed")
-            if not getattr(args, "auto_align_en", True):
-                sub_cmd.append("--no-auto-align-en")
-
-            # Xử lý cờ --sub-offset-ms thủ công trong hàng đợi / tập đơn lẻ:
-            manual_offset_applied = False
-            if args.sub_offset_ms:
-                if len(videos) == 1 or (args.sub_offset_target and args.sub_offset_target.lower() in os.path.basename(src_vid).lower()):
-                    manual_offset_applied = True
-                    print(f"  • [OFFSET] Áp dụng cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms cho: '{os.path.basename(src_vid)}'")
-                    sub_cmd.extend(["--sub-offset-ms", str(args.sub_offset_ms)])
-                elif not args.sub_offset_target:
-                    print(f"  ⚠️ [QUEUE OFFSET WARNING] Cờ thủ công --sub-offset-ms={args.sub_offset_ms}ms được truyền trong hàng đợi nhiều tập nhưng KHÔNG có --sub-offset-target. Để bảo toàn đồng bộ của các tập khác, offset thủ công KHÔNG áp dụng toàn cục cho '{os.path.basename(src_vid)}' (dùng --auto-offset tính riêng).")
-
-            # Nếu không áp dụng offset thủ công cho tập này, dùng auto_offset nếu được bật
-            if not manual_offset_applied and queue_auto_offset:
-                sub_cmd.append("--auto-offset")
+            if src_vid in launched_async_srcs:
+                continue
+            sub_cmd = _build_stage_b_sub_cmd(args, videos, src_vid, out_vid)
             print(f"\n🚀 Khởi chạy tiến trình con dịch phụ đề cho tập '{os.path.basename(src_vid)}'...")
             try:
                 proc = subprocess.run(sub_cmd, timeout=sub_timeout, check=False)
