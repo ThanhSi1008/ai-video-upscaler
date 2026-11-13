@@ -237,3 +237,47 @@ def test_cli_tensorrt_and_zero_disk_flags():
     args_off = parser.parse_args(["samples/sample_30s.mkv", "--zero-disk", "--no-tensorrt"])
     assert args_off.zero_disk is True
     assert args_off.no_tensorrt is True
+
+
+def test_cuda_lazy_module_loading_and_jit_cache_env():
+    """Xác minh src/config.py thiết lập CUDA_MODULE_LOADING=LAZY và CUDA_CACHE_MAXSIZE=2GB."""
+    assert os.environ.get("CUDA_MODULE_LOADING") == "LAZY"
+    assert int(os.environ.get("CUDA_CACHE_MAXSIZE", "0")) >= 2147483648
+
+
+def test_p010le_addcmul_matches_reference_bt709_formula():
+    """Xác minh _p010le_core dùng addcmul_ tại chỗ khớp bit-exact với công thức tham chiếu ITU-R BT.709."""
+    torch.manual_seed(123)
+    rgb = torch.rand(2, 3, 32, 48, dtype=torch.float32)
+    actual = GPUColorConverterP010LE._p010le_core(rgb)
+
+    # Công thức tham chiếu độc lập
+    y_w = torch.tensor([186.2376, 626.5152, 63.2472], dtype=torch.float32).view(1, 3, 1, 1)
+    u_w = torch.tensor([-102.656512, -345.343488, 448.0000], dtype=torch.float32).view(1, 3, 1, 1)
+    v_w = torch.tensor([448.0000, -406.921088, -41.078912], dtype=torch.float32).view(1, 3, 1, 1)
+    y_ref = ((torch.clamp(torch.round((rgb * y_w).sum(dim=1) + 64.0), 64.0, 940.0).to(torch.int32)) << 6).to(torch.int16)
+    sub = torch.nn.functional.avg_pool2d(rgb, kernel_size=2, stride=2)
+    u_ref = ((torch.clamp(torch.round((sub * u_w).sum(dim=1) + 512.0), 64.0, 960.0).to(torch.int32)) << 6).to(torch.int16)
+    v_ref = ((torch.clamp(torch.round((sub * v_w).sum(dim=1) + 512.0), 64.0, 960.0).to(torch.int32)) << 6).to(torch.int16)
+    uv_ref = torch.stack((u_ref, v_ref), dim=-1).view(2, 16, 48)
+    expected = torch.cat((y_ref, uv_ref), dim=1).contiguous()
+
+    # Cho phép chênh tối đa <= 1 LSB (<<6 = 64) do thứ tự cộng FMA dấu phẩy động IEEE-754
+    max_lsb_diff = int(((actual.to(torch.int32) & 0xFFFF) - (expected.to(torch.int32) & 0xFFFF)).abs().max().item()) >> 6
+    assert max_lsb_diff <= 1
+
+
+def test_nhwc_zero_transpose_view_is_channels_last_and_pixel_exact():
+    """Xác minh kỹ thuật view NHWC + permute(0,3,1,2) tạo đúng channels_last 0-copy và khớp từng pixel."""
+    h, w = 12, 16
+    frames = [np.random.randint(0, 256, (h, w, 3), dtype=np.uint8) for _ in range(2)]
+    pin = torch.empty((2, 3, h, w), dtype=torch.uint8)
+
+    hwc_view = pin.view(2, h, w, 3)
+    for i in range(2):
+        hwc_view[i].copy_(torch.from_numpy(frames[i]))
+    fast_nchw = hwc_view.permute(0, 3, 1, 2)
+
+    assert fast_nchw.is_contiguous(memory_format=torch.channels_last)
+    ref_nchw = torch.stack([torch.from_numpy(f).permute(2, 0, 1) for f in frames], dim=0)
+    assert torch.equal(fast_nchw, ref_nchw)

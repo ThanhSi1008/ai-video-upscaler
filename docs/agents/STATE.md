@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-13
 >
-> **Commit Baseline:** `c4918d6` (`fix(scripts): cai dat san nvidiaProfileInspector v3.0.2.3 va hoan thien unlock_rtx3060_admin`)
+> **Commit Baseline:** `a496ab7` (`feat(subtrans): trien khai toan dien lo trinh 6 goi nang cap toi da chat luong dich phu de AI V2`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`298 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`301 passed, 11 skipped, 1 deselected`, `0 errors` với `ruff check`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
 - **Trạng thái Git:** Sạch sẽ, kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
 
 ---
@@ -19,9 +19,9 @@
 
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
-| **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `RealESRAnimeVideoV3` & `AnimeJaNaiCompact2x` (cắt lát 2-frame đuôi 8K tiết kiệm ~4.5 GB VRAM), `configure_cuda_fast_math` (`HMMA.F16` 51 TFLOPS), TensorRT 10.16 (`execute_async_v3` + `_PureFP16TRTExportModule`), Pinned `uint8` H2D & 1-sync D2H. |
-| **Zero-Disk Pipe & Gen4 NVMe Buffer** | `src/trt_zero_copy_upscaler.py`, `src/ffmpeg_ops.py`, `src/ramdisk.py` | PASS | Giải mã `extract_frames_raw_rgb24` (`-hwaccel cuda` BT.709 pipe) -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (`upscale_turbo.bat`); tự định tuyến đệm cuốn chiếu về NVMe Gen4 `WD_BLACK SN7100` (`E:\scratch\rolling_buffer`). |
-| **Dedup, DIS Flow & Alder Lake P-Core** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Split theo GOP, `mpdecimate`, DIS optical flow (`--dis-thresh 0.30`), `configure_alder_lake_pcore_qos` tắt EcoQoS giữ tiến trình trên P-Cores `i5-12600K` + script Admin `scripts/unlock_rtx3060_admin.ps1`. |
+| **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB` trên NVMe Gen4, `configure_cuda_fast_math` (`HMMA.F16` 51 TFLOPS), TensorRT 10.16 (`builder_optimization_level=5`, `TimingCache`, `execute_async_v3`), Ping-Pong Pinned D2H 0-copy RAM. |
+| **Zero-Disk Pipe & Gen4 NVMe Buffer** | `src/trt_zero_copy_upscaler.py`, `src/ffmpeg_ops.py`, `src/ramdisk.py` | PASS | Giải mã `extract_frames_raw_rgb24` (`-hwaccel cuda` BT.709 pipe) -> NHWC 0-transpose H2D -> TensorRT 10 FP16 -> Triton/`addcmul_` `p010le` pipe -> NVENC (`upscale_turbo.bat`); đệm cuốn chiếu trên NVMe Gen4 `WD_BLACK SN7100`. |
+| **Dedup, DIS Flow & Alder Lake P-Core** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Split theo GOP, `mpdecimate` (64KB pipe buffer), DIS optical flow tiền tính toán `1/r^2` & `mag_sq` (0 `hypot`), `configure_alder_lake_pcore_qos` giữ P-Cores `i5-12600K` + `unlock_rtx3060_admin.ps1`. |
 | **10-bit NVENC BT.709** | `src/ffmpeg_ops.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, multipass `fullres`/`qres`), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |
 | **Bit-exact Mux & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Bắt buộc cờ `-max_interleave_delta 0`, audit MD5 âm thanh, font đính kèm và số lượng frame. |
 | **Output Sanity & PID GPU Lock** | `src/output_sanity.py`, `src/config.py` | PASS | Kiểm tra sau chunk 0 và mỗi 10 chunks ($|\Delta Y| \le 6/255$, corr $\ge 0.98$); khóa `.gpu_active.lock` kiểm tra PID sống (`psutil.pid_exists`) chống xóa nhầm khi import. |

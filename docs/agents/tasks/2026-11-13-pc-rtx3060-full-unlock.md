@@ -21,12 +21,19 @@
    - `src/cuda_engine.py` & `src/trt_zero_copy_upscaler.py`: Cắt lát vi mô 2-frame ở đuôi 8K (`RealESRAnimeVideoV3`, `SRVGGNetCompactTRTWrapper`) và `GPUColorConverterP010LE` giảm ~75% đỉnh đệm 8K (~4.5 GB VRAM tiết kiệm, khớp bit-exact `max_diff == 0.0`); gộp kiểm tra `isfinite` trên GPU + Pinned Output Buffer chỉ đồng bộ 1 lần mỗi batch.
    - `src/ffmpeg_ops.py` & `src/pipeline.py`: Bổ sung `extract_frames_raw_rgb24()` giải mã trực tiếp `-hwaccel cuda` BT.709 TV->PC qua stdout pipe vào RAM (0 PNG ghi đĩa cho `--zero-disk`), tích hợp TensorRT 10 xuyên suốt cả đường chuẩn lẫn đường Zero-Disk.
    - `src/ramdisk.py`: Tự nhận diện RAMDisk (`UPSCALER_RAMDISK_DIR` / nhãn `"RAM"`), mặc định định tuyến bộ đệm về `E:\ai-video-upscaler\scratch\rolling_buffer` trên NVMe Gen4 `WD_BLACK SN7100` thay vì `%TEMP%` trên ổ `C:` Gen3 chậm.
-   - `upscale.py`, `upscale_turbo.bat`, `scripts/unlock_rtx3060_admin.ps1`: Thêm cờ `--no-tensorrt`, launcher 1-click `upscale_turbo.bat`, và script Admin tự động bật HAGS + nạp profile `.nip` tắt `CUDA - Force P2 State` + chẩn đoán phần cứng trực quan.
+   - `upscale.py`, `upscale_turbo.bat`, `scripts/unlock_rtx3060_admin.ps1`: Thêm cờ `--no-tensorrt`, launcher 1-click `upscale_turbo.bat`, và script Admin tự động bật HAGS + nạp profile `.nip` tắt `CUDA - Force P2 State` + loại trừ Windows Defender + chẩn đoán phần cứng trực quan.
+4. **Đợt rà soát chốt cuối (Final Deep Audit):**
+   - `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, `CUDA_CACHE_PATH` & `TORCHINDUCTOR_CACHE_DIR` trên NVMe Gen4 (`E:\ai-video-upscaler\.cache`) trong cả `HKCU\Environment` lẫn `src/config.py`.
+   - Khử phép chuyển vị kép NHWC<->NCHW trên RAM DDR4-2133 trong `DoubleBufferedPipeUpscaler` (`view(B,H,W,3)` + `permute(0,3,1,2)` 0-copy `channels_last`).
+   - Khử cấp phát tensor tạm 3 kênh FP32 4K (~199 MB) trong `GPUColorConverterP010LE` bằng `addcmul_` tại chỗ + JIT `torch.compile` Triton.
+   - Bật `builder_optimization_level=5` + lưu `trt_timing.cache` bền vững + tự dò `engine.get_tensor_dtype` trong `src/build_trt_engine.py`.
+   - Ping-Pong 2-slot `pinned_out_slots` xóa `.copy()` 199 MB RAM mỗi batch trong `src/cuda_engine.py`.
+   - Tiền tính toán hằng số hình học `1/r^2` & `mag_sq` (xóa 129.600 phép `np.hypot` mỗi frame) + buffer 64KB cho `mpdecimate` trong `src/dedup.py`.
 
 ## Kiểm chứng
 - `ruff check upscale.py subtrans.py src subtrans scripts tests`: `All checks passed!` (`0 errors`).
 - `.\.venv\Scripts\python.exe scripts/agent_context.py --check`: `PASS: required memory files, local links, root <= 12288 bytes, root + subtrans <= 32768 bytes`.
-- `.\.venv\Scripts\python.exe scripts/verify_offline.py`: **`288 passed, 11 skipped, 1 deselected in 83.48s`** (`Pytest exit code: 0`, Evidence: `E:\ai-video-upscaler\scratch\agent-validation-6d7bm6a7`).
+- `.\.venv\Scripts\python.exe scripts/verify_offline.py`: **`301 passed, 11 skipped, 1 deselected in 86.16s`** (`Pytest exit code: 0`, Evidence: `E:\ai-video-upscaler\scratch\agent-validation-71rkjnkr`).
 - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\unlock_rtx3060_admin.ps1 -CheckOnly`: `PASS` (`Torch=2.6.0+cu124 | TensorRT=True | Triton=True`, Power Scheme `Ultimate Performance`, đã cài sẵn `Orbmu2k.nvidiaProfileInspector` v3.0.2.3 và bổ sung `-silent -mergeImport` + launcher `unlock_rtx3060_admin.bat`).
 - Mux Audit / Frame Count / FPS trên thành phẩm: `N/A — không tạo thành phẩm` (tuân thủ giới hạn không chạy GPU dài khi chưa có xác nhận và đang mở `blender.exe`).
 - Trạng thái: hoàn tất.

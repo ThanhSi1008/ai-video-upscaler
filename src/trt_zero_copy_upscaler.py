@@ -49,48 +49,68 @@ class GPUColorConverterP010LE:
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
+        self._compiled_fn = None
 
-        # Hệ số ma trận ITU-R BT.709 Limited Range cho thang 10-bit [0..1023]:
-        # Y  = 64  + 876 * (0.2126*R + 0.7152*G + 0.0722*B)
-        # Cb = 512 + 896 * (-0.114572*R - 0.385428*G + 0.5*B)
-        # Cr = 512 + 896 * (0.5*R - 0.454153*G - 0.045847*B)
-        self.y_weights = torch.tensor(
-            [186.2376, 626.5152, 63.2472], dtype=torch.float32, device=device
-        ).view(1, 3, 1, 1)
-        self.u_weights = torch.tensor(
-            [-102.656512, -345.343488, 448.0000], dtype=torch.float32, device=device
-        ).view(1, 3, 1, 1)
-        self.v_weights = torch.tensor(
-            [448.0000, -406.921088, -41.078912], dtype=torch.float32, device=device
-        ).view(1, 3, 1, 1)
+        # Khởi tạo JIT Triton fusion (nếu chạy trên CUDA thật và có triton-windows)
+        if (
+            device.type == "cuda"
+            and not os.environ.get("PYTEST_CURRENT_TEST")
+            and hasattr(torch, "compile")
+        ):
+            try:
+                import importlib.util
+                if importlib.util.find_spec("triton") is not None:
+                    self._compiled_fn = torch.compile(self._p010le_core, dynamic=True)
+            except Exception:
+                self._compiled_fn = None
+
+    @staticmethod
+    def _p010le_core(rgb_slice: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = rgb_slice.shape
+        # Tách kênh trực tiếp và cộng dồn tại chỗ bằng addcmul_ để KHÔNG cấp phát
+        # tensor trung gian 3 kênh FP32 4K (~199 MB GDDR6 mỗi 2 frames)
+        r = rgb_slice[:, 0].float()
+        g = rgb_slice[:, 1].float()
+        b = rgb_slice[:, 2].float()
+
+        # 1. Kênh Luma Y [B, H, W] theo chuẩn ITU-R BT.709 Limited Range [64..940]
+        y = torch.empty_like(r).fill_(64.0)
+        y.addcmul_(r, torch.tensor(186.2376, dtype=torch.float32, device=r.device))
+        y.addcmul_(g, torch.tensor(626.5152, dtype=torch.float32, device=r.device))
+        y.addcmul_(b, torch.tensor(63.2472, dtype=torch.float32, device=r.device))
+        y_p010 = (torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32) << 6).to(torch.int16)
+
+        # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling trước khi tính UV [64..960]
+        rgb_sub = F.avg_pool2d(rgb_slice.float(), kernel_size=2, stride=2)
+        rs = rgb_sub[:, 0]
+        gs = rgb_sub[:, 1]
+        bs = rgb_sub[:, 2]
+
+        u = torch.empty_like(rs).fill_(512.0)
+        u.addcmul_(rs, torch.tensor(-102.656512, dtype=torch.float32, device=rs.device))
+        u.addcmul_(gs, torch.tensor(-345.343488, dtype=torch.float32, device=rs.device))
+        u.addcmul_(bs, torch.tensor(448.0000, dtype=torch.float32, device=rs.device))
+
+        v = torch.empty_like(rs).fill_(512.0)
+        v.addcmul_(rs, torch.tensor(448.0000, dtype=torch.float32, device=rs.device))
+        v.addcmul_(gs, torch.tensor(-406.921088, dtype=torch.float32, device=rs.device))
+        v.addcmul_(bs, torch.tensor(-41.078912, dtype=torch.float32, device=rs.device))
+
+        u_p010 = (torch.clamp(torch.round(u), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
+        v_p010 = (torch.clamp(torch.round(v), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
+
+        # 3. Đan xen Semi-Planar UV [B, H/2, W] và nối với Y [B, H, W]
+        uv_p010 = torch.stack((u_p010, v_p010), dim=-1).view(B, H // 2, W)
+        return torch.cat((y_p010, uv_p010), dim=1).contiguous()
 
     @torch.inference_mode()
     def _convert_slice(self, rgb_slice: torch.Tensor) -> torch.Tensor:
-        B, _, H, W = rgb_slice.shape
-        rgb_f32 = rgb_slice.float()
-
-        # 1. Tính kênh Luma Y [B, H, W] ở độ phân giải đầy đủ
-        y = (rgb_f32 * self.y_weights).sum(dim=1, keepdim=True) + 64.0
-        y_10bit = torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32)
-        y_p010 = (y_10bit << 6).squeeze(1).to(torch.int16)  # [B, H, W]
-
-        # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling cho RGB trước khi nhân ma trận UV
-        rgb_sub = F.avg_pool2d(rgb_f32, kernel_size=2, stride=2)  # [B, 3, H/2, W/2]
-
-        u = (rgb_sub * self.u_weights).sum(dim=1, keepdim=True) + 512.0
-        v = (rgb_sub * self.v_weights).sum(dim=1, keepdim=True) + 512.0
-
-        u_10bit = torch.clamp(torch.round(u), 64.0, 960.0).to(torch.int32)
-        v_10bit = torch.clamp(torch.round(v), 64.0, 960.0).to(torch.int32)
-
-        u_p010 = (u_10bit << 6).squeeze(1).to(torch.int16)  # [B, H/2, W/2]
-        v_p010 = (v_10bit << 6).squeeze(1).to(torch.int16)  # [B, H/2, W/2]
-
-        # 3. Đan xen Semi-Planar (UV Interleaved): [B, H/2, W]
-        uv_p010 = torch.stack((u_p010, v_p010), dim=-1).view(B, H // 2, W)
-
-        # 4. Ghép mặt phẳng Y [B, H, W] và mặt phẳng UV [B, H/2, W]
-        return torch.cat((y_p010, uv_p010), dim=1).contiguous()
+        if self._compiled_fn is not None:
+            try:
+                return self._compiled_fn(rgb_slice)
+            except Exception:
+                self._compiled_fn = None
+        return self._p010le_core(rgb_slice)
 
     @torch.inference_mode()
     def rgb_to_p010le(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
@@ -303,21 +323,26 @@ class DoubleBufferedPipeUpscaler:
                 s_idx, e_idx = batches[batch_k]
                 cur_B = e_idx - s_idx
 
-                # 1. Nạp dữ liệu vào Pinned Host Memory và truyền H2D bất đồng bộ
+                # 1. Nạp dữ liệu tuần tự NHWC vào Pinned Memory (0 transpose trên DDR4 CPU) và truyền H2D bất đồng bộ
                 with torch.cuda.stream(self.stream_h2d):
-                    for i in range(cur_B):
-                        t = torch.from_numpy(unique_frames_rgb[s_idx + i])
-                        if t.ndim == 3 and t.shape[-1] == 3:
-                            t = t.permute(2, 0, 1)
-                        self.host_in_pins[slot][i].copy_(t)
-                    gpu_in = self.host_in_pins[slot][:cur_B].to(
-                        self.device, non_blocking=True
-                    )
-                    gpu_tensor = (
-                        gpu_in.to(memory_format=torch.channels_last)
-                        .to(torch.float16)
-                        .mul_(1.0 / 255.0)
-                    )
+                    first_arr = unique_frames_rgb[s_idx]
+                    is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
+                    if is_hwc:
+                        hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
+                        for i in range(cur_B):
+                            hwc_pin[i].copy_(torch.from_numpy(unique_frames_rgb[s_idx + i]))
+                        gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
+                        # permute(0,3,1,2) từ NHWC liền mạch tạo ra NCHW channels_last với 0 bản sao bộ nhớ!
+                        gpu_tensor = gpu_nhwc.permute(0, 3, 1, 2).to(dtype=torch.float16).mul_(1.0 / 255.0)
+                    else:
+                        for i in range(cur_B):
+                            self.host_in_pins[slot][i].copy_(torch.from_numpy(unique_frames_rgb[s_idx + i]))
+                        gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
+                        gpu_tensor = (
+                            gpu_in.to(memory_format=torch.channels_last)
+                            .to(torch.float16)
+                            .mul_(1.0 / 255.0)
+                        )
 
                 # 2. Chờ H2D xong, chạy suy luận + chuyển màu P010LE trực tiếp trên VRAM
                 self.stream_compute.wait_stream(self.stream_h2d)

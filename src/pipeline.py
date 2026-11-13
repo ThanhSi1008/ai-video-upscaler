@@ -496,7 +496,8 @@ def run_upscale_pipeline(
 
                             c_in_dir = extracted["in_dir"]
                             c_out_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_out")
-                            os.makedirs(c_out_dir, exist_ok=True)
+                            if not (zero_disk and engine == "cuda"):
+                                os.makedirs(c_out_dir, exist_ok=True)
 
                             chunk_attempt = 0
                             max_chunk_retries = 2

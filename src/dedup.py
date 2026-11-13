@@ -291,19 +291,26 @@ def detect_dis_policy_actions(
     - Chỉ chạy DIS trên các khung hình mà mpdecimate đề xuất bỏ (candidate drops) so với frame tham chiếu gần nhất,
       bảo toàn tối ưu thời gian và giải phóng tài nguyên ở các cảnh tĩnh/đối thoại.
     """
+    import math
     import cv2
     import numpy as np
 
     frame_bytes = scale_w * scale_h
-    scale_factor = 1080.0 / scale_h
+    scale_factor = np.float32(1080.0 / scale_h)
+    thresh_sq = float(thresh) * float(thresh)
     h, w = scale_h, scale_w
 
-    y_coords, x_coords = np.mgrid[0:h, 0:w]
-    rx = x_coords - w / 2.0
-    ry = y_coords - h / 2.0
-    r = np.sqrt(rx**2 + ry**2)
-    r_mask = r > (20.0 if h == 270 else 40.0)
-    r_max = np.sqrt((w / 2.0)**2 + (h / 2.0)**2)
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    rx = x_coords - np.float32(w / 2.0)
+    ry = y_coords - np.float32(h / 2.0)
+    r_sq = rx * rx + ry * ry
+    min_r = 20.0 if h == 270 else 40.0
+    r_mask = r_sq > (min_r * min_r)
+    r_max = float(math.sqrt((w / 2.0) ** 2 + (h / 2.0) ** 2))
+    # Tiền tính toán hằng số hình học 1/r^2 để khử phép chia mảng mỗi frame
+    inv_r_sq_m = np.float32(1.0) / r_sq[r_mask]
+    rx_inv_r2 = rx[r_mask] * inv_r_sq_m
+    ry_inv_r2 = ry[r_mask] * inv_r_sq_m
 
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
 
@@ -316,7 +323,7 @@ def detect_dis_policy_actions(
         "-pix_fmt", "gray",
         "-"
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 10)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 16)
     actions = list(base_actions)
 
     ref_gray = None
@@ -335,24 +342,21 @@ def detect_dis_policy_actions(
             flow = dis.calc(ref_gray, curr_gray, None)
             u = flow[..., 0] * scale_factor
             v = flow[..., 1] * scale_factor
-            mag = np.hypot(u, v)
+            # Dùng bình phương độ lớn (monotonic) thay cho 129.600 phép căn bậc hai np.hypot mỗi frame
+            mag_sq = u * u + v * v
 
             # 1. Chuyển động lia máy tịnh tiến toàn cục (Pan / Tilt)
             dx = float(np.median(u))
             dy = float(np.median(v))
-            mag_pan = float(np.hypot(dx, dy))
+            mag_pan = math.hypot(dx, dy)
 
             # 2. Chuyển động zoom xuyên tâm (phóng to / thu nhỏ)
-            u_m = u[r_mask]
-            v_m = v[r_mask]
-            r_m = r[r_mask]
-            v_rad = (rx[r_mask] * u_m + ry[r_mask] * v_m) / r_m
-            k_radial = float(np.median(v_rad / r_m))
+            k_radial = float(np.median(u[r_mask] * rx_inv_r2 + v[r_mask] * ry_inv_r2))
             zoom_edge = abs(k_radial * r_max)
 
-            # 3. Chuyển động phân tán / cục bộ
-            p90_mag = float(np.percentile(mag, 90))
-            area_moving = float(np.mean(mag >= thresh) * 100.0)
+            # 3. Chuyển động phân tán / cục bộ (khớp toán học 100% với percentile trên hypot)
+            p90_mag = math.sqrt(max(0.0, float(np.percentile(mag_sq, 90))))
+            area_moving = float(np.mean(mag_sq >= thresh_sq) * 100.0)
 
             score = max(mag_pan, zoom_edge, 0.7 * p90_mag)
 
@@ -470,13 +474,15 @@ def scan_dedup_plan(
 
         pattern = re.compile(r"\[Parsed_mpdecimate_0.*?\]\s+.*?\b(keep|drop)\s+pts:")
 
-        # Thực thi ffmpeg và bắt dòng log debug
+        # Thực thi ffmpeg và bắt dòng log debug (buffer 64KB giảm ~350.000 syscall pipe mỗi tập)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1
+            encoding="utf-8",
+            errors="replace",
+            bufsize=65536
         )
 
         if proc.stderr:

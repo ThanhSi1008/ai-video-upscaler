@@ -110,7 +110,20 @@ if (-not $CheckOnly -and $IsAdmin) {
         Write-Host "     Sau do chay lai script nay hoac Import file: $NipPath"
     }
 
-    Write-Host "`n[4/4] Kiem chung truc tiep xung VRAM khi mo ngữ cảnh CUDA..." -ForegroundColor Green
+    Write-Host "`n[4/5] Them thu muc dem AI & Video vao ngoai le Windows Defender (giam nghen I/O MsMpEng)..." -ForegroundColor Green
+    try {
+        $ExclDirs = @(
+            (Join-Path $RepoRoot ".cache"),
+            (Join-Path $RepoRoot "scratch"),
+            (Join-Path $RepoRoot "out")
+        )
+        Add-MpPreference -ExclusionPath $ExclDirs -ErrorAction Stop
+        Write-Host "  -> [OK] Da loai tru .cache, scratch va out khoi quet thoi gian thuc Windows Defender." -ForegroundColor Green
+    } catch {
+        Write-Host "  -> [INFO] Bo qua ngoai le Defender (Tamper Protection hoac chinh sach he thong)." -ForegroundColor DarkGray
+    }
+
+    Write-Host "`n[5/5] Kiem chung truc tiep xung VRAM khi mo ngữ cảnh CUDA..." -ForegroundColor Green
     if (Test-Path $VenvPy) {
         & $VenvPy -c "import subprocess, torch; x = torch.zeros((256, 256), device='cuda'); out = subprocess.check_output(['nvidia-smi', '--query-gpu=name,pstate,clocks.current.memory,clocks.max.memory,power.limit', '--format=csv,noheader'], text=True).strip(); print('  -> Live CUDA State:', out)"
     } else {

@@ -15,6 +15,15 @@ import json
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SRC_DIR)
 
+# Tối ưu hóa cấp Driver CUDA trước khi nạp PyTorch/TensorRT:
+# - CUDA_MODULE_LOADING=LAZY: giảm ~300-500 MB VRAM chiếm dụng ban đầu và rút ngắn thời gian khởi động.
+# - CUDA_CACHE_MAXSIZE=2GB & định tuyến cache biên dịch JIT sang ổ NVMe Gen4 (ROOT_DIR/.cache).
+os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
+os.environ.setdefault("CUDA_CACHE_MAXSIZE", "2147483648")
+if not os.environ.get("PYTEST_CURRENT_TEST"):
+    os.environ.setdefault("CUDA_CACHE_PATH", os.path.join(ROOT_DIR, ".cache", "cuda_jit"))
+    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(ROOT_DIR, ".cache", "inductor"))
+
 BIN_DIR = os.path.join(ROOT_DIR, "bin", "realesrgan")
 REALESRGAN_BIN = os.path.join(BIN_DIR, "realesrgan-ncnn-vulkan")
 MODELS_DIR = os.path.join(BIN_DIR, "models")

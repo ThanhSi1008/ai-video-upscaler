@@ -195,8 +195,27 @@ def build_tensorrt_engine(
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(workspace_gb) * (1 << 30))
+    if hasattr(config, "builder_optimization_level"):
+        config.builder_optimization_level = 5
     if getattr(builder, "platform_has_fast_fp16", True):
         config.set_flag(trt.BuilderFlag.FP16)
+    if hasattr(trt.BuilderFlag, "TF32"):
+        config.set_flag(trt.BuilderFlag.TF32)
+
+    # Tái sử dụng & lưu Timing Cache bền vững trên NVMe Gen4 để tăng tốc 5-10x các lần build sau
+    timing_cache_path = os.path.join(os.path.dirname(os.path.abspath(engine_path)), "trt_timing.cache")
+    timing_cache = None
+    if hasattr(config, "create_timing_cache") and hasattr(config, "set_timing_cache"):
+        try:
+            cache_blob = b""
+            if os.path.exists(timing_cache_path):
+                with open(timing_cache_path, "rb") as tf:
+                    cache_blob = tf.read()
+            timing_cache = config.create_timing_cache(cache_blob)
+            if timing_cache is not None:
+                config.set_timing_cache(timing_cache, ignore_mismatch=True)
+        except Exception:
+            timing_cache = None
 
     profile = builder.create_optimization_profile()
     profile.set_shape(
@@ -215,6 +234,17 @@ def build_tensorrt_engine(
     with open(tmp_engine, "wb") as f:
         f.write(serialized_engine)
     os.replace(tmp_engine, engine_path)
+
+    if timing_cache is not None and hasattr(config, "get_timing_cache"):
+        try:
+            updated_tc = config.get_timing_cache()
+            if updated_tc is not None:
+                tc_bytes = updated_tc.serialize()
+                if tc_bytes:
+                    with open(timing_cache_path, "wb") as tf:
+                        tf.write(tc_bytes)
+        except Exception:
+            pass
     return engine_path
 
 
@@ -249,17 +279,27 @@ class TRTRuntimeEngineWrapper:
             raise RuntimeError(f"Không thể deserialize TensorRT engine: {engine_path}")
         self.context = self.engine.create_execution_context()
 
-        # Phát hiện kiểu dữ liệu đầu vào/ra của engine (FP16 hoặc FP32)
+        # Phát hiện chính xác kiểu dữ liệu đầu vào/ra đã biên dịch trong Engine (FP16 vs FP32)
         self.in_name = "input_rgb"
         self.out_name = "output_rgb"
+        self.in_torch_dtype = torch.float16
+        self.out_torch_dtype = torch.float16
+        if hasattr(self.engine, "get_tensor_dtype") and hasattr(trt, "DataType"):
+            try:
+                if self.engine.get_tensor_dtype(self.in_name) == trt.DataType.FLOAT:
+                    self.in_torch_dtype = torch.float32
+                if self.engine.get_tensor_dtype(self.out_name) == trt.DataType.FLOAT:
+                    self.out_torch_dtype = torch.float32
+            except Exception:
+                pass
         self._use_v3 = hasattr(self.context, "execute_async_v3") and hasattr(self.context, "set_tensor_address")
 
     def _exec_single_batch(self, contig_in: torch.Tensor) -> torch.Tensor:
         B, C, H, W = contig_in.shape
         out_h, out_w = H * self.scale, W * self.scale
-        if contig_in.dtype != torch.float16:
-            contig_in = contig_in.half().contiguous()
-        output_tensor = torch.empty((B, C, out_h, out_w), dtype=torch.float16, device=self.device)
+        if contig_in.dtype != self.in_torch_dtype:
+            contig_in = contig_in.to(dtype=self.in_torch_dtype).contiguous()
+        output_tensor = torch.empty((B, C, out_h, out_w), dtype=self.out_torch_dtype, device=self.device)
         stream_ptr = (
             torch.cuda.current_stream(self.device).cuda_stream
             if self.device.type == "cuda" and torch.cuda.is_available()

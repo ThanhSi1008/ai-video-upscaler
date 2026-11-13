@@ -295,7 +295,8 @@ class GPUPersistentWorker:
         total_frames = len(img_files)
         target_dtype = torch.float16 if self.precision == "fp16" else torch.float32
         pinned_in: Optional[torch.Tensor] = None
-        pinned_out: Optional[torch.Tensor] = None
+        pinned_out_slots: List[Optional[torch.Tensor]] = [None, None]
+        slot_futures: List[list] = [[], []]
 
         def _resolve_runner(in_h: int, in_w: int):
             if (
@@ -377,22 +378,30 @@ class GPUPersistentWorker:
                         .permute(0, 2, 3, 1)
                         .contiguous()
                     )
+                    slot = (b_start // b_size) % 2
                     if self.device.type == "cuda":
+                        # Đảm bảo các luồng ghi PNG của batch trước dùng cùng slot đã hoàn tất trước khi ghi đè (0 copy RAM)
+                        if slot_futures[slot]:
+                            for prev_fut in slot_futures[slot]:
+                                prev_fut.result()
+                            slot_futures[slot].clear()
                         out_h, out_w = gpu_bgr_out.shape[1:3]
+                        cur_pin_out = pinned_out_slots[slot]
                         if (
-                            pinned_out is None
-                            or pinned_out.shape[0] < cur_b
-                            or pinned_out.shape[1:3] != (out_h, out_w)
+                            cur_pin_out is None
+                            or cur_pin_out.shape[0] < cur_b
+                            or cur_pin_out.shape[1:3] != (out_h, out_w)
                         ):
-                            pinned_out = torch.empty(
+                            cur_pin_out = torch.empty(
                                 (max(b_size, cur_b), out_h, out_w, 3),
                                 dtype=torch.uint8,
                                 pin_memory=True,
                             )
-                        pinned_out[:cur_b].copy_(gpu_bgr_out, non_blocking=True)
+                            pinned_out_slots[slot] = cur_pin_out
+                        cur_pin_out[:cur_b].copy_(gpu_bgr_out, non_blocking=True)
                         torch.cuda.current_stream(self.device).synchronize()
                         is_finite = bool(finite_flag.item())
-                        out_bgr_u8 = pinned_out[:cur_b].numpy().copy()
+                        out_bgr_u8 = cur_pin_out[:cur_b].numpy()
                     else:
                         is_finite = bool(finite_flag.item())
                         out_bgr_u8 = gpu_bgr_out.cpu().numpy()
@@ -416,7 +425,10 @@ class GPUPersistentWorker:
                 for b_idx, fpath in enumerate(batch_files):
                     fname = os.path.basename(fpath)
                     out_path = os.path.join(output_dir, fname)
-                    write_futures.append(writer_executor.submit(_save_task, out_path, out_bgr_u8[b_idx]))
+                    fut = writer_executor.submit(_save_task, out_path, out_bgr_u8[b_idx])
+                    write_futures.append(fut)
+                    if self.device.type == "cuda":
+                        slot_futures[slot].append(fut)
 
                 if mid_chunk_callback and (b_start <= (total_frames // 2) < (b_start + len(batch_files))):
                     try:
