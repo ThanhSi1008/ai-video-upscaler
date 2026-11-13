@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `d258b19`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `14c4762`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -58,9 +58,9 @@ subtrans.cli → TranslationPipeline
 | --- | --- |
 | Điều phối/cấu hình/schema | `subtrans/pipeline.py` (scene-cut clamp `>=4500ms`, inline cached context, Cascade write-back), `cli.py`, `config.py` (`PYTHON_DOTENV_DISABLED` guard), `config.yaml`, `models.yaml`, `models.py` (`p1`, `p2`, `mode_hint`, `Character.aliases`). |
 | Nhập và căn thời gian | `parser.py` (CC sound prefix filter, `detect_dialogue_mode_hint`, Piecewise 2-Segment Auto-Offset), `dtw_auto_align.py` (`get_dtw_alignment_plan` 1:2 pause split, `split_en_reference_for_2_to_1`); model `Cue` xuyên pipeline. |
-| Ngữ cảnh nhân vật/ngôn ngữ | `cast_sheet.py` (3-key rotation, `CastSheetResponse`), `dynamic_cast.py` (`observe_batch_cues` ưu tiên CoT `p1`/`p2`), `ja_morph_tagger.py` (`strip_ja_furigana`, Kansai-ben, `soregashi`), `glossary.py` (`_merge_address_rules`). |
-| Dịch và độ bền API | `gemini_backend.py` (`build_episode_system_prompt` `>4.096` tokens Implicit Caching, `ThinkingConfig` MINIMAL/LOW, 3-key modulo & RPM failover), `translator.py`, `throttle.py` (per-key RPD), `cache.py` (`compute_contextual_cue_sig`, `cached_tokens`). |
-| Hậu kiểm/tri thức | `linter.py` (Katakana boundary, `RULE_GLOSSARY_TERM`, `RULE_PRONOUN_CONSISTENCY`), `validation.py`, `cascade.py` (digit quarantine, contextual repair), `rag.py` (Hybrid BM25, `promote_cascade_repairs` silver), `writer.py` (ASS sign preservation), `report.py`. |
+| Ngữ cảnh nhân vật/ngôn ngữ | `cast_sheet.py` (3-key rotation, `CastSheetResponse`), `dynamic_cast.py` (`observe_batch_cues` ưu tiên CoT `p1`/`p2`), `audio_diarization.py` (5.1 FC 8kHz CMS timbre + F0 `audio_turn`), `ja_morph_tagger.py` (MeCab `fugashi` + `unidic-lite`, 0 báo giả Kanji ghép), `glossary.py` (tự dò theo thư mục cha). |
+| Dịch và độ bền API | `gemini_backend.py` (`build_episode_system_prompt` `>4.096` tokens Implicit & `--explicit-cache`, `ThinkingConfig` MINIMAL/LOW, 3-key modulo & RPM failover), `translator.py`, `throttle.py` (per-key RPD), `cache.py` (`compute_contextual_cue_sig`, `cached_tokens`). |
+| Hậu kiểm/tri thức | `linter.py` (Katakana boundary, `RULE_GLOSSARY_TERM`, `RULE_PRONOUN_CONSISTENCY`), `validation.py`, `cascade.py` (`build_repair_system_prompt` `>4.096` tokens, digit quarantine), `rag.py` (Hybrid BM25, `BUILTIN_GOLD_EXEMPLARS` `rag seed`, mẫu `silver`), `writer.py`, `report.py`. |
 | Đánh giá | `subtrans/eval/runner.py` (`verify_regression_case`, `verify_pronoun_cue`), `metrics.py`, `regression_suite.yaml` (6 ca), `pronoun_suite.yaml` (22 cues); `subtrans/tests/`, `tests/test_subtrans_deep_upgrades.py`, `tests/test_subtrans_v2_max_quality.py`. |
 | Thuật ngữ theo series | [`glossaries/README.md`](../../glossaries/README.md), `glossaries/base.yaml`, `glossary.*.yaml`; phân biệt với base glossary trong `subtrans/`. |
 

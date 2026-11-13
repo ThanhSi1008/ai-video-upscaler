@@ -202,7 +202,8 @@ ai-video-upscaler/
 │   ├── dtw_auto_align.py       # Quy hoạch động Monotonic DTW ghim mốc thời gian Whisper theo EN
 │   ├── cast_sheet.py           # Stage A: Khai thác bảng nhân vật & danh xưng cố định
 │   ├── dynamic_cast.py         # HysteresisCastManager theo dõi xưng hô động qua CoT p1/p2
-│   ├── ja_morph_tagger.py      # Phân tích hình thái tiếng Nhật, phương ngữ Kansai-ben & kính ngữ
+│   ├── audio_diarization.py    # DSP CPU 5.1 FC 8kHz nhận diện đổi lượt nói (speaker_changed) cho .srt trần
+│   ├── ja_morph_tagger.py      # Tách từ hình thái học MeCab (fugashi/UniDic), Kansai-ben & kính ngữ
 │   ├── gemini_backend.py       # Gemini client xoay vòng 3-key, ThinkingConfig & retry/bisect
 │   ├── cascade.py              # Stage P2: Smart Cloud Cascade Repair bằng gemini-3.8-flash
 │   ├── rag.py                  # Hybrid BM25 RAG few-shot retrieval & tự động thăng hạng mẫu silver
