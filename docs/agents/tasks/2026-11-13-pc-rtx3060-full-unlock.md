@@ -27,6 +27,6 @@
 - `ruff check upscale.py subtrans.py src subtrans scripts tests`: `All checks passed!` (`0 errors`).
 - `.\.venv\Scripts\python.exe scripts/agent_context.py --check`: `PASS: required memory files, local links, root <= 12288 bytes, root + subtrans <= 32768 bytes`.
 - `.\.venv\Scripts\python.exe scripts/verify_offline.py`: **`288 passed, 11 skipped, 1 deselected in 83.48s`** (`Pytest exit code: 0`, Evidence: `E:\ai-video-upscaler\scratch\agent-validation-6d7bm6a7`).
-- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\unlock_rtx3060_admin.ps1 -CheckOnly`: `PASS` (`Torch=2.6.0+cu124 | TensorRT=True | Triton=True`, Power Scheme `Ultimate Performance`).
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\unlock_rtx3060_admin.ps1 -CheckOnly`: `PASS` (`Torch=2.6.0+cu124 | TensorRT=True | Triton=True`, Power Scheme `Ultimate Performance`, đã cài sẵn `Orbmu2k.nvidiaProfileInspector` v3.0.2.3 và bổ sung `-silent -mergeImport` + launcher `unlock_rtx3060_admin.bat`).
 - Mux Audit / Frame Count / FPS trên thành phẩm: `N/A — không tạo thành phẩm` (tuân thủ giới hạn không chạy GPU dài khi chưa có xác nhận và đang mở `blender.exe`).
 - Trạng thái: hoàn tất.

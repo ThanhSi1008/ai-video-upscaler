@@ -90,24 +90,32 @@ if (-not $CheckOnly -and $IsAdmin) {
     $NipXml | Out-File -FilePath $NipPath -Encoding Unicode -Force
     Write-Host "  -> Da xuat profile UTF-16 LE: $NipPath"
 
+    $WingetPkgExe = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Orbmu2k.nvidiaProfileInspector*") -Filter "nvidiaProfileInspector.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
     $CandidateNpi = @(
+        $WingetPkgExe,
         (Get-Command "nvidiaProfileInspector.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+        (Get-Command "nvpi.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+        (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\nvpi.exe"),
         (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\nvidiaProfileInspector.exe"),
         (Join-Path $RepoRoot "bin\nvidiaProfileInspector.exe"),
         (Join-Path $env:USERPROFILE "Downloads\nvidiaProfileInspector\nvidiaProfileInspector.exe")
     ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 
     if ($CandidateNpi) {
-        & $CandidateNpi -silentImport $NipPath
-        Write-Host "  -> [OK] Da nap tu dong CUDA - Force P2 State = Off qua: $CandidateNpi" -ForegroundColor Green
+        Start-Process -FilePath $CandidateNpi -ArgumentList @("-silent", "-mergeImport", $NipPath) -Wait -NoNewWindow
+        Write-Host "  -> [OK] Da merge tu dong CUDA - Force P2 State = Off vao Base Profile qua: $CandidateNpi" -ForegroundColor Green
     } else {
         Write-Host "  -> [INFO] Chua tim thay nvidiaProfileInspector.exe tren may." -ForegroundColor Yellow
-        Write-Host "     Cai nhanh bang: winget install --id Orbmu2k.NvidiaProfileInspector -e"
+        Write-Host "     Cai nhanh bang: winget install --id Orbmu2k.nvidiaProfileInspector -e"
         Write-Host "     Sau do chay lai script nay hoac Import file: $NipPath"
     }
 
-    Write-Host "`n[4/4] Kiem tra che do ECC / Persistence cua RTX 3060..." -ForegroundColor Green
-    nvidia-smi --query-gpu=name,driver_version,pstate,power.limit,clocks.max.memory --format=csv,noheader
+    Write-Host "`n[4/4] Kiem chung truc tiep xung VRAM khi mo ngữ cảnh CUDA..." -ForegroundColor Green
+    if (Test-Path $VenvPy) {
+        & $VenvPy -c "import subprocess, torch; x = torch.zeros((256, 256), device='cuda'); out = subprocess.check_output(['nvidia-smi', '--query-gpu=name,pstate,clocks.current.memory,clocks.max.memory,power.limit', '--format=csv,noheader'], text=True).strip(); print('  -> Live CUDA State:', out)"
+    } else {
+        nvidia-smi --query-gpu=name,driver_version,pstate,power.limit,clocks.max.memory --format=csv,noheader
+    }
 }
 
 # -------------------------------------------------------------------------
@@ -180,7 +188,18 @@ try {
     }
 } catch {}
 
-# 6. Kiểm tra TensorRT & Triton trong .venv
+# 6. Kiểm tra NVIDIA Profile Inspector
+$CheckNpi = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Orbmu2k.nvidiaProfileInspector*") -Filter "nvidiaProfileInspector.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+if (-not $CheckNpi) {
+    $CheckNpi = Get-Command "nvpi.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue
+}
+if ($CheckNpi) {
+    Write-Host ("[PASS] NV Inspector  : San sang ({0})" -f $CheckNpi) -ForegroundColor Green
+} else {
+    Write-Host "[WARN] NV Inspector  : Chua cai dat (winget install --id Orbmu2k.nvidiaProfileInspector -e)" -ForegroundColor Yellow
+}
+
+# 7. Kiểm tra TensorRT & Triton trong .venv
 if (Test-Path $VenvPy) {
     $PyCheck = & $VenvPy -c "import importlib.util as u, torch; trt=u.find_spec('tensorrt') is not None; tri=u.find_spec('triton') is not None; print(f'Torch={torch.__version__} | TensorRT={trt} | Triton={tri}')" 2>$null
     Write-Host ("[PASS] AI Runtime    : {0}" -f $PyCheck) -ForegroundColor Green
