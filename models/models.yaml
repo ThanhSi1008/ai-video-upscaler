@@ -31,3 +31,29 @@ models:
     source_url: "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/tag/3.0.0"
     license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
     default: false
+
+  span-2x:
+    id: "span-2x"
+    name: "SPAN 2x Native (Anime)"
+    arch:
+      type: "SPAN"
+      num_feat: 48
+      num_conv: 6
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/span-2x.pth"
+    license: "Apache-2.0"
+    default: false
+
+  2x_AnimeJaNai_V3:
+    id: "2x_AnimeJaNai_V3"
+    name: "2x AnimeJaNai V3 (SPAN Native 2x)"
+    arch:
+      type: "SPAN"
+      num_feat: 48
+      num_conv: 6
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_V3.pth"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false

@@ -87,6 +87,60 @@ class AnimeJaNaiCompact2x(nn.Module):
         return out + base
 
 
+class SpandrelModelWrapper(nn.Module):
+    """
+    Wrapper mô hình tải qua Spandrel 0.4.2 cho động cơ suy luận PyTorch/CUDA:
+    - Nếu descriptor.scale == 2 (Native 2x, ví dụ: SPAN-2x, 2x_AnimeJaNai_V3):
+      Suy luận trực tiếp ra 2x (4K), hoàn toàn không downsample với bicubic 0.5x tail.
+    - Nếu descriptor.scale == 4 và target_scale == 2 (ví dụ: RealESR-AnimeVideoV3):
+      Áp dụng đuôi downsampling bicubic 0.5x từ 4x -> 2x.
+      Khi batch lớn (>2) trên ảnh Full HD (>=540p), cắt lát vi mô 8K (micro-slicing)
+      mỗi 2 frames để giảm ~75% đỉnh VRAM đệm trung gian.
+    - Phơi bày đầy đủ thuộc tính body, upsampler, upscale, scale (nếu có) để tương thích 100%
+      với TensorRT builder và inference runner.
+    """
+    def __init__(self, inner_model: nn.Module, scale: int = 2, target_scale: float = 2.0):
+        super().__init__()
+        self.inner_model = inner_model
+        self.scale = int(scale)
+        self.target_scale = float(target_scale)
+        if hasattr(inner_model, "body"):
+            self.body = inner_model.body
+        if hasattr(inner_model, "upsampler"):
+            self.upsampler = inner_model.upsampler
+        if hasattr(inner_model, "upscale"):
+            self.upscale = inner_model.upscale
+        else:
+            self.upscale = self.scale
+
+    def _tail_4x_to_2x(self, out_4x: torch.Tensor) -> torch.Tensor:
+        interp_in = out_4x.float() if (out_4x.device.type == "cpu" and out_4x.dtype == torch.float16) else out_4x
+        out_2x = F.interpolate(interp_in, scale_factor=0.5, mode="bicubic", align_corners=False)
+        return out_2x.to(out_4x.dtype) if out_2x.dtype != out_4x.dtype else out_2x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.scale == 2:
+            return self.inner_model(x)
+
+        if abs(self.scale - self.target_scale) > 1e-4:
+            # Tối ưu micro-slicing 8K cho mẻ lớn trên Full HD
+            if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
+                B, _, H, W = x.shape
+                out_h = int(round(H * self.target_scale))
+                out_w = int(round(W * self.target_scale))
+                out_buf = torch.empty((B, 3, out_h, out_w), dtype=x.dtype, device=x.device)
+                for s in range(0, B, 2):
+                    e = min(s + 2, B)
+                    out_4x = self.inner_model(x[s:e])
+                    out_buf[s:e].copy_(self._tail_4x_to_2x(out_4x))
+                return out_buf
+
+            out_4x = self.inner_model(x)
+            return self._tail_4x_to_2x(out_4x)
+
+        return self.inner_model(x)
+
+
 class GPUError(Exception):
     """Lỗi suy luận trên động cơ PyTorch GPU (NaN, Inf, OOM hoặc lỗi CUDA runtime)."""
     pass
@@ -170,23 +224,40 @@ class GPUPersistentWorker:
             else:
                 raise FileNotFoundError(f"Không tìm thấy file trọng số mô hình: {self.weights_path}")
 
-        sd = torch.load(self.weights_path, map_location="cpu", weights_only=False)
-        weights = sd.get("params_ema", sd.get("params", sd))
-        clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
+        model = None
+        use_spandrel = True
+        try:
+            import spandrel
+            loader = spandrel.ModelLoader()
+            desc = loader.load_from_file(self.weights_path)
+            model_core = desc.model.to(self.device)
+            scale = int(getattr(desc, "scale", 2))
+            model = SpandrelModelWrapper(model_core, scale=scale, target_scale=2.0)
+        except Exception:
+            use_spandrel = False
 
-        if self.model_id == "animejanai-hd-v3-compact":
-            model = AnimeJaNaiCompact2x().to(self.device)
-        else:
-            model = RealESRAnimeVideoV3().to(self.device)
+        if not use_spandrel or model is None:
+            sd = torch.load(self.weights_path, map_location="cpu", weights_only=False)
+            weights = sd.get("params_ema", sd.get("params", sd))
+            clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
+
+            if self.model_id == "animejanai-hd-v3-compact":
+                model = AnimeJaNaiCompact2x().to(self.device)
+            else:
+                model = RealESRAnimeVideoV3().to(self.device)
+
+            if self.precision == "fp16":
+                clean_weights = {k: v.half() for k, v in clean_weights.items()}
+            else:
+                clean_weights = {k: v.float() for k, v in clean_weights.items()}
+
+            model.load_state_dict(clean_weights, strict=True)
 
         if self.precision == "fp16":
             model = model.half()
-            clean_weights = {k: v.half() for k, v in clean_weights.items()}
         else:
             model = model.float()
-            clean_weights = {k: v.float() for k, v in clean_weights.items()}
 
-        model.load_state_dict(clean_weights, strict=True)
         if self.device.type == "cuda":
             model = model.to(memory_format=torch.channels_last)
         model.eval()

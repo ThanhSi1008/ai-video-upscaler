@@ -44,15 +44,21 @@ def _build_whisper_initial_prompt(video_path: str) -> str:
         return ""
 
 
-def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str = "small") -> bool:
+def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str = "large-v3-turbo") -> bool:
     """
     Trích xuất audio tiếng Nhật và chạy Whisper Speech-to-Text để tạo file phụ đề .ja.srt dự phòng.
     Ưu tiên tự động dùng `faster-whisper` (CTranslate2 + Silero VAD) nếu đã cài đặt và không bị mock,
     fallback mượt về `openai-whisper` để bảo toàn 100% tương thích ngược.
+    Mặc định sử dụng model 'large-v3-turbo' tối ưu cho anime, hỗ trợ override qua biến môi trường WHISPER_MODEL.
     """
     try:
         import pysubs2
         import torch
+
+        # Cho phép ghi đè mô hình qua biến môi trường WHISPER_MODEL
+        env_model = os.environ.get("WHISPER_MODEL")
+        if env_model:
+            model_size = env_model.strip()
 
         print(f"\n🎙️ [WHISPER STT] Không tìm thấy track phụ đề tiếng Nhật. Đang trích xuất audio và nhận diện giọng nói (Whisper {model_size})...")
         audio_tmp = os.path.splitext(output_srt)[0] + ".temp.wav"

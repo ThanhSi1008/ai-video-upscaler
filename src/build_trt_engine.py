@@ -43,14 +43,70 @@ def resolve_trt_profile_max_batch(
 
     upscale = 2
     if pytorch_model is not None:
-        if hasattr(pytorch_model, "upscale"):
+        if hasattr(pytorch_model, "scale"):
+            upscale = int(getattr(pytorch_model, "scale"))
+        elif hasattr(pytorch_model, "upscale"):
             upscale = int(getattr(pytorch_model, "upscale"))
         elif hasattr(pytorch_model, "upsampler") and isinstance(pytorch_model.upsampler, nn.PixelShuffle):
             upscale = int(pytorch_model.upsampler.upscale_factor)
+        elif hasattr(pytorch_model, "model_scale"):
+            upscale = int(getattr(pytorch_model, "model_scale"))
 
     if upscale >= 4:
         return min(req_b, 2)
     return min(req_b, 4)
+
+
+class _GenericTRTExportModule(nn.Module):
+    """
+    Mô-đun xuất ONNX & bọc suy luận cho các kiến trúc mô hình tổng quát (SPAN, Spandrel generic):
+    Hỗ trợ các mô hình không có cấu trúc .body và .upsampler (như SPAN không dùng PReLU).
+    Đối với mô hình Native 2x (scale == 2), tensor đầu ra được giữ nguyên.
+    Nếu mô hình có tỷ lệ scale khác target_scale (ví dụ: mô hình 4x, mục tiêu 2x),
+    áp dụng phép nội suy bicubic tương ứng.
+    """
+    def __init__(
+        self,
+        model: nn.Module,
+        target_scale: float = 2.0,
+        scale: Optional[float] = None,
+        model_scale: Optional[float] = None,
+    ):
+        super().__init__()
+        if scale is not None:
+            target_scale = float(scale)
+        self.target_scale = float(target_scale)
+
+        if hasattr(model, "inner_model"):
+            self.model = model.inner_model
+            self.model_scale = float(getattr(model, "scale", target_scale))
+        else:
+            self.model = model
+            if model_scale is not None:
+                self.model_scale = float(model_scale)
+            elif hasattr(model, "scale"):
+                self.model_scale = float(model.scale)
+            elif hasattr(model, "upscale"):
+                self.model_scale = float(model.upscale)
+            elif hasattr(model, "upsampler") and isinstance(model.upsampler, nn.PixelShuffle):
+                self.model_scale = float(model.upsampler.upscale_factor)
+            else:
+                self.model_scale = float(target_scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.model(x)
+        if abs(self.model_scale - self.target_scale) > 1e-4:
+            interp_in = out.float() if (out.device.type == "cpu" and out.dtype == torch.float16) else out
+            out_target = F.interpolate(
+                interp_in,
+                scale_factor=self.target_scale / self.model_scale,
+                mode="bicubic",
+                align_corners=False,
+            )
+            if out_target.dtype != x.dtype:
+                out_target = out_target.to(x.dtype)
+            return out_target
+        return out
 
 
 class _PureFP16TRTExportModule(nn.Module):
@@ -165,7 +221,18 @@ def export_model_to_onnx(
     device = next(model_copy.parameters()).device if any(True for _ in model_copy.parameters()) else torch.device("cpu")
     model_copy = model_copy.to(memory_format=torch.contiguous_format)
 
-    wrapped = _PureFP16TRTExportModule(model_copy, target_scale=target_scale).eval().to(device)
+    has_body_srvgg = hasattr(model_copy, "body") and hasattr(model_copy, "upsampler")
+    if hasattr(model_copy, "inner_model"):
+        inner = model_copy.inner_model
+        has_body_srvgg = hasattr(inner, "body") and hasattr(inner, "upsampler")
+        model_to_wrap = inner if has_body_srvgg else model_copy
+    else:
+        model_to_wrap = model_copy
+
+    if has_body_srvgg:
+        wrapped = _PureFP16TRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(device)
+    else:
+        wrapped = _GenericTRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(device)
     dh, dw = int(dummy_shape[0]), int(dummy_shape[1])
     if device.type == "cuda":
         wrapped = wrapped.half()
@@ -471,7 +538,18 @@ def get_hybrid_engine_or_wrapper(
     """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    wrapper = SRVGGNetCompactTRTWrapper(pytorch_model, scale=scale).eval().to(device)
+    has_body_srvgg = hasattr(pytorch_model, "body") and hasattr(pytorch_model, "upsampler")
+    if hasattr(pytorch_model, "inner_model"):
+        inner = pytorch_model.inner_model
+        has_body_srvgg = hasattr(inner, "body") and hasattr(inner, "upsampler")
+        model_for_wrapper = inner if has_body_srvgg else pytorch_model
+    else:
+        model_for_wrapper = pytorch_model
+
+    if has_body_srvgg:
+        wrapper = SRVGGNetCompactTRTWrapper(model_for_wrapper, scale=scale).eval().to(device)
+    else:
+        wrapper = _GenericTRTExportModule(model_for_wrapper, target_scale=scale).eval().to(device)
     if device.type == "cuda":
         wrapper = wrapper.half().to(memory_format=torch.channels_last)
 
