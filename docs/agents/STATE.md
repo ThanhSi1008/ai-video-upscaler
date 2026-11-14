@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `18df9ef` (`chore(state): record commit d6a7853 baseline in STATE.md`)
+> **Commit Baseline:** `65a0967` (`feat(group-b): enable real Native 2x TRT FP16 models (18.27-21.13 fps Climax) & verify zero quality loss`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
