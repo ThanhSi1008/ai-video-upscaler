@@ -25,6 +25,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+except Exception:
+    triton = None
+    tl = None
+    HAS_TRITON = False
+
 from src.config import (
     HEVC_ENCODER,
     HEVC_PROFILE,
@@ -38,6 +47,96 @@ from src.config import (
 )
 
 
+if HAS_TRITON:
+    @triton.jit
+    def _rgb_to_p010le_triton_kernel(
+        rgb_ptr,
+        out_ptr,
+        stride_rgb_b, stride_rgb_c, stride_rgb_h, stride_rgb_w,
+        stride_out_b, stride_out_h, stride_out_w,
+        H, W,
+        BLOCK_X: tl.constexpr,
+        BLOCK_Y: tl.constexpr,
+    ):
+        pid_x = tl.program_id(axis=0)
+        pid_y = tl.program_id(axis=1)
+        pid_b = tl.program_id(axis=2)
+
+        H_uv = H // 2
+        W_uv = W // 2
+
+        offs_x = pid_x * BLOCK_X + tl.arange(0, BLOCK_X)
+        offs_y = pid_y * BLOCK_Y + tl.arange(0, BLOCK_Y)
+
+        mask = (offs_x[None, :] < W_uv) & (offs_y[:, None] < H_uv)
+
+        rgb_b = rgb_ptr + pid_b * stride_rgb_b
+        out_b = out_ptr + pid_b * stride_out_b
+
+        y0 = offs_y[:, None] * 2
+        y1 = y0 + 1
+        x0 = offs_x[None, :] * 2
+        x1 = x0 + 1
+
+        # Load 4 pixels of R, G, B
+        r00 = tl.load(rgb_b + 0 * stride_rgb_c + y0 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        r01 = tl.load(rgb_b + 0 * stride_rgb_c + y0 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+        r10 = tl.load(rgb_b + 0 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        r11 = tl.load(rgb_b + 0 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+
+        g00 = tl.load(rgb_b + 1 * stride_rgb_c + y0 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        g01 = tl.load(rgb_b + 1 * stride_rgb_c + y0 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+        g10 = tl.load(rgb_b + 1 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        g11 = tl.load(rgb_b + 1 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+
+        b00 = tl.load(rgb_b + 2 * stride_rgb_c + y0 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        b01 = tl.load(rgb_b + 2 * stride_rgb_c + y0 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+        b10 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
+        b11 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+
+        # 1. Compute Luma Y for 4 pixels (ITU-R BT.709 Limited Range [64..940])
+        y_val00 = 64.0 + 186.2376 * r00 + 626.5152 * g00 + 63.2472 * b00
+        y_val01 = 64.0 + 186.2376 * r01 + 626.5152 * g01 + 63.2472 * b01
+        y_val10 = 64.0 + 186.2376 * r10 + 626.5152 * g10 + 63.2472 * b10
+        y_val11 = 64.0 + 186.2376 * r11 + 626.5152 * g11 + 63.2472 * b11
+
+        y_r00 = tl.extra.cuda.libdevice.rint(y_val00)
+        y_r01 = tl.extra.cuda.libdevice.rint(y_val01)
+        y_r10 = tl.extra.cuda.libdevice.rint(y_val10)
+        y_r11 = tl.extra.cuda.libdevice.rint(y_val11)
+
+        y_p010_00 = (tl.minimum(tl.maximum(y_r00, 64.0), 940.0).to(tl.int32) << 6).to(tl.int16)
+        y_p010_01 = (tl.minimum(tl.maximum(y_r01, 64.0), 940.0).to(tl.int32) << 6).to(tl.int16)
+        y_p010_10 = (tl.minimum(tl.maximum(y_r10, 64.0), 940.0).to(tl.int32) << 6).to(tl.int16)
+        y_p010_11 = (tl.minimum(tl.maximum(y_r11, 64.0), 940.0).to(tl.int32) << 6).to(tl.int16)
+
+        tl.store(out_b + y0 * stride_out_h + x0 * stride_out_w, y_p010_00, mask=mask)
+        tl.store(out_b + y0 * stride_out_h + x1 * stride_out_w, y_p010_01, mask=mask)
+        tl.store(out_b + y1 * stride_out_h + x0 * stride_out_w, y_p010_10, mask=mask)
+        tl.store(out_b + y1 * stride_out_h + x1 * stride_out_w, y_p010_11, mask=mask)
+
+        # 2. 2x2 Chroma Subsampling & BT.709 Chroma calculation [64..960]
+        rs = 0.25 * (r00 + r01 + r10 + r11)
+        gs = 0.25 * (g00 + g01 + g10 + g11)
+        bs = 0.25 * (b00 + b01 + b10 + b11)
+
+        u_val = 512.0 - 102.656512 * rs - 345.343488 * gs + 448.0 * bs
+        v_val = 512.0 + 448.0 * rs - 406.921088 * gs - 41.078912 * bs
+
+        u_r = tl.extra.cuda.libdevice.rint(u_val)
+        v_r = tl.extra.cuda.libdevice.rint(v_val)
+
+        u_p010 = (tl.minimum(tl.maximum(u_r, 64.0), 960.0).to(tl.int32) << 6).to(tl.int16)
+        v_p010 = (tl.minimum(tl.maximum(v_r, 64.0), 960.0).to(tl.int32) << 6).to(tl.int16)
+
+        # Interleaved UV plane at row H + offs_y
+        uv_row = H + offs_y[:, None]
+        tl.store(out_b + uv_row * stride_out_h + x0 * stride_out_w, u_p010, mask=mask)
+        tl.store(out_b + uv_row * stride_out_h + x1 * stride_out_w, v_p010, mask=mask)
+else:
+    _rgb_to_p010le_triton_kernel = None
+
+
 # =============================================================================
 # 1. GPU COLOR CONVERTER P010LE (BT.709 10-BIT LIMITED RANGE)
 # =============================================================================
@@ -46,7 +145,7 @@ class GPUColorConverterP010LE:
     """
     Chuyển đổi trực tiếp Tensor RGB [B, 3, H, W] (miền giá trị [0.0, 1.0])
     sang định dạng rawvideo 'p010le' (YUV420P Semi-Planar 10-bit Little-Endian)
-    theo chuẩn ITU-R BT.709 Limited Range (TV range) trực tiếp trên GPU VRAM.
+    theo chuẩn ITU-R BT.709 Limited Range (TV range) trực tiếp trên GPU VRAM qua Triton JIT kernel.
     """
     def __init__(self, device: Optional[torch.device] = None):
         if device is None:
@@ -55,19 +154,11 @@ class GPUColorConverterP010LE:
         self._compiled_fn = None
         self._p010_ring: List[torch.Tensor] = []
         self._p010_ring_slot: int = 0
+        self._has_triton = False
 
-        # Khởi tạo JIT Triton fusion (nếu chạy trên CUDA thật và có triton-windows)
-        if (
-            device.type == "cuda"
-            and not os.environ.get("PYTEST_CURRENT_TEST")
-            and hasattr(torch, "compile")
-        ):
-            try:
-                import importlib.util
-                if importlib.util.find_spec("triton") is not None:
-                    self._compiled_fn = torch.compile(self._p010le_core, dynamic=True)
-            except Exception:
-                self._compiled_fn = None
+        # Phát hiện Triton JIT kernel khả dụng trên GPU CUDA
+        if device.type == "cuda" and HAS_TRITON and _rgb_to_p010le_triton_kernel is not None:
+            self._has_triton = True
 
     def _ensure_ring(self, B: int, H: int, W: int, device: torch.device) -> None:
         alloc_b = max(int(B), 8)
@@ -137,8 +228,7 @@ class GPUColorConverterP010LE:
         """
         Input:  rgb_tensor: [B, 3, H, W] (float16 hoặc float32, miền [0.0, 1.0])
         Output: p010_frame: [B, H * 3 // 2, W] (int16/uint16, chuẩn Semi-Planar P010LE)
-        Tối ưu Micro-Slice 2 frames cho độ phân giải 4K kết hợp vòng đệm đôi (2-slot VRAM ring)
-        triệt tiêu 100% rung lắc bộ nhớ VRAM (~600 MB/batch) trên GPU.
+        Tối ưu Triton JIT kernel cho GPU CUDA hoặc micro-slice CPU fallback kết hợp vòng đệm đôi (2-slot VRAM ring).
         """
         B, _, H, W = rgb_tensor.shape
         self._ensure_ring(B, H, W, rgb_tensor.device)
@@ -147,6 +237,22 @@ class GPUColorConverterP010LE:
             self._p010_ring_slot = (self._p010_ring_slot + 1) % len(self._p010_ring)
 
         out_buf = self._p010_ring[ring_slot][:B]
+
+        # 1. Chạy trực tiếp qua Triton JIT kernel khi có CUDA + Triton (0 micro-slicing loop, 0 alloc mới)
+        if self._has_triton and rgb_tensor.is_cuda and _rgb_to_p010le_triton_kernel is not None:
+            BLOCK_X = 16
+            BLOCK_Y = 16
+            grid = (triton.cdiv(W // 2, BLOCK_X), triton.cdiv(H // 2, BLOCK_Y), B)
+            _rgb_to_p010le_triton_kernel[grid](
+                rgb_tensor, out_buf,
+                rgb_tensor.stride(0), rgb_tensor.stride(1), rgb_tensor.stride(2), rgb_tensor.stride(3),
+                out_buf.stride(0), out_buf.stride(1), out_buf.stride(2),
+                H, W,
+                BLOCK_X=BLOCK_X, BLOCK_Y=BLOCK_Y
+            )
+            return out_buf
+
+        # 2. Nhánh Fallback cho CPU / non-CUDA hoặc khi Triton không khả dụng
         if B <= 2:
             out_buf.copy_(self._convert_slice(rgb_tensor))
             return out_buf
@@ -319,6 +425,7 @@ class DoubleBufferedPipeUpscaler:
         self.host_in_pins: List[torch.Tensor] = []
         self.host_out_pins: List[torch.Tensor] = []
         self.gpu_in_ring: List[torch.Tensor] = []
+        self.gpu_nhwc_ring: List[torch.Tensor] = []
         self.last_first_rgb_small: Optional[np.ndarray] = None
         self.last_distinct_count: int = 0
         self.ensure_resolution(input_hw[0], input_hw[1])
@@ -350,8 +457,13 @@ class DoubleBufferedPipeUpscaler:
                 torch.empty((self.batch_size, 3, in_h, in_w), dtype=torch.float16, device=self.device)
                 for _ in range(2)
             ]
+            self.gpu_nhwc_ring = [
+                torch.empty((self.batch_size, in_h, in_w, 3), dtype=torch.uint8, device=self.device)
+                for _ in range(2)
+            ]
         else:
             self.gpu_in_ring = []
+            self.gpu_nhwc_ring = []
         return self.output_hw
 
     def warmup(self, batch_size: int = 2) -> None:
@@ -594,7 +706,11 @@ class DoubleBufferedPipeUpscaler:
                             hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
                             for i in range(cur_B):
                                 hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
-                            gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
+                            if self.gpu_nhwc_ring:
+                                gpu_nhwc = self.gpu_nhwc_ring[slot][:cur_B]
+                                gpu_nhwc.copy_(hwc_pin[:cur_B], non_blocking=True)
+                            else:
+                                gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
                             if is_trt and self.gpu_in_ring:
                                 # Transpose NCHW trực tiếp vào bộ đệm VRAM cố định self.gpu_in_ring (1-kernel, 0 alloc mới, cố định địa chỉ con trỏ TRT)
                                 in_buf = self.gpu_in_ring[slot][:cur_B]

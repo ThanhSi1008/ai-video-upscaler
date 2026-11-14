@@ -57,17 +57,17 @@ from pathlib import Path
 def check_deadline_and_eta(
     video_path: str,
     deadline_str: str,
-    fps_median: float = 1.61,
-    fps_p5: float = 1.62,
-    video_overhead: float = 930.0,
+    fps_median: float = 10.5,
+    fps_p5: float = 8.5,
+    video_overhead: float = 420.0,
     subtitles_overhead: float = 300.0,
     eta_margin_pct: float = 0.07,
     allow_partial: bool = False
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
-    Quyết định dựa trên P5 (1.62 fps) + overhead (video ~930s [n=2] + 300s subs) + 7% ETA margin.
-    Trung vị fps: 1.61 (cỡ mẫu n=5 tập).
+    Quyết định dựa trên P5 Unique Inference FPS (8.5 fps) + overhead (video ~420s + 300s subs) + 7% ETA margin.
+    Trung vị Unique Inference FPS: 10.5 fps (RTX 3060 TensorRT FP16 Zero-Disk).
     Returns: (can_run, is_partial, deadline_dt)
     """
     now = datetime.now()
@@ -744,23 +744,26 @@ def main():
         print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào hoặc dùng cờ --queue.")
         sys.exit(1)
 
-    video_overhead = 930.0  # Hiệu chỉnh theo 2 tập đêm 1 [691s, 1166s], cỡ mẫu n=2
+    video_overhead = 420.0  # TensorRT FP16 Zero-Disk mặc định
     if args.engine == "cuda":
         has_trt = False
         if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
             import importlib.util
             has_trt = importlib.util.find_spec("tensorrt") is not None
         if has_trt and getattr(args, "zero_disk", False):
-            fps_median = 22.0
-            fps_p5 = 16.0
+            # RTX 3060 TensorRT FP16 Zero-Disk: unique inference speed ~10.5 fps (effective ~22.0 fps with ~52% dedup)
+            fps_median = 10.5
+            fps_p5 = 8.5
             video_overhead = 420.0
         elif has_trt:
-            fps_median = 18.0
-            fps_p5 = 14.0
+            # RTX 3060 TensorRT FP16 Standard: unique inference speed ~8.5 fps (effective ~18.0 fps)
+            fps_median = 8.5
+            fps_p5 = 7.0
             video_overhead = 660.0
         else:
-            fps_median = 12.0
-            fps_p5 = 10.0
+            # RTX 3060 PyTorch CUDA FP16: unique inference speed ~5.2 fps (effective ~11.0 fps)
+            fps_median = 5.2
+            fps_p5 = 4.5
             if getattr(args, "zero_disk", False):
                 video_overhead = 540.0
     else:

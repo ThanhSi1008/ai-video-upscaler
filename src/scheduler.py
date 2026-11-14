@@ -213,9 +213,9 @@ class BackgroundQueuePreflightManager:
 def compute_overnight_schedule(
     queue: List[str],
     deadline_str: Optional[str] = None,
-    fps_median: float = 1.61,
-    fps_p5: float = 1.62,
-    video_overhead_seconds: float = 930.0,
+    fps_median: float = 10.5,
+    fps_p5: float = 8.5,
+    video_overhead_seconds: float = 420.0,
     subtitles_overhead_seconds: float = 300.0,
     eta_margin_pct: float = 0.07,
     allow_partial: bool = False,
@@ -228,8 +228,8 @@ def compute_overnight_schedule(
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
 
     Quy chuẩn:
-      - Tốc độ AI: trung vị 1.61 fps (cỡ mẫu n=5 tập: Slime 55 chunks, Futsutsuka 01, 02, 03, I.Want, Re:Zero), P5 1.62 fps.
-      - Overhead: video ~930s (hiệu chỉnh theo 2 tập đêm 1 [691s–1166s], n=2) + subtitles ~300s (Stage A + B2 100-cues + audit) = 1230s (~20.5m).
+      - Tốc độ AI: Tốc độ AI suy luận khung hình độc lập (Unique Inference FPS) trung vị 10.5 fps, P5 8.5 fps.
+      - Overhead: video ~420s (TensorRT FP16 Zero-Disk) + subtitles ~300s (Stage A + B2 100-cues + audit) = 720s (~12.0m).
       - Quyết định deadline: dựa trên ETA P5 + biên an toàn 7% ETA (decision_eta = eta_p5 * 1.07).
       - Nếu không kịp và có --allow-partial: cho phép chạy đến hạn chót, dừng sạch ở ranh giới chunk.
     """
@@ -499,8 +499,8 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
     lines.append(f"• Thời điểm bắt đầu    : {sched['start_time']}")
     lines.append(f"• Mốc hạn chót          : {sched['deadline_str'] or 'Không đặt'} ({sched['deadline_time'] or 'N/A'})")
     lines.append(f"• Quỹ thời gian có sẵn : {sched['available_time_formatted']}")
-    lines.append(f"• Tốc độ AI cơ sở       : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (đo thực tế trên {DEVICE_NAME})")
-    lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video [đo đêm 1: 691s–1166s, n=2] + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
+    lines.append(f"• Tốc độ AI suy luận    : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (Unique Inference FPS trên {DEVICE_NAME})")
+    lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
     lines.append(f"• Biên an toàn ETA      : +{sched['eta_margin_pct']*100:.1f}% trên ETA P5 để ra quyết định hạn chót")
     lines.append(f"• Cho phép dở dang      : --allow-partial = {'BẬT' if sched.get('allow_partial') else 'TẮT'}")
     lines.append("-" * 126)
