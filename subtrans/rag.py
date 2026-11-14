@@ -13,6 +13,7 @@ import re
 import sqlite3
 import hashlib
 import logging
+import contextlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
 import pysubs2
@@ -24,6 +25,29 @@ from subtrans.ja_morph_tagger import strip_ja_furigana
 logger = logging.getLogger("subtrans.rag")
 
 KNOWLEDGE_DB_PATH = Path(__file__).parent / ".cache" / "knowledge.db"
+
+
+def _generate_ngram_string(text: str) -> str:
+    """
+    Strips furigana and non-word characters, producing space-separated character 2-grams and 3-grams.
+    If length == 1: returns the single character.
+    If length >= 2: adds all 2-character slices.
+    If length >= 3: adds all 3-character slices.
+    """
+    if not text:
+        return ""
+    # Strip furigana: handles (ふりがな), （ふりがな）, and [ふりがな]
+    furi_stripped = strip_ja_furigana(text)
+    furi_stripped = re.sub(r"\[[^\]]+\]", "", furi_stripped)
+    cleaned = re.sub(r"[\s\d\W]+", "", furi_stripped)
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned
+    tokens = [cleaned[i : i + 2] for i in range(len(cleaned) - 1)]
+    if len(cleaned) >= 3:
+        tokens.extend(cleaned[i : i + 3] for i in range(len(cleaned) - 2))
+    return " ".join(tokens)
 
 # Canonical Error Bank Seeds
 INITIAL_ERROR_BANK_SEEDS = [
@@ -197,10 +221,22 @@ BUILTIN_GOLD_EXEMPLARS: List[Dict[str, Optional[str]]] = [
 class KnowledgeBase:
     """SQLite-backed Knowledge Base managing gold subtitle units and error bank."""
 
+    _generate_ngram_string = staticmethod(_generate_ngram_string)
+
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or KNOWLEDGE_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    @contextlib.contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def get_db_sha256(self) -> str:
         """Returns SHA-256 hash of the knowledge base file for experiment provenance tracking."""
@@ -213,7 +249,7 @@ class KnowledgeBase:
         return hasher.hexdigest()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
@@ -222,6 +258,7 @@ class KnowledgeBase:
                     series TEXT,
                     episode TEXT,
                     ja_text TEXT NOT NULL,
+                    ja_ngram TEXT,
                     en_text TEXT,
                     vi_text TEXT NOT NULL,
                     speaker TEXT,
@@ -234,7 +271,7 @@ class KnowledgeBase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_series ON gold_units(series)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_ja ON gold_units(ja_text)")
 
-            # Schema migration for existing DBs
+            # Schema migration and synchronization for existing DBs
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(gold_units)")
             cols = [r[1] for r in cursor.fetchall()]
@@ -242,6 +279,29 @@ class KnowledgeBase:
                 conn.execute("ALTER TABLE gold_units ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
             if "lang_pair" not in cols:
                 conn.execute("ALTER TABLE gold_units ADD COLUMN lang_pair TEXT NOT NULL DEFAULT 'ja-vi'")
+            if "ja_ngram" not in cols:
+                conn.execute("ALTER TABLE gold_units ADD COLUMN ja_ngram TEXT")
+
+            # SQLite FTS5 index with character 2-gram + 3-gram tokenization
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS gold_units_fts USING fts5(
+                    ja_ngram,
+                    content='gold_units',
+                    content_rowid='id'
+                )
+            """)
+
+            # Synchronize any unindexed rows into gold_units_fts
+            cursor.execute("SELECT id, ja_text FROM gold_units WHERE ja_ngram IS NULL OR ja_ngram = ''")
+            unindexed = cursor.fetchall()
+            if unindexed:
+                for r_id, r_ja in unindexed:
+                    ngram_str = _generate_ngram_string(r_ja)
+                    cursor.execute("UPDATE gold_units SET ja_ngram = ? WHERE id = ?", (ngram_str, r_id))
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO gold_units_fts(rowid, ja_ngram) VALUES (?, ?)",
+                        (r_id, ngram_str),
+                    )
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS error_bank (
@@ -296,7 +356,7 @@ class KnowledgeBase:
         if not ja_norm or not vi_norm:
             return False
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id FROM gold_units WHERE ja_text = ? AND vi_text = ? AND series IS ?",
@@ -305,13 +365,15 @@ class KnowledgeBase:
             if cursor.fetchone():
                 return False
 
-            conn.execute("""
-                INSERT INTO gold_units (series, episode, ja_text, en_text, vi_text, speaker, addressee, status, lang_pair)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ngram_str = _generate_ngram_string(ja_norm)
+            cursor.execute("""
+                INSERT INTO gold_units (series, episode, ja_text, ja_ngram, en_text, vi_text, speaker, addressee, status, lang_pair)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 series,
                 episode,
                 ja_norm,
+                ngram_str,
                 normalize_nfc(en_text).strip() if en_text else None,
                 vi_norm,
                 speaker,
@@ -319,6 +381,11 @@ class KnowledgeBase:
                 status,
                 lang_pair,
             ))
+            new_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT OR REPLACE INTO gold_units_fts(rowid, ja_ngram) VALUES (?, ?)",
+                (new_id, ngram_str),
+            )
             conn.commit()
             return True
 
@@ -474,21 +541,31 @@ class KnowledgeBase:
         if not query_bigrams:
             return []
 
-        # Fetch candidate gold/reviewed/silver units (never 'draft')
-        with sqlite3.connect(self.db_path) as conn:
+        # Fetch candidate gold/reviewed/silver units (never 'draft') via FTS5 MATCH
+        clean_tokens = [tok.replace('"', '""') for tok in set(query_bigrams) if tok]
+        match_expr = " OR ".join(f'"{tok}"' for tok in clean_tokens)
+        if not match_expr:
+            return []
+
+        candidate_limit = max(50, max_examples * 10)
+        with self._connect() as conn:
             cursor = conn.cursor()
             query = """
-                SELECT id, ja_text, en_text, vi_text, series, episode, speaker, addressee, status
-                FROM gold_units
-                WHERE status IN ('reviewed', 'gold', 'silver')
+                SELECT g.id, g.ja_text, g.en_text, g.vi_text, g.series, g.episode, g.speaker, g.addressee, g.status
+                FROM gold_units_fts f
+                JOIN gold_units g ON g.id = f.rowid
+                WHERE gold_units_fts MATCH ?
+                  AND g.status IN ('reviewed', 'gold', 'silver')
             """
-            params: List[Any] = []
+            params: List[Any] = [match_expr]
             if series:
-                query += " AND (series = ? OR series IS NULL)"
+                query += " AND (g.series = ? OR g.series IS NULL)"
                 params.append(series.lower())
             if exclude_episode:
-                query += " AND (episode != ? OR episode IS NULL)"
+                query += " AND (g.episode != ? OR g.episode IS NULL)"
                 params.append(exclude_episode)
+            query += " ORDER BY f.rank LIMIT ?"
+            params.append(candidate_limit)
             cursor.execute(query, params)
             candidates = cursor.fetchall()
 
@@ -613,6 +690,59 @@ class KnowledgeBase:
             )
         return results
 
+    def search_gold_units(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        series: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fast inverted index search via SQLite FTS5 for 2-gram/3-gram Kanji and glossary retrieval."""
+        ngram_str = _generate_ngram_string(query_text)
+        tokens = ngram_str.split()
+        if not tokens:
+            return []
+
+        clean_tokens = [t.replace('"', '""') for t in set(tokens) if t]
+        match_expr = " OR ".join(f'"{t}"' for t in clean_tokens)
+        if not match_expr:
+            return []
+
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            query = """
+                SELECT g.id, g.ja_text, g.en_text, g.vi_text, g.speaker, g.addressee, g.series, g.episode, g.status, f.rank
+                FROM gold_units_fts f
+                JOIN gold_units g ON g.id = f.rowid
+                WHERE gold_units_fts MATCH ?
+                  AND g.status IN ('reviewed', 'gold', 'silver')
+            """
+            params: List[Any] = [match_expr]
+            if series:
+                query += " AND (g.series = ? OR g.series IS NULL)"
+                params.append(series.lower())
+            query += " ORDER BY f.rank LIMIT ?"
+            params.append(top_k)
+
+            cursor.execute(query, params)
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "id": row[0],
+                    "ja": row[1],
+                    "ja_text": row[1],
+                    "en": row[2],
+                    "en_text": row[2],
+                    "vi": row[3],
+                    "vi_text": row[3],
+                    "speaker": row[4],
+                    "addressee": row[5],
+                    "series": row[6],
+                    "episode": row[7],
+                    "status": row[8],
+                    "score": -float(row[9]) if row[9] is not None else 0.0,
+                })
+            return results
+
     def record_correction(
         self,
         ja_text: str,
@@ -643,7 +773,7 @@ class KnowledgeBase:
         )
 
         # 2. Add rule to error_bank
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -689,7 +819,7 @@ class KnowledgeBase:
         if not ja_norm or not bad_norm:
             return False
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id FROM error_bank
@@ -882,7 +1012,7 @@ class KnowledgeBase:
         batch_ja_clean = " ".join(strip_ja_furigana(c.ja or "") for c in cues)
         cautions: List[Dict[str, str]] = []
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             query = "SELECT category, ja_pattern, bad_pattern, good_pattern, explanation FROM error_bank"
             params = []
@@ -908,7 +1038,7 @@ class KnowledgeBase:
 
     def get_stats(self) -> Dict[str, Any]:
         """Returns counts of gold units and error bank items."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM gold_units")
             gold_count = cursor.fetchone()[0]

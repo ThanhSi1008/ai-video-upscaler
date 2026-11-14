@@ -13,6 +13,7 @@ import hashlib
 import json
 import zoneinfo
 import datetime
+import contextlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -124,10 +125,15 @@ class TranslationCache:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._connect() as conn:
@@ -390,7 +396,7 @@ class TranslationCache:
         """Đánh dấu (key_id, model) cạn hạn mức đến 00:00 PT ngày tiếp theo."""
         today_pt = get_today_pt_str()
         next_pt, _ = get_next_pt_reset()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO key_exhaustion (key_id, model, pt_date, exhausted_until_pt, quota_id, quota_value, reason)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -438,7 +444,7 @@ class TranslationCache:
             next_pt, _ = get_next_pt_reset()
             exhausted_until_pt = next_pt
         iso_val = exhausted_until_pt.isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO model_exhaustion (model, exhausted_until_pt, quota_id, quota_value, reason, updated_at)
                 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -447,7 +453,7 @@ class TranslationCache:
 
     def is_model_exhausted(self, model: str) -> bool:
         """Kiểm tra xem model có đang bị đánh dấu hết hạn mức trong ngày Thái Bình Dương hiện tại không."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT exhausted_until_pt FROM model_exhaustion WHERE model = ?", (model,))
             row = cursor.fetchone()
@@ -468,7 +474,7 @@ class TranslationCache:
 
     def get_model_exhaustion_info(self, model: str) -> Optional[Dict[str, Any]]:
         """Lấy thông tin chi tiết về việc hết hạn mức của model."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT exhausted_until_pt, quota_id, quota_value, reason FROM model_exhaustion WHERE model = ?", (model,))
             row = cursor.fetchone()
@@ -487,7 +493,7 @@ class TranslationCache:
         Sử dụng cột pt_date được tính qua zoneinfo.ZoneInfo('America/Los_Angeles') - KHÔNG dùng offset cố định -7.
         """
         pt_date = get_today_pt_str()
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT model, COUNT(*)
