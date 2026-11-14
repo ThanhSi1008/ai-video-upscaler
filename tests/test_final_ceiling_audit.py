@@ -230,7 +230,7 @@ def test_zero_disk_pipeline_overlaps_decode_and_async_nvenc_flush(tmp_path):
             segs.append(sp)
         return segs
 
-    def fake_extract_raw(seg_file, width, height, kept_indices=None, hwaccel=True):
+    def fake_extract_raw(seg_file, width, height, kept_indices=None, hwaccel=True, **kwargs):
         if "seg_0001" in seg_file:
             events["extract1_start"] = time.perf_counter()
             time.sleep(0.02)
@@ -369,3 +369,129 @@ def test_config_detect_hevc_encoder_uses_inherited_env(monkeypatch):
     monkeypatch.setenv("UPSCALER_HEVC_ENCODER", "hevc_nvenc")
     with patch("subprocess.run", side_effect=AssertionError("Không được spawn ffmpeg khi đã có UPSCALER_HEVC_ENCODER")):
         assert app_config._detect_hevc_encoder() == "hevc_nvenc"
+
+
+def test_resolve_trt_profile_max_batch_caps_4x_8k_backbone():
+    """
+    Xác minh resolve_trt_profile_max_batch giới hạn max_batch=2 cho mô hình PixelShuffle(4) ở Full HD
+    (tránh OOM 12.74 GB trên RTX 3060 12GB) nhưng cho phép max_batch=4 cho mô hình 2x thuần.
+    """
+    from src.build_trt_engine import resolve_trt_profile_max_batch
+    from src.cuda_engine import AnimeJaNaiCompact2x, RealESRAnimeVideoV3
+
+    m4 = RealESRAnimeVideoV3()
+    m2 = AnimeJaNaiCompact2x()
+    assert resolve_trt_profile_max_batch(m4, max_batch=8, input_hw=(1080, 1920)) == 2
+    assert resolve_trt_profile_max_batch(m2, max_batch=8, input_hw=(1080, 1920)) == 4
+    assert resolve_trt_profile_max_batch(m4, max_batch=8, input_hw=(270, 480)) == 8
+
+
+def test_pipe_upscaler_write_frame_surfaces_ffmpeg_stderr_on_errno22():
+    """
+    Xác minh khi FFmpeg NVENC thoát sớm khiến pipe trên Windows ném OSError(errno=22 EINVAL),
+    _write_frame_to_pipe trích xuất đầy đủ thông báo lỗi từ stderr để chẩn đoán chính xác.
+    """
+    from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
+
+    class BrokenStdin:
+        def write(self, data):
+            raise OSError(22, "Invalid argument")
+
+    class CrashedEncoderProc:
+        stdin = BrokenStdin()
+        stderr = io.BytesIO(b"[hevc_nvenc] OpenEncodeSessionEx failed: out of memory (10)\n")
+
+        def poll(self):
+            return 1
+
+    arr = np.zeros((16, 16), dtype=np.uint16)
+    try:
+        DoubleBufferedPipeUpscaler._write_frame_to_pipe(CrashedEncoderProc(), arr)
+        raise AssertionError("Phải ném RuntimeError kèm stderr của FFmpeg")
+    except RuntimeError as err:
+        msg = str(err)
+        assert "rc=1" in msg
+        assert "OpenEncodeSessionEx failed: out of memory" in msg
+
+
+def test_extract_frames_raw_rgb24_skips_select_when_all_frames_kept():
+    """
+    Xác minh khi kept_indices giữ đủ 100% số frame của chunk (0..total_frames-1),
+    extract_frames_raw_rgb24 bỏ qua biểu thức select='...' thừa thãi.
+    """
+    from src.ffmpeg_ops import extract_frames_raw_rgb24
+
+    h, w = 4, 6
+    raw = np.zeros((3, h, w, 3), dtype=np.uint8).tobytes()
+    recorded_cmds = []
+
+    def fake_run(cmd, stdout=None, stderr=None, check=False):
+        recorded_cmds.append(list(cmd))
+        return types.SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
+
+    with patch("src.ffmpeg_ops.subprocess.run", side_effect=fake_run):
+        out = extract_frames_raw_rgb24(
+            "seg.mp4",
+            width=w,
+            height=h,
+            kept_indices=[0, 1, 2],
+            hwaccel=False,
+            total_frames=3,
+        )
+    assert len(out) == 3
+    vf_arg = recorded_cmds[0][recorded_cmds[0].index("-vf") + 1]
+    assert "select=" not in vf_arg
+    assert "scale=in_color_matrix=bt709" in vf_arg
+
+
+def test_recover_open_gop_leading_frames_matches_cra_anchor(tmp_path):
+    """
+    Xác minh _recover_open_gop_leading_frames khôi phục chính xác từng pixel của các B-frame RASL dẫn đầu
+    trước điểm neo CRA keyframe trên các bản encode x265 Open-GOP, và fallback an toàn khi thiếu file nguồn.
+    """
+    from src.ffmpeg_ops import _recover_open_gop_leading_frames
+
+    h, w = 8, 32
+    f_rasl0 = np.full((h, w, 3), 11, dtype=np.uint8)
+    f_rasl1 = np.full((h, w, 3), 22, dtype=np.uint8)
+    f_cra = np.full((h, w, 3), 99, dtype=np.uint8)
+    f_after = np.full((h, w, 3), 144, dtype=np.uint8)
+
+    # Fallback khi không có file nguồn trên đĩa
+    fb = _recover_open_gop_leading_frames(
+        source_video_path=None,
+        chunk_start_sec=80.0,
+        cra_anchor_frame=f_cra,
+        n_discard=2,
+        width=w,
+        height=h,
+        color_vf="null",
+    )
+    assert len(fb) == 2
+    assert np.array_equal(fb[0], f_cra)
+
+    # Khôi phục từ luồng giải mã cửa sổ ngắn của file nguồn
+    src_mkv = tmp_path / "source_opengop.mkv"
+    src_mkv.write_bytes(b"MKV")
+    window_bytes = b"".join(arr.tobytes() for arr in [f_after, f_rasl0, f_rasl1, f_cra, f_after])
+
+    class FakePopen:
+        def __init__(self, *args, **kwargs):
+            self.stdout = io.BytesIO(window_bytes)
+
+        def wait(self):
+            return 0
+
+    with patch("src.ffmpeg_ops.subprocess.Popen", FakePopen):
+        recovered = _recover_open_gop_leading_frames(
+            source_video_path=str(src_mkv),
+            chunk_start_sec=120.0,
+            cra_anchor_frame=f_cra,
+            n_discard=2,
+            width=w,
+            height=h,
+            color_vf="null",
+        )
+    assert len(recovered) == 2
+    assert np.array_equal(recovered[0], f_rasl0)
+    assert np.array_equal(recovered[1], f_rasl1)

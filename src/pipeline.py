@@ -54,6 +54,7 @@ from src.ffmpeg_ops import (
     probe_video,
     split_video_segments,
     get_segments_frame_counts,
+    verify_segment_resume_frames,
     extract_frames,
     extract_frames_raw_rgb24,
     encode_chunk_hevc,
@@ -344,15 +345,31 @@ def run_upscale_pipeline(
             total_enc_time = 0.0
             total_ext_time = 0.0
 
-            # Lọc các phân đoạn cần xử lý (bỏ qua những đoạn đã xong nếu bật resume)
+            # Lọc các phân đoạn cần xử lý (bỏ qua những đoạn đã xong nếu bật resume và kiểm tra frame khớp)
             chunks_to_process = []
             for idx, seg_file in enumerate(existing_segs):
                 seg_out_file = os.path.join(up_segs_dir, f"up_{idx:04d}.mp4")
+                expected_frames = (
+                    dedup_plan["chunks"][idx]["total_frames"]
+                    if (dedup and dedup_plan and idx < len(dedup_plan.get("chunks", [])))
+                    else (seg_frame_counts[idx] if idx < len(seg_frame_counts) else None)
+                )
                 if resume and os.path.exists(seg_out_file) and os.path.getsize(seg_out_file) > 10000:
-                    logger.info(f"Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
-                    print(f"⏭️  Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước, tiếp tục...")
-                    total_frames_processed += dedup_plan["chunks"][idx]["total_frames"] if (dedup and dedup_plan) else (seg_frame_counts[idx] if idx < len(seg_frame_counts) else 192)
-                    continue
+                    if verify_segment_resume_frames(seg_out_file, expected_frames):
+                        logger.info(f"Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước ({expected_frames} frames), tiếp tục...")
+                        print(f"⏭️  Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước ({expected_frames} frames), tiếp tục...")
+                        total_frames_processed += expected_frames if expected_frames is not None else 192
+                        continue
+                    else:
+                        logger.warning(
+                            f"⚠️ Phân đoạn [{idx+1:02d}/{total_segs:02d}] '{seg_out_file}' không khớp số frame kỳ vọng "
+                            f"({expected_frames} frames) hoặc container bị lỗi. Tự động loại bỏ checkpoint hỏng và xử lý lại...",
+                            to_console=True
+                        )
+                        try:
+                            os.remove(seg_out_file)
+                        except OSError:
+                            pass
                 chunks_to_process.append((idx, seg_file, seg_out_file))
 
             if not chunks_to_process:
@@ -369,6 +386,17 @@ def run_upscale_pipeline(
                         else None
                     )
                     kept_indices = c_plan["kept_indices"] if c_plan else None
+                    chunk_total_frames = (
+                        c_plan["total_frames"]
+                        if c_plan
+                        else (seg_frame_counts[c_idx] if c_idx < len(seg_frame_counts) else None)
+                    )
+                    fps_val = float(meta.get("fps_num", 24000)) / max(1.0, float(meta.get("fps_den", 1001)))
+                    chunk_start_sec = (
+                        sum(seg_frame_counts[:c_idx]) / fps_val
+                        if (fps_val > 0 and c_idx <= len(seg_frame_counts))
+                        else float(c_idx * segment_time)
+                    )
 
                     if zero_disk and engine == "cuda":
                         t0 = time.time()
@@ -377,10 +405,14 @@ def run_upscale_pipeline(
                             width=int(meta.get("width", 1920)),
                             height=int(meta.get("height", 1080)),
                             kept_indices=kept_indices,
+                            hwaccel=False,
+                            total_frames=chunk_total_frames,
+                            source_video_path=input_path,
+                            chunk_start_sec=chunk_start_sec,
                         )
                         t_ext = time.time() - t0
                         f_count = len(raw_rgb)
-                        exp_frames = c_plan["total_frames"] if c_plan else f_count
+                        exp_frames = chunk_total_frames if chunk_total_frames is not None else f_count
                         return {
                             "idx": c_idx,
                             "seg_file": c_seg_file,
@@ -402,11 +434,21 @@ def run_upscale_pipeline(
                         time.sleep(0.2)
 
                     t0 = time.time()
-                    f_count = extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=kept_indices)
+                    f_count = extract_frames(
+                        c_seg_file,
+                        c_in_dir,
+                        fmt=fmt,
+                        kept_indices=kept_indices,
+                        source_video_path=input_path,
+                        chunk_start_sec=chunk_start_sec,
+                        total_frames=chunk_total_frames,
+                        width=int(meta.get("width", 1920)),
+                        height=int(meta.get("height", 1080)),
+                    )
                     t_ext = time.time() - t0
 
                     ai_count = f_count
-                    exp_frames = c_plan["total_frames"] if c_plan else f_count
+                    exp_frames = chunk_total_frames if chunk_total_frames is not None else f_count
 
                     return {
                         "idx": c_idx,
@@ -469,6 +511,17 @@ def run_upscale_pipeline(
                 def worker_finalize_zero_disk(proc_obj, tmp_p: str, final_p: str, seg_no: int) -> float:
                     """Hoàn tất đóng gói MP4 từ NVENC pipe (flush 32-frame lookahead + atomic rename) ở luồng nền."""
                     t0_w = time.time()
+                    err_txt = ""
+                    try:
+                        if getattr(proc_obj, "stderr", None) is not None:
+                            raw_err = proc_obj.stderr.read()
+                            if isinstance(raw_err, bytes):
+                                err_txt = raw_err.decode("utf-8", errors="replace").strip()
+                            elif isinstance(raw_err, str):
+                                err_txt = raw_err.strip()
+                            proc_obj.stderr.close()
+                    except Exception:
+                        pass
                     rc = proc_obj.wait()
                     if rc != 0 or not os.path.exists(tmp_p) or os.path.getsize(tmp_p) == 0:
                         if os.path.exists(tmp_p):
@@ -476,8 +529,9 @@ def run_upscale_pipeline(
                                 os.remove(tmp_p)
                             except OSError:
                                 pass
+                        err_suffix = f" | stderr: {err_txt}" if err_txt else ""
                         raise RuntimeError(
-                            f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {seg_no+1:02d} (exit code {rc})."
+                            f"FFmpeg NVENC Zero-Disk pipe thất bại tại phân đoạn {seg_no+1:02d} (exit code {rc}){err_suffix}."
                         )
                     os.replace(tmp_p, final_p)
                     return max(0.001, time.time() - t0_w)
@@ -502,6 +556,7 @@ def run_upscale_pipeline(
                         partial_paused = False
                         chunk_png_unit_sizes = []
                         sanity_checks_history = []
+                        last_pipeline_micro_timings = None
 
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
@@ -707,9 +762,47 @@ def run_upscale_pipeline(
                                                 input_hw=(in_h, in_w),
                                                 scale=2,
                                             )
+                                            if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
+                                                torch.cuda.empty_cache()
                                         else:
                                             wrapped_model = cuda_engine._zero_disk_wrapper
                                             cuda_engine._zero_disk_upscaler.ensure_resolution(in_h, in_w)
+
+                                        # Chốt an toàn VRAM cho NVENC 4K 10-bit (lookahead 32 + fullres cần ~1.1 GB VRAM):
+                                        # Nếu chunk trước vẫn đang flush NVENC nền và VRAM trống < 2.2 GB, đợi flush (~1.2s) xong trước khi mở phiên NVENC mới.
+                                        if (
+                                            future_encode is not None
+                                            and not future_encode.done()
+                                            and cuda_engine.device.type == "cuda"
+                                            and torch.cuda.is_available()
+                                        ):
+                                            try:
+                                                free_vram, _ = torch.cuda.mem_get_info(cuda_engine.device)
+                                                if free_vram < int(2.4 * (1024 ** 3)):
+                                                    torch.cuda.empty_cache()
+                                                    free_vram, _ = torch.cuda.mem_get_info(cuda_engine.device)
+                                                if free_vram < int(2.2 * (1024 ** 3)):
+                                                    prev_enc_elapsed = future_encode.result()
+                                                    total_enc_time += prev_enc_elapsed
+                                                    prev_c_idx = last_encode_item["target"][0]
+                                                    prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                                    prev_seg_elapsed = time.time() - last_seg_start
+                                                    logger.log_chunk_done(
+                                                        chunk_idx=prev_c_idx,
+                                                        total_chunks=total_segs,
+                                                        frames=prev_exp_frames,
+                                                        ai_time=last_ai_result["elapsed_seconds"],
+                                                        ai_fps=last_ai_result["fps"],
+                                                        enc_time=prev_enc_elapsed,
+                                                        total_chunk_time=prev_seg_elapsed,
+                                                        output_seg=last_encode_item["target"][2],
+                                                        t0_seconds=last_ai_result.get("t0_seconds"),
+                                                        steady_fps=last_ai_result.get("steady_fps"),
+                                                        rss_mb=last_ai_result.get("peak_rss_mb"),
+                                                    )
+                                                    future_encode = None
+                                            except Exception:
+                                                pass
 
                                         pipe_upscaler = cuda_engine._zero_disk_upscaler
                                         out_h, out_w = pipe_upscaler.output_hw
@@ -829,8 +922,18 @@ def run_upscale_pipeline(
                                             "fps": (num_unique_frames / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
                                             "steady_fps": (num_unique_frames / t_pipe_elapsed) if t_pipe_elapsed > 0 else 0.0,
                                             "t0_seconds": 0.0,
-                                            "peak_rss_mb": rss_now
+                                            "peak_rss_mb": rss_now,
+                                            "micro_timings": getattr(pipe_upscaler, "last_micro_timings", None),
                                         }
+                                        if getattr(pipe_upscaler, "last_micro_timings", None):
+                                            mt = pipe_upscaler.last_micro_timings
+                                            last_pipeline_micro_timings = mt
+                                            logger.info(
+                                                f"⏱️ [CUDA MICRO-TIMINGS] Phân đoạn {c_idx+1:02d}: "
+                                                f"TRT={mt.get('avg_trt_ms', 0):.1f}ms, Triton={mt.get('avg_triton_ms', 0):.1f}ms, "
+                                                f"D2H={mt.get('avg_d2h_ms', 0):.1f}ms, H2D={mt.get('avg_h2d_ms', 0):.1f}ms (avg/batch)",
+                                                to_console=False
+                                            )
                                     else:
                                         ai_result = upscale_frames_with_fallback(
                                             input_dir=c_in_dir,
@@ -942,6 +1045,17 @@ def run_upscale_pipeline(
                                             if extracted.get("chunk_plan")
                                             else None
                                         )
+                                        retry_total_frames = (
+                                            extracted["chunk_plan"]["total_frames"]
+                                            if extracted.get("chunk_plan")
+                                            else (seg_frame_counts[c_idx] if c_idx < len(seg_frame_counts) else None)
+                                        )
+                                        fps_retry = float(meta.get("fps_num", 24000)) / max(1.0, float(meta.get("fps_den", 1001)))
+                                        retry_start_sec = (
+                                            sum(seg_frame_counts[:c_idx]) / fps_retry
+                                            if (fps_retry > 0 and c_idx <= len(seg_frame_counts))
+                                            else float(c_idx * segment_time)
+                                        )
                                         if zero_disk and engine == "cuda":
                                             if extracted.get("raw_rgb_frames") is None:
                                                 extracted["raw_rgb_frames"] = extract_frames_raw_rgb24(
@@ -949,11 +1063,24 @@ def run_upscale_pipeline(
                                                     width=int(meta["width"]),
                                                     height=int(meta["height"]),
                                                     kept_indices=kept_idx_retry,
-                                                    hwaccel=True,
+                                                    hwaccel=False,
+                                                    total_frames=retry_total_frames,
+                                                    source_video_path=input_path,
+                                                    chunk_start_sec=retry_start_sec,
                                                 )
                                         elif not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
                                             os.makedirs(c_in_dir, exist_ok=True)
-                                            extract_frames(c_seg_file, c_in_dir, fmt=fmt, kept_indices=kept_idx_retry)
+                                            extract_frames(
+                                                c_seg_file,
+                                                c_in_dir,
+                                                fmt=fmt,
+                                                kept_indices=kept_idx_retry,
+                                                source_video_path=input_path,
+                                                chunk_start_sec=retry_start_sec,
+                                                total_frames=retry_total_frames,
+                                                width=int(meta["width"]),
+                                                height=int(meta["height"]),
+                                            )
                                         time.sleep(1.0)
                                         continue
                                     elif is_enospc:
@@ -1214,8 +1341,8 @@ def run_upscale_pipeline(
 
                 probe_final = mux_res.get("output_meta") or probe_video(output_path)
                 probe_src = mux_res.get("source_meta") or meta
-                final_frames = probe_final.get("nb_frames")
-                src_frames = probe_src.get("nb_frames")
+                final_frames = probe_final.get("nb_frames") or mux_res.get("video_frame_count", {}).get("output_frames", 0)
+                src_frames = probe_src.get("nb_frames") or mux_res.get("video_frame_count", {}).get("source_frames", 0)
                 final_dur = probe_final.get("duration", 0.0)
                 src_dur = probe_src.get("duration", 0.0)
                 drift_s = abs(final_dur - src_dur)
@@ -1250,6 +1377,7 @@ def run_upscale_pipeline(
                         "total_checks": len(sanity_checks_history),
                         "checks": sanity_checks_history
                     },
+                    "micro_timings": last_pipeline_micro_timings,
                     "mux_audit": mux_res
                 }
                 with open(audit_file, "w", encoding="utf-8") as f:

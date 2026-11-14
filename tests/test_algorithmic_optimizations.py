@@ -298,3 +298,63 @@ def test_fused_mpdecimate_dis_matches_two_pass_and_direct_readinto(tmp_path):
         assert f.shape == (180, 320, 3)
         assert f.dtype == np.uint8
         assert f.flags["C_CONTIGUOUS"]
+
+
+def test_pipe_upscaler_repeated_frames_and_drain_worker():
+    """
+    Xác minh DoubleBufferedPipeUpscaler:
+    - _write_frame_to_pipe hỗ trợ repeats > 1 với 1 lần cast memoryview duy nhất.
+    - _PipeDrainWorker xả dữ liệu khung hình vào pipe không lỗi và xử lý BrokenPipeError báo đúng stderr.
+    """
+    from unittest.mock import MagicMock
+    from src.trt_zero_copy_upscaler import _PipeDrainWorker
+
+    fake_proc = MagicMock()
+    fake_proc.stdin.write.side_effect = lambda chunk: len(chunk)
+
+    buf = np.zeros((100, 100), dtype=np.uint8)
+    DoubleBufferedPipeUpscaler._write_frame_to_pipe(fake_proc, buf, repeats=3)
+    # buf size = 10,000 bytes. With write_step=8MB, 1 call per repeat = 3 calls total
+    assert fake_proc.stdin.write.call_count == 3
+
+    # Test _PipeDrainWorker
+    worker = _PipeDrainWorker(fake_proc, DoubleBufferedPipeUpscaler._write_frame_to_pipe)
+    worker.submit(buf, repeats=2)
+    worker.close()
+    assert fake_proc.stdin.write.call_count == 5
+
+
+def test_pipe_upscaler_micro_timings_structure():
+    """
+    Xác minh process_frames_to_pipe khi bật enable_micro_timings=True
+    tạo đầy đủ cấu trúc last_micro_timings.
+    """
+    from unittest.mock import MagicMock
+    def dummy_model(x):
+        return F.interpolate(x, scale_factor=2.0)
+
+    upscaler = DoubleBufferedPipeUpscaler(
+        dummy_model,
+        batch_size=2,
+        device=torch.device("cpu"),
+        input_hw=(100, 100),
+        scale=2,
+        enable_micro_timings=True,
+    )
+    fake_proc = MagicMock()
+    fake_proc.stdin.write.side_effect = lambda chunk: len(chunk)
+
+    frames = [np.zeros((100, 100, 3), dtype=np.uint8) for _ in range(4)]
+    repeats = [1, 2, 1, 1]
+
+    n_written = upscaler.process_frames_to_pipe(
+        frames,
+        repeats,
+        fake_proc,
+        cyclic_dedup=False,
+    )
+    assert n_written == sum(repeats)
+    assert upscaler.last_micro_timings is not None
+    assert "num_batches" in upscaler.last_micro_timings
+    assert "avg_trt_ms" in upscaler.last_micro_timings
+    assert "avg_triton_ms" in upscaler.last_micro_timings

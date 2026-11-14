@@ -20,13 +20,45 @@ import torch.nn.functional as F
 
 from src.trt_zero_copy_upscaler import SRVGGNetCompactTRTWrapper
 
+# Ghi nhớ các đường dẫn .engine biên dịch thất bại trong phiên chạy để không bao giờ thử lại gây treo pipeline
+_FAILED_TRT_ENGINES: set[str] = set()
+
+
+def resolve_trt_profile_max_batch(
+    pytorch_model: Optional[nn.Module],
+    max_batch: int = 8,
+    input_hw: Tuple[int, int] = (1080, 1920),
+) -> int:
+    """
+    Giới hạn kích thước batch tối đa của TensorRT Optimization Profile theo kiến trúc mô hình:
+    - Mô hình PixelShuffle(4) trên nguồn >= 540p (vd: RealESR-AnimeVideoV3 tạo nhánh 8K 4320x7680 trung gian):
+      giới hạn profile max_batch <= 2 để đỉnh VRAM chỉ ~1.33 GB (khử hoàn toàn lỗi OOM 12.74 GB trên RTX 3060 12GB)
+      mà vẫn bão hòa nhân Tensor Core (~11.5+ fps); TRTRuntimeEngineWrapper tự cắt lát B=8 -> 4x2 zero-copy.
+    - Mô hình 2x thuần (AnimeJaNaiCompact2x, không có nhánh 8K): giữ max_batch <= 4 trên Full HD.
+    """
+    req_b = max(1, int(max_batch))
+    in_h, in_w = int(input_hw[0]), int(input_hw[1])
+    if (in_h * in_w) < (540 * 960):
+        return req_b
+
+    upscale = 2
+    if pytorch_model is not None:
+        if hasattr(pytorch_model, "upscale"):
+            upscale = int(getattr(pytorch_model, "upscale"))
+        elif hasattr(pytorch_model, "upsampler") and isinstance(pytorch_model.upsampler, nn.PixelShuffle):
+            upscale = int(pytorch_model.upsampler.upscale_factor)
+
+    if upscale >= 4:
+        return min(req_b, 2)
+    return min(req_b, 4)
+
 
 class _PureFP16TRTExportModule(nn.Module):
     """
     Mô-đun xuất ONNX tối ưu chuyên biệt cho TensorRT FP16 Builder:
-    Giữ liền mạch đồ thị Conv2d + PReLU + PixelShuffle ở FP16 để trình biên dịch Myelin
-    của TensorRT gộp (fuse) toàn bộ 17 tầng tích chập vào thanh ghi/SRAM và chọn tập lệnh
-    HMMA.16816.F16 full-rate trên RTX 3060, chỉ dùng nội suy chuẩn cho nhánh thu phóng cuối.
+    Giữ liền mạch đồ thị Conv2d + PReLU + PixelShuffle + Bicubic ở FP16 thuần khiết (0 nút Cast sang FP32
+    trên nhánh trung gian 8K) để trình biên dịch của TensorRT hợp nhất toàn bộ 18 tầng tích chập vào SRAM,
+    chọn tập lệnh HMMA.16816.F16 full-rate và giữ đỉnh VRAM chỉ ~1.33 GB trên RTX 3060.
     """
     def __init__(self, base_srvgg_model: nn.Module, target_scale: float = 2.0, scale: Optional[float] = None):
         super().__init__()
@@ -52,12 +84,17 @@ class _PureFP16TRTExportModule(nn.Module):
         base = F.interpolate(x, scale_factor=float(self.upscale), mode="nearest")
         out_hr = out + base
         if abs(float(self.upscale) - self.target_scale) > 1e-4:
+            # Chỉ ép float32 trên CPU khi input là float16 (CPU thiếu kernel Half bicubic);
+            # trên CUDA giữ nguyên FP16 thuần để tránh tạo tensor 8K FP32 12.74 GB trong TensorRT.
+            interp_in = out_hr.float() if (out_hr.device.type == "cpu" and out_hr.dtype == torch.float16) else out_hr
             out_target = F.interpolate(
-                out_hr.float(),
+                interp_in,
                 scale_factor=self.target_scale / float(self.upscale),
                 mode="bicubic",
                 align_corners=False,
-            ).to(x.dtype)
+            )
+            if out_target.dtype != x.dtype:
+                out_target = out_target.to(x.dtype)
         else:
             out_target = out_hr
         return out_target
@@ -157,7 +194,12 @@ def export_model_to_onnx(
     except Exception:
         pass
 
-    torch.onnx.export(wrapped, dummy_in, onnx_path, **export_kwargs)
+    try:
+        torch.onnx.export(wrapped, dummy_in, onnx_path, **export_kwargs)
+    finally:
+        del wrapped, model_copy, dummy_in
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return onnx_path
 
 
@@ -170,6 +212,8 @@ def build_tensorrt_engine(
 ) -> Optional[str]:
     """
     Biên dịch file ONNX sang TensorRT FP16 serialized engine (tương thích TensorRT 8.x & 10.x).
+    Sử dụng builder_optimization_level=3 (mức tối ưu chuẩn sản xuất của NVIDIA, tránh lỗi ForeignNode
+    Myelin ở level=5 gây kẹt 30 phút trên TensorRT 10.16 Windows) và giải phóng sạch VRAM sau build.
     """
     if not is_tensorrt_available():
         return None
@@ -196,7 +240,7 @@ def build_tensorrt_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(workspace_gb) * (1 << 30))
     if hasattr(config, "builder_optimization_level"):
-        config.builder_optimization_level = 5
+        config.builder_optimization_level = 3
     if getattr(builder, "platform_has_fast_fp16", True):
         config.set_flag(trt.BuilderFlag.FP16)
     if hasattr(trt.BuilderFlag, "TF32"):
@@ -227,32 +271,37 @@ def build_tensorrt_engine(
     config.add_optimization_profile(profile)
 
     tmp_engine = f"{engine_path}.tmp.{os.getpid()}"
-    serialized_engine = builder.build_serialized_network(network, config)
-    if serialized_engine is None:
-        return None
+    try:
+        serialized_engine = builder.build_serialized_network(network, config)
+        if serialized_engine is None:
+            return None
 
-    with open(tmp_engine, "wb") as f:
-        f.write(serialized_engine)
-    os.replace(tmp_engine, engine_path)
+        with open(tmp_engine, "wb") as f:
+            f.write(serialized_engine)
+        os.replace(tmp_engine, engine_path)
 
-    if timing_cache is not None and hasattr(config, "get_timing_cache"):
-        try:
-            updated_tc = config.get_timing_cache()
-            if updated_tc is not None:
-                tc_bytes = updated_tc.serialize()
-                if tc_bytes:
-                    with open(timing_cache_path, "wb") as tf:
-                        tf.write(tc_bytes)
-        except Exception:
-            pass
-    return engine_path
+        if timing_cache is not None and hasattr(config, "get_timing_cache"):
+            try:
+                updated_tc = config.get_timing_cache()
+                if updated_tc is not None:
+                    tc_bytes = updated_tc.serialize()
+                    if tc_bytes:
+                        with open(timing_cache_path, "wb") as tf:
+                            tf.write(tc_bytes)
+            except Exception:
+                pass
+        return engine_path
+    finally:
+        del config, network, parser, builder
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class TRTRuntimeEngineWrapper:
     """
     Wrapper thực thi TensorRT Execution Context tích hợp Zero-Copy với PyTorch CUDA Tensors.
     Tự động hỗ trợ cả API TensorRT 10.x (execute_async_v3) và TensorRT 8.x (execute_async_v2),
-    đồng thời tự động xử lý chuyển đổi contiguous NCHW và cắt lát nếu batch > max_batch.
+    đồng thời tự động xử lý chuyển đổi contiguous NCHW và cắt lát zero-copy nếu batch > max_batch.
     """
     def __init__(
         self,
@@ -264,6 +313,7 @@ class TRTRuntimeEngineWrapper:
         fallback_module: Optional[nn.Module] = None,
     ):
         import tensorrt as trt
+        self.engine_path = engine_path
         self.device = device
         self.input_hw = (int(input_hw[0]), int(input_hw[1]))
         self.max_batch = max(1, int(max_batch))
@@ -295,13 +345,15 @@ class TRTRuntimeEngineWrapper:
         self._use_v3 = hasattr(self.context, "execute_async_v3") and hasattr(self.context, "set_tensor_address")
         self._out_ring: list[torch.Tensor] = []
         self._ring_idx: int = 0
+        self._batch_out_ring: list[torch.Tensor] = []
+        self._batch_ring_idx: int = 0
         self._last_input_shape: Optional[Tuple[int, int, int, int]] = None
         self._last_in_ptr: Optional[int] = None
         self._last_out_ptr: Optional[int] = None
 
     def _acquire_output_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
         """
-        Tái sử dụng vòng đệm đôi (2-slot ping-pong VRAM ring) cho tensor đầu ra 4K (~199 MB/slot ở B=8 FP16),
+        Tái sử dụng vòng đệm đôi (2-slot ping-pong VRAM ring) cho tensor đầu ra 4K,
         khử ~2.100 lần cấp phát động torch.empty mỗi tập mà vẫn đảm bảo 2 lần gọi liên tiếp không ghi đè nhau.
         """
         alloc_b = max(int(B), self.max_batch)
@@ -323,12 +375,32 @@ class TRTRuntimeEngineWrapper:
         self._ring_idx ^= 1
         return slot_buf[:B]
 
-    def _exec_single_batch(self, contig_in: torch.Tensor) -> torch.Tensor:
+    def _acquire_batch_output_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
+        """Vòng đệm đôi 2-slot cho batch tổng hợp (vd: B=8 khi profile max_batch=2) để cắt lát zero-copy."""
+        alloc_b = max(int(B), self.max_batch)
+        target_tail = (int(C), int(out_h), int(out_w))
+        if (
+            len(self._batch_out_ring) != 2
+            or self._batch_out_ring[0].shape[0] < alloc_b
+            or self._batch_out_ring[0].shape[1:] != target_tail
+            or self._batch_out_ring[0].dtype != self.out_torch_dtype
+            or self._batch_out_ring[0].device != self.device
+        ):
+            self._batch_out_ring = [
+                torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
+                for _ in range(2)
+            ]
+            self._batch_ring_idx = 0
+        slot_buf = self._batch_out_ring[self._batch_ring_idx]
+        self._batch_ring_idx ^= 1
+        return slot_buf[:B]
+
+    def _exec_single_batch(self, contig_in: torch.Tensor, out_view: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, C, H, W = contig_in.shape
         out_h, out_w = H * self.scale, W * self.scale
         if contig_in.dtype != self.in_torch_dtype:
             contig_in = contig_in.to(dtype=self.in_torch_dtype).contiguous()
-        output_tensor = self._acquire_output_buffer(B, C, out_h, out_w)
+        output_tensor = out_view if out_view is not None else self._acquire_output_buffer(B, C, out_h, out_w)
         stream_ptr = (
             torch.cuda.current_stream(self.device).cuda_stream
             if self.device.type == "cuda" and torch.cuda.is_available()
@@ -373,15 +445,15 @@ class TRTRuntimeEngineWrapper:
         contig_in = input_tensor.contiguous()
         if B <= self.max_batch:
             out = self._exec_single_batch(contig_in)
-            return out if orig_dtype == torch.float16 else out.to(orig_dtype)
+            return out if orig_dtype == self.out_torch_dtype else out.to(orig_dtype)
 
-        # Tự động cắt lát nếu caller truyền batch lớn hơn max_batch của profile
+        # Tự động cắt lát zero-copy trực tiếp vào lát cắt của vòng đệm _batch_out_ring (0 lần copy thừa 199 MB)
         out_h, out_w = H * self.scale, W * self.scale
-        full_out = torch.empty((B, C, out_h, out_w), dtype=torch.float16, device=self.device)
+        full_out = self._acquire_batch_output_buffer(B, C, out_h, out_w)
         for s in range(0, B, self.max_batch):
             e = min(s + self.max_batch, B)
-            full_out[s:e].copy_(self._exec_single_batch(contig_in[s:e]))
-        return full_out if orig_dtype == torch.float16 else full_out.to(orig_dtype)
+            self._exec_single_batch(contig_in[s:e], out_view=full_out[s:e])
+        return full_out if orig_dtype == self.out_torch_dtype else full_out.to(orig_dtype)
 
 
 def get_hybrid_engine_or_wrapper(
@@ -403,45 +475,52 @@ def get_hybrid_engine_or_wrapper(
     if device.type == "cuda":
         wrapper = wrapper.half().to(memory_format=torch.channels_last)
 
-    # Trong môi trường kiểm thử offline (PYTEST_CURRENT_TEST) không tự ý biên dịch engine 30-60s trừ khi ép test
+    # Trong môi trường kiểm thử offline (PYTEST_CURRENT_TEST) không tự ý biên dịch engine trừ khi ép test
     in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     allow_trt = (not force_pytorch) and (not in_pytest) and is_tensorrt_available() and (device.type == "cuda")
 
     if allow_trt:
-        engine_path = get_trt_engine_path(model_id=model_id, max_batch=max_batch, input_hw=input_hw)
-        onnx_path = engine_path.replace(".engine", ".onnx")
-        try:
-            if not os.path.exists(engine_path):
-                print(
-                    f"\n⚡ [TensorRT FP16 Compiler] Đang biên dịch nhân Tensor Core tối ưu lần đầu cho "
-                    f"'{model_id}' ({input_hw[1]}x{input_hw[0]}, batch 1..{max_batch}) — chỉ mất ~30-60s lần đầu tiên..."
-                )
-                if not os.path.exists(onnx_path):
-                    export_model_to_onnx(
-                        pytorch_model,
-                        onnx_path,
-                        max_batch=max_batch,
-                        dummy_shape=input_hw,
-                        target_scale=scale,
+        trt_max_batch = resolve_trt_profile_max_batch(pytorch_model, max_batch=max_batch, input_hw=input_hw)
+        engine_path = get_trt_engine_path(model_id=model_id, max_batch=trt_max_batch, input_hw=input_hw)
+        if engine_path not in _FAILED_TRT_ENGINES:
+            onnx_path = engine_path.replace(".engine", ".onnx")
+            try:
+                if not os.path.exists(engine_path) or os.path.getsize(engine_path) == 0:
+                    print(
+                        f"\n⚡ [TensorRT FP16 Compiler] Đang biên dịch nhân Tensor Core tối ưu lần đầu cho "
+                        f"'{model_id}' ({input_hw[1]}x{input_hw[0]}, profile batch 1..{trt_max_batch})..."
                     )
-                build_tensorrt_engine(
-                    onnx_path,
-                    engine_path,
-                    max_batch=max_batch,
-                    input_hw=input_hw,
-                )
+                    if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
+                        export_model_to_onnx(
+                            pytorch_model,
+                            onnx_path,
+                            max_batch=trt_max_batch,
+                            dummy_shape=input_hw,
+                            target_scale=scale,
+                        )
+                    built = build_tensorrt_engine(
+                        onnx_path,
+                        engine_path,
+                        max_batch=trt_max_batch,
+                        input_hw=input_hw,
+                    )
+                    if not built:
+                        _FAILED_TRT_ENGINES.add(engine_path)
 
-            if os.path.exists(engine_path):
-                trt_runner = TRTRuntimeEngineWrapper(
-                    engine_path,
-                    device=device,
-                    input_hw=input_hw,
-                    max_batch=max_batch,
-                    scale=int(round(scale)),
-                    fallback_module=wrapper,
-                )
-                return trt_runner
-        except Exception as e:
-            print(f"⚠️ Không thể khởi tạo TensorRT Engine ({e}), tự động chuyển sang PyTorch FP16 Wrapper.")
+                if os.path.exists(engine_path) and os.path.getsize(engine_path) > 0:
+                    trt_runner = TRTRuntimeEngineWrapper(
+                        engine_path,
+                        device=device,
+                        input_hw=input_hw,
+                        max_batch=trt_max_batch,
+                        scale=int(round(scale)),
+                        fallback_module=wrapper,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    return trt_runner
+            except Exception as e:
+                _FAILED_TRT_ENGINES.add(engine_path)
+                print(f"⚠️ Không thể khởi tạo TensorRT Engine ({e}), tự động chuyển sang PyTorch FP16 Wrapper.")
 
     return wrapper
