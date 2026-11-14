@@ -24,7 +24,7 @@ Tạo lập và hoàn thiện hồ sơ bàn giao toàn diện sau khi hoàn tấ
   - `5eaf4d7`: `feat(m2): integrate PyAV 18.1.0 in-process metadata and parameterize track defaults CLI` (Milestone 2)
   - `d9bbc5d`: `feat(subtrans): clean SQLite connection closing and FTS5 2-gram/3-gram Kanji RAG` (Milestone 3)
   - `ac6b061`: `feat(model-engine): integrate Spandrel 0.4.2 Native 2x & Faster-Whisper Turbo` (Milestone 4)
-  - `[M5 Commit]`: `feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization` (Milestone 5)
+  - `d6a7853`: `feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization` (Milestone 5)
 - **File đã tạo mới và sửa đổi trong M5:**
   - `tests/test_e2e_group_a.py` (82 test cases)
   - `tests/test_e2e_group_b.py` (66 test cases)

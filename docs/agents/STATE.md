@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `d9bbc5d` (`feat(subtrans): clean SQLite connection closing and FTS5 2-gram/3-gram Kanji RAG`)
+> **Commit Baseline:** `d6a7853` (`feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
