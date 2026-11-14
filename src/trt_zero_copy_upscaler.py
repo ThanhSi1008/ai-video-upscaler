@@ -94,6 +94,21 @@ if HAS_TRITON:
         b10 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
         b11 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
 
+        # Clamp out-of-gamut SR model RGB overshoots (< 0.0 or > 1.0) in registers before signed BT.709 matrix
+        # so Cb/Cr channels never cross-bleed on bright Sakuga highlights (matches PNG mode clamp(0.0, 1.0))
+        r00 = tl.minimum(tl.maximum(r00, 0.0), 1.0)
+        r01 = tl.minimum(tl.maximum(r01, 0.0), 1.0)
+        r10 = tl.minimum(tl.maximum(r10, 0.0), 1.0)
+        r11 = tl.minimum(tl.maximum(r11, 0.0), 1.0)
+        g00 = tl.minimum(tl.maximum(g00, 0.0), 1.0)
+        g01 = tl.minimum(tl.maximum(g01, 0.0), 1.0)
+        g10 = tl.minimum(tl.maximum(g10, 0.0), 1.0)
+        g11 = tl.minimum(tl.maximum(g11, 0.0), 1.0)
+        b00 = tl.minimum(tl.maximum(b00, 0.0), 1.0)
+        b01 = tl.minimum(tl.maximum(b01, 0.0), 1.0)
+        b10 = tl.minimum(tl.maximum(b10, 0.0), 1.0)
+        b11 = tl.minimum(tl.maximum(b11, 0.0), 1.0)
+
         # 1. Compute Luma Y for 4 pixels (ITU-R BT.709 Limited Range [64..940])
         y_val00 = 64.0 + 186.2376 * r00 + 626.5152 * g00 + 63.2472 * b00
         y_val01 = 64.0 + 186.2376 * r01 + 626.5152 * g01 + 63.2472 * b01
@@ -178,11 +193,16 @@ class GPUColorConverterP010LE:
     @staticmethod
     def _p010le_core(rgb_slice: torch.Tensor) -> torch.Tensor:
         B, _, H, W = rgb_slice.shape
-        # Tách kênh trực tiếp và cộng dồn tại chỗ bằng in-place add_ với hệ số alpha vô hướng
-        # để KHÔNG cấp phát bất kỳ tensor GPU tạm thời nào cho các hệ số ITU-R BT.709
-        r = rgb_slice[:, 0].float()
-        g = rgb_slice[:, 1].float()
-        b = rgb_slice[:, 2].float()
+        # Clamp RGB overshoots/NaNs về miền hợp lệ [0.0, 1.0] trước phép nhân ma trận có dấu ITU-R BT.709
+        # (khớp tuyệt đối với out_tensor.clamp(0.0, 1.0) của chế độ PNG và tránh rò rỉ sắc độ Cb/Cr vùng chói)
+        rgb_clamped = torch.clamp(
+            torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0),
+            0.0,
+            1.0,
+        )
+        r = rgb_clamped[:, 0]
+        g = rgb_clamped[:, 1]
+        b = rgb_clamped[:, 2]
 
         # 1. Kênh Luma Y [B, H, W] theo chuẩn ITU-R BT.709 Limited Range [64..940]
         y = torch.empty_like(r).fill_(64.0)
@@ -192,7 +212,7 @@ class GPUColorConverterP010LE:
         y_p010 = (torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32) << 6).to(torch.int16)
 
         # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling trước khi tính UV [64..960]
-        rgb_sub = F.avg_pool2d(rgb_slice.float(), kernel_size=2, stride=2)
+        rgb_sub = F.avg_pool2d(rgb_clamped, kernel_size=2, stride=2)
         rs = rgb_sub[:, 0]
         gs = rgb_sub[:, 1]
         bs = rgb_sub[:, 2]

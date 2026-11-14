@@ -457,3 +457,170 @@ def test_auto_download_zip_extraction_and_sha256_verification(monkeypatch, tmp_p
             "sha256": "0" * 64,
         })
     assert not bad_pth.exists()
+
+
+def test_p010le_clamps_out_of_gamut_rgb_overshoots_before_bt709():
+    """Kiểm tra P010LE clamp RGB overshoots (<0 hoặc >1) trước ma trận BT.709 để không rò rỉ sắc độ Cb/Cr."""
+    from src.trt_zero_copy_upscaler import GPUColorConverterP010LE
+
+    conv = GPUColorConverterP010LE(device=torch.device("cpu"))
+    # R > 1.0 khi G < 1.0 trước đây làm trôi U/V tới 15 codewords dù chưa chạm biên [64..960]
+    overshoot = torch.tensor(
+        [[[[1.08]], [[0.92]], [[0.80]]], [[[-0.06]], [[0.50]], [[0.45]]]],
+        dtype=torch.float32,
+    ).expand(2, 3, 8, 8).contiguous()
+    pre_clamped = overshoot.clamp(0.0, 1.0)
+
+    out_overshoot = conv.rgb_to_p010le(overshoot)
+    out_clamped = conv._p010le_core(pre_clamped)
+    assert torch.equal(out_overshoot, out_clamped), (
+        "RGB overshoot ngoài [0, 1] phải khớp bit-exact với RGB đã clamp trước ma trận BT.709!"
+    )
+
+
+def test_auto_download_requires_valid_sha256_and_handles_querystring_appledouble_zip(monkeypatch, tmp_path):
+    """Kiểm tra _auto_download_registered_weights từ chối thiếu SHA-256/HTTP và bỏ qua __MACOSX / ._ trong .zip?token=..."""
+    import hashlib
+    import io
+    import zipfile
+
+    dummy_worker = object.__new__(GPUPersistentWorker)
+    dummy_worker.model_id = "test-sec-model"
+    target_pth = tmp_path / "clean_target.pth"
+    dummy_worker.weights_path = str(target_pth)
+
+    network_called = {"count": 0}
+
+    def fail_if_called(*args, **kwargs):
+        network_called["count"] += 1
+        raise AssertionError("Không được gọi mạng khi thiếu SHA-256 hoặc URL không phải HTTPS!")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_if_called)
+
+    # 1. Thiếu hoặc sai định dạng SHA-256 64-hex -> từ chối ngay trước khi tải
+    for bad_sha in (None, "", "abc123", "z" * 64):
+        with pytest.raises(RuntimeError):
+            dummy_worker._auto_download_registered_weights({
+                "name": "Missing SHA",
+                "source_url": "https://example.com/weights.pth",
+                "sha256": bad_sha,
+            })
+    # 2. HTTP không mã hóa -> từ chối ngay trước khi tải
+    with pytest.raises(RuntimeError):
+        dummy_worker._auto_download_registered_weights({
+            "name": "Insecure HTTP",
+            "source_url": "http://example.com/weights.pth",
+            "sha256": "a" * 64,
+        })
+    assert network_called["count"] == 0
+
+    # 3. URL .zip có query string + chứa thư mục và rác AppleDouble __MACOSX / ._clean_target.pth
+    real_payload = b"REAL_VERIFIED_WEIGHTS_BYTES_98765"
+    real_sha = hashlib.sha256(real_payload).hexdigest()
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("pack/", b"")
+        zf.writestr("__MACOSX/pack/clean_target.pth", b"APPLEDOUBLE_JUNK_1")
+        zf.writestr("pack/._clean_target.pth", b"APPLEDOUBLE_JUNK_2")
+        zf.writestr("pack/clean_target.pth", real_payload)
+    zip_bytes = zip_buf.getvalue()
+
+    class FakeHTTPResp(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=120: FakeHTTPResp(zip_bytes))
+    dummy_worker._auto_download_registered_weights({
+        "name": "Signed Zip URL",
+        "source_url": "https://example.com/releases/pack.zip?token=xyz&dl=1",
+        "sha256": real_sha,
+    })
+    assert target_pth.exists()
+    assert target_pth.read_bytes() == real_payload
+
+
+def test_get_gpu_worker_recreates_on_device_or_weights_change(monkeypatch, tmp_path):
+    """Kiểm tra singleton get_gpu_worker tạo mới worker khi đổi weights_path hoặc device."""
+    import src.cuda_engine as ce
+
+    created = []
+
+    class DummyWorker:
+        def __init__(self, model_id, weights_path, precision="fp16", max_chunks_before_restart=10, device=None, batch_size=None, use_tensorrt=True):
+            self.model_id = model_id
+            self.weights_path = weights_path
+            self.precision = precision.lower()
+            self.device = torch.device(device or "cpu")
+            self.batch_size = batch_size or 1
+            self.use_tensorrt = bool(use_tensorrt)
+            created.append(self)
+
+    monkeypatch.setattr(ce, "GPUPersistentWorker", DummyWorker)
+    monkeypatch.setattr(ce, "_GLOBAL_GPU_WORKER", None)
+
+    w1_path = str(tmp_path / "m1.pth")
+    w2_path = str(tmp_path / "m2.pth")
+
+    inst1 = ce.get_gpu_worker("custom-id", w1_path, precision="fp32", device="cpu", batch_size=2)
+    inst1_reuse = ce.get_gpu_worker("custom-id", w1_path, precision="fp32", device="cpu", batch_size=2)
+    assert inst1 is inst1_reuse
+    assert len(created) == 1
+
+    # Đổi weights_path trên cùng model_id -> bắt buộc khởi tạo mới
+    inst2 = ce.get_gpu_worker("custom-id", w2_path, precision="fp32", device="cpu", batch_size=2)
+    assert inst2 is not inst1
+    assert len(created) == 2
+
+    # Đổi device từ cpu -> meta (hoặc cuda giả lập) -> bắt buộc khởi tạo mới
+    inst3 = ce.get_gpu_worker("custom-id", w2_path, precision="fp32", device="meta", batch_size=2)
+    assert inst3 is not inst2
+    assert inst3.device.type == "meta"
+    assert len(created) == 3
+
+
+def test_transcribe_japanese_audio_no_empty_srt_and_cleans_temp_wav(monkeypatch, tmp_path):
+    """Khi 0 câu thoại hợp lệ hoặc lỗi giữa chừng: không tạo file .srt rỗng và luôn xóa .temp.wav."""
+    def mock_run_impl(cmd, *args, **kwargs):
+        if cmd[0] == "ffprobe":
+            return MagicMock(returncode=0, stdout='{"streams": [{"index": 0, "channels": 2}]}')
+        if "-vn" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"RIFF" + b"\x00" * 64)
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("subprocess.run", mock_run_impl)
+    monkeypatch.setattr("src.config.is_gpu_lock_held_by_other", lambda: 99999)
+
+    fake_video = str(tmp_path / "silent_ep.mkv")
+    with open(fake_video, "w", encoding="utf-8") as f:
+        f.write("mock")
+
+    # 1. Trường hợp 0 câu thoại -> trả về False, KHÔNG ghi file .ja.srt rỗng, xóa sạch .temp.wav
+    class SilentWhisper:
+        def __init__(self, *a, **kw):
+            pass
+        def transcribe(self, audio_path, **kw):
+            return iter([]), MagicMock()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", MagicMock(WhisperModel=SilentWhisper))
+    out_srt_silent = tmp_path / "silent_ep.ja.srt"
+    temp_wav_silent = tmp_path / "silent_ep.ja.temp.wav"
+    assert transcribe_japanese_audio(fake_video, str(out_srt_silent)) is False
+    assert not out_srt_silent.exists(), "Không được ghi file .srt rỗng 0 cue làm hỏng phát hiện track JA!"
+    assert not temp_wav_silent.exists(), "Phải dọn sạch .temp.wav sau khi nhận diện 0 cue!"
+
+    # 2. Trường hợp transcribe ném ngoại lệ -> trả về False và vẫn xóa sạch .temp.wav trong finally
+    class CrashingWhisper:
+        def __init__(self, *a, **kw):
+            pass
+        def transcribe(self, audio_path, **kw):
+            raise RuntimeError("Simulated CTranslate2 failure")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", MagicMock(WhisperModel=CrashingWhisper))
+    out_srt_err = tmp_path / "err_ep.ja.srt"
+    temp_wav_err = tmp_path / "err_ep.ja.temp.wav"
+    assert transcribe_japanese_audio(fake_video, str(out_srt_err)) is False
+    assert not out_srt_err.exists()
+    assert not temp_wav_err.exists(), "Phải dọn sạch .temp.wav trong finally ngay cả khi Whisper ném lỗi!"

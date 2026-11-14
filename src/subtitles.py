@@ -129,58 +129,74 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
 
         glossary_prompt = _build_whisper_initial_prompt(video_path)
         raw_segments = []
+        fw_model = None
+        model = None
 
-        # Nếu môi trường test đang inject mock `whisper` vào sys.modules, dùng trực tiếp nhánh `whisper`
-        whisper_mod_in_sys = sys.modules.get("whisper")
-        use_faster_whisper = whisper_mod_in_sys is None
-        if use_faster_whisper:
-            try:
-                from faster_whisper import WhisperModel  # type: ignore
+        try:
+            # Nếu môi trường test đang inject mock `whisper` vào sys.modules, dùng trực tiếp nhánh `whisper`
+            whisper_mod_in_sys = sys.modules.get("whisper")
+            use_faster_whisper = whisper_mod_in_sys is None
+            if use_faster_whisper:
+                try:
+                    from faster_whisper import WhisperModel  # type: ignore
 
-                compute_type = "float16" if device == "cuda" else "int8"
-                fw_model = WhisperModel(model_size, device=device, compute_type=compute_type)
-                fw_kwargs = {
+                    compute_type = "float16" if device == "cuda" else "int8"
+                    fw_model = WhisperModel(model_size, device=device, compute_type=compute_type)
+                    fw_kwargs = {
+                        "language": "ja",
+                        "task": "transcribe",
+                        "condition_on_previous_text": False,
+                        "no_speech_threshold": 0.6,
+                        "log_prob_threshold": -1.0,
+                        "compression_ratio_threshold": 2.0,
+                        "vad_filter": True,
+                        "vad_parameters": {"min_silence_duration_ms": 350},
+                    }
+                    if glossary_prompt:
+                        fw_kwargs["initial_prompt"] = glossary_prompt
+                    seg_iter, _ = fw_model.transcribe(audio_tmp, **fw_kwargs)
+                    for s in seg_iter:
+                        raw_segments.append({
+                            "start": float(s.start),
+                            "end": float(s.end),
+                            "text": s.text,
+                            "no_speech_prob": float(getattr(s, "no_speech_prob", 0.0) or 0.0),
+                            "compression_ratio": float(getattr(s, "compression_ratio", 0.0) or 0.0),
+                            "avg_logprob": float(getattr(s, "avg_logprob", 0.0) or 0.0),
+                        })
+                except ImportError:
+                    use_faster_whisper = False
+
+            if not use_faster_whisper:
+                import whisper
+
+                model = whisper.load_model(model_size, device=device)
+                ow_kwargs = {
                     "language": "ja",
                     "task": "transcribe",
                     "condition_on_previous_text": False,
                     "no_speech_threshold": 0.6,
-                    "log_prob_threshold": -1.0,
+                    "logprob_threshold": -1.0,
                     "compression_ratio_threshold": 2.0,
-                    "vad_filter": True,
-                    "vad_parameters": {"min_silence_duration_ms": 350},
+                    "fp16": (device == "cuda"),
                 }
                 if glossary_prompt:
-                    fw_kwargs["initial_prompt"] = glossary_prompt
-                seg_iter, _ = fw_model.transcribe(audio_tmp, **fw_kwargs)
-                for s in seg_iter:
-                    raw_segments.append({
-                        "start": float(s.start),
-                        "end": float(s.end),
-                        "text": s.text,
-                        "no_speech_prob": float(getattr(s, "no_speech_prob", 0.0) or 0.0),
-                        "compression_ratio": float(getattr(s, "compression_ratio", 0.0) or 0.0),
-                        "avg_logprob": float(getattr(s, "avg_logprob", 0.0) or 0.0),
-                    })
-            except ImportError:
-                use_faster_whisper = False
-
-        if not use_faster_whisper:
-            import whisper
-
-            model = whisper.load_model(model_size, device=device)
-            ow_kwargs = {
-                "language": "ja",
-                "task": "transcribe",
-                "condition_on_previous_text": False,
-                "no_speech_threshold": 0.6,
-                "logprob_threshold": -1.0,
-                "compression_ratio_threshold": 2.0,
-                "fp16": (device == "cuda"),
-            }
-            if glossary_prompt:
-                ow_kwargs["initial_prompt"] = glossary_prompt
-            result = model.transcribe(audio_tmp, **ow_kwargs)
-            raw_segments = result.get("segments", [])
+                    ow_kwargs["initial_prompt"] = glossary_prompt
+                result = model.transcribe(audio_tmp, **ow_kwargs)
+                raw_segments = result.get("segments", [])
+        finally:
+            fw_model = None
+            model = None
+            if device == "cuda" and torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            try:
+                if os.path.exists(audio_tmp):
+                    os.remove(audio_tmp)
+            except Exception:
+                pass
 
         subs = pysubs2.SSAFile()
         for seg in raw_segments:
@@ -205,14 +221,11 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
 
             subs.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=text))
 
-        subs.save(output_srt)
-        try:
-            if os.path.exists(audio_tmp):
-                os.remove(audio_tmp)
-        except Exception:
-            pass
+        if len(subs) == 0:
+            return False
 
-        if os.path.exists(output_srt) and len(subs) > 0:
+        subs.save(output_srt)
+        if os.path.exists(output_srt):
             print(f"✅ [WHISPER STT] Đã tạo thành công {len(subs)} câu thoại tiếng Nhật dự phòng: {os.path.basename(output_srt)}")
             return True
         return False

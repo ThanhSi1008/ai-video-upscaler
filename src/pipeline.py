@@ -603,6 +603,11 @@ def run_upscale_pipeline(
                                     )
                                     if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
                                         torch.cuda.empty_cache()
+                            except (FileNotFoundError, ValueError):
+                                raise
+                            except RuntimeError as pre_rt_err:
+                                if "SHA-256" in str(pre_rt_err):
+                                    raise
                             except Exception:
                                 pass
                         future_encode = None

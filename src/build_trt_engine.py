@@ -275,6 +275,18 @@ def export_model_to_onnx(
     return onnx_path
 
 
+_TRT_GLOBAL_LOGGER = None
+
+
+def _get_trt_logger():
+    """Trả về instance singleton trt.Logger cho toàn tiến trình (tránh cảnh báo xung đột global ILogger của TensorRT 10)."""
+    global _TRT_GLOBAL_LOGGER
+    if _TRT_GLOBAL_LOGGER is None:
+        import tensorrt as trt
+        _TRT_GLOBAL_LOGGER = trt.Logger(trt.Logger.ERROR)
+    return _TRT_GLOBAL_LOGGER
+
+
 def build_tensorrt_engine(
     onnx_path: str,
     engine_path: str,
@@ -296,7 +308,7 @@ def build_tensorrt_engine(
     opt_b = max(1, min(int(max_batch), 8))
     max_b = max(1, int(max_batch))
 
-    logger = trt.Logger(trt.Logger.WARNING)
+    logger = _get_trt_logger()
     builder = trt.Builder(logger)
     flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
     network = builder.create_network(flag)
@@ -393,7 +405,7 @@ class TRTRuntimeEngineWrapper:
         self.fallback_module = fallback_module
         self.is_tensorrt = True
 
-        self.logger = trt.Logger(trt.Logger.ERROR)
+        self.logger = _get_trt_logger()
         self.runtime = trt.Runtime(self.logger)
         with open(engine_path, "rb") as f:
             self.engine = self.runtime.deserialize_cuda_engine(f.read())

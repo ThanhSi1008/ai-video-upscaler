@@ -226,29 +226,46 @@ class GPUPersistentWorker:
         return norm_self in (norm_reg, norm_raw)
 
     def _auto_download_registered_weights(self, reg_info: Dict[str, Any]) -> None:
-        """Tự động tải và xác thực SHA-256 cho mô hình chính thức có source_url hợp lệ (hỗ trợ .pth/.safetensors/.zip)."""
+        """Tự động tải và xác thực SHA-256 bắt buộc cho mô hình chính thức có source_url hợp lệ (hỗ trợ .pth/.safetensors/.zip)."""
+        import urllib.parse
         import urllib.request
         import zipfile
         from src.models_resolver import verify_weights_sha256
 
         url = str(reg_info.get("source_url") or "").strip()
-        expected_sha = reg_info.get("sha256")
+        expected_sha = str(reg_info.get("sha256") or "").strip().lower()
+        if not url.startswith("https://"):
+            raise RuntimeError(f"Từ chối tự động tải trọng số từ URL không phải HTTPS: {url!r}")
+        if len(expected_sha) != 64 or any(c not in "0123456789abcdef" for c in expected_sha):
+            raise RuntimeError(
+                f"Từ chối tự động tải trọng số '{self.weights_path}' vì thiếu mã băm SHA-256 64-hex hợp lệ để chống nạp pickle không xác thực."
+            )
+
         os.makedirs(os.path.dirname(os.path.abspath(self.weights_path)), exist_ok=True)
         tmp_dl = self.weights_path + f".part.{os.getpid()}"
         tmp_zip = self.weights_path + f".zip.part.{os.getpid()}"
+        url_path = urllib.parse.urlsplit(url).path.lower()
 
         print(f"📥 Đang tự động tải trọng số '{reg_info.get('name', self.model_id)}' từ {url}...")
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
-            if url.lower().endswith(".zip"):
+            if url_path.endswith(".zip"):
                 with urllib.request.urlopen(req, timeout=120) as resp, open(tmp_zip, "wb") as out_f:
                     shutil.copyfileobj(resp, out_f)
                 target_base = os.path.basename(self.weights_path)
                 matched_member = None
                 with zipfile.ZipFile(tmp_zip, "r") as zf:
-                    for member in zf.namelist():
-                        if os.path.basename(member) == target_base:
-                            matched_member = member
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        norm_member = info.filename.replace("\\", "/")
+                        if norm_member.startswith("__MACOSX/") or "/__MACOSX/" in norm_member:
+                            continue
+                        member_base = os.path.basename(norm_member)
+                        if member_base.startswith("._"):
+                            continue
+                        if member_base == target_base:
+                            matched_member = info.filename
                             break
                     if matched_member is None:
                         raise FileNotFoundError(
@@ -679,10 +696,34 @@ def get_gpu_worker(
 ) -> GPUPersistentWorker:
     """Lấy hoặc khởi tạo instance Singleton cho GPUPersistentWorker."""
     global _GLOBAL_GPU_WORKER
-    if (_GLOBAL_GPU_WORKER is None
+    req_dev_type: Optional[str] = None
+    if device:
+        cand_type = torch.device(device).type
+        if cand_type != "cuda" or torch.cuda.is_available():
+            req_dev_type = cand_type
+    else:
+        req_dev_type = "cuda" if torch.cuda.is_available() else "cpu"
+
+    existing_weights = getattr(_GLOBAL_GPU_WORKER, "weights_path", None) if _GLOBAL_GPU_WORKER is not None else None
+    existing_dev = getattr(_GLOBAL_GPU_WORKER, "device", None) if _GLOBAL_GPU_WORKER is not None else None
+    weights_mismatch = (
+        existing_weights is not None
+        and os.path.normcase(os.path.abspath(str(existing_weights)))
+        != os.path.normcase(os.path.abspath(str(weights_path)))
+    )
+    device_mismatch = (
+        req_dev_type is not None
+        and existing_dev is not None
+        and getattr(existing_dev, "type", str(existing_dev)) != req_dev_type
+    )
+    if (
+        _GLOBAL_GPU_WORKER is None
         or _GLOBAL_GPU_WORKER.model_id != model_id
+        or weights_mismatch
+        or device_mismatch
         or _GLOBAL_GPU_WORKER.precision != precision.lower()
-        or (batch_size is not None and _GLOBAL_GPU_WORKER.batch_size != batch_size)):
+        or (batch_size is not None and _GLOBAL_GPU_WORKER.batch_size != batch_size)
+    ):
         _GLOBAL_GPU_WORKER = GPUPersistentWorker(
             model_id=model_id,
             weights_path=weights_path,
