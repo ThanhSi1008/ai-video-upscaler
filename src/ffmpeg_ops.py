@@ -58,6 +58,8 @@ def probe_video(video_path: str) -> Dict[str, Any]:
     width = int(video_stream.get("width", 1920))
     height = int(video_stream.get("height", 1080))
     codec = video_stream.get("codec_name", "unknown")
+    pix_fmt = video_stream.get("pix_fmt", "yuv420p")
+    profile = video_stream.get("profile", "")
 
     r_fps = video_stream.get("r_frame_rate", "24/1")
     fps_num = 24000
@@ -91,12 +93,45 @@ def probe_video(video_path: str) -> Dict[str, Any]:
         "duration": duration,
         "size_bytes": size_bytes,
         "codec": codec,
+        "pix_fmt": pix_fmt,
+        "profile": profile,
         "nb_frames": nb_frames,
         "audio_count": len(audio_streams),
         "subtitle_count": len(sub_streams),
         "attachment_count": len(attachment_streams),
         "chapter_count": len(chapters)
     }
+
+
+def is_nvdec_supported(codec: str, pix_fmt: str = "", profile: str = "") -> bool:
+    """
+    Xác định xem stream video có được hỗ trợ giải mã phần cứng bằng NVDEC (-hwaccel cuda) hay không.
+    NVIDIA NVDEC hỗ trợ:
+    - H.264 8-bit (yuv420p), nhưng KHÔNG hỗ trợ H.264 10-bit (Hi10P / High 10 / yuv420p10le).
+    - HEVC/H.265 8-bit và 10-bit (Main, Main 10, yuv420p, yuv420p10le, p010le).
+    - VP9 8-bit và 10-bit.
+    - AV1 8-bit và 10-bit.
+    """
+    codec_lower = (codec or "").lower()
+    pix_lower = (pix_fmt or "").lower()
+    prof_lower = (profile or "").lower()
+
+    if not codec_lower or codec_lower == "unknown":
+        return False
+
+    if "h264" in codec_lower or "avc" in codec_lower:
+        # H.264: Chỉ hỗ trợ 8-bit. Nếu là 10-bit (Hi10P) phải dùng CPU software decode.
+        if "10" in pix_lower or "10" in prof_lower or "hi10" in prof_lower:
+            return False
+        return True
+
+    if "hevc" in codec_lower or "h265" in codec_lower:
+        return True
+
+    if "vp9" in codec_lower or "av1" in codec_lower:
+        return True
+
+    return False
 
 
 def split_video_segments(input_path: str, segs_dir: str, segment_time: int) -> List[str]:
@@ -340,6 +375,7 @@ def extract_frames_raw_rgb24(
     total_frames: Optional[int] = None,
     source_video_path: Optional[str] = None,
     chunk_start_sec: Optional[float] = None,
+    source_codec: Optional[str] = None,
 ) -> List[Any]:
     """
     Giải mã trực tiếp khung hình video sang mảng RGB24 trong RAM qua pipe stdout (0 byte ghi đĩa):
@@ -348,6 +384,7 @@ def extract_frames_raw_rgb24(
     - Tự động phát hiện và khôi phục bit-exact các B-frame dẫn đầu của phân đoạn x265 Open-GOP (CRA/RASL)
       từ file nguồn gốc để tổng số frame thành phẩm khớp tuyệt đối 100% với video gốc.
     - Tự động bỏ qua biểu thức select='...' khi 100% khung hình của phân đoạn đều được giữ lại.
+    - Bỏ qua kiểm tra Open-GOP CRA discard trên các stream không phải HEVC (vd: H.264), tiết kiệm chi phí ffprobe.
     """
     import numpy as np
 
@@ -359,7 +396,8 @@ def extract_frames_raw_rgb24(
 
     color_vf = "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc"
     is_real_subproc = (not hasattr(subprocess.run, "_mock_name")) and (not hasattr(subprocess.Popen, "_mock_name"))
-    n_discard = _count_leading_discard_packets(seg_path) if is_real_subproc else 0
+    is_hevc = (source_codec is None) or bool(any(k in source_codec.lower() for k in ["hevc", "265"]))
+    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and is_hevc) else 0
 
     def _run_pipe_into_array(use_hwaccel: bool, expected_count: int, custom_vf: str):
         hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
@@ -462,12 +500,12 @@ def extract_frames_raw_rgb24(
         return res.stdout
 
     # Nhánh Zero-Copy readinto: Đọc trực tiếp từ pipe vào mảng NumPy tiền cấp phát (0 bản sao b"".join 1.2GB trên DDR4)
+    exp_n = len(kept_indices) if (kept_indices is not None and len(kept_indices) > 0) else (int(total_frames) if total_frames else None)
     if (
-        kept_indices is not None
-        and len(kept_indices) > 0
+        exp_n is not None
+        and exp_n > 0
         and is_real_subproc
     ):
-        exp_n = len(kept_indices)
         frames_direct = _run_pipe_into_array(use_hwaccel=True, expected_count=exp_n, custom_vf=vf_filter) if prefer_hw else None
         if frames_direct is None:
             frames_direct = _run_pipe_into_array(use_hwaccel=False, expected_count=exp_n, custom_vf=vf_filter)

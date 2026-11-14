@@ -53,6 +53,8 @@ class GPUColorConverterP010LE:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
         self._compiled_fn = None
+        self._p010_ring: List[torch.Tensor] = []
+        self._p010_ring_slot: int = 0
 
         # Khởi tạo JIT Triton fusion (nếu chạy trên CUDA thật và có triton-windows)
         if (
@@ -67,20 +69,35 @@ class GPUColorConverterP010LE:
             except Exception:
                 self._compiled_fn = None
 
+    def _ensure_ring(self, B: int, H: int, W: int, device: torch.device) -> None:
+        alloc_b = max(int(B), 8)
+        out_shape = (alloc_b, int(H * 3 // 2), int(W))
+        if (
+            len(self._p010_ring) != 2
+            or self._p010_ring[0].shape[0] < alloc_b
+            or self._p010_ring[0].shape[1:] != out_shape[1:]
+            or self._p010_ring[0].device != device
+        ):
+            self._p010_ring = [
+                torch.empty(out_shape, dtype=torch.int16, device=device)
+                for _ in range(2)
+            ]
+            self._p010_ring_slot = 0
+
     @staticmethod
     def _p010le_core(rgb_slice: torch.Tensor) -> torch.Tensor:
         B, _, H, W = rgb_slice.shape
-        # Tách kênh trực tiếp và cộng dồn tại chỗ bằng addcmul_ để KHÔNG cấp phát
-        # tensor trung gian 3 kênh FP32 4K (~199 MB GDDR6 mỗi 2 frames)
+        # Tách kênh trực tiếp và cộng dồn tại chỗ bằng in-place add_ với hệ số alpha vô hướng
+        # để KHÔNG cấp phát bất kỳ tensor GPU tạm thời nào cho các hệ số ITU-R BT.709
         r = rgb_slice[:, 0].float()
         g = rgb_slice[:, 1].float()
         b = rgb_slice[:, 2].float()
 
         # 1. Kênh Luma Y [B, H, W] theo chuẩn ITU-R BT.709 Limited Range [64..940]
         y = torch.empty_like(r).fill_(64.0)
-        y.addcmul_(r, torch.tensor(186.2376, dtype=torch.float32, device=r.device))
-        y.addcmul_(g, torch.tensor(626.5152, dtype=torch.float32, device=r.device))
-        y.addcmul_(b, torch.tensor(63.2472, dtype=torch.float32, device=r.device))
+        y.add_(r, alpha=186.2376)
+        y.add_(g, alpha=626.5152)
+        y.add_(b, alpha=63.2472)
         y_p010 = (torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32) << 6).to(torch.int16)
 
         # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling trước khi tính UV [64..960]
@@ -90,14 +107,14 @@ class GPUColorConverterP010LE:
         bs = rgb_sub[:, 2]
 
         u = torch.empty_like(rs).fill_(512.0)
-        u.addcmul_(rs, torch.tensor(-102.656512, dtype=torch.float32, device=rs.device))
-        u.addcmul_(gs, torch.tensor(-345.343488, dtype=torch.float32, device=rs.device))
-        u.addcmul_(bs, torch.tensor(448.0000, dtype=torch.float32, device=rs.device))
+        u.add_(rs, alpha=-102.656512)
+        u.add_(gs, alpha=-345.343488)
+        u.add_(bs, alpha=448.0000)
 
         v = torch.empty_like(rs).fill_(512.0)
-        v.addcmul_(rs, torch.tensor(448.0000, dtype=torch.float32, device=rs.device))
-        v.addcmul_(gs, torch.tensor(-406.921088, dtype=torch.float32, device=rs.device))
-        v.addcmul_(bs, torch.tensor(-41.078912, dtype=torch.float32, device=rs.device))
+        v.add_(rs, alpha=448.0000)
+        v.add_(gs, alpha=-406.921088)
+        v.add_(bs, alpha=-41.078912)
 
         u_p010 = (torch.clamp(torch.round(u), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
         v_p010 = (torch.clamp(torch.round(v), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
@@ -116,17 +133,24 @@ class GPUColorConverterP010LE:
         return self._p010le_core(rgb_slice)
 
     @torch.inference_mode()
-    def rgb_to_p010le(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
+    def rgb_to_p010le(self, rgb_tensor: torch.Tensor, slot: Optional[int] = None) -> torch.Tensor:
         """
         Input:  rgb_tensor: [B, 3, H, W] (float16 hoặc float32, miền [0.0, 1.0])
         Output: p010_frame: [B, H * 3 // 2, W] (int16/uint16, chuẩn Semi-Planar P010LE)
-        Tối ưu Micro-Slice 2 frames cho độ phân giải 4K để giữ bộ đệm trung gian gọn trong VRAM/L2.
+        Tối ưu Micro-Slice 2 frames cho độ phân giải 4K kết hợp vòng đệm đôi (2-slot VRAM ring)
+        triệt tiêu 100% rung lắc bộ nhớ VRAM (~600 MB/batch) trên GPU.
         """
         B, _, H, W = rgb_tensor.shape
-        if B <= 2 or (H * W) <= (540 * 960):
-            return self._convert_slice(rgb_tensor)
+        self._ensure_ring(B, H, W, rgb_tensor.device)
+        ring_slot = self._p010_ring_slot if slot is None else (slot % len(self._p010_ring))
+        if slot is None:
+            self._p010_ring_slot = (self._p010_ring_slot + 1) % len(self._p010_ring)
 
-        out_buf = torch.empty((B, H * 3 // 2, W), dtype=torch.int16, device=rgb_tensor.device)
+        out_buf = self._p010_ring[ring_slot][:B]
+        if B <= 2:
+            out_buf.copy_(self._convert_slice(rgb_tensor))
+            return out_buf
+
         for s in range(0, B, 2):
             e = min(s + 2, B)
             out_buf[s:e].copy_(self._convert_slice(rgb_tensor[s:e]))
@@ -294,9 +318,12 @@ class DoubleBufferedPipeUpscaler:
 
         self.host_in_pins: List[torch.Tensor] = []
         self.host_out_pins: List[torch.Tensor] = []
+        self.gpu_in_ring: List[torch.Tensor] = []
         self.last_first_rgb_small: Optional[np.ndarray] = None
         self.last_distinct_count: int = 0
         self.ensure_resolution(input_hw[0], input_hw[1])
+        if self.device.type == "cuda" and not os.environ.get("PYTEST_CURRENT_TEST"):
+            self.warmup(batch_size=min(2, self.batch_size))
 
     def ensure_resolution(self, in_h: int, in_w: int) -> Tuple[int, int]:
         """Đảm bảo bộ đệm Pinned Memory khớp độ phân giải khung hình thực tế (hỗ trợ tái sử dụng xuyên suốt tập)."""
@@ -318,7 +345,47 @@ class DoubleBufferedPipeUpscaler:
             torch.empty((self.batch_size, out_h * 3 // 2, out_w), dtype=torch.int16, pin_memory=pin)
             for _ in range(2)
         ]
+        if self.device.type == "cuda":
+            self.gpu_in_ring = [
+                torch.empty((self.batch_size, 3, in_h, in_w), dtype=torch.float16, device=self.device)
+                for _ in range(2)
+            ]
+        else:
+            self.gpu_in_ring = []
         return self.output_hw
+
+    def warmup(self, batch_size: int = 2) -> None:
+        """
+        Khởi động sớm (Warm-up) 1-batch qua Triton JIT Color Converter và Engine Context
+        trước khi bắt đầu đo đạc pipeline video, triệt tiêu hoàn toàn 3-4s độ trễ biên dịch cold-start.
+        """
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        try:
+            cur_bs = min(max(1, batch_size), self.batch_size)
+            in_h, in_w = self.input_hw if self.input_hw[0] > 0 else (1080, 1920)
+            out_h, out_w = self.output_hw if self.output_hw[0] > 0 else (in_h * self.scale, in_w * self.scale)
+            dummy_in = torch.zeros((cur_bs, 3, in_h, in_w), dtype=torch.float16, device=self.device)
+            with torch.inference_mode():
+                if callable(self.model):
+                    dummy_out = self.model(dummy_in)
+                else:
+                    dummy_out = torch.zeros((cur_bs, 3, out_h, out_w), dtype=torch.float16, device=self.device)
+                self.color_conv.rgb_to_p010le(dummy_out, slot=0)
+                torch.cuda.synchronize(self.device)
+        except Exception:
+            try:
+                cur_bs = min(max(1, batch_size), self.batch_size)
+                out_h = self.output_hw[0] if self.output_hw[0] > 0 else 2160
+                out_w = self.output_hw[1] if self.output_hw[1] > 0 else 3840
+                dummy_out = torch.zeros((cur_bs, 3, out_h, out_w), dtype=torch.float16, device=self.device)
+                with torch.inference_mode():
+                    self.color_conv.rgb_to_p010le(dummy_out, slot=0)
+                    torch.cuda.synchronize(self.device)
+            except Exception:
+                pass
 
     @staticmethod
     def spawn_nvenc_pipe_writer(
@@ -405,6 +472,7 @@ class DoubleBufferedPipeUpscaler:
         cyclic_dedup: bool = True,
         capture_first_rgb_small: bool = False,
         enable_micro_timings: Optional[bool] = None,
+        precomputed_dedup: Optional[Tuple[List[np.ndarray], List[int]]] = None,
     ) -> int:
         """
         Xử lý danh sách các unique frames của 1 phân đoạn và nhân bản trực tiếp trong RAM Pipe
@@ -432,7 +500,9 @@ class DoubleBufferedPipeUpscaler:
         f_h, f_w = unique_frames_rgb[0].shape[:2]
         self.ensure_resolution(f_h, f_w)
 
-        if cyclic_dedup and num_unique > 1:
+        if precomputed_dedup is not None and precomputed_dedup[0] is not None and precomputed_dedup[1] is not None:
+            distinct_frames, frame_to_distinct = precomputed_dedup
+        elif cyclic_dedup and num_unique > 1:
             from src.dedup import deduplicate_cyclic_frames
             distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(unique_frames_rgb)
         else:
@@ -525,7 +595,12 @@ class DoubleBufferedPipeUpscaler:
                             for i in range(cur_B):
                                 hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                             gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
-                            if is_trt:
+                            if is_trt and self.gpu_in_ring:
+                                # Transpose NCHW trực tiếp vào bộ đệm VRAM cố định self.gpu_in_ring (1-kernel, 0 alloc mới, cố định địa chỉ con trỏ TRT)
+                                in_buf = self.gpu_in_ring[slot][:cur_B]
+                                in_buf.copy_(gpu_nhwc.permute(0, 3, 1, 2))
+                                gpu_tensor = in_buf.mul_(1.0 / 255.0)
+                            elif is_trt:
                                 # Transpose NCHW ngay ở uint8 (1 byte/kênh = 49.7 MB) giảm 50% băng thông VRAM so với transpose FP16
                                 gpu_tensor = (
                                     gpu_nhwc.permute(0, 3, 1, 2)
@@ -539,7 +614,11 @@ class DoubleBufferedPipeUpscaler:
                             for i in range(cur_B):
                                 self.host_in_pins[slot][i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                             gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
-                            if is_trt:
+                            if is_trt and self.gpu_in_ring:
+                                in_buf = self.gpu_in_ring[slot][:cur_B]
+                                in_buf.copy_(gpu_in)
+                                gpu_tensor = in_buf.mul_(1.0 / 255.0)
+                            elif is_trt:
                                 gpu_tensor = gpu_in.contiguous().to(torch.float16).mul_(1.0 / 255.0)
                             else:
                                 gpu_tensor = (
@@ -574,7 +653,7 @@ class DoubleBufferedPipeUpscaler:
                             )
                         if record_micro and evt_tri_s:
                             evt_tri_s.record(self.stream_compute)
-                        gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb)
+                        gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb, slot=slot)
                         if record_micro and evt_tri_e:
                             evt_tri_e.record(self.stream_compute)
 
@@ -710,3 +789,7 @@ class DoubleBufferedPipeUpscaler:
             drain_worker.close()
 
         return total_frames_written
+
+
+# Alias cho hợp đồng giao diện TRTZeroCopyUpscaler
+TRTZeroCopyUpscaler = DoubleBufferedPipeUpscaler

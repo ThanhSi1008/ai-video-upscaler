@@ -52,6 +52,7 @@ class FailedResumableError(RuntimeError):
 
 from src.ffmpeg_ops import (
     probe_video,
+    is_nvdec_supported,
     split_video_segments,
     get_segments_frame_counts,
     verify_segment_resume_frames,
@@ -400,26 +401,39 @@ def run_upscale_pipeline(
 
                     if zero_disk and engine == "cuda":
                         t0 = time.time()
+                        safe_hwaccel = is_nvdec_supported(
+                            codec=meta.get("codec", ""),
+                            pix_fmt=meta.get("pix_fmt", ""),
+                            profile=meta.get("profile", ""),
+                        )
                         raw_rgb = extract_frames_raw_rgb24(
                             c_seg_file,
                             width=int(meta.get("width", 1920)),
                             height=int(meta.get("height", 1080)),
                             kept_indices=kept_indices,
-                            hwaccel=False,
+                            hwaccel=safe_hwaccel,
                             total_frames=chunk_total_frames,
                             source_video_path=input_path,
                             chunk_start_sec=chunk_start_sec,
+                            source_codec=meta.get("codec"),
                         )
                         t_ext = time.time() - t0
                         f_count = len(raw_rgb)
+                        distinct_frames = raw_rgb
+                        frame_to_distinct = list(range(f_count))
+                        if dedup and f_count > 1:
+                            from src.dedup import deduplicate_cyclic_frames
+                            distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(raw_rgb)
                         exp_frames = chunk_total_frames if chunk_total_frames is not None else f_count
                         return {
                             "idx": c_idx,
                             "seg_file": c_seg_file,
                             "in_dir": c_in_dir,
                             "raw_rgb_frames": raw_rgb,
+                            "distinct_frames": distinct_frames,
+                            "frame_to_distinct": frame_to_distinct,
                             "frame_count": f_count,
-                            "ai_frames": f_count,
+                            "ai_frames": len(distinct_frames),
                             "expected_frames": exp_frames,
                             "ext_time": t_ext,
                             "chunk_plan": c_plan,
@@ -557,6 +571,13 @@ def run_upscale_pipeline(
                         chunk_png_unit_sizes = []
                         sanity_checks_history = []
                         last_pipeline_micro_timings = None
+                        accumulated_micro_timings = {
+                            "num_batches": 0,
+                            "total_h2d_ms": 0.0,
+                            "total_trt_ms": 0.0,
+                            "total_triton_ms": 0.0,
+                            "total_d2h_ms": 0.0,
+                        }
 
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
@@ -815,12 +836,17 @@ def run_upscale_pipeline(
                                             tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
                                         )
                                         try:
+                                            pre_dedup = (
+                                                extracted.get("distinct_frames"),
+                                                extracted.get("frame_to_distinct"),
+                                            ) if (extracted.get("distinct_frames") is not None and extracted.get("frame_to_distinct") is not None) else None
                                             pipe_upscaler.process_frames_to_pipe(
                                                 unique_frames_rgb,
                                                 repeat_counts,
                                                 enc_proc,
                                                 cyclic_dedup=bool(dedup),
                                                 capture_first_rgb_small=should_check_sanity,
+                                                precomputed_dedup=pre_dedup,
                                             )
                                         except Exception:
                                             if enc_proc.stdin:
@@ -928,6 +954,13 @@ def run_upscale_pipeline(
                                         if getattr(pipe_upscaler, "last_micro_timings", None):
                                             mt = pipe_upscaler.last_micro_timings
                                             last_pipeline_micro_timings = mt
+                                            nb = mt.get("num_batches", 0)
+                                            if nb > 0:
+                                                accumulated_micro_timings["num_batches"] += nb
+                                                accumulated_micro_timings["total_h2d_ms"] += mt.get("total_h2d_ms", 0.0)
+                                                accumulated_micro_timings["total_trt_ms"] += mt.get("total_trt_ms", 0.0)
+                                                accumulated_micro_timings["total_triton_ms"] += mt.get("total_triton_ms", 0.0)
+                                                accumulated_micro_timings["total_d2h_ms"] += mt.get("total_d2h_ms", 0.0)
                                             logger.info(
                                                 f"⏱️ [CUDA MICRO-TIMINGS] Phân đoạn {c_idx+1:02d}: "
                                                 f"TRT={mt.get('avg_trt_ms', 0):.1f}ms, Triton={mt.get('avg_triton_ms', 0):.1f}ms, "
@@ -1058,15 +1091,21 @@ def run_upscale_pipeline(
                                         )
                                         if zero_disk and engine == "cuda":
                                             if extracted.get("raw_rgb_frames") is None:
+                                                safe_hwaccel_retry = is_nvdec_supported(
+                                                    codec=meta.get("codec", ""),
+                                                    pix_fmt=meta.get("pix_fmt", ""),
+                                                    profile=meta.get("profile", ""),
+                                                )
                                                 extracted["raw_rgb_frames"] = extract_frames_raw_rgb24(
                                                     c_seg_file,
                                                     width=int(meta["width"]),
                                                     height=int(meta["height"]),
                                                     kept_indices=kept_idx_retry,
-                                                    hwaccel=False,
+                                                    hwaccel=safe_hwaccel_retry,
                                                     total_frames=retry_total_frames,
                                                     source_video_path=input_path,
                                                     chunk_start_sec=retry_start_sec,
+                                                    source_codec=meta.get("codec"),
                                                 )
                                         elif not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
                                             os.makedirs(c_in_dir, exist_ok=True)
@@ -1347,6 +1386,23 @@ def run_upscale_pipeline(
                 src_dur = probe_src.get("duration", 0.0)
                 drift_s = abs(final_dur - src_dur)
 
+                final_micro_timings = None
+                if accumulated_micro_timings.get("num_batches", 0) > 0:
+                    nb = accumulated_micro_timings["num_batches"]
+                    final_micro_timings = {
+                        "num_batches": nb,
+                        "total_h2d_ms": round(accumulated_micro_timings["total_h2d_ms"], 2),
+                        "total_trt_ms": round(accumulated_micro_timings["total_trt_ms"], 2),
+                        "total_triton_ms": round(accumulated_micro_timings["total_triton_ms"], 2),
+                        "total_d2h_ms": round(accumulated_micro_timings["total_d2h_ms"], 2),
+                        "avg_h2d_ms": round(accumulated_micro_timings["total_h2d_ms"] / nb, 2),
+                        "avg_trt_ms": round(accumulated_micro_timings["total_trt_ms"] / nb, 2),
+                        "avg_triton_ms": round(accumulated_micro_timings["total_triton_ms"] / nb, 2),
+                        "avg_d2h_ms": round(accumulated_micro_timings["total_d2h_ms"] / nb, 2),
+                    }
+                elif last_pipeline_micro_timings is not None:
+                    final_micro_timings = last_pipeline_micro_timings
+
                 audit_data = {
                     "status": mux_res.get("status", "PASS"),
                     "source_file": os.path.abspath(input_path),
@@ -1377,7 +1433,7 @@ def run_upscale_pipeline(
                         "total_checks": len(sanity_checks_history),
                         "checks": sanity_checks_history
                     },
-                    "micro_timings": last_pipeline_micro_timings,
+                    "micro_timings": final_micro_timings,
                     "mux_audit": mux_res
                 }
                 with open(audit_file, "w", encoding="utf-8") as f:
