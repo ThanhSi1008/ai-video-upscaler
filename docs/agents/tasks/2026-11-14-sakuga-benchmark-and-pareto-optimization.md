@@ -6,7 +6,7 @@
 - Trạng thái: **HOÀN THÀNH 100% (`VICTORY CONFIRMED`)**.
 
 ## Mốc mã nguồn và điều phối
-- Root, branch, commits: `e:\ai-video-upscaler`, branch `main`, chuỗi commit triển khai `028f0ff` -> `d786a80` -> `101aced`.
+- Root, branch, commits: `e:\ai-video-upscaler`, branch `main`, chuỗi commit triển khai `028f0ff` -> `d786a80` -> `101aced` -> `e876e80` -> `cf38379`.
 - Mẫu chuẩn tuyển chọn từ 261 video (`160.4 GB`): `E:\Films\Raw_Sources\Fate Apocrypha\[AC] Fate Apocrypha - 22 [BD 1080p Hi10 FLAC][DualAudio][695AB63E].mkv` (`H.264 Hi10P` CPU decode, đại cảnh Karna vs Sieg đạt `95.06%` unique frames ở Climax).
 
 ## Đã làm và bằng chứng
@@ -23,4 +23,6 @@
 3. **Số liệu Đối chứng & Bão hòa Pareto (R4 — `benchmarks/final_optimization_report.md`):**
    - **Tier Preview (`10s`, `270` frames):** `3.61 -> 8.05 fps` (**`+122.99%`**), thời gian `74.69s -> 33.52s` (`-55.12%`), CPU `33.2% -> 18.5%`, Mux Audit `PASS`.
    - **Tier Climax (`60s`, `1478` frames):** `8.53 -> 9.47 fps` (**`+11.02%`**), **AI Steady-State `8.90 -> 10.20 fps` (`+14.61%`)**, đạt **`92.85%` trần vật lý TensorRT FP16 GA106 (`10.985 fps`)**, Mux Audit `PASS` bit-exact.
-   - Kiểm thử tổng thể: `verify_offline.py` đạt **`488 passed, 11 skipped, 1 deselected`** (`0` lỗi), `tests/e2e/` đạt **`115/115 passed`**.
+   - Kiểm thử tổng thể: `verify_offline.py` đạt **`495 passed, 11 skipped, 1 deselected`** (`0` lỗi), `tests/e2e/` đạt **`115/115 passed`**.
+4. **Đợt Kiểm Tra Lại & Vi Tối Ưu Hóa Vòng 2 (`cf38379` — `B1–B2, P1–P5`):**
+   - `B1` tích lũy `micro_timings` toàn cục; `B2` `warmup(batch_size=2)` cho Triton JIT ngoài vùng bấm giờ; `P1` FMA Scalar Add Fusion (khử 36 tensor allocs/batch, khớp bit-exact `99.99915%` trên 16.7M màu); `P2` & `P3` tiền cấp phát 2-slot `_p010_ring` và `gpu_in_ring` (khử `~750 MB/batch` cấp phát VRAM động, 100% TensorRT pointer cache hit); `P4` chạy `deduplicate_cyclic_frames` nền trên `dec_exec` (khử `133.7ms` GPU idle/chunk); `P5` tự động bật `NVDEC` cho nguồn 8-bit và bỏ qua `ffprobe` CRA trên non-HEVC; bổ sung `tests/test_pipeline_m1_optimizations.py` (`7/7` PASS).

@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-14
 >
-> **Commit Baseline:** `101aced` (`docs(benchmarks): compile comprehensive final optimization report and safety audit`)
+> **Commit Baseline:** `cf38379` (`perf(pipeline): hoan thien 7 vi toi uu Vong 2 (B1-B2, P1-P5) khu 100% cap phat VRAM dong va GPU idle`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`488 passed, 11 skipped, 1 deselected`, bao gồm `115/115` ca kiểm thử hộp đen `tests/e2e/` và `30/30` ca `tests/test_benchmark_infra.py`, `0 errors` với `ruff check`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`495 passed, 11 skipped, 1 deselected`, bao gồm `115/115` ca kiểm thử hộp đen `tests/e2e/`, `30/30` ca `tests/test_benchmark_infra.py` và `7/7` ca `tests/test_pipeline_m1_optimizations.py`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
 - **Thực nghiệm phần cứng & Bão hòa Pareto:** Đã đo đạc đối chứng trên mẫu đại cảnh **Fate/Apocrypha Tập 22** (`H.264 Hi10P`, `95.06%` unique frames) trên RTX 3060 12GB + i5-12600K: **Preview `3.61 -> 8.05 fps` (`+122.99%`)**, **Climax `8.53 -> 9.47 fps` (`+11.02%`, AI Steady-State `10.20 fps` = `92.85%` trần vật lý GA106)**, `Mux Audit PASS` bit-exact (`benchmarks/final_optimization_report.md`).
 - **Trạng thái Git:** Sạch sẽ, kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
 
@@ -21,7 +21,7 @@
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
 | **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, TensorRT 10.16 (`resolve_trt_profile_max_batch`, `_out_ring` 2-slot 0-alloc, `execute_async_v3`), kế thừa `UPSCALER_HEVC_ENCODER`. |
-| **Zero-Disk Pipe & 3-Stage Overlap** | `src/trt_zero_copy_upscaler.py`, `src/pipeline.py`, `src/ffmpeg_ops.py` | PASS | Gối đầu 3 tầng thực sự, `_PipeDrainWorker` bất đồng bộ `8 MiB` zero-copy + chống deadlock, `CUDA Event` micro-timings phi phong tỏa, bù `Open-GOP CRA discard` & `verify_segment_resume_frames`. |
+| **Zero-Disk Pipe & 3-Stage Overlap** | `src/trt_zero_copy_upscaler.py`, `src/pipeline.py`, `src/ffmpeg_ops.py` | PASS | Gối đầu 3 tầng + Background Cel trên `dec_exec`, 2-slot `_p010_ring` & `gpu_in_ring` (0 cấp phát VRAM động, 100% TensorRT pointer hit), FMA Scalar Add Fusion, Triton warmup, `_PipeDrainWorker` `8 MiB` + chống deadlock, Dynamic NVDEC & cắt tỉa `CRA ffprobe`. |
 | **Dedup, GOP-RLE & Sakuga DIS** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Băm `Cyclic Cel` 3 tầng (`64x36` thumbnail + BLAKE2b + SIMD uint8, tăng tốc `27.02x`), `raw_actions_rle`, phân tách ngưỡng `DIS` toàn cục (`0.35px`) / cục bộ (`1.50px` @ `12%`) cho policy `sakuga`/`dis-sakuga`. |
 | **Benchmark, Telemetry & E2E Suite** | `scripts/telemetry_collector.py`, `scripts/benchmark_pipeline.py`, `scripts/compare_benchmarks.py`, `tests/e2e/` | PASS | Thu thập 17 chỉ số phần cứng chu kỳ `1.0s`, đối chiếu delta tự động, bộ 115 ca kiểm thử hộp đen 4 tầng (`tests/e2e/`) bảo vệ toàn bộ bất biến kỹ thuật. |
 | **10-bit NVENC BT.709** | `src/ffmpeg_ops.py`, `src/config.py` | PASS | `hevc_nvenc` Main 10 (`p010le`, preset `p6`, `CQ 18`, `maxrate 45M`, multipass `fullres`, lookahead `32`, Spatial/Temporal AQ), ma trận màu BT.709 hai chiều Full $\leftrightarrow$ Limited. |

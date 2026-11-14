@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-14**, từ baseline Git `101aced`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-14**, từ baseline Git `cf38379`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -31,8 +31,8 @@ subtrans.cli → TranslationPipeline
 | File trong `src/` | Trách nhiệm và symbol để tìm |
 | --- | --- |
 | [`config.py`](../../src/config.py) | Hằng số runtime, `configure_cuda_fast_math` (Ampere FP16 `HMMA.F16` + cuDNN benchmark), kế thừa `UPSCALER_HEVC_ENCODER`, `get_hevc_rate_args`, `validate_environment`; khóa `.gpu_active.lock` kiểm tra PID sống. |
-| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; gối đầu 3 tầng thực sự (`Decode N+1` + `GPU N` + `worker_finalize_zero_disk` / `Encode N-1`), xác thực khung hình khi resume (`verify_segment_resume_frames`), Zero-Disk TensorRT 10 FP16, 1-Pass Concat-Mux. |
-| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `_count_leading_discard_packets`, `verify_segment_resume_frames`, `extract_frames`, `extract_frames_raw_rgb24` (`1 MiB` slice), `encode_chunk_hevc`, `mux_segments_directly`, `embed_subtitle_track`. |
+| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; gối đầu 3 tầng + Background Cel trên `dec_exec`, tích lũy `micro_timings` toàn cục, xác thực khung hình khi resume (`verify_segment_resume_frames`), Zero-Disk TensorRT 10 FP16, 1-Pass Concat-Mux. |
+| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `_count_leading_discard_packets` (cắt tỉa non-HEVC), `verify_segment_resume_frames`, `extract_frames`, `extract_frames_raw_rgb24` (Dynamic NVDEC 8-bit + `1 MiB` slice), `mux_segments_directly`. |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `get_default_model_id`, `resolve_model_for_video`, `verify_weights_sha256`, `list_models_formatted`; neo đường dẫn tương đối về `ROOT_DIR`. |
 | [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (vi phân lô đuôi 8K 2-frame), `AnimeJaNaiCompact2x`, `GPUPersistentWorker` (Cyclic Cel Dedup + NTFS Hardlink, TensorRT 10 auto-runner + Pinned D2H), `get_cuda_inference_engine`, `upscale_frames_with_fallback`. |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: runner NCNN Vulkan dự phòng; không phải engine PyTorch chính. |
@@ -47,7 +47,7 @@ subtrans.cli → TranslationPipeline
 | [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text`; còn dữ liệu lịch sử hardcoded, không mặc nhiên là đo đạc mới. |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`, `_build_whisper_initial_prompt`; hỗ trợ `faster-whisper` + Silero VAD (fallback `openai-whisper`), ưu tiên EN 0ms lệch mặc định hoặc `--prefer-whisper`. |
 | [`pending_queue.py`](../../src/pending_queue.py) | `load_pending_subs`, `save_pending_subs`, `add_pending_sub`, `remove_pending_sub`; module stdlib-only quản lý `pending_subs.json` không kích hoạt import `torch`/CUDA. |
-| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper`, `_PipeDrainWorker` (`8 MiB` zero-copy async pipe + chống deadlock), `DoubleBufferedPipeUpscaler` (CUDA Event `micro_timings` phi phong tỏa, Belady's OPT Cyclic Memoization). |
+| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE` (FMA Scalar Add + `warmup`), `SRVGGNetCompactTRTWrapper`, `_PipeDrainWorker` (`8 MiB` zero-copy + chống deadlock), `DoubleBufferedPipeUpscaler` (`_p010_ring` + `gpu_in_ring` 0-alloc, CUDA Event `micro_timings`). |
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, `resolve_trt_profile_max_batch`, ONNX export (`dynamo=False`), `TRTRuntimeEngineWrapper` (`_out_ring` 2-slot khử cấp phát động + cache `set_input_shape`/`set_tensor_address`), `get_hybrid_engine_or_wrapper`. |
 
 `src/__init__.py` là package marker. Symbol nhỏ/nested không liệt kê hết: dùng `rg -n '^(class |def |    def )' src/<file>.py` khi đi sâu.
