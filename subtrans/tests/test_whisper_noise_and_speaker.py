@@ -274,13 +274,14 @@ def test_transcribe_japanese_audio_filters_and_segment_rejection(tmp_path, monke
             mock_res.stdout = json.dumps(data)
             return mock_res
         elif "ffmpeg" in cmd_str:
-            # Tạo audio_tmp file
-            audio_tmp = cmd[-1]
-            with open(audio_tmp, "wb") as f:
-                f.write(b"RIFF" + b"\x00" * 100)
+            if "-i" in cmd:
+                # Tạo audio_tmp file
+                audio_tmp = cmd[-1]
+                with open(audio_tmp, "wb") as f:
+                    f.write(b"RIFF" + b"\x00" * 100)
+                # Lưu cmd để kiểm tra filter
+                mock_subprocess_run.last_ffmpeg_cmd = cmd
             mock_res.returncode = 0
-            # Lưu cmd để kiểm tra filter
-            mock_subprocess_run.last_ffmpeg_cmd = cmd
             return mock_res
         return mock_res
 

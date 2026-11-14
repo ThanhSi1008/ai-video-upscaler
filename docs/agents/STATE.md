@@ -1,8 +1,8 @@
 # Trạng Thái Hệ Thống & Ngữ Cảnh Hoạt Động (STATE)
 
-> **Cập nhật ngày:** 2026-11-14
+> **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `cf38379` (`perf(pipeline): hoan thien 7 vi toi uu Vong 2 (B1-B2, P1-P5) khu 100% cap phat VRAM dong va GPU idle`)
+> **Commit Baseline:** `d9bbc5d` (`feat(subtrans): clean SQLite connection closing and FTS5 2-gram/3-gram Kanji RAG`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,9 +10,9 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (`495 passed, 11 skipped, 1 deselected`, bao gồm `115/115` ca kiểm thử hộp đen `tests/e2e/`, `30/30` ca `tests/test_benchmark_infra.py` và `7/7` ca `tests/test_pipeline_m1_optimizations.py`, `6/6` ca hồi quy & `22/22` cues benchmark trong `subtrans.py eval`) qua runner cô lập `scripts/verify_offline.py` trên Windows 11.
-- **Thực nghiệm phần cứng & Bão hòa Pareto:** Đã đo đạc đối chứng trên mẫu đại cảnh **Fate/Apocrypha Tập 22** (`H.264 Hi10P`, `95.06%` unique frames) trên RTX 3060 12GB + i5-12600K: **Preview `3.61 -> 8.05 fps` (`+122.99%`)**, **Climax `8.53 -> 9.47 fps` (`+11.02%`, AI Steady-State `10.20 fps` = `92.85%` trần vật lý GA106)**, `Mux Audit PASS` bit-exact (`benchmarks/final_optimization_report.md`).
-- **Trạng thái Git:** Sạch sẽ, kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (hơn 870+ ca kiểm thử tự động, bao gồm 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py` và 115/115 ca `tests/e2e/` qua runner cô lập `scripts/verify_offline.py` trên Windows 11).
+- **Thực nghiệm phần cứng & Bão hòa Pareto:** Đã đo đạc đối chứng trên mẫu đại cảnh **Fate/Apocrypha Tập 22** (`H.264 Hi10P`, `95.06%` unique frames) trên RTX 3060 12GB + i5-12600K: **Preview `3.61 -> 8.05 fps` (`+122.99%`)**, **Climax `8.53 -> 9.47 fps` (`+11.02%`, AI Steady-State `10.20 fps` = `92.85%` trần vật lý GA106)**; kiểm chứng live clip Milestone 5 đạt Peak VRAM 9.31 GB (< 9.5 GB), Output Sanity Guard PASS ($|\Delta Y| = 1.06 \le 6.0$, corr $= 0.9998 \ge 0.98$), `Mux Audit PASS` bit-exact 100% (2 FLAC Audio MD5 khớp từng bit, 2 ASS Subs, 5 Fonts, Chapters).
+- **Trạng thái Git:** Sạch sẽ, hoàn thành trọn vẹn 5 Milestone M1-M5 theo đúng quy trình bàn giao đa Agent; kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
 
 ---
 
@@ -20,6 +20,15 @@
 
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
+| **PyAV 18.1.0 In-Process Probing & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Thay thế ~230-290 `ffprobe` subprocesses/tập bằng PyAV 18.1.0 in-process, giữ nguyên tuyệt đối Concat-Mux `-max_interleave_delta 0` và Single-Pass `streamhash` MD5 subprocesses. |
+| **Track Defaults CLI** | `scripts/set_track_defaults.py` | PASS | Tham số hóa `argparse` CLI, tùy biến đường dẫn video/mkvpropedit, xử lý đường dẫn tương đối và hỗ trợ cờ `--dry-run`. |
+| **Triton P010LE Kernel & Pinned Ring** | `src/trt_zero_copy_upscaler.py` | PASS | Kernel `@triton.jit` BT.709 TV-range thay thế `torch.compile`, loại bỏ hoàn toàn cold-start <50ms và B=1 dynamic recompile, nạp H2D trực tiếp vào pinned memory `gpu_nhwc_ring`. |
+| **Unique Inference FPS Deadline Realignment** | `upscale.py`, `src/scheduler.py` | PASS | Căn chỉnh công thức ETA `--deadline` theo Unique Inference FPS ($N_{\text{unique}} / \text{FPS}_{\text{unique}}$), loại bỏ triệt để sai lệch dự toán ~2.1x khi có dedup. |
+| **SQLite Connection Context Manager** | `subtrans/cache.py`, `subtrans/rag.py` | PASS | Bọc kết nối SQLite bằng `contextlib.contextmanager` đóng sạch handle, triệt tiêu hoàn toàn lỗi khóa file `WinError 32` trên Windows 11. |
+| **SQLite FTS5 2-Gram/3-Gram Kanji RAG** | `subtrans/rag.py` | PASS | Nâng cấp chỉ mục RAG lên SQLite FTS5 với tokenizer character 2-gram + 3-gram, tra cứu chính xác từ khóa Kanji 2 chữ (`魔術`, `聖杯`, `令呪`). |
+| **Spandrel 0.4.2 Native 2x Model Loader** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `models/models.yaml` | PASS | Tích hợp `spandrel 0.4.2` nạp các kiến trúc Native 2x không PReLU, lớp `_GenericTRTExportModule` hỗ trợ ONNX opset 18 và TensorRT 10 max_batch=4, đăng ký `span-2x` và `2x_AnimeJaNai_V3`. |
+| **Faster-Whisper Large-V3-Turbo STT** | `src/subtitles.py` | PASS | Mặc định model STT `large-v3-turbo` trên CUDA float16 với fallback CPU int8, tương thích 100% với tách kênh 5.1 FC mono, ghim mốc DTW và lọc âm thanh. |
+| **E2E Acceptance Suite** | `tests/test_e2e_group_a.py`, `tests/test_e2e_group_b.py`, `tests/test_e2e_integration_t3_t4.py` | PASS | 169 ca kiểm thử tự động 4 tầng (Tier 1 Isolated, Tier 2 BVA, Tier 3 Cross-Feature, Tier 4 Workload Scenarios) bảo vệ toàn diện 14 tính năng của Nhóm A & Nhóm B. |
 | **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, TensorRT 10.16 (`resolve_trt_profile_max_batch`, `_out_ring` 2-slot 0-alloc, `execute_async_v3`), kế thừa `UPSCALER_HEVC_ENCODER`. |
 | **Zero-Disk Pipe & 3-Stage Overlap** | `src/trt_zero_copy_upscaler.py`, `src/pipeline.py`, `src/ffmpeg_ops.py` | PASS | Gối đầu 3 tầng + Background Cel trên `dec_exec`, 2-slot `_p010_ring` & `gpu_in_ring` (0 cấp phát VRAM động, 100% TensorRT pointer hit), FMA Scalar Add Fusion, Triton warmup, `_PipeDrainWorker` `8 MiB` + chống deadlock, Dynamic NVDEC & cắt tỉa `CRA ffprobe`. |
 | **Dedup, GOP-RLE & Sakuga DIS** | `src/dedup.py`, `src/scheduler.py`, `src/preflight.py` | PASS | Băm `Cyclic Cel` 3 tầng (`64x36` thumbnail + BLAKE2b + SIMD uint8, tăng tốc `27.02x`), `raw_actions_rle`, phân tách ngưỡng `DIS` toàn cục (`0.35px`) / cục bộ (`1.50px` @ `12%`) cho policy `sakuga`/`dis-sakuga`. |
