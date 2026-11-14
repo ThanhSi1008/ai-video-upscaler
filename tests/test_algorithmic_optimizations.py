@@ -324,6 +324,36 @@ def test_pipe_upscaler_repeated_frames_and_drain_worker():
     assert fake_proc.stdin.write.call_count == 5
 
 
+def test_pipe_drain_worker_queue_full_deadlock_on_broken_pipe():
+    """
+    Xác minh _PipeDrainWorker không bị treo vô hạn (deadlock) khi downstream FFmpeg chết
+    (BrokenPipeError) trong khi hàng đợi queue đã đầy (maxsize=16 và submit 25 items).
+    Worker phải thoát vòng lặp timeout, nhận biết luồng nền đã chết và ném BrokenPipeError
+    hoặc RuntimeError một cách sạch sẽ.
+    """
+    import time
+    import pytest
+    from src.trt_zero_copy_upscaler import _PipeDrainWorker
+
+    def broken_write(proc, buf, repeats):
+        time.sleep(0.01)
+        raise BrokenPipeError(32, "Broken pipe")
+
+    worker = _PipeDrainWorker(None, broken_write)
+    dummy_buf = np.zeros(100, dtype=np.uint8)
+
+    # Submit 25 items vượt ngưỡng maxsize=16 của hàng đợi
+    with pytest.raises((BrokenPipeError, RuntimeError)):
+        for _ in range(25):
+            worker.submit(dummy_buf, repeats=1)
+
+    # Kiểm tra close() cũng báo lỗi sạch sẽ và thu hồi thread an toàn
+    with pytest.raises((BrokenPipeError, RuntimeError)):
+        worker.close()
+
+    assert not worker._thread.is_alive()
+
+
 def test_pipe_upscaler_micro_timings_structure():
     """
     Xác minh process_frames_to_pipe khi bật enable_micro_timings=True

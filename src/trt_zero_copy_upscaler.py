@@ -228,13 +228,30 @@ class _PipeDrainWorker:
             self.error = exc
 
     def submit(self, buf_arr: Optional[np.ndarray], repeats: int, done_evt: Optional[threading.Event] = None) -> None:
-        if self.error is not None:
-            raise self.error
-        self.queue.put((buf_arr, repeats, done_evt))
+        while True:
+            if self.error is not None:
+                raise self.error
+            if not self._thread.is_alive():
+                raise RuntimeError("PipeDrainWorker thread died unexpectedly") from self.error
+            try:
+                self.queue.put((buf_arr, repeats, done_evt), timeout=0.1)
+                break
+            except queue.Full:
+                continue
 
     def close(self) -> None:
-        self.queue.put(None)
-        self._thread.join()
+        if self.error is not None:
+            raise self.error
+        if self._thread.is_alive():
+            while self._thread.is_alive():
+                if self.error is not None:
+                    raise self.error
+                try:
+                    self.queue.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+            self._thread.join()
         if self.error is not None:
             raise self.error
 
