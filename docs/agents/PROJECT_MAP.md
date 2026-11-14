@@ -1,6 +1,6 @@
 # Bản đồ project cho agent
 
-Đối chiếu tĩnh ngày **2026-11-13**, từ baseline Git `14c4762`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
+Đối chiếu tĩnh ngày **2026-11-14**, từ baseline Git `101aced`. Đây là bản đồ tìm code, không phải chứng nhận pipeline đã chạy thành công. Trạng thái mới nhất: [STATE](STATE.md); khác biệt giữa ý định và code: [DECISIONS](DECISIONS.md); cách kiểm thử: [VALIDATION](VALIDATION.md). Bắt đầu bằng [START_HERE](START_HERE.md) và [AGENTS gốc](../../AGENTS.md).
 
 ## Điểm vào và luồng chính
 
@@ -31,12 +31,12 @@ subtrans.cli → TranslationPipeline
 | File trong `src/` | Trách nhiệm và symbol để tìm |
 | --- | --- |
 | [`config.py`](../../src/config.py) | Hằng số runtime, `configure_cuda_fast_math` (Ampere FP16 `HMMA.F16` + cuDNN benchmark), kế thừa `UPSCALER_HEVC_ENCODER`, `get_hevc_rate_args`, `validate_environment`; khóa `.gpu_active.lock` kiểm tra PID sống. |
-| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; gối đầu 3 tầng thực sự (`Decode N+1` + `GPU N` + `worker_finalize_zero_disk` / `Encode N-1`), Zero-Disk NVDEC RGB24 pipe, TensorRT 10 FP16, 0-reinference Sanity, 1-Pass Concat-Mux. |
-| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `extract_frames`, `extract_frames_raw_rgb24` (`readinto` 0-copy), `encode_chunk_hevc`, `concat_segments`, `mux_final_container`, `mux_segments_directly`, `embed_subtitle_track`. |
+| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`; gối đầu 3 tầng thực sự (`Decode N+1` + `GPU N` + `worker_finalize_zero_disk` / `Encode N-1`), xác thực khung hình khi resume (`verify_segment_resume_frames`), Zero-Disk TensorRT 10 FP16, 1-Pass Concat-Mux. |
+| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | `probe_video`, `split_video_segments`, `get_segments_frame_counts`, `_count_leading_discard_packets`, `verify_segment_resume_frames`, `extract_frames`, `extract_frames_raw_rgb24` (`1 MiB` slice), `encode_chunk_hevc`, `mux_segments_directly`, `embed_subtitle_track`. |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `get_default_model_id`, `resolve_model_for_video`, `verify_weights_sha256`, `list_models_formatted`; neo đường dẫn tương đối về `ROOT_DIR`. |
 | [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (vi phân lô đuôi 8K 2-frame), `AnimeJaNaiCompact2x`, `GPUPersistentWorker` (Cyclic Cel Dedup + NTFS Hardlink, TensorRT 10 auto-runner + Pinned D2H), `get_cuda_inference_engine`, `upscale_frames_with_fallback`. |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: runner NCNN Vulkan dự phòng; không phải engine PyTorch chính. |
-| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `resolve_dedup_policy`, `deduplicate_cyclic_frames`, `raw_actions_rle` tái phân hoạch GOP `< 1 ms`, `run_preflight_worker_cli` (tách sẵn `raw_segs` + GOP), 1-Pass fused `mpdecimate+gray`, Early-Exit DIS Flow. |
+| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS` (`sakuga`, `dis-sakuga`), `resolve_dedup_policy`, `deduplicate_cyclic_frames` (băm 3 tầng `64x36` thumbnail + BLAKE2b + SIMD uint8, `27x`), `raw_actions_rle`, phân tách ngưỡng DIS toàn cục/cục bộ. |
 | [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays` (nhận trực tiếp ảnh thu nhỏ GPU `270x480`), `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit`; ΔY/correlation guard. |
 | [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity` (đa luồng `ThreadPoolExecutor`, tái sử dụng metadata), `get_all_audio_streams_md5` (1-Pass `-f streamhash`), `check_window_interleaving` song song. |
 | [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` tự dò đĩa RAM vật lý/`UPSCALER_RAMDISK_DIR` hoặc định tuyến về `scratch/rolling_buffer` trên NVMe Gen4 (`E:`); `cleanup_orphan_ramdisks` dọn thư mục mồ côi. |
@@ -47,8 +47,8 @@ subtrans.cli → TranslationPipeline
 | [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text`; còn dữ liệu lịch sử hardcoded, không mặc nhiên là đo đạc mới. |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio`, `_build_whisper_initial_prompt`; hỗ trợ `faster-whisper` + Silero VAD (fallback `openai-whisper`), ưu tiên EN 0ms lệch mặc định hoặc `--prefer-whisper`. |
 | [`pending_queue.py`](../../src/pending_queue.py) | `load_pending_subs`, `save_pending_subs`, `add_pending_sub`, `remove_pending_sub`; module stdlib-only quản lý `pending_subs.json` không kích hoạt import `torch`/CUDA. |
-| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper` (cắt lát 2-frame giảm 75% đỉnh VRAM 8K), `DoubleBufferedPipeUpscaler` (transpose `uint8` giảm 50% băng thông VRAM, Belady's OPT Cyclic Memoization + 0-reinference Sanity). |
-| [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, ONNX export (`dynamo=False`), `TRTRuntimeEngineWrapper` (`_out_ring` 2-slot khử cấp phát động + cache `set_input_shape`/`set_tensor_address`), `get_hybrid_engine_or_wrapper`. |
+| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `GPUColorConverterP010LE`, `SRVGGNetCompactTRTWrapper`, `_PipeDrainWorker` (`8 MiB` zero-copy async pipe + chống deadlock), `DoubleBufferedPipeUpscaler` (CUDA Event `micro_timings` phi phong tỏa, Belady's OPT Cyclic Memoization). |
+| [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule`, `resolve_trt_profile_max_batch`, ONNX export (`dynamo=False`), `TRTRuntimeEngineWrapper` (`_out_ring` 2-slot khử cấp phát động + cache `set_input_shape`/`set_tensor_address`), `get_hybrid_engine_or_wrapper`. |
 
 `src/__init__.py` là package marker. Symbol nhỏ/nested không liệt kê hết: dùng `rg -n '^(class |def |    def )' src/<file>.py` khi đi sâu.
 
@@ -82,9 +82,10 @@ subtrans.cli → TranslationPipeline
 - [`scripts/`](../../scripts):
   - `agent_context.py`: Bootstrap Agent, kiểm tra tính toàn vẹn bộ nhớ (`--check`), trích xuất cấu trúc code AST (`--symbols`), tìm kiếm symbol (`--find`), và cài đặt pre-commit hook (`--install-hooks`).
   - `verify_offline.py`: Kiểm thử an toàn sandbox offline ngắt kết nối mạng.
+  - `telemetry_collector.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`: Hạ tầng thu thập 17 chỉ số phần cứng chu kỳ `1.0s`, điều phối chạy benchmark tự động (Preview/Climax) và đối chiếu delta/bất biến.
   - `unlock_rtx3060_admin.ps1`: Kích hoạt HAGS (`HwSchMode=2`), xuất/nạp profile tắt `CUDA - Force P2 State` và chẩn đoán RAM XMP / Resizable BAR / TensorRT.
   - `batch_translate_all.py` điều phối dịch tuần tự; `set_track_defaults.py` đổi default track MKV; `organize_vietnamese_subs.py` sắp xếp phụ đề; `upscale_x4_single.py` tiện ích upscale riêng. Đọc tham số/đường dẫn và side effect trước chạy.
-- [`benchmarks/README.md`](../../benchmarks/README.md): nhóm `upscale/` đo model, dedup, latency và chaos resume; `subtrans/` đánh giá pronoun; `research/` hiệu chuẩn DIS/so sánh hình ảnh. Không thuộc test mặc định và không phải lệnh bootstrap.
-- [`pytest.ini`](../../pytest.ini): thu thập `tests/` và `subtrans/tests/`. Video tests chia nhóm dedup/GOP, resume/storage, model/color, mux; subtitle tests chia parser/writer/glossary, API stub/quota/cache, cascade/RAG/eval.
+- [`benchmarks/README.md`](../../benchmarks/README.md): nhóm `upscale/` đo model, dedup, latency và chaos resume; `subtrans/` đánh giá pronoun; `research/` hiệu chuẩn DIS/so sánh hình ảnh; [`baseline_summary.md`](../../benchmarks/baseline_summary.md) & [`final_optimization_report.md`](../../benchmarks/final_optimization_report.md) lưu đối chứng Golden Baseline và báo cáo tối ưu hóa bão hòa Pareto.
+- [`pytest.ini`](../../pytest.ini): thu thập `tests/` (bao gồm `tests/e2e/` 115 ca kiểm thử hộp đen 4 tầng và `tests/test_benchmark_infra.py`) và `subtrans/tests/`. Video tests chia nhóm dedup/GOP, resume/storage, model/color, mux, E2E; subtitle tests chia parser/writer/glossary, API stub/quota/cache, cascade/RAG/eval.
 - `-m "not gpu"` loại test gắn marker GPU, nhưng vài test không gắn marker vẫn tự chọn CUDA. Chỉ một tiến trình test, kiểm tra production idle và cách ly dữ liệu theo [VALIDATION](VALIDATION.md).
 - Test mô phỏng/unit PASS không thay thế nghiệm thu video thực, frame count hay audit trên tập thành phẩm. Phạm vi kiểm chứng hiện tại phải được ghi trong [STATE](STATE.md).

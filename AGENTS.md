@@ -67,7 +67,7 @@ python subtrans.py path/to/source.mkv -o out/
 | `--no-embed` | `False` | Tắt bước nhúng phụ đề vào container MKV thành phẩm |
 | `--keep-temp` | `False` | Giữ lại thư mục tạm `.temp_<basename>` (mặc định xóa khi Mux PASS) |
 | `--clean-temp`, `--cleanup` | `False` | Quét dọn toàn bộ thư mục tạm và gom audit/cast rồi thoát |
-| `--dedup-policy` | `default` | Chính sách dedup: `default`, `sensitive-a/b`, `motion`, `drift`, `dis`, `off` |
+| `--dedup-policy` | `default` | Chính sách dedup: `default`, `sensitive-a/b`, `motion`, `drift`, `dis`, `sakuga`, `dis-sakuga`, `off` |
 | `--dis-thresh` | `0.30` | Ngưỡng dòng chảy quang học DIS tính bằng pixel 1080p |
 | `--dry-run` | `False` | Chạy mô phỏng toàn bộ quy trình không gọi AI hay API |
 
@@ -79,7 +79,7 @@ python subtrans.py path/to/source.mkv -o out/
 
 - **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 Zero-Alloc Ring / CUDA FP16, 3-Stage Overlapped Zero-Disk Pipe, Cyclic Cel Memoization `A->B->A`, GOP-RLE Queue Preflight, 1-Pass Concat-Mux & `streamhash`).
 - **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
-- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `unlock_rtx3060_admin.ps1`, `batch_translate_all.py`, `set_track_defaults.py`).
+- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `unlock_rtx3060_admin.ps1`, `batch_translate_all.py`, `set_track_defaults.py`).
 - **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.
 - **`tests/` & `subtrans/tests/`:** 100% Pytest tự động hóa kiểm thử đơn vị và tích hợp.
 
