@@ -12,10 +12,19 @@ import sys
 import shutil
 import tempfile
 import subprocess
+from unittest import mock
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.mux_audit import verify_mux_integrity, check_window_interleaving
+from src.mux_audit import (
+    verify_mux_integrity,
+    check_window_interleaving,
+    get_detailed_stream_info,
+    count_subtitle_packets,
+    _count_video_packets,
+    _get_detailed_stream_info_pyav,
+    _check_window_interleaving_pyav,
+)
 
 
 def test_mux_audit_catches_bugged_audio():
@@ -148,6 +157,112 @@ def test_mux_audit_catches_bugged_audio_track_2():
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_get_detailed_stream_info_pyav():
+    """Tests _get_detailed_stream_info_pyav parses streams, languages, and dispositions."""
+    with mock.patch("av.open") as mock_open:
+        mock_c = mock.MagicMock()
+
+        s_audio = mock.MagicMock(type="audio", index=1)
+        s_audio.name = "flac"
+        s_audio.metadata = {"language": "jpn"}
+        s_audio.disposition = mock.MagicMock(default=1, forced=0)
+
+        s_sub = mock.MagicMock(type="subtitle", index=2)
+        s_sub.name = "ass"
+        s_sub.metadata = {"language": "vie"}
+        s_sub.disposition = None
+
+        mock_c.streams = [s_audio, s_sub]
+        mock_open.return_value.__enter__.return_value = mock_c
+
+        info = _get_detailed_stream_info_pyav("test.mkv")
+        assert len(info["audio_streams"]) == 1
+        assert info["audio_streams"][0]["language"] == "jpn"
+        assert info["audio_streams"][0]["disposition"]["default"] == 1
+        assert len(info["subtitle_streams"]) == 1
+        assert info["subtitle_streams"][0]["language"] == "vie"
+        assert info["subtitle_streams"][0]["disposition"]["default"] == 0
+
+
+def test_count_subtitle_packets_pyav():
+    """Tests count_subtitle_packets via PyAV demux."""
+    with mock.patch("av.open") as mock_open:
+        mock_c = mock.MagicMock()
+        mock_sub = mock.MagicMock(frames=0)
+        mock_c.streams.subtitles = [mock_sub]
+
+        p1 = mock.MagicMock(size=50)
+        p2 = mock.MagicMock(size=60)
+        mock_c.demux.return_value = [p1, p2]
+        mock_open.return_value.__enter__.return_value = mock_c
+
+        cnt = count_subtitle_packets("test.mkv", sub_stream_idx=0)
+        assert cnt == 2
+
+        # Stream index out of range returns None
+        cnt_out = count_subtitle_packets("test.mkv", sub_stream_idx=5)
+        assert cnt_out is None
+
+
+def test_count_video_packets_pyav():
+    """Tests _count_video_packets via PyAV frames or demux."""
+    with mock.patch("av.open") as mock_open:
+        mock_c = mock.MagicMock()
+        mock_v = mock.MagicMock(frames=500)
+        mock_c.streams.video = [mock_v]
+        mock_open.return_value.__enter__.return_value = mock_c
+
+        assert _count_video_packets("test.mkv") == 500
+
+
+def test_check_window_interleaving_pyav():
+    """Tests _check_window_interleaving_pyav detects audio and video presence across windows."""
+    with mock.patch("av.open") as mock_open:
+        mock_c = mock.MagicMock()
+        v_stream = mock.MagicMock()
+        a_stream = mock.MagicMock()
+        mock_c.streams.video = [v_stream]
+        mock_c.streams.audio = [a_stream]
+
+        def mock_demux():
+            seek_val = mock_c.seek.call_args[0][0] / 1_000_000.0 if mock_c.seek.call_args else 0.0
+            return [
+                mock.MagicMock(stream=v_stream, pts=int((seek_val + 1) * 1000), dts=int((seek_val + 1) * 1000), time_base=0.001),
+                mock.MagicMock(stream=a_stream, pts=int((seek_val + 2) * 1000), dts=int((seek_val + 2) * 1000), time_base=0.001),
+            ]
+        mock_c.demux.side_effect = mock_demux
+        mock_open.return_value.__enter__.return_value = mock_c
+
+        # 1. Healthy interleaving: both video and audio present in all windows
+        res_pass = _check_window_interleaving_pyav(
+            "test.mkv",
+            duration_sec=30.0,
+            window_size_sec=10.0,
+            num_samples=2,
+            audio_count=1,
+        )
+        assert res_pass["passed"] is True
+        assert res_pass["windows_tested"] >= 1
+
+        # 2. Bugged interleaving: audio missing
+        def mock_demux_no_audio():
+            seek_val = mock_c.seek.call_args[0][0] / 1_000_000.0 if mock_c.seek.call_args else 0.0
+            return [
+                mock.MagicMock(stream=v_stream, pts=int((seek_val + 1) * 1000), dts=int((seek_val + 1) * 1000), time_base=0.001),
+            ]
+        mock_c.demux.side_effect = mock_demux_no_audio
+
+        res_fail = _check_window_interleaving_pyav(
+            "test.mkv",
+            duration_sec=30.0,
+            window_size_sec=10.0,
+            num_samples=2,
+            audio_count=1,
+        )
+        assert res_fail["passed"] is False
+        assert len(res_fail["failed_windows"]) > 0
 
 
 if __name__ == "__main__":

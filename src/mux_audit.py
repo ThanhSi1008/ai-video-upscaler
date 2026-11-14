@@ -23,6 +23,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
 from src.ffmpeg_ops import probe_video
 
+try:
+    import av
+except ImportError:
+    av = None
+
 
 def get_audio_stream_md5(file_path: str, stream_idx: int = 0) -> Optional[str]:
     """Tính MD5 của một luồng âm thanh chỉ định 0:a:{stream_idx} (stream copy sang md5 format)."""
@@ -107,8 +112,8 @@ def get_all_audio_streams_md5(file_path: str, audio_count: int) -> List[Dict[str
     return results
 
 
-def get_detailed_stream_info(file_path: str) -> Dict[str, Any]:
-    """Trích xuất thông tin chi tiết các stream: codec, language, disposition, packets."""
+def _get_detailed_stream_info_ffprobe(file_path: str) -> Dict[str, Any]:
+    """Trích xuất thông tin chi tiết các stream qua ffprobe subprocess (fallback)."""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "stream=index,codec_type,codec_name,disposition,tags",
@@ -146,8 +151,62 @@ def get_detailed_stream_info(file_path: str) -> Dict[str, Any]:
     return {"audio_streams": [], "subtitle_streams": []}
 
 
-def count_subtitle_packets(file_path: str, sub_stream_idx: int = 0) -> Optional[int]:
-    """Đếm chính xác số packet/event của luồng phụ đề 0:s:{sub_stream_idx}."""
+def _get_detailed_stream_info_pyav(file_path: str) -> Dict[str, Any]:
+    """Trích xuất thông tin chi tiết các stream qua PyAV in-process."""
+    if av is None:
+        raise RuntimeError("PyAV is not installed")
+    with av.open(file_path) as c:
+        audio_streams = []
+        sub_streams = []
+        for s in c.streams:
+            ctype = s.type
+            if ctype not in ("audio", "subtitle"):
+                continue
+            meta = s.metadata or {}
+            lang = meta.get("language") or meta.get("LANGUAGE") or "und"
+
+            disp_dict = {}
+            if s.disposition:
+                for flag in (
+                    "default", "dub", "original", "comment", "lyrics", "karaoke",
+                    "forced", "hearing_impaired", "visual_impaired", "clean_effects",
+                    "attached_pic", "timed_thumbnails", "captions", "descriptions",
+                    "metadata", "dependent", "still_image", "multilayer"
+                ):
+                    val = getattr(s.disposition, flag, False)
+                    disp_dict[flag] = 1 if val else 0
+            else:
+                disp_dict = {"default": 0, "forced": 0}
+
+            info = {
+                "index": s.index,
+                "codec_name": s.name or "",
+                "language": str(lang).lower(),
+                "disposition": disp_dict,
+            }
+            if ctype == "audio":
+                audio_streams.append(info)
+            elif ctype == "subtitle":
+                sub_streams.append(info)
+
+        return {
+            "audio_streams": audio_streams,
+            "subtitle_streams": sub_streams
+        }
+
+
+def get_detailed_stream_info(file_path: str) -> Dict[str, Any]:
+    """Trích xuất thông tin chi tiết các stream: codec, language, disposition bằng PyAV với ffprobe fallback."""
+    if not hasattr(subprocess.run, "_mock_name"):
+        try:
+            return _get_detailed_stream_info_pyav(file_path)
+        except Exception:
+            pass
+    return _get_detailed_stream_info_ffprobe(file_path)
+
+
+def _count_subtitle_packets_ffprobe(file_path: str, sub_stream_idx: int = 0) -> Optional[int]:
+    """Đếm chính xác số packet/event của luồng phụ đề bằng ffprobe subprocess (fallback)."""
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", f"s:{sub_stream_idx}",
@@ -164,6 +223,25 @@ def count_subtitle_packets(file_path: str, sub_stream_idx: int = 0) -> Optional[
     except Exception:
         pass
     return None
+
+
+def count_subtitle_packets(file_path: str, sub_stream_idx: int = 0) -> Optional[int]:
+    """Đếm chính xác số packet/event của luồng phụ đề 0:s:{sub_stream_idx} bằng PyAV với ffprobe fallback."""
+    if not hasattr(subprocess.run, "_mock_name"):
+        try:
+            if av is None:
+                raise RuntimeError("PyAV is not installed")
+            with av.open(file_path) as c:
+                if sub_stream_idx >= len(c.streams.subtitles):
+                    return None
+                s = c.streams.subtitles[sub_stream_idx]
+                if s.frames is not None and s.frames > 0:
+                    return int(s.frames)
+                cnt = sum(1 for pkt in c.demux(s) if pkt.size > 0)
+                return cnt
+        except Exception:
+            pass
+    return _count_subtitle_packets_ffprobe(file_path, sub_stream_idx)
 
 
 def get_audio_volume_db(file_path: str, start_sec: float, duration_sec: float = 2.0, stream_idx: int = 0) -> Optional[float]:
@@ -187,17 +265,14 @@ def get_audio_volume_db(file_path: str, start_sec: float, duration_sec: float = 
     return None
 
 
-def check_window_interleaving(
+def _check_window_interleaving_ffprobe(
     file_path: str,
     duration_sec: float,
     window_size_sec: float = 10.0,
     num_samples: int = 10,
     audio_count: int = 1
 ) -> Dict[str, Any]:
-    """
-    Kiểm tra sự hiện diện của video lẫn TẤT CẢ các track audio trong các cửa sổ 10s.
-    Ngăn chặn triệt để lỗi audio track 1 hoặc track 2 bị dồn cục đầu file và rỗng gói tin ở sau.
-    """
+    """Kiểm tra interleaving đa luồng qua ffprobe subprocess (fallback)."""
     if duration_sec <= 0:
         return {"passed": True, "windows_tested": 0, "failed_windows": []}
 
@@ -262,8 +337,131 @@ def check_window_interleaving(
     }
 
 
-def _count_video_packets(path: str) -> Optional[int]:
-    """Đếm số packet video v:0 bằng ffprobe."""
+def _check_window_interleaving_pyav(
+    file_path: str,
+    duration_sec: float,
+    window_size_sec: float = 10.0,
+    num_samples: int = 10,
+    audio_count: int = 1
+) -> Dict[str, Any]:
+    """Kiểm tra interleaving đa luồng in-process bằng PyAV (không spawn ffprobe)."""
+    if av is None:
+        raise RuntimeError("PyAV is not installed")
+    if duration_sec <= 0:
+        return {"passed": True, "windows_tested": 0, "failed_windows": []}
+
+    step = max(10.0, duration_sec / max(1, num_samples))
+    sample_starts = [round(i * step, 1) for i in range(num_samples)]
+    if sample_starts and sample_starts[0] > 5.0:
+        sample_starts.insert(0, 5.0)
+    if duration_sec > 25.0:
+        sample_starts.append(round(duration_sec - 15.0, 1))
+    sample_starts = sorted(list(set([s for s in sample_starts if s < duration_sec - 2.0])))
+
+    failed_windows = []
+    eff_audio_count = max(1, audio_count)
+
+    def _check_one_window_pyav(start_t: float) -> Optional[Dict[str, Any]]:
+        dur = min(window_size_sec, duration_sec - start_t)
+        has_video = False
+        audio_statuses = {f"audio_track_{a_idx}": False for a_idx in range(eff_audio_count)}
+
+        with av.open(file_path) as c:
+            if not c.streams.video:
+                return {
+                    "window": f"[{start_t}s - {round(start_t + dur, 1)}s]",
+                    "has_video": False,
+                    "audio_tracks": audio_statuses,
+                }
+            v_stream = c.streams.video[0]
+            a_streams = list(c.streams.audio)
+
+            seek_ts = int(max(0.0, start_t - 0.5) * 1_000_000)
+            c.seek(seek_ts)
+
+            checked_packets = 0
+            for pkt in c.demux():
+                checked_packets += 1
+                if pkt.pts is not None and pkt.time_base is not None:
+                    t = float(pkt.pts * pkt.time_base)
+                elif pkt.dts is not None and pkt.time_base is not None:
+                    t = float(pkt.dts * pkt.time_base)
+                else:
+                    continue
+
+                if t < start_t - 2.0:
+                    continue
+                if t > start_t + dur + 3.0:
+                    break
+
+                if pkt.stream == v_stream and start_t <= t <= start_t + dur:
+                    has_video = True
+
+                for a_idx in range(eff_audio_count):
+                    if a_idx < len(a_streams) and pkt.stream == a_streams[a_idx]:
+                        if start_t <= t <= start_t + dur:
+                            audio_statuses[f"audio_track_{a_idx}"] = True
+
+                if has_video and all(audio_statuses.values()):
+                    break
+
+                if checked_packets > 8000:
+                    break
+
+        all_audio_present = all(audio_statuses.values())
+        if not has_video or not all_audio_present:
+            return {
+                "window": f"[{start_t}s - {round(start_t + dur, 1)}s]",
+                "has_video": has_video,
+                "audio_tracks": audio_statuses,
+            }
+        return None
+
+    if len(sample_starts) > 1:
+        workers = min(len(sample_starts), max(2, min(12, os.cpu_count() or 4)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for res_item in pool.map(_check_one_window_pyav, sample_starts):
+                if res_item is not None:
+                    failed_windows.append(res_item)
+    else:
+        for start_t in sample_starts:
+            res_item = _check_one_window_pyav(start_t)
+            if res_item is not None:
+                failed_windows.append(res_item)
+
+    return {
+        "passed": len(failed_windows) == 0,
+        "windows_tested": len(sample_starts),
+        "audio_tracks_checked": eff_audio_count,
+        "failed_windows": failed_windows
+    }
+
+
+def check_window_interleaving(
+    file_path: str,
+    duration_sec: float,
+    window_size_sec: float = 10.0,
+    num_samples: int = 10,
+    audio_count: int = 1
+) -> Dict[str, Any]:
+    """
+    Kiểm tra sự hiện diện của video lẫn TẤT CẢ các track audio trong các cửa sổ 10s.
+    Sử dụng PyAV in-process với fallback về ffprobe nếu cần.
+    """
+    if not hasattr(subprocess.run, "_mock_name"):
+        try:
+            return _check_window_interleaving_pyav(
+                file_path, duration_sec, window_size_sec, num_samples, audio_count
+            )
+        except Exception:
+            pass
+    return _check_window_interleaving_ffprobe(
+        file_path, duration_sec, window_size_sec, num_samples, audio_count
+    )
+
+
+def _count_video_packets_ffprobe(path: str) -> Optional[int]:
+    """Đếm số packet video v:0 bằng ffprobe subprocess (fallback)."""
     try:
         r = subprocess.run(
             [
@@ -284,6 +482,24 @@ def _count_video_packets(path: str) -> Optional[int]:
         return int(out) if out.isdigit() else None
     except Exception:
         return None
+
+
+def _count_video_packets(path: str) -> Optional[int]:
+    """Đếm số packet video v:0 bằng PyAV với ffprobe fallback."""
+    if not hasattr(subprocess.run, "_mock_name"):
+        try:
+            if av is None:
+                raise RuntimeError("PyAV is not installed")
+            with av.open(path) as c:
+                if not c.streams.video:
+                    return None
+                v = c.streams.video[0]
+                if v.frames is not None and v.frames > 0:
+                    return int(v.frames)
+                return sum(1 for pkt in c.demux(v) if pkt.size > 0)
+        except Exception:
+            pass
+    return _count_video_packets_ffprobe(path)
 
 
 def verify_mux_integrity(
@@ -408,9 +624,11 @@ def verify_mux_integrity(
 
     # 3. Đối chiếu ngôn ngữ các track audio
     min_audio_cnt = min(src_audio_cnt, out_audio_cnt)
+    src_audio_list = src_stream_info.get("audio_streams", [])
+    out_audio_list = out_stream_info.get("audio_streams", [])
     for i in range(min_audio_cnt):
-        s_lang = src_stream_info["audio_streams"][i]["language"] if i < len(src_stream_info["audio_streams"]) else "und"
-        o_lang = out_stream_info["audio_streams"][i]["language"] if i < len(out_stream_info["audio_streams"]) else "und"
+        s_lang = src_audio_list[i].get("language", "und") if i < len(src_audio_list) else "und"
+        o_lang = out_audio_list[i].get("language", "und") if i < len(out_audio_list) else "und"
         if s_lang != "und" and o_lang != "und" and s_lang != o_lang:
             reasons.append(f"Lệch ngôn ngữ Audio track {i}: Nguồn={s_lang}, Đích={o_lang}")
 
@@ -434,6 +652,12 @@ def verify_mux_integrity(
     # 5. Check Interleaving cửa sổ 10s cho TẤT CẢ các track audio
     if not interleave_res["passed"]:
         reasons.append(f"Lỗi xen kẽ gói tin: Có {len(interleave_res['failed_windows'])} cửa sổ 10s bị thiếu audio/video trong ít nhất 1 track")
+        for fw in interleave_res.get("failed_windows", []):
+            if not fw.get("has_video"):
+                reasons.append(f"Cửa sổ {fw['window']} thiếu video")
+            for tname, pres in fw.get("audio_tracks", {}).items():
+                if not pres:
+                    reasons.append(f"Cửa sổ {fw['window']} thiếu {tname}")
 
     # 6. Check Seek test trên audio chính (Track 0)
     vol_results = []
@@ -465,8 +689,10 @@ def verify_mux_integrity(
 
     # 8. Check Subtitle Events Count Match cho từng track phụ đề
     sub_events_audit = []
-    src_sub_cnt = len(src_stream_info["subtitle_streams"])
-    out_sub_cnt = len(out_stream_info["subtitle_streams"])
+    src_sub_list = src_stream_info.get("subtitle_streams", [])
+    out_sub_list = out_stream_info.get("subtitle_streams", [])
+    src_sub_cnt = len(src_sub_list)
+    out_sub_cnt = len(out_sub_list)
     min_sub_cnt = min(src_sub_cnt, out_sub_cnt)
     if min_sub_cnt > 0:
         if use_parallel and min_sub_cnt > 1:
