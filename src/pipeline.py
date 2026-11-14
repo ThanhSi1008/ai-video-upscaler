@@ -154,7 +154,7 @@ def run_upscale_pipeline(
     logger = RunLogger(base_name)
 
     # Xác định hậu tố tên file đầu ra theo model (D7)
-    out_suffix = "_4K_animejanai.mkv" if model_info["id"] == "animejanai-hd-v3-compact" else "_4K.mkv"
+    out_suffix = "_4K_animejanai.mkv" if str(model_info.get("id", "")).startswith("animejanai-") else "_4K.mkv"
 
     # Xác định đường dẫn file thành phẩm
     if not output_path:
@@ -199,19 +199,20 @@ def run_upscale_pipeline(
         os.makedirs(up_segs_dir, exist_ok=True)
 
         # Kiểm tra tính đồng nhất của model qua manifest.json (D7)
+        model_sha256 = str(model_info.get("sha256") or "")
         manifest_path = os.path.join(work_dir, "manifest.json")
         if os.path.exists(manifest_path):
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest_data = json.load(f)
                 prev_model_id = manifest_data.get("model_id")
-                prev_sha256 = manifest_data.get("sha256")
-                if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_info["sha256"]):
+                prev_sha256 = manifest_data.get("sha256") or ""
+                if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_sha256):
                     if not force:
                         raise ValueError(
                             f"❌ Xung đột mô hình: Thư mục tạm '{work_dir}' chứa phân đoạn của mô hình '{prev_model_id}' "
                             f"(sha256: {prev_sha256[:8] if prev_sha256 else 'N/A'}), nhưng phiên hiện tại yêu cầu '{model_info['id']}' "
-                            f"(sha256: {model_info['sha256'][:8]}).\n"
+                            f"(sha256: {model_sha256[:8] if model_sha256 else 'N/A'}).\n"
                             f"Từ chối trộn lẫn mô hình trong cùng một tập (D7)! "
                             f"Sử dụng cờ --force để xóa sạch phân đoạn cũ và chạy lại từ đầu."
                         )
@@ -233,7 +234,7 @@ def run_upscale_pipeline(
         manifest_data = {
             "model_id": model_info["id"],
             "model_name": model_info["name"],
-            "sha256": model_info["sha256"],
+            "sha256": model_sha256,
             "engine": engine,
             "precision": precision,
             "resolution_source": model_info.get("resolution_source", "")
@@ -318,7 +319,7 @@ def run_upscale_pipeline(
                 )
                 if dedup_plan:
                     dedup_plan["model_id"] = model_info["id"]
-                    dedup_plan["model_sha256"] = model_info["sha256"]
+                    dedup_plan["model_sha256"] = model_sha256
                     dedup_plan["engine"] = engine
                     dedup_plan["precision"] = precision
                     try:
@@ -558,8 +559,52 @@ def run_upscale_pipeline(
                     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="DecodeWorker") as dec_exec, \
                          ThreadPoolExecutor(max_workers=1, thread_name_prefix="EncodeWorker") as enc_exec:
 
-                        # Bắt đầu trích xuất chunk đầu tiên
+                        # Bắt đầu trích xuất chunk đầu tiên trên luồng DecodeWorker
                         future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
+
+                        # Khởi tạo song song GPU Engine + TensorRT + Pinned Ring + Triton Warmup ngay trong lúc chờ giải mã Chunk 0
+                        if zero_disk and engine == "cuda" and not os.environ.get("PYTEST_CURRENT_TEST"):
+                            try:
+                                import torch
+                                from src.cuda_engine import get_cuda_inference_engine
+                                from src.build_trt_engine import get_hybrid_engine_or_wrapper
+                                from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
+
+                                pre_h = int(meta.get("height", 1080))
+                                pre_w = int(meta.get("width", 1920))
+                                pre_cuda = get_cuda_inference_engine(
+                                    model_info,
+                                    precision=precision,
+                                    batch_size=batch_size,
+                                    use_tensorrt=use_tensorrt,
+                                )
+                                pre_bs = batch_size or pre_cuda.batch_size or 8
+                                pre_key = (model_info["id"], pre_h, pre_w, int(pre_bs), bool(use_tensorrt), precision)
+                                if (
+                                    getattr(pre_cuda, "_zero_disk_upscaler", None) is None
+                                    or getattr(pre_cuda, "_zero_disk_key", None) != pre_key
+                                ):
+                                    pre_wrapped = get_hybrid_engine_or_wrapper(
+                                        pre_cuda.model,
+                                        max_batch=pre_bs,
+                                        force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                        model_id=model_info["id"],
+                                        input_hw=(pre_h, pre_w),
+                                        scale=2.0,
+                                    )
+                                    pre_cuda._zero_disk_wrapper = pre_wrapped
+                                    pre_cuda._zero_disk_key = pre_key
+                                    pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
+                                        pre_wrapped,
+                                        batch_size=pre_bs,
+                                        device=pre_cuda.device,
+                                        input_hw=(pre_h, pre_w),
+                                        scale=2,
+                                    )
+                                    if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                            except Exception:
+                                pass
                         future_encode = None
                         last_encode_item = None
                         last_ai_result = None
@@ -1409,7 +1454,7 @@ def run_upscale_pipeline(
                     "output_file": os.path.abspath(output_path),
                     "model_id": model_info["id"],
                     "model_name": model_info["name"],
-                    "model_sha256": model_info["sha256"],
+                    "model_sha256": model_sha256,
                     "engine": engine,
                     "precision": precision,
                     "resolution_source": model_info.get("resolution_source", ""),
@@ -1465,8 +1510,8 @@ def run_upscale_pipeline(
                 sound="Glass"
             )
 
-            # Tự động mở trình phát nếu đang chạy chế độ preview
-            if is_preview:
+            # Tự động mở trình phát nếu đang chạy chế độ preview (trừ khi chạy benchmark tự động)
+            if is_preview and not os.environ.get("UPSCALER_NO_AUTO_OPEN"):
                 try:
                     os.startfile(output_path)
                 except Exception:

@@ -28,13 +28,16 @@ def resolve_trt_profile_max_batch(
     pytorch_model: Optional[nn.Module],
     max_batch: int = 8,
     input_hw: Tuple[int, int] = (1080, 1920),
+    available_vram_gb: Optional[float] = None,
 ) -> int:
     """
-    Giới hạn kích thước batch tối đa của TensorRT Optimization Profile theo kiến trúc mô hình:
+    Giới hạn kích thước batch tối đa của TensorRT Optimization Profile theo kiến trúc mô hình và dung lượng VRAM:
     - Mô hình PixelShuffle(4) trên nguồn >= 540p (vd: RealESR-AnimeVideoV3 tạo nhánh 8K 4320x7680 trung gian):
       giới hạn profile max_batch <= 2 để đỉnh VRAM chỉ ~1.33 GB (khử hoàn toàn lỗi OOM 12.74 GB trên RTX 3060 12GB)
       mà vẫn bão hòa nhân Tensor Core (~11.5+ fps); TRTRuntimeEngineWrapper tự cắt lát B=8 -> 4x2 zero-copy.
-    - Mô hình 2x thuần (AnimeJaNaiCompact2x, không có nhánh 8K): giữ max_batch <= 4 trên Full HD.
+    - Mô hình 2x thuần (AnimeJaNaiCompact2x, SPAN-2x, không có nhánh 8K): cho phép max_batch <= 4 về mặt kiến trúc,
+      nhưng trên GPU có VRAM < 15 GB (như RTX 3060 12GB) ở độ phân giải >= 720p, giới hạn max_batch <= 2 để tránh
+      TensorRT 10.16 cấp phát 12.15 GiB cho chiến thuật HMMA.16816.F16 gây lỗi CUDA OOM và tụt 42% tốc độ.
     """
     req_b = max(1, int(max_batch))
     in_h, in_w = int(input_hw[0]), int(input_hw[1])
@@ -53,6 +56,8 @@ def resolve_trt_profile_max_batch(
             upscale = int(getattr(pytorch_model, "model_scale"))
 
     if upscale >= 4:
+        return min(req_b, 2)
+    if available_vram_gb is not None and float(available_vram_gb) < 15.0 and (in_h * in_w) >= (720 * 1280):
         return min(req_b, 2)
     return min(req_b, 4)
 
@@ -558,7 +563,17 @@ def get_hybrid_engine_or_wrapper(
     allow_trt = (not force_pytorch) and (not in_pytest) and is_tensorrt_available() and (device.type == "cuda")
 
     if allow_trt:
-        trt_max_batch = resolve_trt_profile_max_batch(pytorch_model, max_batch=max_batch, input_hw=input_hw)
+        vram_gb: Optional[float] = None
+        try:
+            vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+        except Exception:
+            vram_gb = None
+        trt_max_batch = resolve_trt_profile_max_batch(
+            pytorch_model,
+            max_batch=max_batch,
+            input_hw=input_hw,
+            available_vram_gb=vram_gb,
+        )
         engine_path = get_trt_engine_path(model_id=model_id, max_batch=trt_max_batch, input_hw=input_hw)
         if engine_path not in _FAILED_TRT_ENGINES:
             onnx_path = engine_path.replace(".engine", ".onnx")

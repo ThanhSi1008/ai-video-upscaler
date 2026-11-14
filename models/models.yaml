@@ -28,7 +28,67 @@ models:
     downsample: "none"
     weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3_Compact.pth"
     sha256: "af7307eee19e5982a8014dd0e4650d3bde2e25aa78d2105a4bdfd947636e4c8f"
-    source_url: "https://github.com/the-database/mpv-upscale-2x_animejanai/releases/tag/3.0.0"
+    source_url: "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false
+
+  animejanai-hd-v3-ultracompact:
+    id: "animejanai-hd-v3-ultracompact"
+    name: "AnimeJaNai HD V3 UltraCompact (Native 2x)"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 64
+      num_conv: 8
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3_UltraCompact.pth"
+    sha256: "7c74ae2f919a31b96a08afc7dee37f1d1bae8b80844b7cc24ee82d43efd64110"
+    source_url: "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false
+
+  animejanai-hd-v3-sharp1-ultracompact:
+    id: "animejanai-hd-v3-sharp1-ultracompact"
+    name: "AnimeJaNai HD V3 Sharp1 UltraCompact (Native 2x)"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 64
+      num_conv: 8
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth"
+    sha256: "6e64b50e6eafdef99984ea398c4ba7e352db90e38acf31e95d39cb853423b486"
+    source_url: "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false
+
+  animejanai-hd-v3-superultracompact:
+    id: "animejanai-hd-v3-superultracompact"
+    name: "AnimeJaNai HD V3 SuperUltraCompact (Native 2x)"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 24
+      num_conv: 8
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3_SuperUltraCompact.pth"
+    sha256: "402f81e5b3202dfead0e6d2e092c9fc0372b687bff4bf2b5da68735bdc8206c8"
+    source_url: "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
+    license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
+    default: false
+
+  animejanai-hd-v3-sharp1-superultracompact:
+    id: "animejanai-hd-v3-sharp1-superultracompact"
+    name: "AnimeJaNai HD V3 Sharp1 SuperUltraCompact (Native 2x)"
+    arch:
+      type: "SRVGGNetCompact"
+      num_feat: 24
+      num_conv: 8
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_AnimeJaNai_HD_V3_ModelsOnly/2x_AnimeJaNai_HD_V3Sharp1_SuperUltraCompact.pth"
+    sha256: "200b6f820e06d3b98d80956b143216467650ac03a294e4e8f90e1dfd015eb863"
+    source_url: "https://github.com/the-database/mpv-AnimeJaNai/releases/download/3.0.0/2x_AnimeJaNai_HD_V3_ModelsOnly.zip"
     license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
     default: false
 
@@ -42,6 +102,8 @@ models:
       upscale: 2
     downsample: "none"
     weights_path: "models_bench/span-2x.pth"
+    sha256: "0b20caeea7af5507ec3bdc63ff5a141a28506279d2cfec909c417ecb308d3f93"
+    source_url: "https://objectstorage.us-phoenix-1.oraclecloud.com/n/ax6ygfvpvzka/b/open-modeldb-files/o/2x-spanx2-ch48.pth"
     license: "Apache-2.0"
     default: false
 
@@ -55,5 +117,7 @@ models:
       upscale: 2
     downsample: "none"
     weights_path: "models_bench/2x_AnimeJaNai_V3.pth"
+    sha256: "8d4223495eb8c87d31c24a030370432d612708e4cac11e833a48563a71fa7f36"
+    source_url: "https://huggingface.co/nuriyoo/openmodeldb-mirror/resolve/main/models/2x-AniSD-Suite/2x_AniSD_AC_G6i2b_SPAN_190K.pth"
     license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
     default: false

@@ -354,3 +354,106 @@ def test_whisper_compute_type_selection(monkeypatch, tmp_path):
     assert ok is True
     assert recorded_kwargs.get("device") == "cpu"
     assert recorded_kwargs.get("compute_type") == "int8"
+
+
+# =============================================================================
+# 5. Native 2x Registry Integrity, Mixed-Case Resolution & VRAM-Aware TRT Batch
+# =============================================================================
+
+def test_resolve_model_mixed_case_and_ultracompact_entries():
+    """Kiểm tra phân giải không phân biệt hoa thường cho 2x_AnimeJaNai_V3 và các biến thể UltraCompact."""
+    from src.models_resolver import resolve_model_for_video
+
+    res_exact = resolve_model_for_video("ep22.mkv", "2x_AnimeJaNai_V3")
+    assert res_exact["id"] == "2x_AnimeJaNai_V3"
+
+    res_lower = resolve_model_for_video("ep22.mkv", "2x_animejanai_v3")
+    assert res_lower["id"] == "2x_AnimeJaNai_V3"
+
+    res_uc = resolve_model_for_video("ep22.mkv", "animejanai-hd-v3-sharp1-ultracompact")
+    assert res_uc["id"] == "animejanai-hd-v3-sharp1-ultracompact"
+    assert res_uc["arch"]["upscale"] == 2
+    assert res_uc["downsample"] == "none"
+
+
+def test_all_registered_models_have_sha256_and_https_source_url():
+    """Mọi mô hình trong models/models.yaml phải có sha256 hợp lệ (64 ký tự hex) và source_url https://."""
+    registry = load_models_registry()
+    assert len(registry) >= 7
+    for m_id, m_cfg in registry.items():
+        sha = str(m_cfg.get("sha256") or "")
+        url = str(m_cfg.get("source_url") or "")
+        assert len(sha) == 64 and all(c in "0123456789abcdef" for c in sha.lower()), (
+            f"Model {m_id} thiếu sha256 hợp lệ: {sha!r}"
+        )
+        assert url.startswith("https://"), f"Model {m_id} thiếu source_url https: {url!r}"
+
+
+def test_resolve_trt_profile_max_batch_vram_aware_cap():
+    """Trên GPU 12 GB VRAM (RTX 3060) ở 1080p, Native 2x giới hạn max_batch=2 tránh OOM 12.15 GiB."""
+    m2 = AnimeJaNaiCompact2x(num_feat=64, num_conv=8)
+    assert resolve_trt_profile_max_batch(m2, max_batch=8, input_hw=(1080, 1920)) == 4
+    assert resolve_trt_profile_max_batch(m2, max_batch=8, input_hw=(1080, 1920), available_vram_gb=12.0) == 2
+    assert resolve_trt_profile_max_batch(m2, max_batch=8, input_hw=(1080, 1920), available_vram_gb=24.0) == 4
+    assert resolve_trt_profile_max_batch(m2, max_batch=8, input_hw=(360, 640), available_vram_gb=12.0) == 8
+
+
+def test_animejanai_compact_parametric_variants():
+    """Kiểm tra AnimeJaNaiCompact2x hỗ trợ cả UltraCompact (64f8c) và SuperUltraCompact (24f8c)."""
+    x = torch.randn(1, 3, 32, 32)
+    for nf, nc in ((64, 8), (24, 8)):
+        m = AnimeJaNaiCompact2x(num_feat=nf, num_conv=nc).eval()
+        with torch.no_grad():
+            out = m(x)
+        assert out.shape == (1, 3, 64, 64)
+
+
+def test_auto_download_zip_extraction_and_sha256_verification(monkeypatch, tmp_path):
+    """Kiểm tra _auto_download_registered_weights giải nén đúng .pth từ gói .zip và xác thực SHA-256."""
+    import hashlib
+    import io
+    import zipfile
+
+    dummy_bytes = b"FAKE_PTH_WEIGHTS_PAYLOAD_12345"
+    expected_sha = hashlib.sha256(dummy_bytes).hexdigest()
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("2x_AnimeJaNai_HD_V3_ModelsOnly/test_target.pth", dummy_bytes)
+    zip_payload = zip_buf.getvalue()
+
+    class FakeHTTPResp(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=120: FakeHTTPResp(zip_payload),
+    )
+
+    target_pth = tmp_path / "test_target.pth"
+    dummy_worker = object.__new__(GPUPersistentWorker)
+    dummy_worker.model_id = "test-zip-model"
+    dummy_worker.weights_path = str(target_pth)
+
+    dummy_worker._auto_download_registered_weights({
+        "name": "Test Zip Model",
+        "source_url": "https://example.com/release/models.zip",
+        "sha256": expected_sha,
+    })
+
+    assert target_pth.exists()
+    assert target_pth.read_bytes() == dummy_bytes
+
+    # Trường hợp sai SHA-256 phải xóa file tạm và ném RuntimeError
+    bad_pth = tmp_path / "test_target.pth"
+    bad_pth.unlink()
+    with pytest.raises(RuntimeError):
+        dummy_worker._auto_download_registered_weights({
+            "name": "Test Zip Model",
+            "source_url": "https://example.com/release/models.zip",
+            "sha256": "0" * 64,
+        })
+    assert not bad_pth.exists()

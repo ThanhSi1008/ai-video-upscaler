@@ -24,7 +24,10 @@ Tạo lập và hoàn thiện hồ sơ bàn giao toàn diện sau khi hoàn tấ
   - `5eaf4d7`: `feat(m2): integrate PyAV 18.1.0 in-process metadata and parameterize track defaults CLI` (Milestone 2)
   - `d9bbc5d`: `feat(subtrans): clean SQLite connection closing and FTS5 2-gram/3-gram Kanji RAG` (Milestone 3)
   - `ac6b061`: `feat(model-engine): integrate Spandrel 0.4.2 Native 2x & Faster-Whisper Turbo` (Milestone 4)
-  - `d6a7853`: `feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization` (Milestone 5)
+  - `d6a7853` / `18df9ef`: `feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization` (Milestone 5)
+  - Phiên hoàn thiện thực nghiệm Nhóm B (Native 2x Pretrained Weights + `--zero-disk` TensorRT 10 FP16 Climax Benchmark & 12-Frame Quality Audit):
+    - Cài đặt đầy đủ 6 trọng số pretrained Native `2x` chính thức vào `models_bench/` (`2x_AnimeJaNai_HD_V3_Compact.pth`, `2x_AnimeJaNai_HD_V3_UltraCompact.pth`, `2x_AnimeJaNai_HD_V3Sharp1_UltraCompact.pth`, `2x_AnimeJaNai_HD_V3_SuperUltraCompact.pth`, `2x_AnimeJaNai_HD_V3Sharp1_SuperUltraCompact.pth`, `span-2x.pth`, `2x_AnimeJaNai_V3.pth`) kèm `sha256` & `source_url` đầy đủ trong `models/models.yaml`.
+    - Vá 3 lỗi thực thi thực tế: (1) `resolve_model_for_video` không phân biệt hoa thường cho ID `2x_AnimeJaNai_V3`; (2) `resolve_trt_profile_max_batch(..., available_vram_gb)` giới hạn `max_batch <= 2` khi `VRAM < 15 GB` ở `>= 720p` để tránh lỗi CUDA OOM `12.15 GiB` của TensorRT 10.16 ở `max_batch=4` (tăng `+72.7%` tốc độ TRT và rút thời gian build `.engine` xuống `2.1–8.0s`); (3) tự động tải `.pth`/`.zip` + xác thực SHA-256 trong `src/cuda_engine.py` và khởi động song song GPU Engine trong lúc giải mã Chunk 0 (`src/pipeline.py`).
 - **File đã tạo mới và sửa đổi trong M5:**
   - `tests/test_e2e_group_a.py` (82 test cases)
   - `tests/test_e2e_group_b.py` (66 test cases)
@@ -74,18 +77,13 @@ Tạo lập và hoàn thiện hồ sơ bàn giao toàn diện sau khi hoàn tấ
   - **Agent Memory Integrity Check:**
     - Lệnh: `.\.venv\Scripts\python.exe scripts/agent_context.py --check`
     - Kết quả: **PASS: required memory files, local links, root <= 12288 bytes, root + subtrans <= 32768 bytes**.
-  - **Thực nghiệm Benchmark trên Fate Apocrypha 22 (Live 4s CUDA preview):**
-    - Lệnh: `.\.venv\Scripts\python.exe scripts/benchmark_pipeline.py "E:\Films\Raw_Sources\Fate Apocrypha\[AC] Fate Apocrypha - 22 [BD 1080p Hi10 FLAC][DualAudio][695AB63E].mkv" --tier preview --duration 4 --label "fate22_m5_4s_live" --engine cuda`
-    - Tổng thời gian: 50.45 s (126 frames, kept 93 unique frames, 26.19% dedup).
-    - Tốc độ: AI Steady FPS = 3.98 fps, Average Pipeline FPS = 2.59 fps.
-    - Peak VRAM: 9313.0 MiB (< 9.5 GB = 9728 MiB trần an toàn RTX 3060).
-    - Output Sanity Guard: `status: PASS`, $\Delta Y = 1.0643 \le 6.0/255$, Pearson $r = 0.999809 \ge 0.98$.
-    - BT.709 Color: Source `yuv420p10le` High 10 $\rightarrow$ Output `yuv420p10le` Main 10 HEVC, BT.709 Limited, không clipping.
-    - Bit-exact Stream Copy Mux Audit: `status: PASS`.
-      - Audio: 2 FLAC Stereo tracks, MD5 track 0 (`27f1426c...`) và track 1 (`3e370b4c...`) khớp 100% từng bit.
-      - Subtitles: 2 SSA/ASS tracks khớp số lượng packets.
-      - Fonts: 5 fonts (3 TTF, 2 OTF) đính kèm nguyên vẹn.
-      - Chapters: Khớp toàn vẹn.
+  - **Thực nghiệm Benchmark trực tiếp `--zero-disk` TensorRT 10 FP16 trên `Fate Apocrypha 22` (`out/benchmark_group_b/`):**
+    - `gb_animevideov3_post_a_preview` (10s, 270f): `9.81 fps` effective (`27.53s`), AI Steady `11.14 fps` (`+21.86%` so với `8.05 fps` M3), Peak VRAM `5679 MiB`, Mux `PASS`.
+    - `gb_span_2x_preview` (`--model 2x_AnimeJaNai_V3`, 10s, 270f): `8.94 fps` effective (`30.20s`), AI Steady `9.91 fps`, Peak VRAM `7727 MiB`, Mux `PASS`.
+    - `gb_sharp1_uc_preview` (`--model animejanai-hd-v3-sharp1-ultracompact`, 10s, 270f): **`13.58 fps` effective (`19.88s`, `3.76x` vs Baseline / `1.69x` vs M3)**, AI Steady **`20.18 fps`**, Peak VRAM `5175 MiB`, Mux `PASS`.
+    - `gb_sharp1_uc_climax` (`--model animejanai-hd-v3-sharp1-ultracompact`, 60s @ `13:30`, `1478` frames, `95.06%` unique): **`18.27 fps` effective (`80.89s`, `2.14x` vs Baseline `8.53 fps` / `1.93x` vs `animevideov3` Zero-Disk `9.47 fps`)**, AI Steady **`19.99 fps` (Peak `20.81 fps`)**, `TRT: 354.71ms | Triton: 5.72ms | D2H: 10.17ms`, Peak VRAM **`6838 MiB` (`6.68 GB` < 9.5 GB)**, Output Sanity PASS ($\Delta Y = 0.3219$, $r = 0.999921$), Mux `PASS` bit-exact (2 FLAC MD5 khớp 100%, 2 ASS, 5 Fonts, 1 Chapter, `1478/1478` frames).
+    - `gb_sharp1_suc_climax` (`--model animejanai-hd-v3-sharp1-superultracompact`, 60s @ `13:30`, `1478` frames): **`21.13 fps` effective (`69.94s`, `2.48x` vs Baseline / `2.23x` vs `animevideov3` Zero-Disk)**, AI Steady **`24.32 fps` (Peak `28.03 fps`)**, `TRT: 183.30ms | Triton: 5.53ms`, Peak VRAM **`6212 MiB` (`6.07 GB`)**, Mux `PASS` (`1478/1478` frames).
+    - **Kiểm định chất lượng 12 khung hình Sakuga 4K Main 10 (`out/benchmark_group_b/empirical_quality_audit.json`):** `Sharp1 UltraCompact` đạt Cycle PSNR `39.68 dB` (vs `39.04 dB` trên `animevideov3`), Cycle SSIM `0.98876` (vs `0.98471`), Cross-Model 4K SSIM `0.99079`, Sobel P95 Line-Art `19.990` (`+23.17%` so với `16.229`), và giảm `3.75x` sai lệch sắc độ BT.709 (`0.0947` vs `0.3549`).
 
 ## Bước tiếp theo
 1. Toàn bộ 5 Milestone M1-M5 đã hoàn tất và được nghiệm thu độc lập.

@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `d6a7853` (`feat(m5): complete Group A & Group B acceptance, E2E test suite, and state synchronization`)
+> **Commit Baseline:** `18df9ef` (`chore(state): record commit d6a7853 baseline in STATE.md`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,9 +10,13 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (hơn 870+ ca kiểm thử tự động, bao gồm 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py` và 115/115 ca `tests/e2e/` qua runner cô lập `scripts/verify_offline.py` trên Windows 11).
-- **Thực nghiệm phần cứng & Bão hòa Pareto:** Đã đo đạc đối chứng trên mẫu đại cảnh **Fate/Apocrypha Tập 22** (`H.264 Hi10P`, `95.06%` unique frames) trên RTX 3060 12GB + i5-12600K: **Preview `3.61 -> 8.05 fps` (`+122.99%`)**, **Climax `8.53 -> 9.47 fps` (`+11.02%`, AI Steady-State `10.20 fps` = `92.85%` trần vật lý GA106)**; kiểm chứng live clip Milestone 5 đạt Peak VRAM 9.31 GB (< 9.5 GB), Output Sanity Guard PASS ($|\Delta Y| = 1.06 \le 6.0$, corr $= 0.9998 \ge 0.98$), `Mux Audit PASS` bit-exact 100% (2 FLAC Audio MD5 khớp từng bit, 2 ASS Subs, 5 Fonts, Chapters).
-- **Trạng thái Git:** Sạch sẽ, hoàn thành trọn vẹn 5 Milestone M1-M5 theo đúng quy trình bàn giao đa Agent; kỷ luật commit riêng biệt cho từng yêu cầu kỹ thuật; đã trang bị đầy đủ `.agents/skills/`, `.agents/plugins/`, `.vscode/` và `ruff.toml`.
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (713+ ca kiểm thử tự động không GPU qua runner cô lập `scripts/verify_offline.py` trên Windows 11, bao gồm 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py`, `2/2` ca đối chiếu độc lập `tests/test_model_regression.py` PSNR >= 50 dB và 115/115 ca `tests/e2e/`).
+- **Thực nghiệm phần cứng Nhóm A & Nhóm B trên mẫu đại cảnh `Fate/Apocrypha Tập 22` (`BD 1080p H.264 Hi10P`, `95.06%` unique frames ở Climax `13:30`) trên RTX 3060 12GB + i5-12600K (`--zero-disk` TensorRT 10 FP16):**
+  - **Mô hình mặc định `animevideov3` (Hậu Nhóm A):** Preview `3.61 -> 8.05 -> 9.81 fps` (AI Steady `11.14 fps`), Climax `8.53 -> 9.47 fps` (AI Steady `10.20 fps`).
+  - **Mô hình Native `2x` sắc nét `animejanai-hd-v3-sharp1-ultracompact` (`64f8c`):** Preview **`13.58 fps`** (AI Steady **`20.18 fps`**, `19.88s`), Climax 60s **`18.27 fps` (`2.14x` vs Baseline / `1.93x` vs `animevideov3` Zero-Disk, AI Steady `19.99 fps`, Peak `20.81 fps`, `80.89s`)**, Peak VRAM **`6.68 GB` (`6838 MiB` < 9.5 GB)**.
+  - **Mô hình Native `2x` siêu tốc `animejanai-hd-v3-sharp1-superultracompact` (`24f8c`):** Climax 60s **`21.13 fps` (`2.48x` vs Baseline / `2.23x` vs `animevideov3` Zero-Disk, AI Steady `24.32 fps`, Peak `28.03 fps`, `69.94s`)**, Peak VRAM **`6.07 GB` (`6212 MiB`)**.
+  - **Kiểm định chất lượng 12 khung hình Sakuga 4K Main 10 (`out/benchmark_group_b/empirical_quality_audit.json`):** Output Sanity PASS ($|\Delta Y| = 0.32 \le 6.0$, Pearson $r = 0.99992 \ge 0.98$), Cycle PSNR vs BD 1080p tăng **`39.04 -> 39.68..39.78 dB`**, Cycle SSIM tăng **`0.98471 -> 0.98876`**, độ sắc nét nét vẽ Sobel P95 tăng **`+23.17%` (`16.23 -> 19.99`)**, độ trôi màu BT.709 giảm `3.75x`, khớp `1478/1478` frames và `Mux Audit PASS` bit-exact 100% (2 FLAC MD5, 2 ASS, 5 Fonts, 1 Chapter).
+- **Trạng thái Git:** Sạch sẽ, hoàn thành trọn vẹn Nhóm A & Nhóm B kèm trọng số Native `2x` chính thức đã xác thực SHA-256 trong `models_bench/` và `models/models.yaml` (giữ nguyên `animevideov3` là `default: true` theo `AGENTS.md` §5).
 
 ---
 
@@ -26,7 +30,7 @@
 | **Unique Inference FPS Deadline Realignment** | `upscale.py`, `src/scheduler.py` | PASS | Căn chỉnh công thức ETA `--deadline` theo Unique Inference FPS ($N_{\text{unique}} / \text{FPS}_{\text{unique}}$), loại bỏ triệt để sai lệch dự toán ~2.1x khi có dedup. |
 | **SQLite Connection Context Manager** | `subtrans/cache.py`, `subtrans/rag.py` | PASS | Bọc kết nối SQLite bằng `contextlib.contextmanager` đóng sạch handle, triệt tiêu hoàn toàn lỗi khóa file `WinError 32` trên Windows 11. |
 | **SQLite FTS5 2-Gram/3-Gram Kanji RAG** | `subtrans/rag.py` | PASS | Nâng cấp chỉ mục RAG lên SQLite FTS5 với tokenizer character 2-gram + 3-gram, tra cứu chính xác từ khóa Kanji 2 chữ (`魔術`, `聖杯`, `令呪`). |
-| **Spandrel 0.4.2 Native 2x Model Loader** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `models/models.yaml` | PASS | Tích hợp `spandrel 0.4.2` nạp các kiến trúc Native 2x không PReLU, lớp `_GenericTRTExportModule` hỗ trợ ONNX opset 18 và TensorRT 10 max_batch=4, đăng ký `span-2x` và `2x_AnimeJaNai_V3`. |
+| **Spandrel 0.4.2 Native 2x & Auto-Verify** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/models_resolver.py`, `models/models.yaml` | PASS | Nạp kiến trúc Native 2x qua `spandrel 0.4.2` & `AnimeJaNaiCompact2x(num_feat, num_conv)`, phân giải ID không phân biệt hoa thường, tự động tải `.pth`/`.zip` + xác thực SHA-256, giới hạn `max_batch=2` theo VRAM `<15 GB` trên RTX 3060 giúp Native `2x` đạt `18.27–21.13 fps` Climax (`0` OOM). |
 | **Faster-Whisper Large-V3-Turbo STT** | `src/subtitles.py` | PASS | Mặc định model STT `large-v3-turbo` trên CUDA float16 với fallback CPU int8, tương thích 100% với tách kênh 5.1 FC mono, ghim mốc DTW và lọc âm thanh. |
 | **E2E Acceptance Suite** | `tests/test_e2e_group_a.py`, `tests/test_e2e_group_b.py`, `tests/test_e2e_integration_t3_t4.py` | PASS | 169 ca kiểm thử tự động 4 tầng (Tier 1 Isolated, Tier 2 BVA, Tier 3 Cross-Feature, Tier 4 Workload Scenarios) bảo vệ toàn diện 14 tính năng của Nhóm A & Nhóm B. |
 | **PyTorch CUDA / TensorRT 10 FP16** | `src/cuda_engine.py`, `src/build_trt_engine.py`, `src/config.py` | PASS | `CUDA_MODULE_LOADING=LAZY`, `CUDA_CACHE_MAXSIZE=2GB`, TensorRT 10.16 (`resolve_trt_profile_max_batch`, `_out_ring` 2-slot 0-alloc, `execute_async_v3`), kế thừa `UPSCALER_HEVC_ENCODER`. |

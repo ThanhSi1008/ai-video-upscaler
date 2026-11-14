@@ -162,53 +162,61 @@ def run_benchmark(
             with open(plan_json_path, "w", encoding="utf-8") as f:
                 json.dump(plan_data, f, indent=2)
         else:
-            # Real pipeline execution
+            # Real pipeline execution (suppress interactive preview player windows)
+            prev_no_auto_open = os.environ.get("UPSCALER_NO_AUTO_OPEN")
+            os.environ["UPSCALER_NO_AUTO_OPEN"] = "1"
             custom_clip: Optional[Path] = None
             effective_input = str(source)
             preview_arg = target_duration
 
-            if pipeline_fn is not None:
-                actual_output_mkv = pipeline_fn(
-                    input_path=str(source),
-                    output_path=str(target_output_mkv),
-                    model=model,
-                    engine=engine,
-                    zero_disk=zero_disk,
-                    use_tensorrt=not no_tensorrt,
-                    preview_seconds=target_duration,
-                    batch_size=batch_size,
-                    dedup_policy=dedup_policy,
-                    keep_temp=True,  # ALWAYS keep temp in pipeline; harness handles cleanup
-                )
-            else:
-                from src.pipeline import run_upscale_pipeline
-                # Custom clip extraction if start_time is explicitly specified or defined for tier
-                effective_start = start_time if start_time is not None else TIER_START_TIMES.get(tier)
-                if effective_start is not None and target_duration is not None:
-                    custom_clip = out_dir / f".bench_clip_{label}.mkv"
-                    cut_cmd = [
-                        "ffmpeg", "-y", "-ss", str(effective_start), "-i", str(source),
-                        "-t", str(target_duration), "-c", "copy", "-map", "0",
-                        str(custom_clip)
-                    ]
-                    subprocess.run(cut_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    effective_input = str(custom_clip)
-                    preview_arg = None
+            try:
+                if pipeline_fn is not None:
+                    actual_output_mkv = pipeline_fn(
+                        input_path=str(source),
+                        output_path=str(target_output_mkv),
+                        model=model,
+                        engine=engine,
+                        zero_disk=zero_disk,
+                        use_tensorrt=not no_tensorrt,
+                        preview_seconds=target_duration,
+                        batch_size=batch_size,
+                        dedup_policy=dedup_policy,
+                        keep_temp=True,  # ALWAYS keep temp in pipeline; harness handles cleanup
+                    )
                 else:
-                    preview_arg = target_duration
+                    from src.pipeline import run_upscale_pipeline
+                    # Custom clip extraction if start_time is explicitly specified or defined for tier
+                    effective_start = start_time if start_time is not None else TIER_START_TIMES.get(tier)
+                    if effective_start is not None and target_duration is not None:
+                        custom_clip = out_dir / f".bench_clip_{label}.mkv"
+                        cut_cmd = [
+                            "ffmpeg", "-y", "-ss", str(effective_start), "-i", str(source),
+                            "-t", str(target_duration), "-c", "copy", "-map", "0",
+                            str(custom_clip)
+                        ]
+                        subprocess.run(cut_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        effective_input = str(custom_clip)
+                        preview_arg = None
+                    else:
+                        preview_arg = target_duration
 
-                actual_output_mkv = run_upscale_pipeline(
-                    input_path=effective_input,
-                    output_path=str(target_output_mkv),
-                    model=model,
-                    engine=engine,
-                    zero_disk=zero_disk,
-                    use_tensorrt=not no_tensorrt,
-                    preview_seconds=preview_arg,
-                    batch_size=batch_size,
-                    dedup_policy=dedup_policy,
-                    keep_temp=True,  # ALWAYS keep temp in pipeline; harness handles cleanup
-                )
+                    actual_output_mkv = run_upscale_pipeline(
+                        input_path=effective_input,
+                        output_path=str(target_output_mkv),
+                        model=model,
+                        engine=engine,
+                        zero_disk=zero_disk,
+                        use_tensorrt=not no_tensorrt,
+                        preview_seconds=preview_arg,
+                        batch_size=batch_size,
+                        dedup_policy=dedup_policy,
+                        keep_temp=True,  # ALWAYS keep temp in pipeline; harness handles cleanup
+                    )
+            finally:
+                if prev_no_auto_open is None:
+                    os.environ.pop("UPSCALER_NO_AUTO_OPEN", None)
+                else:
+                    os.environ["UPSCALER_NO_AUTO_OPEN"] = prev_no_auto_open
 
             # Discover and copy the pipeline audit artifact
             candidate_audit = Path(str(actual_output_mkv).rsplit(".", 1)[0] + ".audit.json")

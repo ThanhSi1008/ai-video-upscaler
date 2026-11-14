@@ -66,16 +66,19 @@ class RealESRAnimeVideoV3(nn.Module):
 
 
 class AnimeJaNaiCompact2x(nn.Module):
-    """Mô hình AnimeJaNai HD V3 Compact: 64f16c x2 native (PixelShuffle 2) -> 2x 4K"""
-    def __init__(self):
+    """Mô hình AnimeJaNai HD V3 Compact / UltraCompact / SuperUltraCompact: SRVGGNetCompact x2 native -> 2x 4K"""
+    def __init__(self, num_feat: int = 64, num_conv: int = 16):
         super().__init__()
+        self.num_feat = int(num_feat)
+        self.num_conv = int(num_conv)
+        self.upscale = 2
         self.body = nn.ModuleList()
-        self.body.append(nn.Conv2d(3, 64, 3, 1, 1))
-        self.body.append(nn.PReLU(64))
-        for _ in range(16):
-            self.body.append(nn.Conv2d(64, 64, 3, 1, 1))
-            self.body.append(nn.PReLU(64))
-        self.body.append(nn.Conv2d(64, 12, 3, 1, 1))
+        self.body.append(nn.Conv2d(3, self.num_feat, 3, 1, 1))
+        self.body.append(nn.PReLU(self.num_feat))
+        for _ in range(self.num_conv):
+            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1))
+            self.body.append(nn.PReLU(self.num_feat))
+        self.body.append(nn.Conv2d(self.num_feat, 12, 3, 1, 1))
         self.upsampler = nn.PixelShuffle(2)
 
     def forward(self, x):
@@ -196,33 +199,111 @@ class GPUPersistentWorker:
         self.model = None
         self._load_model()
 
+    def _resolve_registry_entry(self) -> Optional[Dict[str, Any]]:
+        """Tra cứu cấu hình mô hình trong models/models.yaml (không phân biệt hoa thường)."""
+        try:
+            from src.models_resolver import load_models_registry
+            registry = load_models_registry()
+            if self.model_id in registry:
+                return registry[self.model_id]
+            target_lower = str(self.model_id or "").strip().lower()
+            for k, v in registry.items():
+                if str(k).lower() == target_lower:
+                    return v
+        except Exception:
+            pass
+        return None
+
+    def _is_canonical_registered_path(self, reg_info: Optional[Dict[str, Any]]) -> bool:
+        """Kiểm tra self.weights_path có trùng với đường dẫn đăng ký chính tắc trong models.yaml hay không."""
+        if not reg_info or not reg_info.get("weights_path"):
+            return False
+        from src.models_resolver import _resolve_repo_path
+        reg_path = _resolve_repo_path(str(reg_info["weights_path"]))
+        norm_self = os.path.normcase(os.path.abspath(self.weights_path))
+        norm_reg = os.path.normcase(os.path.abspath(reg_path))
+        norm_raw = os.path.normcase(os.path.abspath(str(reg_info["weights_path"])))
+        return norm_self in (norm_reg, norm_raw)
+
+    def _auto_download_registered_weights(self, reg_info: Dict[str, Any]) -> None:
+        """Tự động tải và xác thực SHA-256 cho mô hình chính thức có source_url hợp lệ (hỗ trợ .pth/.safetensors/.zip)."""
+        import urllib.request
+        import zipfile
+        from src.models_resolver import verify_weights_sha256
+
+        url = str(reg_info.get("source_url") or "").strip()
+        expected_sha = reg_info.get("sha256")
+        os.makedirs(os.path.dirname(os.path.abspath(self.weights_path)), exist_ok=True)
+        tmp_dl = self.weights_path + f".part.{os.getpid()}"
+        tmp_zip = self.weights_path + f".zip.part.{os.getpid()}"
+
+        print(f"📥 Đang tự động tải trọng số '{reg_info.get('name', self.model_id)}' từ {url}...")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            if url.lower().endswith(".zip"):
+                with urllib.request.urlopen(req, timeout=120) as resp, open(tmp_zip, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+                target_base = os.path.basename(self.weights_path)
+                matched_member = None
+                with zipfile.ZipFile(tmp_zip, "r") as zf:
+                    for member in zf.namelist():
+                        if os.path.basename(member) == target_base:
+                            matched_member = member
+                            break
+                    if matched_member is None:
+                        raise FileNotFoundError(
+                            f"Không tìm thấy '{target_base}' bên trong gói nén {url}"
+                        )
+                    with zf.open(matched_member) as zsrc, open(tmp_dl, "wb") as zdst:
+                        shutil.copyfileobj(zsrc, zdst)
+            else:
+                with urllib.request.urlopen(req, timeout=120) as resp, open(tmp_dl, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+
+            if not verify_weights_sha256(tmp_dl, expected_sha):
+                raise RuntimeError(
+                    f"Kiểm tra toàn vẹn SHA-256 thất bại khi tải trọng số {self.weights_path}"
+                )
+            os.replace(tmp_dl, self.weights_path)
+        finally:
+            for p in (tmp_dl, tmp_zip):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
     def _load_model(self):
         """Nạp trọng số và khởi tạo mô hình trên device (CUDA/CPU)."""
         t0 = time.time()
+        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        reg_info = self._resolve_registry_entry()
+
         if not os.path.exists(self.weights_path):
-            # Tự động tải trọng số chính thức nếu chưa có file cục bộ
-            if self.model_id == "animevideov3":
-                os.makedirs(os.path.dirname(os.path.abspath(self.weights_path)), exist_ok=True)
-                url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
-                print(f"📥 Đang tự động tải trọng số RealESR-AnimeVideoV3 từ {url}...")
-                import urllib.request
-                from src.models_resolver import load_models_registry, verify_weights_sha256
-                tmp_dl = self.weights_path + ".part"
-                urllib.request.urlretrieve(url, tmp_dl)
-                expected_sha = None
-                try:
-                    expected_sha = load_models_registry().get("animevideov3", {}).get("sha256")
-                except Exception:
-                    pass
-                if not verify_weights_sha256(tmp_dl, expected_sha):
-                    try:
-                        os.remove(tmp_dl)
-                    except OSError:
-                        pass
-                    raise RuntimeError(f"Kiểm tra toàn vẹn SHA-256 thất bại khi tải trọng số {self.weights_path}")
-                os.replace(tmp_dl, self.weights_path)
+            can_auto_dl = (
+                not in_pytest
+                and reg_info is not None
+                and str(reg_info.get("source_url") or "").startswith("https://")
+                and self._is_canonical_registered_path(reg_info)
+            )
+            if can_auto_dl:
+                self._auto_download_registered_weights(reg_info)
             else:
                 raise FileNotFoundError(f"Không tìm thấy file trọng số mô hình: {self.weights_path}")
+        elif not in_pytest and reg_info is not None and reg_info.get("sha256") and self._is_canonical_registered_path(reg_info):
+            from src.models_resolver import verify_weights_sha256
+            st = os.stat(self.weights_path)
+            cache_sig = (os.path.normcase(os.path.abspath(self.weights_path)), st.st_size, st.st_mtime_ns, str(reg_info["sha256"]).lower())
+            verified_cache = getattr(GPUPersistentWorker, "_verified_weights_cache", None)
+            if verified_cache is None:
+                verified_cache = set()
+                GPUPersistentWorker._verified_weights_cache = verified_cache
+            if cache_sig not in verified_cache:
+                if not verify_weights_sha256(self.weights_path, reg_info.get("sha256")):
+                    raise RuntimeError(
+                        f"Trọng số mô hình '{self.weights_path}' không khớp mã băm SHA-256 đã đăng ký!"
+                    )
+                verified_cache.add(cache_sig)
 
         model = None
         use_spandrel = True
@@ -241,8 +322,13 @@ class GPUPersistentWorker:
             weights = sd.get("params_ema", sd.get("params", sd))
             clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
 
-            if self.model_id == "animejanai-hd-v3-compact":
-                model = AnimeJaNaiCompact2x().to(self.device)
+            arch_cfg = (reg_info or {}).get("arch", {})
+            if self.model_id == "animejanai-hd-v3-compact" or (
+                arch_cfg.get("type") == "SRVGGNetCompact" and int(arch_cfg.get("upscale", 4)) == 2
+            ):
+                nf = int(arch_cfg.get("num_feat", 64))
+                nc = int(arch_cfg.get("num_conv", 16))
+                model = AnimeJaNaiCompact2x(num_feat=nf, num_conv=nc).to(self.device)
             else:
                 model = RealESRAnimeVideoV3().to(self.device)
 
