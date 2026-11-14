@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `65a0967` (`feat(group-b): enable real Native 2x TRT FP16 models (18.27-21.13 fps Climax) & verify zero quality loss`)
+> **Commit Baseline:** `bd33075` (`fix(group-a-b): clamp Sakuga RGB overshoots in P010LE & harden auto-download/Whisper/TRT safety`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (713+ ca kiểm thử tự động không GPU qua runner cô lập `scripts/verify_offline.py` trên Windows 11, bao gồm 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py`, `2/2` ca đối chiếu độc lập `tests/test_model_regression.py` PSNR >= 50 dB và 115/115 ca `tests/e2e/`).
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (716+ ca kiểm thử tự động không GPU qua runner cô lập `scripts/verify_offline.py` trên Windows 11, bao gồm 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py`, `2/2` ca đối chiếu độc lập `tests/test_model_regression.py` PSNR >= 50 dB và 115/115 ca `tests/e2e/`).
 - **Thực nghiệm phần cứng Nhóm A & Nhóm B trên mẫu đại cảnh `Fate/Apocrypha Tập 22` (`BD 1080p H.264 Hi10P`, `95.06%` unique frames ở Climax `13:30`) trên RTX 3060 12GB + i5-12600K (`--zero-disk` TensorRT 10 FP16):**
   - **Mô hình mặc định `animevideov3` (Hậu Nhóm A):** Preview `3.61 -> 8.05 -> 9.81 fps` (AI Steady `11.14 fps`), Climax `8.53 -> 9.47 fps` (AI Steady `10.20 fps`).
   - **Mô hình Native `2x` sắc nét `animejanai-hd-v3-sharp1-ultracompact` (`64f8c`):** Preview **`13.58 fps`** (AI Steady **`20.18 fps`**, `19.88s`), Climax 60s **`18.27 fps` (`2.14x` vs Baseline / `1.93x` vs `animevideov3` Zero-Disk, AI Steady `19.99 fps`, Peak `20.81 fps`, `80.89s`)**, Peak VRAM **`6.68 GB` (`6838 MiB` < 9.5 GB)**.
