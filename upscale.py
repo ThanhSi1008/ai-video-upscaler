@@ -23,10 +23,11 @@ if sys.platform == "win32":
         pass
 
 import json
+import re
 import argparse
 import subprocess
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Sequence
 
 from src.config import (
     DEFAULT_MODEL,
@@ -146,7 +147,7 @@ def build_arg_parser():
         "input",
         nargs="*",
         default=[],
-        help="Đường dẫn đến một hoặc nhiều file video nguồn (.mkv, .mp4, .webm)"
+        help="Đường dẫn đến một/nhiều file video nguồn (.mkv, .mp4, .webm...) hoặc thư mục chứa các tập video"
     )
     parser.add_argument(
         "--queue",
@@ -249,8 +250,13 @@ def build_arg_parser():
     parser.add_argument(
         "--dedup-policy",
         default=None,
-        choices=["default", "sensitive", "sensitive-a", "sensitive-b", "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0", "dis", "dis-0.2", "dis-0.3", "dis-0.4", "dis-0.5", "off"],
-        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy từ frame giữ gần nhất), dis (dòng chảy quang học DIS bắt 100%% zoom/lia), off (giữ tất cả)"
+        choices=[
+            "default", "sensitive", "sensitive-a", "sensitive-b",
+            "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0",
+            "dis", "dis-0.2", "dis-0.3", "dis-0.4", "dis-0.5",
+            "sakuga", "dis-sakuga", "off",
+        ],
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy), dis (dòng chảy quang học DIS bắt zoom/lia), sakuga / dis-sakuga (ngưỡng kép bảo vệ đại cảnh hành động), off (giữ tất cả)"
     )
     parser.add_argument(
         "--drift-delta",
@@ -421,6 +427,60 @@ def build_arg_parser():
     return parser
  
  
+SUPPORTED_VIDEO_EXTS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
+
+
+def _natural_sort_key(filename: str) -> List[object]:
+    """Khóa sắp xếp tự nhiên theo số tập (ví dụ: Tập 2 đứng trước Tập 10)."""
+    return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", filename)]
+
+
+def expand_video_inputs(raw_inputs: Sequence[str]) -> List[str]:
+    """
+    Mở rộng danh sách đầu vào: nếu phần tử là thư mục hiện hữu, tự động quét các file video gốc
+    bên trong theo thứ tự tập tự nhiên (bỏ qua file ẩn/tạm và các bản thành phẩm *_4K / *_4K_animejanai),
+    giúp người dùng truyền cả thư mục chứa tên file có ngoặc vuông '[SubsPlease]...' mà không vướng lỗi wildcard của PowerShell.
+    """
+    expanded: List[str] = []
+    seen = set()
+
+    def _append_unique(p_str: str) -> None:
+        norm_key = os.path.normcase(os.path.abspath(os.path.expanduser(p_str)))
+        if norm_key not in seen:
+            seen.add(norm_key)
+            expanded.append(p_str)
+
+    for item in raw_inputs:
+        if not item:
+            continue
+        cand_dir = os.path.expanduser(item)
+        if os.path.isdir(cand_dir):
+            found_in_dir: List[str] = []
+            for entry in sorted(os.listdir(cand_dir), key=_natural_sort_key):
+                if entry.startswith("."):
+                    continue
+                full_entry = os.path.join(cand_dir, entry)
+                if not os.path.isfile(full_entry):
+                    continue
+                stem, ext = os.path.splitext(entry)
+                if ext.lower() not in SUPPORTED_VIDEO_EXTS:
+                    continue
+                stem_low = stem.lower()
+                if stem_low.endswith("_4k") or stem_low.endswith("_4k_animejanai"):
+                    continue
+                found_in_dir.append(full_entry)
+            if not found_in_dir:
+                raise ValueError(
+                    f"Thư mục '{item}' không chứa file video gốc hợp lệ nào (hoặc tất cả đã là bản _4K)."
+                )
+            print(f"📂 [QUÉT THƯ MỤC] Đã nạp {len(found_in_dir)} tập video gốc từ '{item}'.")
+            for f_path in found_in_dir:
+                _append_unique(f_path)
+        else:
+            _append_unique(item)
+    return expanded
+
+
 def _resolve_sub_output_dir_and_target_4k(
     output_arg: Optional[str],
     default_dir: str,
@@ -731,17 +791,23 @@ def main():
         print(list_models_formatted())
         sys.exit(0)
 
-    # Xác định danh sách video cần xử lý
-    videos = []
+    # Xác định danh sách video cần xử lý (hỗ trợ cả file lẻ lẫn thư mục chứa nhiều tập)
+    raw_videos = []
     if args.queue:
-        videos.extend(args.queue)
+        raw_videos.extend(args.queue)
     if isinstance(args.input, list):
-        videos.extend(args.input)
+        raw_videos.extend(args.input)
     elif args.input:
-        videos.append(args.input)
+        raw_videos.append(args.input)
 
-    if not videos:
-        print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào hoặc dùng cờ --queue.")
+    if not raw_videos:
+        print("❌ Lỗi: Vui lòng cung cấp ít nhất một file video đầu vào (hoặc thư mục / dùng cờ --queue).")
+        sys.exit(1)
+
+    try:
+        videos = expand_video_inputs(raw_videos)
+    except ValueError as e_dir:
+        print(f"❌ Lỗi: {e_dir}")
         sys.exit(1)
 
     video_overhead = 420.0  # TensorRT FP16 Zero-Disk mặc định

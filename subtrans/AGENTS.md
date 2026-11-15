@@ -9,7 +9,7 @@
 - Đối chiếu code tại baseline **`c4918d6`**: `TranslationPipeline.__init__` lấy thứ tự model từ `models.yaml:chain`, lọc `local`/`preview`, rồi sắp Lite trước (`normal`/`fast`) hoặc Flash trước (`high`). `config.yaml` giữ batch, timeout và tùy chọn; CLI override trong `cli.py`. Model/quota ở đây là cấu hình repo, chưa xác minh khả dụng hay hạn mức nhà cung cấp trong phiên này.
 - Khởi động offline: dùng `--help`; **không chạy `check`/`models`**, vì chúng gọi API thật. `check` còn hiển thị mảnh key. Không đọc/in `.env` hay API key; mọi test dùng stub.
 - `--dry-run` không gọi API nhưng vẫn ghi cast giả, subtitle/audit, telemetry (tuyệt đối không chạm `pending_subs.json`). Dùng output riêng. `TranslationCache` và `KnowledgeBase` bật sẵn `WAL`; `generate_qa_report` nhận trực tiếp `cache` của pipeline. Khi test vẫn phải cách ly qua `scripts/verify_offline.py`; không sửa/xóa dữ liệu vận hành để kiểm thử.
-- `--local`/`--review` và cấu hình Ollama là dấu vết cũ, không phải backend được phép dùng. Cổng chất lượng tại `pipeline.py`: bản dịch thật >=95%, nghi vấn <10%; còn lại xuất `.vi.partial.*` và ghi hàng đợi pending.
+- `--local`/`--review` trong CLI là dấu vết lịch sử không được phép dùng; cấu hình `ollama`/`translategemma` đã được gỡ bỏ khỏi `config.yaml` và `models.yaml`. Cổng chất lượng tại `pipeline.py`: bản dịch thật >=95%, nghi vấn <10%; còn lại xuất `.vi.partial.*` và ghi hàng đợi pending.
 
 ---
 

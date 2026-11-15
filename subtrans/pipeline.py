@@ -96,7 +96,7 @@ class TranslationPipeline:
         # Chuỗi model: Nạp từ models.yaml, tuyệt đối không dùng model preview
         # A6: Lite làm model chính theo mặc định. Cờ --subs-quality high đảo thứ tự (Flash trước, Lite sau).
         raw_chain = self.models_cfg.get("chain", [
-            "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "local"
+            "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"
         ])
         gemini_chain = [m for m in raw_chain if m != "local" and "preview" not in m.lower()]
         lite_models = [m for m in gemini_chain if "lite" in m.lower()]

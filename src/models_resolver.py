@@ -10,14 +10,41 @@ Thứ tự ưu tiên (D2):
 
 import hashlib
 import os
+import re
 import yaml
-import fnmatch
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 from src.config import ROOT_DIR
 
 MODELS_YAML = "models/models.yaml"
 SHOWS_YAML = "shows.yaml"
+
+
+def match_show_pattern(text: str, pattern: str) -> bool:
+    """
+    Khớp mẫu tên file/thư mục anime từ shows.yaml không phân biệt hoa thường.
+    An toàn tuyệt đối với dấu ngoặc vuông literal như '[SubsPlease]', '[BD 1080p]'
+    (không bị fnmatch hiểu nhầm '[...]' là tập ký tự đơn).
+    Hỗ trợ cả ký tự đại diện glob ('*', '?') lẫn chuỗi con (substring).
+    """
+    if not text or not pattern:
+        return False
+    t_low = str(text).lower()
+    p_low = str(pattern).strip().lower()
+    if not p_low:
+        return False
+    if "*" not in p_low and "?" not in p_low:
+        return p_low in t_low
+    regex_parts = ["^"]
+    for ch in p_low:
+        if ch == "*":
+            regex_parts.append(".*")
+        elif ch == "?":
+            regex_parts.append(".")
+        else:
+            regex_parts.append(re.escape(ch))
+    regex_parts.append("$")
+    return re.match("".join(regex_parts), t_low, flags=re.DOTALL) is not None
 
 
 def _resolve_repo_path(path_str: str) -> str:
@@ -119,8 +146,8 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
             for rule in shows_rules:
                 pat = rule.get("pattern", "")
                 m_target = str(rule.get("model", "")).strip().lower()
-                # Khớp với tên file hoặc tên thư mục chứa
-                if fnmatch.fnmatch(vid_name, pat) or fnmatch.fnmatch(vid_dir, pat) or (pat and pat.lower() in vid_name.lower()):
+                # Khớp với tên file hoặc tên thư mục chứa (an toàn với ngoặc vuông '[...]')
+                if match_show_pattern(vid_name, pat) or match_show_pattern(vid_dir, pat):
                     if m_target in lower_to_key:
                         chosen_id = lower_to_key[m_target]
                         resolution_source = f"shows.yaml (Khớp mẫu '{pat}')"

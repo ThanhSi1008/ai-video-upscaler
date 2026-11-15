@@ -72,7 +72,7 @@ def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> s
     if os.path.exists(shows_yaml):
         try:
             import yaml
-            import fnmatch
+            from src.models_resolver import match_show_pattern
             with open(shows_yaml, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             rules = data.get("shows", []) or []
@@ -81,7 +81,7 @@ def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> s
             for r in rules:
                 pat = r.get("pattern", "")
                 pol = r.get("dedup_policy")
-                if pol and (fnmatch.fnmatch(vname, pat) or fnmatch.fnmatch(vdir, pat) or (pat and pat.lower() in vname.lower())):
+                if pol and (match_show_pattern(vname, pat) or match_show_pattern(vdir, pat)):
                     return str(pol).lower()
         except Exception:
             pass

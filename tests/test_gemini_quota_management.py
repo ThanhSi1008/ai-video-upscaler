@@ -63,20 +63,21 @@ class TestGeminiQuotaManagement(unittest.TestCase):
         self.assertEqual(models["gemini-3.5-flash-lite"]["rpd"], 500)
         self.assertEqual(models["gemini-3.1-flash-lite"]["rpd"], 500)
 
-        # Chuỗi model A6: 3.5-flash-lite -> 3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash -> local
+        # Chuỗi model Cloud thuần túy: 3.5-flash-lite -> 3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash
         expected_chain = [
             "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
-            "local"
         ]
         self.assertEqual(cfg["chain"], expected_chain)
+        self.assertNotIn("translategemma:12b", models)
 
-        # Tuyệt đối không dùng model preview
+        # Tuyệt đối không dùng model preview hay local
         for m in cfg["chain"]:
             self.assertNotIn("preview", m.lower())
+            self.assertNotEqual(m.lower(), "local")
 
     def test_2_pacific_time_reset_calculation(self):
         """Kiểm tra tính toán mốc reset 00:00 PT tương ứng giờ Việt Nam."""

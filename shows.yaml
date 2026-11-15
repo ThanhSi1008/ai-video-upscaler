@@ -1,9 +1,29 @@
-# shows.yaml - Ánh xạ mô hình SR theo từng bộ anime (do người dùng cấu hình thủ công)
-# Cú pháp:
-#   pattern: glob hoặc substring khớp với tên file hoặc thư mục anime
-#   model: id mô hình đã đăng ký trong models/models.yaml (animevideov3 | animejanai-hd-v3-compact)
+# shows.yaml - Ánh xạ tự động mô hình SR & chính sách Dedup theo từng bộ / nguồn anime
+# Cú pháp mỗi rule (độ ưu tiên từ trên xuống dưới, thấp hơn cờ CLI --model / --dedup-policy):
+#   - pattern: Chuỗi con hoặc glob ('*', '?') khớp tên file hoặc thư mục (an toàn với ngoặc vuông '[SubsPlease]', '[BD 1080p]')
+#     model: ID mô hình trong models/models.yaml:
+#       • animevideov3                           (Mặc định 4x->2x, nét đậm mịn, khử nhiễu tốt cho cả BD & Web-DL)
+#       • animejanai-hd-v3-ultracompact          (Native 2x nhanh ~18.5 fps, khử nhiễu muỗi nén 8-bit Web-DL / SubsPlease)
+#       • animejanai-hd-v3-sharp1-ultracompact   (Native 2x nhanh ~18.5 fps, sắc nét giữ film grain gốc cho Blu-ray 1080p sạch)
+#       • animejanai-hd-v3-superultracompact     (Native 2x siêu tốc ~20.8 fps, khử nhiễu nhẹ cho tập thoại đời thường)
+#       • animejanai-hd-v3-sharp1-superultracompact (Native 2x siêu tốc ~20.8 fps cho Blu-ray nhẹ)
+#       • animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3
+#     dedup_policy: (Tùy chọn) default | dis | sakuga | dis-sakuga | sensitive-b | motion | drift | off
 
-shows:
-  # Ví dụ cấu hình mẫu (người dùng tự thêm tay):
-  # - pattern: "*Watanare*"
-  #   model: "animejanai-hd-v3-compact"
+shows: []
+  # --- MẪU GỢI Ý (bỏ dấu '#' ở đầu dòng và xóa '[]' phía trên `shows:` khi muốn bật tự động) ---
+  #
+  # 1. Bộ hành động nặng (Sakuga / lia máy liên tục):
+  # - pattern: "*Fate*"
+  #   model: "animejanai-hd-v3-sharp1-ultracompact"
+  #   dedup_policy: "sakuga"
+  #
+  # 2. Nguồn phát sóng hằng tuần Crunchyroll Web-DL ([SubsPlease], [Erai-raws]):
+  # - pattern: "[SubsPlease]*"
+  #   model: "animejanai-hd-v3-ultracompact"
+  #   dedup_policy: "default"
+  #
+  # 3. Nguồn đĩa Blu-ray 1080p sạch ([BD 1080p], BluRay):
+  # - pattern: "*[BD*"
+  #   model: "animejanai-hd-v3-sharp1-ultracompact"
+  #   dedup_policy: "dis"
