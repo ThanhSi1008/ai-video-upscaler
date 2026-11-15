@@ -611,6 +611,12 @@ def get_hybrid_engine_or_wrapper(
                     )
                     if not built:
                         _FAILED_TRT_ENGINES.add(engine_path)
+                    elif os.path.exists(engine_path) and os.path.getsize(engine_path) > 0:
+                        try:
+                            if os.path.exists(onnx_path):
+                                os.remove(onnx_path)
+                        except OSError:
+                            pass
 
                 if os.path.exists(engine_path) and os.path.getsize(engine_path) > 0:
                     trt_runner = TRTRuntimeEngineWrapper(

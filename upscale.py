@@ -28,6 +28,14 @@ import argparse
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Sequence
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.env_isolation import configure_e_drive_isolation
+configure_e_drive_isolation(project_root=ROOT_DIR)
 
 from src.config import (
     DEFAULT_MODEL,

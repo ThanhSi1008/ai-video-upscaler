@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    from src.env_isolation import configure_e_drive_isolation
+    configure_e_drive_isolation(project_root=_REPO_ROOT)
+except Exception:
+    pass
+
 # Load .env explicitly from subtrans/ or repo root unless disabled in isolated offline tests
 if (
     os.environ.get("PYTHON_DOTENV_DISABLED") != "1"

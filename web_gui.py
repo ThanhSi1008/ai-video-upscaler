@@ -23,6 +23,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.env_isolation import configure_e_drive_isolation
+configure_e_drive_isolation(project_root=ROOT_DIR)
+
 
 def _configure_utf8_console() -> None:
     if sys.platform == "win32":

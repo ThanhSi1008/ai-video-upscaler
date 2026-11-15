@@ -25,6 +25,9 @@ root_dir = Path(__file__).resolve().parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+from src.env_isolation import configure_e_drive_isolation
+configure_e_drive_isolation(project_root=root_dir)
+
 from subtrans.cli import app
 
 if __name__ == "__main__":

@@ -18,6 +18,13 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SRC_DIR)
 PROJECT_ROOT = Path(ROOT_DIR)
 
+try:
+    from src.env_isolation import configure_e_drive_isolation
+except ImportError:
+    from env_isolation import configure_e_drive_isolation
+
+configure_e_drive_isolation(project_root=PROJECT_ROOT)
+
 CACHE_ROOT_DIR = PROJECT_ROOT / ".cache"
 CUDA_COMPUTE_CACHE_DIR = CACHE_ROOT_DIR / "cuda_compute_cache"
 TRITON_CACHE_DIR_DEFAULT = CACHE_ROOT_DIR / "triton_cache"
@@ -377,11 +384,11 @@ def validate_environment(engine: str = DEFAULT_ENGINE):
     """Kiểm tra sự hiện diện của FFmpeg, FFprobe trên Windows."""
     if shutil.which("ffmpeg") is None:
         print("❌ Lỗi: Không tìm thấy 'ffmpeg' trên hệ thống!")
-        print("💡 Vui lòng tải FFmpeg (Gyan.dev Full Build) và thêm vào biến môi trường PATH.")
+        print("💡 Vui lòng đặt ffmpeg.exe vào 'bin/ffmpeg/' hoặc thêm FFmpeg (Gyan.dev Full Build) vào biến môi trường PATH.")
         sys.exit(1)
 
     if shutil.which("ffprobe") is None:
         print("❌ Lỗi: Không tìm thấy 'ffprobe' trên hệ thống!")
-        print("💡 Vui lòng tải FFmpeg (Gyan.dev Full Build) và thêm vào biến môi trường PATH.")
+        print("💡 Vui lòng đặt ffprobe.exe vào 'bin/ffmpeg/' hoặc thêm FFmpeg (Gyan.dev Full Build) vào biến môi trường PATH.")
         sys.exit(1)
 

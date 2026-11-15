@@ -39,7 +39,7 @@ LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
 RUNTIME_PATHS = ("upscale.py", "subtrans.py", "web_gui.py", "src", "subtrans", "scripts", "web")
 SOURCE_DIRS = frozenset({"src", "subtrans", "tests", "scripts", "benchmarks", "web"})
-PRIVATE_DIRS = frozenset({"venv", "env", "__pycache__", "scratch", "out", "models_bench", "samples", "test_frames"})
+PRIVATE_DIRS = frozenset({"venv", "env", "bin", "__pycache__", "scratch", "out", "models_bench", "samples", "test_frames"})
 MANAGED_HOOK = (
     "#!/bin/sh\n"
     "# Antigravity agent context & memory integrity check\n"

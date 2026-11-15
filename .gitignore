@@ -74,6 +74,11 @@ models/*.onnx
 .env.*
 !.env.example
 .cache/
+.pytest_cache/
+.ruff_cache/
+.cache/**/*.onnx
+bin/python311/
+bin/ffmpeg/
 subtrans/.env
 subtrans/.cache/
 out/

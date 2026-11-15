@@ -1,11 +1,15 @@
 # Ruff configuration for fast, zero-side-effect linting by developers & AI Agents
 target-version = "py311"
 line-length = 120
+cache-dir = ".cache/ruff_cache"
 
 exclude = [
   ".git",
   ".venv",
   "venv",
+  "bin",
+  ".cache",
+  ".ruff_cache",
   "__pycache__",
   ".pytest_cache",
   "scratch",

@@ -8,15 +8,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs", "web"}
-ROOT_FILES = {"upscale.py", "subtrans.py", "web_gui.py", "web_gui.bat", "pytest.ini", "requirements.txt", "shows.yaml",
+ROOT_FILES = {"upscale.py", "upscale.bat", "upscale_turbo.bat", "subtrans.py", "subtrans.bat",
+              "web_gui.py", "web_gui.bat", "pytest.ini", "requirements.txt", "shows.yaml",
               "AGENTS.md", "GEMINI.md", "CLAUDE.md", "README.md"}
-SUFFIXES = {".py", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt", ".html", ".css", ".js", ".svg"}
+SUFFIXES = {".py", ".bat", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt", ".html", ".css", ".js", ".svg"}
 GUARD = '''"""Offline guard loaded before test collection in the source snapshot."""
 import _socket
 import socket
@@ -90,6 +92,21 @@ def snapshot_sources(root: Path, destination: Path) -> int:
     return count
 
 
+def _rmtree_force(path: Path) -> None:
+    """Xóa sạch thư mục tạm kể cả các file read-only (như .git/objects trên Windows)."""
+    if not path.exists():
+        return
+
+    def _clear_readonly(func, target, _exc_info):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=_clear_readonly)
+
+
 def main() -> int:
     if len(sys.argv) > 1:
         print("Usage: python scripts/verify_offline.py (runs the full non-GPU suite)")
@@ -121,6 +138,19 @@ def main() -> int:
                 log.write(line)
             code = process.wait()
     print(f"Evidence: {run_dir}\nPytest exit code: {code}")
+    if code == 0:
+        # Clean heavy disposable snapshot & pytest scratch files while keeping tmp_dir and logs
+        _rmtree_force(snapshot)
+        _rmtree_force(tmp_dir / "pytest")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        validation_dirs = sorted(
+            (p for p in scratch.glob("agent-validation-*") if p.is_dir()),
+            key=lambda p: (p.stat().st_mtime_ns, p.name),
+            reverse=True,
+        )
+        for old_dir in validation_dirs[2:]:
+            if old_dir != run_dir:
+                _rmtree_force(old_dir)
     return code
 
 
