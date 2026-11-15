@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `b8fb0ea` (`docs(state): synchronize STATE.md baseline`)
+> **Commit Baseline:** `eff33ef` (`feat(cli): sync sakuga dedup flags, bracket-safe shows/folder queue & purge legacy ollama config`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
