@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-16
 >
-> **Commit Baseline:** `2196175` (`docs(state): synchronize STATE.md baseline`)
+> **Commit Baseline:** `b5858ee` (`fix(web): harden API key management, localhost/LAN security, SSE cursors, job concurrency & UI polish`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
