@@ -87,6 +87,7 @@ function bootstrapStudio() {
   const maxLogLines = 450;
   let lastLogCursor = { path: "", sig: "", offset: 0 };
   let lastEffectiveStage = null;
+  let lastActivePipelineStep = null;
   let lastHeatmapSignature = "";
   let lastCheckpointSignature = null;
   let gpuStaticInfo = { gpu_name: "NVIDIA RTX GPU", vram_total_mib: 12288 };
@@ -235,12 +236,17 @@ function bootstrapStudio() {
   btnAbortJob?.addEventListener("click", async () => {
     try {
       const res = await apiFetch("/api/jobs/abort", { method: "POST" });
-      showToast(
-        res.aborted_pid
-          ? `Đã buộc dừng tiến trình Web Job (PID=${res.aborted_pid}).`
-          : "Không có tiến trình Web Job nào đang chạy.",
-        "info"
-      );
+      if (res.aborted_pid) {
+        showToast(res.message || `Đã buộc dừng tiến trình Web Job (PID=${res.aborted_pid}).`, "warn");
+      } else if (res.status === "external_lock") {
+        showToast(
+          res.message || `Tiến trình GPU bên ngoài (PID=${res.external_lock_pid || "?"}) vẫn đang chạy.`,
+          "warn",
+          6000
+        );
+      } else {
+        showToast(res.message || "Không có tiến trình Web Job nào đang chạy.", "info");
+      }
       fetchSnapshotFallback();
     } catch (err) {
       showToast(err.message, "error");
@@ -268,12 +274,25 @@ function bootstrapStudio() {
       "subtrans",
     ]);
     if (activeTransitionStages.has(lastEffectiveStage) && stage === "completed") {
-      showToast("🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!", "success", 6500);
+      const toastMsg =
+        lastEffectiveStage === "subtrans"
+          ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
+          : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
+      showToast(toastMsg, "success", 6500);
       compareCtrl?.refreshCandidates();
       subtransCtrl?.refreshAll();
       modelsCtrl?.refresh();
     }
     lastEffectiveStage = stage;
+    if (stage === "idle") {
+      lastActivePipelineStep = null;
+    } else if (stage === "initializing") {
+      lastActivePipelineStep = "probing";
+    } else if (stage === "subtrans") {
+      lastActivePipelineStep = "completed";
+    } else if (STEP_ORDER.includes(stage) && stage !== "completed") {
+      lastActivePipelineStep = stage;
+    }
 
     // Header Source Badge
     if (sourceBadge && sourceBadgeText) {
@@ -347,16 +366,33 @@ function bootstrapStudio() {
 
     // 6-Stage Stepper
     if (stepperEl) {
-      const mappedStage = stage === "initializing" ? "probing" : stage;
+      const normalizeStep = (st) => {
+        if (st === "initializing") return "probing";
+        if (st === "subtrans") return "completed";
+        return st;
+      };
+      const mappedStage = normalizeStep(stage);
       const curIdx = STEP_ORDER.indexOf(mappedStage);
+      const hasCheckpoints = Array.isArray(pipeline.checkpoints) && pipeline.checkpoints.length > 0;
+      const fallbackAnchor =
+        live.failed_stage ||
+        live.last_stage ||
+        lastActivePipelineStep ||
+        (hasCheckpoints ? "upscaling" : "probing");
+      const anchorIdx = Math.max(0, STEP_ORDER.indexOf(normalizeStep(fallbackAnchor)));
+
       for (const li of stepperEl.querySelectorAll(".step-item")) {
         const stepKey = li.dataset.step;
         const idx = STEP_ORDER.indexOf(stepKey);
         delete li.dataset.state;
         if (stage === "completed") {
           li.dataset.state = "done";
-        } else if (stage === "error" && idx === Math.max(0, curIdx)) {
-          li.dataset.state = "error";
+        } else if (stage === "error") {
+          if (idx < anchorIdx) li.dataset.state = "done";
+          else if (idx === anchorIdx) li.dataset.state = "error";
+        } else if (stage === "paused") {
+          if (idx < anchorIdx) li.dataset.state = "done";
+          else if (idx === anchorIdx) li.dataset.state = "paused";
         } else if (curIdx >= 0) {
           if (idx < curIdx) li.dataset.state = "done";
           else if (idx === curIdx) li.dataset.state = isRunning ? "active" : "done";
@@ -528,8 +564,12 @@ function bootstrapStudio() {
 
   const applySnapshotLogs = (snap) => {
     if (snap.log_cursor && typeof snap.log_cursor === "object") {
+      const nextPath = String(snap.log_cursor.path || "");
+      if (nextPath && lastLogCursor.path && nextPath !== lastLogCursor.path) {
+        logRing = [];
+      }
       lastLogCursor = {
-        path: String(snap.log_cursor.path || ""),
+        path: nextPath,
         sig: String(snap.log_cursor.sig || ""),
         offset: Number(snap.log_cursor.offset || 0),
       };
@@ -590,11 +630,26 @@ function bootstrapStudio() {
         charts.pushTick(pkt.telemetry, pkt.pipeline?.live || {});
         applyPipelineAndTelemetry(pkt.telemetry, pkt.pipeline);
         const cur = pkt.log_cursor && typeof pkt.log_cursor === "object" ? pkt.log_cursor : null;
-        const alreadySeen =
+        const nextPath = cur ? String(cur.path || "") : "";
+        const nextOffset = cur ? Number(cur.offset || 0) : 0;
+        const switchedLogFile = Boolean(
           cur &&
-          cur.path === lastLogCursor.path &&
-          cur.sig === lastLogCursor.sig &&
-          Number(cur.offset || 0) <= lastLogCursor.offset;
+            (cur.reset ||
+              (nextPath && lastLogCursor.path && nextPath !== lastLogCursor.path) ||
+              (nextPath && nextPath === lastLogCursor.path && nextOffset < lastLogCursor.offset))
+        );
+        if (switchedLogFile) {
+          logRing = [];
+          if (!Array.isArray(pkt.logs) || pkt.logs.length === 0) {
+            renderLogs();
+          }
+        }
+        const alreadySeen = Boolean(
+          cur &&
+            !switchedLogFile &&
+            nextPath === lastLogCursor.path &&
+            nextOffset <= lastLogCursor.offset
+        );
         if (!alreadySeen && Array.isArray(pkt.logs) && pkt.logs.length > 0) {
           logRing.push(...pkt.logs);
           if (logRing.length > maxLogLines) {
@@ -603,15 +658,11 @@ function bootstrapStudio() {
           renderLogs();
         }
         if (cur) {
-          if (cur.path !== lastLogCursor.path || cur.sig !== lastLogCursor.sig) {
-            lastLogCursor = {
-              path: String(cur.path || ""),
-              sig: String(cur.sig || ""),
-              offset: Number(cur.offset || 0),
-            };
-          } else if (Number(cur.offset || 0) > lastLogCursor.offset) {
-            lastLogCursor.offset = Number(cur.offset || 0);
-          }
+          lastLogCursor = {
+            path: nextPath,
+            sig: String(cur.sig || ""),
+            offset: nextOffset,
+          };
         }
       } catch {
         // Ignore malformed tick

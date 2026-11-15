@@ -19,6 +19,22 @@ import {
 
 const QUEUE_STORAGE_KEY = "upscaler-studio-queue-inputs";
 
+function setSelectValueSafely(selectEl, targetValue, fallbackValue = "") {
+  if (!(selectEl instanceof HTMLSelectElement)) return;
+  const candidate = targetValue == null ? "" : String(targetValue);
+  const options = Array.from(selectEl.options);
+  if (options.some((opt) => opt.value === candidate)) {
+    selectEl.value = candidate;
+    return;
+  }
+  const fb = fallbackValue == null ? "" : String(fallbackValue);
+  if (options.some((opt) => opt.value === fb)) {
+    selectEl.value = fb;
+  } else if (options.length > 0) {
+    selectEl.selectedIndex = 0;
+  }
+}
+
 /* =====================================================================
  * TAB 2: QUEUE & OVERNIGHT SCHEDULER
  * ===================================================================== */
@@ -273,6 +289,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       showToast("Hãy chọn ít nhất 1 file video hoặc thư mục để chạy Xem trước 10s.", "warn");
       return;
     }
+    if (btnPreview10s instanceof HTMLButtonElement) btnPreview10s.disabled = true;
     try {
       const res = await apiFetch("/api/jobs/preview", {
         method: "POST",
@@ -292,6 +309,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       onJobLaunched?.(res.job);
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      if (btnPreview10s instanceof HTMLButtonElement) btnPreview10s.disabled = false;
     }
   });
 
@@ -301,13 +320,24 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       showToast("Vui lòng chọn ít nhất 1 video hoặc thư mục nguồn trước khi bắt đầu.", "warn");
       return;
     }
+    const rawBatch = optBatch?.value.trim() ?? "";
+    const batchVal = rawBatch === "" ? 8 : Number(rawBatch);
+    if (!Number.isFinite(batchVal) || !Number.isInteger(batchVal) || batchVal < 1 || batchVal > 32) {
+      optBatch?.setAttribute("aria-invalid", "true");
+      optBatch?.focus();
+      showToast("Batch Size phải là số nguyên từ 1 đến 32.", "warn");
+      return;
+    }
+    optBatch?.removeAttribute("aria-invalid");
+    const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
+    if (submitBtn) submitBtn.disabled = true;
     try {
       const payload = {
         inputs: queueInputs,
         output_dir: optOutDir?.value.trim() || null,
         model: optModel?.value || null,
         dedup_policy: optDedup?.value || null,
-        batch_size: Math.max(1, Math.min(32, Number(optBatch?.value || 8))),
+        batch_size: batchVal,
         deadline: optDeadline?.value.trim() || null,
         allow_partial: Boolean(optAllowPartial?.checked),
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
@@ -332,6 +362,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       onJobLaunched?.(res.job);
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
   });
 
@@ -421,7 +453,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
             })
           );
         }
-        optModelSelect.value = cur;
+        setSelectValueSafely(optModelSelect, cur, "");
       }
 
       if (optDedupSelect instanceof HTMLSelectElement) {
@@ -442,7 +474,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
             })
           );
         }
-        optDedupSelect.value = curPol;
+        setSelectValueSafely(optDedupSelect, curPol, "");
       }
 
       // Render Models Table
@@ -583,6 +615,9 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const keyInput1 = document.getElementById("input-api-key-1");
   const keyInput2 = document.getElementById("input-api-key-2");
   const keyInput3 = document.getElementById("input-api-key-3");
+  const keyClear1 = document.getElementById("clear-api-key-1");
+  const keyClear2 = document.getElementById("clear-api-key-2");
+  const keyClear3 = document.getElementById("clear-api-key-3");
 
   const btnRefreshAudits = document.getElementById("btn-refresh-audits");
   const auditsTbody = document.getElementById("audits-tbody");
@@ -603,15 +638,55 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     });
   }
 
+  const clearKeySlot = async (slotNum) => {
+    try {
+      const res = await apiFetch("/api/subtrans/api-keys", {
+        method: "PUT",
+        body: { [`key_${slotNum}`]: "" },
+      });
+      renderKeySlots(res.key_slots);
+      await loadSubtransOverview();
+      showToast(`Đã xóa khóa ở Khe ${slotNum} khỏi .env cục bộ.`, "info");
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  };
+
   const renderKeySlots = (slots) => {
     if (!keySlotsStatus) return;
     clearChildren(keySlotsStatus);
     for (const s of slots || []) {
+      const chip = el("div", { className: "key-slot-chip" });
       const cls = s.configured ? "badge badge-ok" : "badge";
+      const srcNote =
+        s.configured && s.source === "env"
+          ? " [ENV]"
+          : s.configured && s.env_name === "GEMINI_API_KEYS"
+            ? " [LIST]"
+            : "";
       const label = s.configured
-        ? `✓ Khe ${s.slot}: ${s.masked} (ID: ${s.key_id})`
+        ? `✓ Khe ${s.slot}: ${s.masked} (ID: ${s.key_id})${srcNote}`
         : `◌ Khe ${s.slot}: Chưa đặt`;
-      keySlotsStatus.append(el("span", { className: cls, textContent: label }));
+      chip.append(el("span", { className: cls, textContent: label }));
+      if (s.configured && s.source !== "env") {
+        chip.append(
+          el("button", {
+            type: "button",
+            className: "btn-ghost btn-xs",
+            textContent: "✕ Xóa",
+            "aria-label": `Xóa khóa Gemini API Khe ${s.slot}`,
+            onClick: () => clearKeySlot(s.slot),
+          })
+        );
+      } else if (s.configured && s.source === "env") {
+        chip.append(
+          el("span", {
+            className: "muted-meta",
+            textContent: "Biến môi trường hệ thống",
+          })
+        );
+      }
+      keySlotsStatus.append(chip);
     }
   };
 
@@ -648,7 +723,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         for (const g of data.glossaries || []) {
           subGlossary.append(el("option", { value: g.path, textContent: g.name }));
         }
-        subGlossary.value = curG;
+        setSelectValueSafely(subGlossary, curG, "");
       }
 
       renderKeySlots(data.key_slots);
@@ -717,7 +792,10 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           res.type === "json" ? JSON.stringify(res.data, null, 2) : String(res.content || "");
       } catch (err) {
         if (reqId !== auditLoadSeq || !auditDialog.open) return;
-        auditCode.textContent = `Không thể đọc tệp kiểm định: ${err.message}`;
+        const rawPreview = err?.payload?.raw_preview;
+        auditCode.textContent = rawPreview
+          ? `Không thể đọc tệp kiểm định: ${err.message}\n\n--- Nội dung thô (.audit.json bị hỏng) ---\n${rawPreview}`
+          : `Không thể đọc tệp kiểm định: ${err.message}`;
       }
     };
 
@@ -768,7 +846,11 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
 
       for (const a of audits) {
         const muxTone =
-          a.status === "PASS" ? "badge-ok" : a.status === "FAIL" ? "badge-err" : "badge-warn";
+          a.status === "PASS"
+            ? "badge-ok"
+            : a.status === "FAIL" || a.status === "CORRUPT" || a.corrupt
+              ? "badge-err"
+              : "badge-warn";
         const sanTone =
           a.sanity_status === "PASS"
             ? "badge-ok"
@@ -833,11 +915,19 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
             el("th", { scope: "row" }, [
               el("div", { textContent: a.episode }),
               el("div", {
-                className: "muted-meta",
-                textContent: `${a.model_id || "—"} ${a.completed_at ? `• ${a.completed_at}` : ""}`,
+                className: a.corrupt ? "muted-meta text-error" : "muted-meta",
+                textContent: a.corrupt && a.error
+                  ? a.error
+                  : `${a.model_id || "—"} ${a.completed_at ? `• ${a.completed_at}` : ""}`,
               }),
             ]),
-            el("td", {}, [el("span", { className: `badge ${muxTone}`, textContent: a.status })]),
+            el("td", {}, [
+              el("span", {
+                className: `badge ${muxTone}`,
+                textContent: a.status,
+                ...(a.corrupt && a.error ? { title: a.error } : {}),
+              }),
+            ]),
             el("td", {}, [
               el("span", { className: `badge ${sanTone}`, textContent: a.sanity_status }),
             ]),
@@ -874,9 +964,23 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     ev.preventDefault();
     const target = subInputPath?.value.trim() || "";
     if (!target) {
+      subInputPath?.setAttribute("aria-invalid", "true");
+      subInputPath?.focus();
       showToast("Vui lòng chọn tệp video hoặc phụ đề cần dịch.", "warn");
       return;
     }
+    subInputPath?.removeAttribute("aria-invalid");
+    const rawOffset = subOffset?.value.trim() ?? "";
+    const offsetMs = rawOffset === "" ? 0 : Number(rawOffset);
+    if (!Number.isFinite(offsetMs) || !Number.isInteger(offsetMs)) {
+      subOffset?.setAttribute("aria-invalid", "true");
+      subOffset?.focus();
+      showToast("Sub Offset (ms) phải là số nguyên hợp lệ.", "warn");
+      return;
+    }
+    subOffset?.removeAttribute("aria-invalid");
+    const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
+    if (submitBtn) submitBtn.disabled = true;
     try {
       const res = await apiFetch("/api/jobs/subtrans", {
         method: "POST",
@@ -888,7 +992,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           prefer_whisper: Boolean(subPreferWhisper?.checked),
           auto_align_en: Boolean(subAutoAlign?.checked ?? true),
           no_embed: Boolean(subNoEmbed?.checked),
-          sub_offset_ms: Number(subOffset?.value || 0),
+          sub_offset_ms: offsetMs,
           glossary: subGlossary?.value || null,
           dry_run: Boolean(subDryRun?.checked),
         },
@@ -898,10 +1002,13 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       onJobLaunched?.(res.job);
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
   });
 
   btnRunPending?.addEventListener("click", async () => {
+    if (btnRunPending instanceof HTMLButtonElement) btnRunPending.disabled = true;
     try {
       const res = await apiFetch("/api/jobs/subs-pending", {
         method: "POST",
@@ -915,35 +1022,60 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       onJobLaunched?.(res.job);
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      if (btnRunPending instanceof HTMLButtonElement) btnRunPending.disabled = false;
     }
   });
+
+  for (const [inp, chk] of [
+    [keyInput1, keyClear1],
+    [keyInput2, keyClear2],
+    [keyInput3, keyClear3],
+  ]) {
+    inp?.addEventListener("input", () => {
+      if (chk && inp.value.trim()) chk.checked = false;
+    });
+    chk?.addEventListener("change", () => {
+      if (chk.checked && inp) inp.value = "";
+    });
+  }
 
   apiKeysForm?.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const v1 = keyInput1?.value.trim() || "";
     const v2 = keyInput2?.value.trim() || "";
     const v3 = keyInput3?.value.trim() || "";
-    if (!v1 && !v2 && !v3) {
-      showToast("Hãy nhập ít nhất 1 khóa API mới vào khe cần cập nhật.", "warn");
+    const c1 = Boolean(keyClear1?.checked);
+    const c2 = Boolean(keyClear2?.checked);
+    const c3 = Boolean(keyClear3?.checked);
+    if (!v1 && !v2 && !v3 && !c1 && !c2 && !c3) {
+      showToast("Hãy nhập khóa API mới hoặc tích chọn xóa khe cần cập nhật.", "warn");
       return;
     }
+    const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
+    if (submitBtn) submitBtn.disabled = true;
     try {
       const res = await apiFetch("/api/subtrans/api-keys", {
         method: "PUT",
         body: {
-          key_1: v1 ? v1 : null,
-          key_2: v2 ? v2 : null,
-          key_3: v3 ? v3 : null,
+          key_1: c1 && !v1 ? "" : v1 ? v1 : null,
+          key_2: c2 && !v2 ? "" : v2 ? v2 : null,
+          key_3: c3 && !v3 ? "" : v3 ? v3 : null,
         },
       });
       if (keyInput1) keyInput1.value = "";
       if (keyInput2) keyInput2.value = "";
       if (keyInput3) keyInput3.value = "";
+      if (keyClear1) keyClear1.checked = false;
+      if (keyClear2) keyClear2.checked = false;
+      if (keyClear3) keyClear3.checked = false;
       renderKeySlots(res.key_slots);
       await loadSubtransOverview();
       showToast("Đã cập nhật khóa Gemini API an toàn vào .env cục bộ.", "success");
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
   });
 

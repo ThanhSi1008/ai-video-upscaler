@@ -312,9 +312,29 @@ export function initCompareStage({ selectTabById } = {}) {
       return;
     }
 
-    const tsSec = Math.max(0, Number(tsInput?.value || 2.0));
+    const rawTs = tsInput?.value.trim() ?? "";
+    const tsSec = rawTs === "" ? 2.0 : Number(rawTs);
+    if (!Number.isFinite(tsSec) || tsSec < 0) {
+      if (tsInput) {
+        tsInput.setAttribute("aria-invalid", "true");
+        tsInput.focus();
+      }
+      showToast("Mốc thời gian phải là số giây hợp lệ (>= 0).", "warn");
+      return;
+    }
+    tsInput?.removeAttribute("aria-invalid");
+
     const rawOffset = offsetInput?.value.trim() || "";
     const offsetVal = rawOffset === "" ? null : Number(rawOffset);
+    if (offsetVal !== null && !Number.isFinite(offsetVal)) {
+      if (offsetInput) {
+        offsetInput.setAttribute("aria-invalid", "true");
+        offsetInput.focus();
+      }
+      showToast("Độ lệch gốc (offset) phải là số giây hữu hạn hợp lệ.", "warn");
+      return;
+    }
+    offsetInput?.removeAttribute("aria-invalid");
 
     if (btnExtract instanceof HTMLButtonElement) {
       btnExtract.disabled = true;
@@ -367,10 +387,12 @@ export function initCompareStage({ selectTabById } = {}) {
     const item = candidatesCache.find((c) => c.upscaled_path === chosenUp);
     if (!item) return;
     if (upInput) upInput.value = item.upscaled_path;
-    if (srcInput && item.source_path) srcInput.value = item.source_path;
+    if (srcInput) srcInput.value = item.source_path || "";
     if (offsetInput) offsetInput.value = "";
     if (srcInput?.value && upInput?.value) {
       extractAndCompare();
+    } else if (metaCaption) {
+      metaCaption.textContent = "Tệp 4K này chưa tự khớp được video gốc 1080p — hãy chọn video gốc thủ công rồi nhấn Trích xuất.";
     }
   });
 
@@ -486,8 +508,8 @@ export function initCompareStage({ selectTabById } = {}) {
     refreshCandidates: loadCandidates,
     redraw: renderCanvas,
     async openPair(sourcePath, upscaledPath) {
-      if (srcInput && sourcePath) srcInput.value = sourcePath;
-      if (upInput && upscaledPath) upInput.value = upscaledPath;
+      if (srcInput) srcInput.value = sourcePath || "";
+      if (upInput) upInput.value = upscaledPath || "";
       if (offsetInput) offsetInput.value = "";
       selectTabById?.("tab-compare");
       await loadCandidates();

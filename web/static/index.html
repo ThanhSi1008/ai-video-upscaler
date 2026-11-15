@@ -133,7 +133,7 @@
                   <label for="episode-progress" id="episode-progress-label">Tiến độ khung hình: 0%</label>
                   <span id="live-stage-detail" class="muted-meta">Đang chờ tác vụ…</span>
                 </div>
-                <progress id="episode-progress" class="studio-progress" value="0" max="100" style="--progress-pct: 0;"></progress>
+                <progress id="episode-progress" class="studio-progress" value="0" max="100"></progress>
               </div>
 
               <dl class="kpi-strip">
@@ -461,7 +461,7 @@
                 </div>
               </div>
 
-              <div id="compare-stage" class="compare-stage" style="--wipe-pct: 50%;">
+              <div id="compare-stage" class="compare-stage">
                 <canvas id="compare-canvas" width="1280" height="720" aria-label="Khung đối chiếu trực quan giữa bản gốc 1080p bên trái và bản nâng cấp 4K bên phải"></canvas>
                 <p id="compare-placeholder" class="compare-placeholder">
                   Chọn một file thành phẩm trong <code>out/</code> (hoặc chạy Xem trước 10s ở Tab Hàng đợi) rồi nhấn “Trích xuất Khung hình Đối chiếu”.
@@ -653,14 +653,17 @@
                       <div class="field-group">
                         <label for="input-api-key-1">Khe 1 (GEMINI_API_KEY_1)</label>
                         <input type="password" id="input-api-key-1" placeholder="Giữ nguyên nếu để trống…">
+                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-1"> Xóa khe 1 khỏi .env</label>
                       </div>
                       <div class="field-group">
                         <label for="input-api-key-2">Khe 2 (GEMINI_API_KEY_2)</label>
                         <input type="password" id="input-api-key-2" placeholder="Giữ nguyên nếu để trống…">
+                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-2"> Xóa khe 2 khỏi .env</label>
                       </div>
                       <div class="field-group">
                         <label for="input-api-key-3">Khe 3 (GEMINI_API_KEY_3)</label>
                         <input type="password" id="input-api-key-3" placeholder="Giữ nguyên nếu để trống…">
+                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-3"> Xóa khe 3 khỏi .env</label>
                       </div>
                       <div class="form-cta-row">
                         <button type="submit" class="btn btn-secondary">Lưu Khóa API vào .env</button>

@@ -13,8 +13,10 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta
 import json
+import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -55,9 +57,63 @@ def _probe_frames_lightweight(video_path: str) -> int:
     return 34000
 
 
+_VALID_SUBS_QUALITIES = {"normal", "fast", "high"}
+_DEADLINE_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_VIDEO_FILE_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".avi", ".ts", ".m2ts"}
+
+
+def _validate_no_nul(val: Optional[str], field: str = "path") -> Optional[str]:
+    if val is not None and "\x00" in val:
+        raise ValueError(f"Trường '{field}' chứa ký tự NUL (\\x00) không hợp lệ.")
+    return val
+
+
+def _validate_subs_quality(val: Optional[str]) -> str:
+    norm = (val if val is not None else "normal").strip().lower()
+    if norm not in _VALID_SUBS_QUALITIES:
+        raise ValueError(
+            f"Giá trị subs_quality '{val}' không hợp lệ (chỉ chấp nhận normal, fast hoặc high)."
+        )
+    return norm
+
+
+def _validate_deadline(val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = _DEADLINE_RE.match(s)
+    if not m:
+        raise ValueError(f"Định dạng deadline '{val}' không hợp lệ (cần HH:MM, ví dụ 07:00).")
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"Giờ deadline '{val}' phải nằm trong 00:00..23:59.")
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> tuple[Path, Optional[Path]]:
+    """
+    Chuẩn hóa đường dẫn output (-o):
+    - Đường dẫn tương đối được phân giải theo workspace_root (không dùng os.getcwd()).
+    - Nếu trỏ thẳng tới tệp video (.mkv, .mp4, ...), tách thành (thư mục cha, tệp đích).
+    """
+    if not output_dir or not str(output_dir).strip():
+        return (workspace_root / "out").resolve(), None
+    raw = str(output_dir).strip()
+    _validate_no_nul(raw, "output_dir")
+    p = Path(os.path.expanduser(raw))
+    if not p.is_absolute():
+        p = workspace_root / p
+    resolved = p.resolve()
+    if resolved.suffix.lower() in _VIDEO_FILE_SUFFIXES:
+        return resolved.parent, resolved
+    return resolved, None
+
+
 def _find_cached_plan(workspace_root: Path, video_path: str, output_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
     base_name = os.path.splitext(os.path.basename(video_path))[0]
-    out_base = Path(output_dir).resolve() if output_dir else (workspace_root / "out")
+    out_base, _ = _resolve_output_target(workspace_root, output_dir)
     vid_dir = Path(video_path).resolve().parent
     candidates = [
         out_base / f".temp_{base_name}" / "plan.json",
@@ -168,22 +224,26 @@ class JobManager:
     ) -> Dict[str, Any]:
         """Dự báo chi tiết danh sách tập, model phân giải từ shows.yaml và thời gian hoàn thành theo --deadline."""
         videos = self.fs_browser.expand_inputs(inputs)
+        deadline_str = _validate_deadline(deadline_str)
         now = datetime.now()
         deadline_dt: Optional[datetime] = None
-        if deadline_str and deadline_str.strip():
-            parts = deadline_str.strip().split(":")
-            if len(parts) != 2:
-                raise ValueError(f"Định dạng deadline '{deadline_str}' không hợp lệ (cần HH:MM).")
+        if deadline_str:
+            parts = deadline_str.split(":")
             dh, dm = int(parts[0]), int(parts[1])
-            if not (0 <= dh <= 23 and 0 <= dm <= 59):
-                raise ValueError(f"Giờ hạn chót '{deadline_str}' ngoài phạm vi 00:00..23:59.")
             deadline_dt = now.replace(hour=dh, minute=dm, second=0, microsecond=0)
             if deadline_dt <= now:
                 deadline_dt += timedelta(days=1)
 
-        out_base = Path(output_dir).resolve() if output_dir else (self.workspace_root / "out")
+        out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         sub_overhead = 300.0 if subs_after_upscale else 0.0
-        vid_overhead = 420.0 if (zero_disk and use_tensorrt) else 600.0
+        if zero_disk and use_tensorrt:
+            vid_overhead = 420.0
+        elif not zero_disk and use_tensorrt:
+            vid_overhead = 660.0
+        elif zero_disk and not use_tensorrt:
+            vid_overhead = 540.0
+        else:
+            vid_overhead = 780.0
         total_overhead = vid_overhead + sub_overhead
 
         sim_med = now
@@ -203,7 +263,7 @@ class JobManager:
             if not use_tensorrt:
                 base_med_fps *= 0.52
                 base_p5_fps *= 0.52
-            elif not zero_disk:
+            if not zero_disk:
                 base_med_fps *= 0.82
                 base_p5_fps *= 0.82
 
@@ -222,7 +282,10 @@ class JobManager:
                 source_note = "ước tính thận trọng"
 
             out_suffix = "_4K_animejanai.mkv" if m_id.startswith("animejanai-") else "_4K.mkv"
-            out_4k = out_base / f"{base_name}{out_suffix}"
+            if explicit_out_file is not None and len(videos) == 1:
+                out_4k = explicit_out_file
+            else:
+                out_4k = out_base / f"{base_name}{out_suffix}"
             already_done = out_4k.is_file() and out_4k.stat().st_size > 1024 * 1024
 
             if already_done:
@@ -302,13 +365,12 @@ class JobManager:
             "episodes": episodes,
         }
 
-    def _ensure_ready_to_launch(self, requires_gpu: bool = True) -> None:
-        with self._lock:
-            if self._active_job and self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError(
-                    f"Đang có một tiến trình Web Job hoạt động (PID={self._proc.pid}, loại={self._active_job['job_type']}). "
-                    f"Vui lòng chờ xong hoặc dừng trước khi chạy tác vụ mới."
-                )
+    def _ensure_ready_to_launch_locked(self, requires_gpu: bool = True) -> None:
+        if self._active_job and self._proc is not None and self._proc.poll() is None:
+            raise RuntimeError(
+                f"Đang có một tiến trình Web Job hoạt động (PID={self._proc.pid}, loại={self._active_job['job_type']}). "
+                f"Vui lòng chờ xong hoặc dừng trước khi chạy tác vụ mới."
+            )
         if requires_gpu:
             lock_info = check_active_gpu_lock(self.workspace_root)
             if lock_info.get("locked"):
@@ -317,6 +379,10 @@ class JobManager:
                     f"Chỉ cho phép 1 tiến trình suy luận GPU hoạt động tại một thời điểm."
                 )
 
+    def _ensure_ready_to_launch(self, requires_gpu: bool = True) -> None:
+        with self._lock:
+            self._ensure_ready_to_launch_locked(requires_gpu=requires_gpu)
+
     def _spawn_command(
         self,
         job_type: str,
@@ -324,15 +390,11 @@ class JobManager:
         queue_items: List[str],
         options: Dict[str, Any],
         extra_env: Optional[Dict[str, str]] = None,
+        requires_gpu: bool = True,
     ) -> Dict[str, Any]:
         logs_dir = self.workspace_root / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         pause_flag = logs_dir / ".graceful_pause.flag"
-        if pause_flag.exists():
-            try:
-                pause_flag.unlink()
-            except OSError:
-                pass
 
         web_log_path = logs_dir / "web_job.log"
         env = dict(os.environ)
@@ -356,42 +418,59 @@ class JobManager:
             startupinfo.wShowWindow = subprocess.SW_HIDE
             popen_kwargs["startupinfo"] = startupinfo
 
-        proc = self.popen_factory(cmd, **popen_kwargs)
-        job_id = uuid.uuid4().hex[:10]
-        now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        job_record: Dict[str, Any] = {
-            "job_id": job_id,
-            "job_type": job_type,
-            "status": "running",
-            "pid": getattr(proc, "pid", None),
-            "started_at": now_iso,
-            "finished_at": None,
-            "return_code": None,
-            "command": cmd,
-            "queue_items": queue_items,
-            "options": options,
-        }
-
+        # Giữ self._lock xuyên suốt kiểm tra sẵn sàng + khởi tạo tiến trình con + đăng ký state để triệt tiêu TOCTOU race
         with self._lock:
+            self._ensure_ready_to_launch_locked(requires_gpu=requires_gpu)
+            if pause_flag.exists():
+                try:
+                    pause_flag.unlink()
+                except OSError:
+                    pass
+            proc = self.popen_factory(cmd, **popen_kwargs)
+            if proc is None:
+                raise RuntimeError("Không thể khởi tạo tiến trình con (popen_factory trả về None).")
+            job_id = uuid.uuid4().hex[:10]
+            now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            job_record: Dict[str, Any] = {
+                "job_id": job_id,
+                "job_type": job_type,
+                "status": "running",
+                "pid": getattr(proc, "pid", None),
+                "started_at": now_iso,
+                "finished_at": None,
+                "return_code": None,
+                "command": cmd,
+                "queue_items": queue_items,
+                "options": options,
+            }
             self._proc = proc
             self._active_job = job_record
 
         def _drain_output() -> None:
+            rc = -1
             try:
                 with web_log_path.open("w", encoding="utf-8") as wf:
                     wf.write(f"# Web Studio Job {job_id} ({job_type}) started at {now_iso}\n")
                     wf.flush()
-                    stdout_pipe = getattr(proc, "stdout", None)
-                    if stdout_pipe is not None:
-                        for raw_line in stdout_pipe:
-                            wf.write(raw_line)
-                            wf.flush()
-                rc = proc.wait()
+                    if proc is not None:
+                        stdout_pipe = getattr(proc, "stdout", None)
+                        if stdout_pipe is not None:
+                            for raw_line in stdout_pipe:
+                                wf.write(raw_line)
+                                wf.flush()
+                if proc is not None:
+                    rc = int(proc.wait())
             except Exception:
-                rc = proc.poll() if proc.poll() is not None else -1
-            with self._lock:
-                if self._active_job and self._active_job.get("job_id") == job_id:
-                    self._finalize_locked(int(rc))
+                if proc is not None:
+                    try:
+                        polled = proc.poll()
+                        rc = int(polled) if polled is not None else -1
+                    except Exception:
+                        rc = -1
+            finally:
+                with self._lock:
+                    if self._active_job and self._active_job.get("job_id") == job_id:
+                        self._finalize_locked(int(rc))
 
         t = threading.Thread(target=_drain_output, name=f"WebJobDrain-{job_id}", daemon=True)
         t.start()
@@ -402,6 +481,14 @@ class JobManager:
         raw_inputs = payload.get("inputs") or []
         if not raw_inputs:
             raise ValueError("Vui lòng chọn ít nhất một file video hoặc thư mục nguồn.")
+        for item in raw_inputs:
+            _validate_no_nul(str(item), "inputs")
+        if payload.get("output_dir"):
+            _validate_no_nul(str(payload.get("output_dir")), "output_dir")
+
+        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
+        deadline_norm = _validate_deadline(payload.get("deadline"))
+
         videos = self.fs_browser.expand_inputs(raw_inputs)
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=not dry_run)
@@ -419,10 +506,13 @@ class JobManager:
             cmd.extend(["--model", str(payload["model"]).strip()])
         if payload.get("dedup_policy"):
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
-        if payload.get("batch_size"):
-            cmd.extend(["--batch-size", str(int(payload["batch_size"]))])
-        if payload.get("deadline"):
-            cmd.extend(["--deadline", str(payload["deadline"]).strip()])
+        if payload.get("batch_size") is not None:
+            bs = int(payload["batch_size"])
+            if bs < 1:
+                raise ValueError("batch_size phải >= 1.")
+            cmd.extend(["--batch-size", str(bs)])
+        if deadline_norm:
+            cmd.extend(["--deadline", deadline_norm])
         if payload.get("allow_partial"):
             cmd.append("--allow-partial")
         if payload.get("zero_disk") is False:
@@ -431,8 +521,7 @@ class JobManager:
             cmd.append("--no-tensorrt")
         if payload.get("subs_after_upscale") is False:
             cmd.append("--no-subs")
-        if payload.get("subs_quality") in {"normal", "fast", "high"}:
-            cmd.extend(["--subs-quality", str(payload["subs_quality"])])
+        cmd.extend(["--subs-quality", subs_quality])
         if payload.get("async_subs"):
             cmd.append("--async-subs")
         if payload.get("prefer_whisper"):
@@ -448,16 +537,21 @@ class JobManager:
         if dry_run:
             cmd.append("--dry-run")
 
-        return self._spawn_command("upscale", cmd, videos, payload)
+        return self._spawn_command("upscale", cmd, videos, payload, requires_gpu=not dry_run)
 
     def start_preview_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Khởi chạy xem trước nhanh (--preview N giây ở 30% tập phim)."""
         video_raw = str(payload.get("video_path") or "").strip()
+        _validate_no_nul(video_raw, "video_path")
         if not video_raw:
             raise ValueError("Vui lòng chọn một file video để trích xuất Preview.")
         videos = self.fs_browser.expand_inputs([video_raw])
         target_video = videos[0]
-        seconds = max(3, min(60, int(payload.get("seconds") or 10)))
+        raw_sec = payload.get("seconds", 10)
+        sec_f = float(10 if raw_sec is None else raw_sec)
+        if not math.isfinite(sec_f):
+            raise ValueError("seconds phải là số hữu hạn.")
+        seconds = max(3, min(60, int(sec_f)))
         self._ensure_ready_to_launch(requires_gpu=True)
 
         cmd = [
@@ -483,21 +577,33 @@ class JobManager:
         if not payload.get("auto_open_player", False):
             extra_env["UPSCALER_NO_AUTO_OPEN"] = "1"
 
-        return self._spawn_command("preview", cmd, [target_video], payload, extra_env=extra_env)
+        return self._spawn_command("preview", cmd, [target_video], payload, extra_env=extra_env, requires_gpu=True)
 
     def start_subtrans_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Khởi chạy dịch phụ đề trực tiếp (--subs-only hoặc subtrans.py) bình thường ở mọi khung giờ."""
         target_raw = str(payload.get("input_path") or "").strip()
+        _validate_no_nul(target_raw, "input_path")
+        if payload.get("output_dir"):
+            _validate_no_nul(str(payload.get("output_dir")), "output_dir")
+        if payload.get("glossary"):
+            _validate_no_nul(str(payload.get("glossary")), "glossary")
+
         if not target_raw:
             raise ValueError("Vui lòng chọn file video (.mkv/.mp4) hoặc phụ đề (.srt/.ass) để dịch.")
+
+        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         items = self.fs_browser.expand_inputs([target_raw])
-        target_file = items[0]
         prefer_whisper = bool(payload.get("prefer_whisper", False))
         dry_run = bool(payload.get("dry_run", False))
-        self._ensure_ready_to_launch(requires_gpu=(prefer_whisper and not dry_run))
+        needs_gpu = bool(prefer_whisper and not dry_run)
+        self._ensure_ready_to_launch(requires_gpu=needs_gpu)
 
-        ext = os.path.splitext(target_file)[1].lower()
-        if ext in {".srt", ".ass", ".ssa", ".vtt"}:
+        glossary_val = str(payload.get("glossary") or "").strip()
+        sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
+        is_subtitle_only = len(items) == 1 and os.path.splitext(items[0])[1].lower() in sub_exts
+
+        if is_subtitle_only:
+            target_file = items[0]
             out_dir = str(payload.get("output_dir") or (self.workspace_root / "out"))
             cmd = [
                 self.python_executable,
@@ -507,11 +613,11 @@ class JobManager:
                 "-o",
                 out_dir,
                 "--subs-quality",
-                str(payload.get("subs_quality") or "normal"),
+                subs_quality,
                 "--yes",
             ]
-            if payload.get("glossary"):
-                cmd.extend(["--glossary", str(payload["glossary"]).strip()])
+            if glossary_val:
+                cmd.extend(["--glossary", glossary_val])
             if payload.get("sub_offset_ms"):
                 cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
             if payload.get("auto_align_en") is False:
@@ -523,12 +629,16 @@ class JobManager:
                 self.python_executable,
                 str(self.workspace_root / "upscale.py"),
                 "--subs-only",
-                target_file,
-                "--subs-quality",
-                str(payload.get("subs_quality") or "normal"),
             ]
+            if len(items) == 1:
+                cmd.append(items[0])
+            else:
+                cmd.extend(["--queue", *items])
+            cmd.extend(["--subs-quality", subs_quality])
             if payload.get("output_dir"):
                 cmd.extend(["-o", str(payload["output_dir"]).strip()])
+            if glossary_val:
+                cmd.extend(["--glossary", glossary_val])
             if payload.get("subs_upgrade"):
                 cmd.append("--subs-upgrade")
             if prefer_whisper:
@@ -542,10 +652,11 @@ class JobManager:
             if dry_run:
                 cmd.append("--dry-run")
 
-        return self._spawn_command("subtrans", cmd, [target_file], payload)
+        return self._spawn_command("subtrans", cmd, items, payload, requires_gpu=needs_gpu)
 
     def start_subs_pending_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Chạy lại danh sách phụ đề tồn đọng trong pending_subs.json."""
+        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=False)
         cmd = [
@@ -553,11 +664,11 @@ class JobManager:
             str(self.workspace_root / "upscale.py"),
             "--subs-pending",
             "--subs-quality",
-            str(payload.get("subs_quality") or "normal"),
+            subs_quality,
         ]
         if dry_run:
             cmd.append("--dry-run")
-        return self._spawn_command("subs_pending", cmd, ["pending_subs.json"], payload)
+        return self._spawn_command("subs_pending", cmd, ["pending_subs.json"], payload, requires_gpu=False)
 
     def request_graceful_pause(self) -> Dict[str, Any]:
         """Ghi cờ dừng êm logs/.graceful_pause.flag cho cả tiến trình Web lẫn CLI ngoài."""
@@ -626,14 +737,40 @@ class JobManager:
                     except Exception:
                         pass
 
-        # Thu hồi khóa .gpu_active.lock nếu thuộc PID vừa kết thúc
+        # Thu hồi khóa .gpu_active.lock nếu thuộc PID vừa kết thúc hoặc phát hiện tiến trình CLI ngoài
         lock_file = self.workspace_root / ".gpu_active.lock"
+        external_lock_pid: Optional[int] = None
         if lock_file.is_file():
             lock_state = check_active_gpu_lock(self.workspace_root)
-            if not lock_state.get("locked"):
+            if lock_state.get("locked"):
+                external_lock_pid = lock_state.get("pid")
+            else:
                 try:
                     lock_file.unlink()
                 except OSError:
                     pass
 
-        return {"ok": True, "aborted_pid": killed_pid}
+        if killed_pid is not None:
+            return {
+                "ok": True,
+                "aborted_pid": killed_pid,
+                "status": "aborted",
+                "message": f"Đã dừng tiến trình Web Job (PID={killed_pid}).",
+            }
+        if external_lock_pid is not None:
+            return {
+                "ok": False,
+                "aborted_pid": None,
+                "status": "external_lock",
+                "external_lock_pid": external_lock_pid,
+                "message": (
+                    f"Không có Web Job đang chạy; tiến trình GPU bên ngoài (PID={external_lock_pid}) "
+                    f"vẫn đang hoạt động và không thuộc quyền hủy từ Web Studio."
+                ),
+            }
+        return {
+            "ok": False,
+            "aborted_pid": None,
+            "status": "idle",
+            "message": "Không có tác vụ Web Job nào đang chạy để dừng.",
+        }

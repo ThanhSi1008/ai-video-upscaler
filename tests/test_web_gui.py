@@ -182,6 +182,22 @@ def _fake_gpu_metrics() -> Dict[str, Any]:
     }
 
 
+def _idle_gpu_metrics() -> Dict[str, Any]:
+    return {
+        "pstate": "P8",
+        "gpu_util_pct": 0.0,
+        "mem_util_pct": 0.0,
+        "enc_util_pct": 0.0,
+        "dec_util_pct": 0.0,
+        "mem_clock_mhz": 405.0,
+        "core_clock_mhz": 300.0,
+        "power_w": 14.0,
+        "temp_c": 39.0,
+        "vram_used_mib": 200.0,
+        "vram_free_mib": 12088.0,
+    }
+
+
 @pytest.fixture()
 def studio_env(tmp_path: Path):
     root = _seed_workspace(tmp_path / "workspace")
@@ -861,21 +877,7 @@ def test_sse_log_cursor_no_duplicate_on_first_tick_and_holds_partial_line(tmp_pa
 
     hub = TelemetryHub(
         root,
-        gpu_query_fn=lambda: {
-            "gpu_util": 0.0,
-            "mem_util": 0.0,
-            "vram_used_mib": 250.0,
-            "vram_total_mib": 12288.0,
-            "power_w": 15.0,
-            "temp_c": 40.0,
-            "pstate": "P8",
-            "clock_sm_mhz": 300.0,
-            "clock_mem_mhz": 405.0,
-            "nvenc_util": 0.0,
-            "nvdec_util": 0.0,
-            "pcie_tx_kb": 0.0,
-            "pcie_rx_kb": 0.0,
-        },
+        gpu_query_fn=_idle_gpu_metrics,
     )
     snap = hub.build_snapshot()
     assert snap["logs"] == seed_lines
@@ -941,21 +943,7 @@ def test_stale_live_status_isolated_during_subtrans_and_new_upscale_boot(tmp_pat
     }
     hub = TelemetryHub(
         root,
-        gpu_query_fn=lambda: {
-            "gpu_util": 0.0,
-            "mem_util": 0.0,
-            "vram_used_mib": 200.0,
-            "vram_total_mib": 12288.0,
-            "power_w": 14.0,
-            "temp_c": 39.0,
-            "pstate": "P8",
-            "clock_sm_mhz": 300.0,
-            "clock_mem_mhz": 405.0,
-            "nvenc_util": 0.0,
-            "nvdec_util": 0.0,
-            "pcie_tx_kb": 0.0,
-            "pcie_rx_kb": 0.0,
-        },
+        gpu_query_fn=_idle_gpu_metrics,
         job_state_provider=lambda: state_box,
     )
 
@@ -1052,21 +1040,7 @@ def test_real_ffmpeg_bt709_compare_frame_extraction(tmp_path):
     # Instantiate create_app WITHOUT frame_extract_fn mock so _default_extract_frame & PyAV probe run for real
     app = create_app(
         workspace_root=root,
-        gpu_query_fn=lambda: {
-            "gpu_util": 0.0,
-            "mem_util": 0.0,
-            "vram_used_mib": 200.0,
-            "vram_total_mib": 12288.0,
-            "power_w": 12.0,
-            "temp_c": 38.0,
-            "pstate": "P8",
-            "clock_sm_mhz": 300.0,
-            "clock_mem_mhz": 405.0,
-            "nvenc_util": 0.0,
-            "nvdec_util": 0.0,
-            "pcie_tx_kb": 0.0,
-            "pcie_rx_kb": 0.0,
-        },
+        gpu_query_fn=_idle_gpu_metrics,
     )
     with TestClient(app) as client:
         r_cmp = client.post(
@@ -1184,21 +1158,7 @@ def test_audits_mux_frame_count_fallback_and_subdir_discovery(tmp_path):
 
     app = create_app(
         workspace_root=root,
-        gpu_query_fn=lambda: {
-            "gpu_util": 0.0,
-            "mem_util": 0.0,
-            "vram_used_mib": 200.0,
-            "vram_total_mib": 12288.0,
-            "power_w": 12.0,
-            "temp_c": 38.0,
-            "pstate": "P8",
-            "clock_sm_mhz": 300.0,
-            "clock_mem_mhz": 405.0,
-            "nvenc_util": 0.0,
-            "nvdec_util": 0.0,
-            "pcie_tx_kb": 0.0,
-            "pcie_rx_kb": 0.0,
-        },
+        gpu_query_fn=_idle_gpu_metrics,
     )
     with TestClient(app) as client:
         r_aud = client.get("/api/audits")
@@ -1254,6 +1214,735 @@ def test_dialog_reflow_async_races_checkpoint_focus_and_toast_clamping_guards(st
     assert "ev.button !== 0" in ui_js
     assert "--toast-max-h" in css and "--toast-max-h" in ui_js
     assert "onbeforematch" in ui_js
+
+
+# =====================================================================
+# 8. DEEP AUDIT REGRESSION COVERAGE (ALL 5 DEFECT CATEGORIES)
+# =====================================================================
+
+
+def test_env_api_keys_crlf_injection_key1_sync_and_precedence(tmp_path: Path, monkeypatch):
+    from web.app import _write_dotenv_keys
+
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    for var in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"):
+        monkeypatch.delenv(var, raising=False)
+
+    root = _seed_workspace(tmp_path / "env_sync_ws")
+    (root / ".env").write_text(
+        "CUSTOM_FLAG=keep_me\n"
+        "GEMINI_API_KEY=AIzaSyLegacySingleKey0000\n"
+        "GEMINI_API_KEYS=AIzaSyListSlotOne1111;AIzaSyListSlotTwo2222\n"
+        "GEMINI_API_KEY_1=AIzaSyOldSlotOne0001\n",
+        encoding="utf-8",
+    )
+
+    # Direct writer must reject CR/LF/NUL injection
+    with pytest.raises(ValueError):
+        _write_dotenv_keys(root / ".env", {"GEMINI_API_KEY_1": "AIzaSyEvil\nINJECTED=1"})
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        # Pydantic validator must return 422 on CR/LF/NUL
+        for bad_val in ("AIza\nBAD=1", "AIza\rBAD=1", "AIza\x00BAD"):
+            r_bad = client.put("/api/subtrans/api-keys", json={"key_1": bad_val})
+            assert r_bad.status_code == 422
+
+        # Updating key_1 synchronizes legacy GEMINI_API_KEY and unwraps GEMINI_API_KEYS cleanly
+        r_upd = client.put("/api/subtrans/api-keys", json={"key_1": "AIzaSyFreshSlotOne9999"})
+        assert r_upd.status_code == 200
+        env_after_upd = (root / ".env").read_text(encoding="utf-8")
+        assert "AIzaSyLegacySingleKey0000" not in env_after_upd
+        assert "GEMINI_API_KEYS=" not in env_after_upd
+        assert "GEMINI_API_KEY=AIzaSyFreshSlotOne9999" in env_after_upd
+        assert "GEMINI_API_KEY_1=AIzaSyFreshSlotOne9999" in env_after_upd
+        assert "GEMINI_API_KEY_2=AIzaSyListSlotTwo2222" in env_after_upd
+        assert "CUSTOM_FLAG=keep_me" in env_after_upd
+
+        # Clearing key_1 deletes both GEMINI_API_KEY_1 and synced GEMINI_API_KEY without touching slot 2
+        r_clr = client.put("/api/subtrans/api-keys", json={"key_1": ""})
+        assert r_clr.status_code == 200
+        assert r_clr.json()["configured_count"] == 1
+        env_after_clr = (root / ".env").read_text(encoding="utf-8")
+        assert "GEMINI_API_KEY=" not in env_after_clr
+        assert "GEMINI_API_KEY_1=" not in env_after_clr
+        assert "GEMINI_API_KEY_2=AIzaSyListSlotTwo2222" in env_after_clr
+
+        # os.environ takes precedence over .env (load_dotenv override=False parity) + comma/semicolon list
+        monkeypatch.setenv("GEMINI_API_KEYS", "AIzaSyEnvCommaOne1111,AIzaSyEnvCommaTwo2222")
+        r_ov = client.get("/api/subtrans/overview")
+        assert r_ov.status_code == 200
+        ov = r_ov.json()
+        raw_dump = json.dumps(ov)
+        assert "AIzaSyEnvCommaOne1111" not in raw_dump
+        assert "AIzaSyEnvCommaTwo2222" not in raw_dump
+        assert "AIzaSyListSlotTwo2222" not in raw_dump
+        slots = {s["slot"]: s for s in ov["key_slots"]}
+        assert slots[1]["configured"] is True
+        assert slots[1]["source"] == "env"
+        assert slots[1]["masked"] == "AIzaSy...1111"
+        assert slots[2]["configured"] is True
+        assert slots[2]["source"] == "env"
+        assert slots[2]["masked"] == "AIzaSy...2222"
+        # Pool holds 2 keys from env GEMINI_API_KEYS + distinct slot-2 key still configured in .env/env
+        assert ov["configured_keys_count"] == 3
+
+        # Clearing slot 2 leaves strictly the 2 keys from os.environ GEMINI_API_KEYS
+        assert client.put("/api/subtrans/api-keys", json={"key_2": ""}).status_code == 200
+        assert client.get("/api/subtrans/overview").json()["configured_keys_count"] == 2
+
+
+def test_dns_rebinding_host_origin_csp_multidrive_nan_nul_and_corrupt_audit(tmp_path: Path):
+    import base64
+    import hashlib
+    import re
+
+    root = _seed_workspace(tmp_path / "sec_ws")
+
+    # Localhost-only mode (allow_lan=False)
+    app_local = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, allow_lan=False)
+    with TestClient(app_local) as client:
+        # Strict anti-DNS-rebinding Host/Origin checks
+        assert client.get("/api/status", headers={"Host": "evil.attacker.com:8765"}).status_code == 403
+        assert (
+            client.get(
+                "/api/status",
+                headers={"Host": "127.0.0.1:8765", "Origin": "https://evil.attacker.com"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/config/test-match",
+                json={"sample_path": "a.mkv"},
+                headers={"Host": "127.0.0.1:8765", "Origin": "null"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/config/test-match",
+                json={"sample_path": "a.mkv"},
+                headers={"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:9999"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                "/api/status",
+                headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"},
+            ).status_code
+            == 200
+        )
+
+        # Strict CSP + SHA-256 hash matches exact inline FOUC script and zero inline style= attrs
+        r_html = client.get("/")
+        assert r_html.status_code == 200
+        csp = r_html.headers.get("content-security-policy", "")
+        assert "default-src 'self'" in csp
+        assert "style-src 'self'" in csp
+        assert "'unsafe-inline'" not in csp
+        assert "img-src 'self' data:" in csp
+        script_match = re.search(r"<script>([\s\S]*?)</script>", r_html.text)
+        assert script_match is not None
+        digest = base64.b64encode(hashlib.sha256(script_match.group(1).encode("utf-8")).digest()).decode("ascii")
+        assert f"'sha256-{digest}'" in csp
+        assert re.search(r"\sstyle\s*=", r_html.text) is None
+
+        # Multi-drive unrestricted Windows browsing / open-media / compare-frames outside workspace_root
+        ext_dir = tmp_path / "external_drive_D" / "Anime"
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        ext_src = ext_dir / "External_Ep01.mkv"
+        ext_4k = ext_dir / "External_Ep01_4K.mkv"
+        ext_src.write_bytes(b"\x00" * 1024)
+        ext_4k.write_bytes(b"\x00" * 1024)
+        (ext_dir / ".env").write_text("SECRET=hidden\n", encoding="utf-8")
+
+        r_browse = client.get("/api/fs/browse", params={"path": str(ext_dir)})
+        assert r_browse.status_code == 200
+        names = [e["name"] for e in r_browse.json()["entries"]]
+        assert "External_Ep01.mkv" in names
+        assert ".env" not in names
+
+        # Null byte & NaN/Infinity guards -> 400/422 cleanly (never 500)
+        assert client.get("/api/fs/browse", params={"path": "C:/anime/\x00bad"}).status_code == 400
+        assert client.get("/api/audits/detail", params={"path": "out/x\x00.audit.json"}).status_code == 400
+        assert client.post("/api/config/test-match", json={"sample_path": "a\x00b.mkv"}).status_code == 422
+        r_nan = client.post(
+            "/api/preview/compare-frames",
+            content=json.dumps({"source_path": str(ext_src), "upscaled_path": str(ext_4k), "timestamp_sec": float("nan")}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert r_nan.status_code == 422
+        r_inf = client.post(
+            "/api/preview/compare-frames",
+            content=json.dumps({"source_path": str(ext_src), "upscaled_path": str(ext_4k), "source_offset_sec": float("inf")}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert r_inf.status_code == 422
+
+        # Corrupt / non-decodable MKV returns clean 422 diagnostic instead of HTTP 500
+        r_corrupt_vid = client.post(
+            "/api/preview/compare-frames",
+            json={"source_path": str(ext_src), "upscaled_path": str(ext_4k), "timestamp_sec": 0.0},
+        )
+        assert r_corrupt_vid.status_code == 422
+
+        # Corrupt .audit.json surfaced cleanly in list & 422 raw_preview in detail
+        bad_audit = root / "out" / "Broken_Ep09_4K.audit.json"
+        bad_audit.write_text("{corrupt_json_missing_quote: [1, 2", encoding="utf-8")
+        r_audits = client.get("/api/audits")
+        assert r_audits.status_code == 200
+        corrupt_items = [a for a in r_audits.json()["audits"] if a["episode"] == "Broken_Ep09"]
+        assert len(corrupt_items) == 1
+        assert corrupt_items[0]["status"] == "CORRUPT"
+        assert corrupt_items[0]["corrupt"] is True
+        assert corrupt_items[0]["error"]
+
+        r_det = client.get("/api/audits/detail", params={"path": str(bad_audit)})
+        assert r_det.status_code == 422
+        det_json = r_det.json()
+        assert det_json["corrupt"] is True
+        assert "{corrupt_json_missing_quote" in det_json["raw_preview"]
+
+    # Open-media and compare-frames outside workspace_root succeed with stubbed handlers
+    opened: List[Path] = []
+    app_ext = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        open_media_fn=lambda p, _m: opened.append(p) or "mpv",
+        frame_extract_fn=lambda _v, _t, out: out.parent.mkdir(parents=True, exist_ok=True) or out.write_bytes(PNG_1X1_BYTES),
+    )
+    with TestClient(app_ext) as client_ext:
+        assert client_ext.post("/api/open-media", json={"path": str(ext_src)}).status_code == 200
+        assert opened and opened[0] == ext_src.resolve()
+        assert (
+            client_ext.post(
+                "/api/preview/compare-frames",
+                json={"source_path": str(ext_src), "upscaled_path": str(ext_4k), "timestamp_sec": 0.0},
+            ).status_code
+            == 200
+        )
+
+    # LAN mode (--lan -> allow_lan=True): allows private LAN IP & .local but still blocks public attacker host
+    lan_args = web_gui.build_parser().parse_args(["--lan"])
+    assert lan_args.lan is True
+    app_lan = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, allow_lan=True)
+    with TestClient(app_lan) as client_lan:
+        assert (
+            client_lan.get(
+                "/api/status",
+                headers={"Host": "192.168.1.42:8765", "Origin": "http://192.168.1.42:8765"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client_lan.get(
+                "/api/status",
+                headers={"Host": "studio-box.local:8765", "Origin": "http://studio-box.local:8765"},
+            ).status_code
+            == 200
+        )
+        assert client_lan.get("/api/status", headers={"Host": "rebind.evil.org:8765"}).status_code == 403
+
+
+def test_job_manager_concurrency_drain_validation_cli_parity_and_abort(tmp_path: Path, monkeypatch):
+    import time
+    import upscale
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "jm_parity_ws")
+    ep1 = root / "anime_season" / "[SubsPlease] Frieren - 02 (1080p).mkv"
+    ep2 = root / "anime_season" / "[SubsPlease] Frieren - 10 (1080p).mkv"
+
+    # 1. TOCTOU concurrent launch lock: only 1 process spawns under concurrent start calls
+    spawn_calls: List[List[str]] = []
+    barrier = threading.Barrier(2)
+
+    def slow_popen(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        time.sleep(0.08)
+        proc = FakePopenProcess(cmd, pid=71000 + len(spawn_calls), running=True)
+        spawn_calls.append(cmd)
+        return proc
+
+    jm_race = JobManager(root, popen_factory=slow_popen)
+    results: List[str] = []
+
+    def worker() -> None:
+        barrier.wait(timeout=3.0)
+        try:
+            jm_race.start_upscale_job({"inputs": [str(ep1)], "dry_run": True})
+            results.append("ok")
+        except RuntimeError:
+            results.append("conflict")
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    assert sorted(results) == ["conflict", "ok"]
+    assert len(spawn_calls) == 1
+    jm_race.abort_job()
+
+    # 2. Failed popen_factory / None stdout pipe must never leave job stuck in 'running'
+    def failing_popen(_cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        raise OSError("simulated spawn error")
+
+    jm_fail = JobManager(root, popen_factory=failing_popen)
+    with pytest.raises(OSError):
+        jm_fail.start_upscale_job({"inputs": [str(ep1)]})
+    assert jm_fail.get_state()["status"] in {"idle", "failed", "error"}
+
+    class _NoStdoutProc(FakePopenProcess):
+        def __init__(self, cmd: List[str]) -> None:
+            super().__init__(cmd, pid=71999, running=False, return_code=2)
+            self.stdout = None  # type: ignore[assignment]
+
+    jm_nostdout = JobManager(root, popen_factory=lambda c, **_kw: _NoStdoutProc(c))
+    jm_nostdout.start_upscale_job({"inputs": [str(ep1)], "dry_run": True})
+    for _ in range(40):
+        if jm_nostdout.get_state()["status"] != "running":
+            break
+        time.sleep(0.025)
+    assert jm_nostdout.get_state()["status"] == "failed"
+
+    # 3. CLI parity in start_subtrans_job: --glossary on video container & multi-video directory queue
+    captured_cmds: List[List[str]] = []
+    jm_cli = JobManager(
+        root,
+        popen_factory=lambda cmd, **_kw: captured_cmds.append(cmd) or FakePopenProcess(cmd, pid=72000, running=False),
+    )
+    jm_cli.start_subtrans_job({"input_path": str(ep1), "glossary": "glossaries/frieren.yaml", "dry_run": True})
+    assert "--subs-only" in captured_cmds[-1]
+    assert "--glossary" in captured_cmds[-1]
+    time.sleep(0.05)
+
+    # Multi-video directory must include multiple mkvs via --queue (never silently truncated to items[0])
+    dir_only = root / "multi_vid_dir"
+    dir_only.mkdir()
+    (dir_only / "Ep01.mkv").write_bytes(b"\x00" * 512)
+    (dir_only / "Ep02.mkv").write_bytes(b"\x00" * 512)
+    jm_cli.start_subtrans_job({"input_path": str(dir_only), "dry_run": True})
+    cmd_dir = captured_cmds[-1]
+    assert "--subs-only" in cmd_dir and "--queue" in cmd_dir
+    assert str((dir_only / "Ep01.mkv").resolve()) in cmd_dir
+    assert str((dir_only / "Ep02.mkv").resolve()) in cmd_dir
+    time.sleep(0.05)
+
+    # upscale.py CLI parser accepts --glossary cleanly
+    parsed = upscale.build_arg_parser().parse_args(["--subs-only", "--glossary", "glossaries/frieren.yaml", str(ep1)])
+    assert parsed.subs_only == "__INPUT__"
+    assert parsed.glossary == "glossaries/frieren.yaml"
+
+    # 4. abort_job() external .gpu_active.lock status reporting (non-misleading ok=False)
+    assert jm_cli.abort_job()["status"] == "idle"
+    lock_file = root / ".gpu_active.lock"
+    lock_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    try:
+        ext_res = jm_cli.abort_job()
+        assert ext_res["ok"] is False
+        assert ext_res["status"] == "external_lock"
+        assert ext_res["aborted_pid"] is None
+        assert ext_res["external_lock_pid"] == os.getpid()
+    finally:
+        lock_file.unlink(missing_ok=True)
+
+    # 5. compute_schedule_preview: workspace_root relative output_dir, explicit .mkv target, zero_disk=False FPS penalty
+    alt_cwd = tmp_path / "elsewhere_cwd"
+    alt_cwd.mkdir()
+    monkeypatch.chdir(alt_cwd)
+
+    custom_out_dir = root / "custom_rel_out"
+    custom_out_dir.mkdir()
+    (custom_out_dir / f"{ep1.stem}_4K_animejanai.mkv").write_bytes(b"\x00" * (1024 * 1024 + 64))
+
+    sched_rel = jm_cli.compute_schedule_preview(
+        inputs=[str(ep1)],
+        output_dir="custom_rel_out",
+        zero_disk=True,
+        use_tensorrt=False,
+    )
+    assert sched_rel["episodes"][0]["already_done"] is True
+
+    explicit_out = root / "custom_rel_out" / "explicit_target_4K.mkv"
+    explicit_out.write_bytes(b"\x00" * (1024 * 1024 + 64))
+    sched_explicit = jm_cli.compute_schedule_preview(
+        inputs=[str(ep2)],
+        output_dir=str(explicit_out),
+        zero_disk=True,
+        use_tensorrt=False,
+    )
+    assert sched_explicit["episodes"][0]["already_done"] is True
+
+    sched_zd_on = jm_cli.compute_schedule_preview(inputs=[str(ep2)], zero_disk=True, use_tensorrt=False)
+    sched_zd_off = jm_cli.compute_schedule_preview(inputs=[str(ep2)], zero_disk=False, use_tensorrt=False)
+    assert sched_zd_off["episodes"][0]["ref_fps"] < sched_zd_on["episodes"][0]["ref_fps"]
+
+    # 6. Validation of subs_quality and deadline across job API endpoints
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=lambda c, **_kw: FakePopenProcess(c))
+    with TestClient(app) as client:
+        assert client.post("/api/jobs/start", json={"inputs": [str(ep1)], "subs_quality": "ultra"}).status_code == 400
+        assert client.post("/api/jobs/start", json={"inputs": [str(ep1)], "deadline": "29:99"}).status_code == 400
+        assert client.post("/api/jobs/subtrans", json={"input_path": str(ep1), "subs_quality": "invalid"}).status_code == 400
+        assert client.post("/api/jobs/subs-pending", json={"subs_quality": "bad"}).status_code == 400
+
+
+def test_telemetry_small_logs_multitab_sse_checkpoints_sqlite_uri_and_shows_parity(tmp_path: Path, monkeypatch):
+    import asyncio
+    import src.dedup as core_dedup_mod
+    import src.models_resolver as core_models_resolver
+    from web.sse_hub import TelemetryHub, scan_temp_checkpoints
+
+    # 1. Special characters '#' and '%' in SQLite DB path + Telemetry workspace
+    special_root = _seed_workspace(tmp_path / "Shows #1 100% Folder")
+    db_path = special_root / "subtrans" / ".cache" / "translations.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE translations (sig TEXT, pt_date TEXT)")
+        conn.execute("INSERT INTO translations VALUES ('k1', '2026-11-16')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 2. Custom -o directory checkpoint discovery
+    custom_out = special_root / "custom_exports"
+    custom_tp = custom_out / ".temp_Ep07"
+    custom_tp.mkdir(parents=True, exist_ok=True)
+    (custom_tp / "up_0000.mp4").write_bytes(b"\x00" * 512)
+    (special_root / "logs" / "live_status.json").write_text(
+        json.dumps(
+            {
+                "pid": 999999,
+                "stage": "completed",
+                "output_path": str(custom_out / "Ep07_4K.mkv"),
+                "stage_detail": "Hoàn tất",
+                "total_chunks": 10,
+                "completed_chunks": 10,
+            }
+        ),
+        encoding="utf-8",
+    )
+    found_tps = scan_temp_checkpoints(special_root)
+    assert any(cp["name"] == ".temp_Ep07" for cp in found_tps)
+
+    # 3. <96B log growth never re-emits earlier lines
+    latest_log = special_root / "logs" / "latest.log"
+    latest_log.write_text("[01:00:01] Short line 1\n", encoding="utf-8")
+    state_box: Dict[str, Any] = {"status": "idle", "active_job": None, "last_finished_job": None, "history": []}
+    hub = TelemetryHub(special_root, gpu_query_fn=_idle_gpu_metrics, job_state_provider=lambda: state_box)
+    snap = hub.build_snapshot()
+    assert snap["logs"] == ["[01:00:01] Short line 1"]
+    cursor = snap["log_cursor"]
+    with latest_log.open("a", encoding="utf-8") as f:
+        f.write("[01:00:02] Short line 2\n")
+    inc1, cursor = hub._read_incremental_logs_from_cursor(cursor)
+    assert inc1 == ["[01:00:02] Short line 2"]
+    with latest_log.open("a", encoding="utf-8") as f:
+        f.write("[01:00:03] Longer third line crossing the ninety six byte boundary cleanly for verification\n")
+    inc2, cursor = hub._read_incremental_logs_from_cursor(cursor)
+    assert inc2 == ["[01:00:03] Longer third line crossing the ninety six byte boundary cleanly for verification"]
+
+    # 4. No false 'subtrans' when live_status.json is completed without Stage B active;
+    #    finished subtrans Web Job emits 'completed'
+    pipe_done = hub.read_pipeline_state()
+    assert pipe_done["effective_stage"] == "completed"
+    state_box["last_finished_job"] = {
+        "job_id": "sub_done_1",
+        "job_type": "subtrans",
+        "status": "completed",
+        "pid": 80001,
+        "exit_code": 0,
+        "finished_at": "2026-11-16T01:05:00",
+        "queue_items": [str(special_root / "anime_season" / "Frieren_02.ja.srt")],
+        "options": {"subs_quality": "high"},
+    }
+    pipe_sub_done = hub.read_pipeline_state()
+    assert pipe_sub_done["effective_stage"] == "completed"
+
+    # 5. Multi-subscriber SSE log cursor isolation & non-mutating /api/status while broadcast loop runs
+    def _parse_sse_json(raw_chunk: str) -> Dict[str, Any]:
+        for ln in raw_chunk.splitlines():
+            if ln.startswith("data: "):
+                return json.loads(ln[len("data: "):])
+        raise AssertionError(f"Missing SSE data line in {raw_chunk!r}")
+
+    async def _verify_multi_tab_sse() -> None:
+        gen1 = hub.stream_events()
+        gen2 = hub.stream_events()
+        try:
+            ev1_init = _parse_sse_json(await anext(gen1))
+            ev2_init = _parse_sse_json(await anext(gen2))
+            assert ev1_init["logs"][-1].startswith("[01:00:03]")
+            assert ev2_init["logs"][-1].startswith("[01:00:03]")
+
+            with latest_log.open("a", encoding="utf-8") as f:
+                f.write("[01:00:04] Multi-tab isolated log event\n")
+
+            ev1_tick = _parse_sse_json(await anext(gen1))
+            ev2_tick = _parse_sse_json(await anext(gen2))
+            assert "[01:00:04] Multi-tab isolated log event" in ev1_tick["logs"]
+            assert "[01:00:04] Multi-tab isolated log event" in ev2_tick["logs"]
+
+            # Once _broadcast_loop is active, GET /api/status must not mutate shared hub.history
+            assert hub._poll_task is not None and not hub._poll_task.done()
+            hist_len_before = len(hub.history)
+            hub.build_snapshot()
+            assert len(hub.history) == hist_len_before
+        finally:
+            await gen1.aclose()
+            await gen2.aclose()
+            if hub._poll_task is not None and not hub._poll_task.done():
+                hub._poll_task.cancel()
+                try:
+                    await hub._poll_task
+                except asyncio.CancelledError:
+                    pass
+
+    asyncio.run(_verify_multi_tab_sse())
+
+    # 6. SQLite #/% URI endpoint & 2-pass shows.yaml parity with mixed-case dedup_policy & override_dedup
+    split_shows = (
+        "shows:\n"
+        "  - pattern: '*[SubDir]*'\n"
+        "    model: animejanai-hd-v3-ultracompact\n"
+        "  - pattern: '*Special*'\n"
+        "    dedup_policy: 'DIS'\n"
+    )
+    (special_root / "shows.yaml").write_text(split_shows, encoding="utf-8")
+    sample_vid = r"D:\[SubDir]\Ep01_Special.mkv"
+    monkeypatch.chdir(special_root)
+    monkeypatch.setattr(core_dedup_mod, "ROOT_DIR", str(special_root))
+    core_model = core_models_resolver.resolve_model_for_video(sample_vid)
+    core_dedup = core_dedup_mod.resolve_dedup_policy(sample_vid)
+    fs_special = SafeLocalFSBrowser(special_root)
+    web_routing = fs_special.resolve_routing_for_path(sample_vid)
+    assert web_routing["model_id"] == "animejanai-hd-v3-ultracompact"
+    assert core_model["name"] == "AnimeJaNai V3 HD UltraCompact"
+    assert web_routing["dedup_policy"] == core_dedup == "dis"
+    assert fs_special.resolve_routing_for_path(sample_vid, override_dedup="SAKUGA")["dedup_policy"] == "sakuga"
+
+    app = create_app(workspace_root=special_root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r_ov = client.get("/api/subtrans/overview")
+        assert r_ov.status_code == 200
+        assert r_ov.json()["cache"]["total_cached_cues"] == 1
+
+
+def test_real_1080p_4k_ffmpeg_compare_and_frontend_regression_guards(studio_env, tmp_path: Path):
+    import shutil
+
+    client: TestClient = studio_env["client"]
+    panels_js = client.get("/static/js/panels.js").text
+    charts_js = client.get("/static/js/charts.js").text
+    compare_js = client.get("/static/js/compare_stage.js").text
+    app_js = client.get("/static/js/app.js").text
+    css = client.get("/static/styles.css").text
+
+    assert "setSelectValueSafely" in panels_js
+    assert "clearKeySlot" in panels_js
+    assert "clear-api-key-1" in panels_js
+    assert "raw_preview" in panels_js
+    assert "CORRUPT" in panels_js
+    assert "prevFps.length > 0" in charts_js
+    assert 'srcInput.value = item.source_path || ""' in compare_js
+    assert "lastActivePipelineStep" in app_js
+    assert "cur.reset" in app_js
+    assert "td:not([colspan])" in css
+    assert '[data-tone="warn"]' in css
+
+    if shutil.which("ffmpeg"):
+        vid_dir = tmp_path / "fhd_4k_pair"
+        vid_dir.mkdir(parents=True, exist_ok=True)
+        src_1080 = vid_dir / "pair_1080p.mkv"
+        up_4k = vid_dir / "pair_4K.mkv"
+        for target, dims in ((src_1080, "1920x1080"), (up_4k, "3840x2160")):
+            res = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"testsrc=size={dims}:rate=24:duration=0.2",
+                    "-frames:v",
+                    "1",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:v",
+                    "libx265",
+                    "-preset",
+                    "ultrafast",
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-color_range",
+                    "tv",
+                    str(target),
+                ],
+                capture_output=True,
+                timeout=30.0,
+                check=False,
+            )
+            if res.returncode != 0:
+                pytest.skip("ffmpeg ultrafast 4K encode unavailable")
+        app = create_app(workspace_root=studio_env["root"], gpu_query_fn=_idle_gpu_metrics)
+        with TestClient(app) as real_client:
+            r = real_client.post(
+                "/api/preview/compare-frames",
+                json={"source_path": str(src_1080), "upscaled_path": str(up_4k), "timestamp_sec": 0.0},
+            )
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["source_meta"]["width"] == 1920
+            assert data["source_meta"]["height"] == 1080
+            assert data["upscaled_meta"]["width"] == 3840
+            assert data["upscaled_meta"]["height"] == 2160
+            assert real_client.get(data["source_frame_url"]).content.startswith(b"\x89PNG\r\n\x1a\n")
+            assert real_client.get(data["upscaled_frame_url"]).content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_review_regression_fixes_and_edge_cases(tmp_path: Path, monkeypatch):
+    """Kiểm tra hồi quy các lỗi thực nghiệm: failed jobs, logger step recovery, dotenv env/list/4th-key, deadline 7:xx, audit non-dict & FE guards."""
+    import src.logger as logger_mod
+    from web.app import _resolve_subtrans_key_slots, create_app
+    from web.sse_hub import TelemetryHub
+
+    root = tmp_path / "studio_review"
+    for d in ("logs", "out", "models", "subtrans"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / "models" / "models.yaml").write_text(
+        "models:\n  animevideov3:\n    id: animevideov3\n    name: AnimeVideoV3\n    default: true\n",
+        encoding="utf-8",
+    )
+    (root / "shows.yaml").write_text("shows: []\n", encoding="utf-8")
+
+    # 1. Failed subtrans/upscale Web Jobs (status='failed', NOT 'error') & stale completed live_status.json
+    (root / "logs" / "live_status.json").write_text(
+        json.dumps({"pid": 999999, "stage": "completed", "stage_detail": "Tập trước đã xong"}),
+        encoding="utf-8",
+    )
+    failed_sub = {
+        "job_id": "sub_fail_1",
+        "job_type": "subtrans",
+        "status": "failed",
+        "pid": 12345,
+        "return_code": 2,
+        "finished_at": "2099-01-01T00:00:00",
+        "queue_items": [str(root / "ep01.ja.srt")],
+    }
+    state_box: Dict[str, Any] = {"status": "idle", "active_job": None, "history": [failed_sub]}
+    hub = TelemetryHub(root, gpu_query_fn=_idle_gpu_metrics, job_state_provider=lambda: state_box)
+
+    ps_sub = hub.read_pipeline_state()
+    assert ps_sub["effective_stage"] == "error"
+    assert ps_sub["live"]["failed_stage"] == "subtrans"
+
+    state_box["history"] = [{**failed_sub, "job_type": "upscale", "queue_items": [str(root / "ep01.mkv")]}]
+    ps_up = hub.read_pipeline_state()
+    assert ps_up["effective_stage"] == "error"
+    assert ps_up["live"]["failed_stage"] == "probing"
+
+    # 2. RunLogger.set_stage preserves failed_stage / last_stage across crash & pause reloads
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", str(root / "logs"))
+    lg = logger_mod.RunLogger("Ep01")
+    lg.set_stage("muxing", "Đang mux...")
+    lg.set_stage("error", "Mux lỗi")
+    st_err = json.loads((root / "logs" / "live_status.json").read_text(encoding="utf-8"))
+    assert st_err["stage"] == "error"
+    assert st_err["failed_stage"] == "muxing"
+    assert st_err["last_stage"] == "muxing"
+
+    lg.set_stage("upscaling", "Chunk 2/5")
+    lg.set_stage("paused", "Tạm dừng")
+    st_pause = json.loads((root / "logs" / "live_status.json").read_text(encoding="utf-8"))
+    assert st_pause["stage"] == "paused"
+    assert st_pause["last_stage"] == "upscaling"
+    assert "failed_stage" not in st_pause
+
+    # 3. .env vs process os.environ precedence under SUBTRANS_DISABLE_DOTENV=1, [LIST] badge, 4th+ key preservation & deduplication
+    dotenv_file = root / ".env"
+    dotenv_file.write_text("GEMINI_API_KEY_1=dotenv_k1_secret\n", encoding="utf-8")
+    monkeypatch.setenv("SUBTRANS_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("GEMINI_API_KEY_1", "proc_env_k1_secret")
+    slots_env, cnt_env = _resolve_subtrans_key_slots(dotenv_file)
+    assert cnt_env == 1
+    assert slots_env[0]["source"] == "env"
+    assert "proc_e" in slots_env[0]["masked"]
+
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_3", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+
+    dotenv_file.write_text("GEMINI_API_KEYS=key_one_111,key_two_222,key_three_333,key_four_444\n", encoding="utf-8")
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        ov = client.get("/api/subtrans/overview").json()
+        assert ov["configured_keys_count"] == 4
+        assert ov["key_slots"][0]["env_name"] == "GEMINI_API_KEYS"
+        r_upd = client.put("/api/subtrans/api-keys", json={"key_1": "new_k1_secret"})
+        assert r_upd.status_code == 200
+        assert r_upd.json()["key_slots"][0]["source"] == "dotenv"
+        assert r_upd.json()["key_slots"][1]["source"] == "dotenv"
+        assert r_upd.json()["key_slots"][2]["source"] == "dotenv"
+        env_txt = dotenv_file.read_text(encoding="utf-8")
+        assert "GEMINI_API_KEY_4=key_four_444" in env_txt
+        assert "GEMINI_API_KEY_1=new_k1_secret" in env_txt
+        assert "GEMINI_API_KEY=new_k1_secret" in env_txt
+
+        # Clearing key_1 from GEMINI_API_KEYS with SUBTRANS_DISABLE_DOTENV unset keeps slots 2 & 3 as source='dotenv'
+        dotenv_file.write_text("GEMINI_API_KEYS=key_one_111,key_two_222,key_three_333,key_four_444\n", encoding="utf-8")
+        r_clr = client.put("/api/subtrans/api-keys", json={"key_1": ""})
+        assert r_clr.status_code == 200
+        clr_slots = r_clr.json()["key_slots"]
+        assert clr_slots[0]["configured"] is False
+        assert clr_slots[1]["configured"] is True and clr_slots[1]["source"] == "dotenv"
+        assert clr_slots[2]["configured"] is True and clr_slots[2]["source"] == "dotenv"
+        assert "GEMINI_API_KEY_4=key_four_444" in dotenv_file.read_text(encoding="utf-8")
+        assert not any(
+            k in os.environ
+            for k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4")
+        )
+
+        # Duplicate key lines deduplicated on write
+        dotenv_file.write_text("GEMINI_API_KEY_1=dup1\nOTHER_VAR=keep\nGEMINI_API_KEY_1=dup2\n", encoding="utf-8")
+        client.put("/api/subtrans/api-keys", json={"key_1": "dedup_k1_secret"})
+        dup_lines = [ln for ln in dotenv_file.read_text(encoding="utf-8").splitlines() if ln.startswith("GEMINI_API_KEY_1=")]
+        assert len(dup_lines) == 1
+        assert "OTHER_VAR=keep" in dotenv_file.read_text(encoding="utf-8")
+
+        # 4. Schedule deadline '7:xx' -> clean HH:MM message; non-dict audit '[1,2,3]' -> 422 corrupt
+        dummy_vid = root / "out" / "ep01.mkv"
+        dummy_vid.write_bytes(b"\x00" * 100)
+        r_dl = client.post("/api/queue/preview-schedule", json={"inputs": [str(dummy_vid)], "deadline": "7:xx"})
+        assert r_dl.status_code == 400
+        assert "HH:MM" in r_dl.json()["detail"]
+
+        bad_list_audit = root / "out" / "badlist_4K.audit.json"
+        bad_list_audit.write_text("[1, 2, 3]", encoding="utf-8")
+        r_aud = client.get("/api/audits").json()
+        assert any(a["corrupt"] and a["status"] == "CORRUPT" for a in r_aud["audits"])
+        r_det = client.get("/api/audits/detail", params={"path": str(bad_list_audit)})
+        assert r_det.status_code == 422
+        assert r_det.json()["corrupt"] is True
+
+        # 5. Frontend regression guards present in served static files
+        assert "priorSlots > 0 ? prevFps.slice(-priorSlots) : []" in client.get("/static/js/charts.js").text
+        panels_txt = client.get("/static/js/panels.js").text
+        assert "Number.isFinite(batchVal)" in panels_txt
+        assert "Number.isFinite(offsetMs)" in panels_txt
+        assert "a.corrupt && a.error" in panels_txt
+        compare_txt = client.get("/static/js/compare_stage.js").text
+        assert "Number.isFinite(tsSec)" in compare_txt
+        assert ".text-error" in client.get("/static/styles.css").text
 
 
 

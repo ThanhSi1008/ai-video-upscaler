@@ -238,6 +238,17 @@ class RunLogger:
         active_chunk: Optional[int] = None,
     ) -> None:
         """Cập nhật chặng pipeline hiện tại (probing | preflight_dedup | upscaling | muxing | auditing | subtrans | completed | paused | error)."""
+        prev_stage = str(self._live_state.get("stage") or "")
+        non_step_stages = {"", "idle", "starting", "initializing", "completed", "paused", "error"}
+        if stage in {"error", "paused"}:
+            if prev_stage not in non_step_stages:
+                self._live_state["last_stage"] = prev_stage
+                if stage == "error":
+                    self._live_state["failed_stage"] = prev_stage
+        else:
+            self._live_state.pop("failed_stage", None)
+            if stage not in non_step_stages:
+                self._live_state["last_stage"] = stage
         self._live_state["stage"] = stage
         if detail:
             self._live_state["stage_detail"] = detail

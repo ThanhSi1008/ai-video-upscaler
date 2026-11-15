@@ -378,6 +378,12 @@ def build_arg_parser():
         help="Chất lượng dịch phụ đề: 'normal'/'fast' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"
     )
     parser.add_argument(
+        "--glossary", "-g",
+        type=str,
+        default=None,
+        help="Đường dẫn file Glossary YAML tùy chọn dành cho bước dịch phụ đề (Subtrans)"
+    )
+    parser.add_argument(
         "--subs-pending",
         action="store_true",
         help="Chạy lại quy trình dịch phụ đề cho các tập ghi nhận trong pending_subs.json"
@@ -540,6 +546,8 @@ def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) 
         sub_cmd.append("--no-auto-align-en")
     if getattr(args, "prefer_whisper", False):
         sub_cmd.append("--prefer-whisper")
+    if getattr(args, "glossary", None):
+        sub_cmd.extend(["--glossary", str(args.glossary)])
 
     queue_auto_offset = not getattr(args, "no_auto_offset", False)
     manual_offset_applied = False
@@ -688,109 +696,135 @@ def main():
                     embed_subtitle_track(target_4k, str(srt_p), original_source_path=vid_p)
         sys.exit(0)
 
-    # Xử lý cờ --subs-only (Chạy riêng phụ đề trong tiến trình con độc lập)
+    # Xử lý cờ --subs-only (Chạy riêng phụ đề trong tiến trình con độc lập, hỗ trợ 1 hoặc nhiều tập / thư mục)
     if args.subs_only:
-        target_subs_vid = args.subs_only
-        if target_subs_vid == "__INPUT__":
-            target_subs_vid = args.input[0] if (isinstance(args.input, list) and len(args.input) > 0) else args.input
-        if not target_subs_vid:
+        subs_raw_targets: List[str] = []
+        if args.subs_only != "__INPUT__":
+            subs_raw_targets.append(args.subs_only)
+        if args.queue:
+            subs_raw_targets.extend(args.queue)
+        if isinstance(args.input, list):
+            subs_raw_targets.extend(args.input)
+        elif args.input:
+            subs_raw_targets.append(args.input)
+
+        try:
+            subs_targets = expand_video_inputs(subs_raw_targets) if subs_raw_targets else []
+        except ValueError as exp_err:
+            print(f"❌ Lỗi đầu vào --subs-only: {exp_err}")
+            sys.exit(1)
+
+        if not subs_targets:
             print("❌ Lỗi: Cần cung cấp đường dẫn video khi dùng cờ --subs-only (ví dụ: ./upscale.py --subs-only <tập.mkv>)")
             sys.exit(1)
 
-        print(f"\n{'='*75}")
-        print(f"📝 [SUBS-ONLY] BẮT ĐẦU DỊCH PHỤ ĐỀ ĐỘC LẬP CHO: {os.path.basename(target_subs_vid)}")
-        print(f"{'='*75}")
-        ja_sub, en_sub = find_or_extract_subtitles(
-            target_subs_vid,
-            prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
-        )
-        if not ja_sub:
-            print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
-            sys.exit(1)
-
-        if ja_sub == en_sub:
-            print(f"   • Nguồn phụ đề: Dùng track tiếng Anh phòng thu làm gốc ({os.path.basename(ja_sub)}) để đảm bảo mốc thời gian frame-perfect 0ms sai lệch.")
-            en_sub = None
-        else:
-            print(f"   • File gốc JA: {ja_sub}")
-            if en_sub:
-                print(f"   • File tham chiếu EN: {en_sub}")
-
+        glossary_arg = getattr(args, "glossary", None)
+        glossary_path_obj = Path(os.path.expanduser(str(glossary_arg).strip())) if glossary_arg else None
         from subtrans.pipeline import TranslationPipeline
-        vid_dir = os.path.dirname(os.path.abspath(target_subs_vid))
-        base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
-        sub_out_dir, target_4k = _resolve_sub_output_dir_and_target_4k(
-            args.output,
-            vid_dir,
-            base_vid_name,
-            getattr(args, "target_4k", None),
-        )
-        if not getattr(args, "dry_run", False):
-            os.makedirs(sub_out_dir, exist_ok=True)
-        sub_pipeline = TranslationPipeline(
-            local_only=False,
-            output_dir=sub_out_dir,
-            output_format="srt",
-            dry_run=getattr(args, "dry_run", False),
-            require_approved_cast=False,
-            allow_latest_alias=False,
-            subs_quality=getattr(args, "subs_quality", "normal"),
-            auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
-        )
+
         use_auto_offset = (
             False
             if getattr(args, "no_auto_offset", False)
-            else (bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else False)
+            else (bool(args.auto_offset) if getattr(args, "auto_offset", None) is not None else len(subs_targets) > 1)
         )
-        out_base = os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else base_vid_name
-        res = sub_pipeline.run(
-            ja_path=Path(ja_sub),
-            en_path=Path(en_sub) if en_sub else None,
-            output_basename=out_base,
-            subs_upgrade=args.subs_upgrade,
-            sub_offset_ms=args.sub_offset_ms,
-            auto_offset=use_auto_offset,
-            sound_cues=args.sound_cues,
-            video_path=Path(target_subs_vid),
-        )
-        srt_path = res.get('subtitle_path') or res.get('output_path')
-        print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
+        multi_mode = len(subs_targets) > 1
+        sub_failures = 0
 
-        if getattr(args, "dry_run", False):
-            cleanup_subtitle_extracts(vid_dir, base_vid_name)
-            print("🔍 [DRY RUN] Bỏ qua bước nhúng MKV và ghi đè phụ đề cạnh video gốc.")
-            sys.exit(0)
+        for idx_sub, target_subs_vid in enumerate(subs_targets, start=1):
+            print(f"\n{'='*75}")
+            prefix_label = f"[{idx_sub}/{len(subs_targets)}] " if multi_mode else ""
+            print(f"📝 [SUBS-ONLY] {prefix_label}BẮT ĐẦU DỊCH PHỤ ĐỀ ĐỘC LẬP CHO: {os.path.basename(target_subs_vid)}")
+            print(f"{'='*75}")
+            ja_sub, en_sub = find_or_extract_subtitles(
+                target_subs_vid,
+                prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
+            )
+            if not ja_sub:
+                print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
+                sub_failures += 1
+                if not multi_mode:
+                    sys.exit(1)
+                continue
 
-        # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
-        if srt_path and os.path.exists(srt_path):
-            is_partial_sub = str(srt_path).endswith(".partial.srt")
-            if is_partial_sub:
-                print(f"⚠️ [CHƯA ĐỦ ĐIỀU KIỆN NHÚNG] File phụ đề là bản một phần ({os.path.basename(str(srt_path))}). Không nhúng vào MKV.")
+            if ja_sub == en_sub:
+                print(f"   • Nguồn phụ đề: Dùng track tiếng Anh phòng thu làm gốc ({os.path.basename(ja_sub)}) để đảm bảo mốc thời gian frame-perfect 0ms sai lệch.")
+                en_sub = None
             else:
-                from src.ffmpeg_ops import embed_subtitle_track
-                target_mkv = target_4k if os.path.exists(target_4k) else (target_subs_vid if target_subs_vid.lower().endswith(".mkv") else None)
-                if target_mkv and os.path.exists(target_mkv):
-                    if not getattr(args, "no_embed", False):
-                        print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_mkv)}...")
-                        ok = embed_subtitle_track(target_mkv, str(srt_path), original_source_path=target_subs_vid)
-                        if ok:
-                            print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container MKV!")
+                print(f"   • File gốc JA: {ja_sub}")
+                if en_sub:
+                    print(f"   • File tham chiếu EN: {en_sub}")
+
+            vid_dir = os.path.dirname(os.path.abspath(target_subs_vid))
+            base_vid_name = os.path.splitext(os.path.basename(target_subs_vid))[0]
+            explicit_t4k = getattr(args, "target_4k", None) if not multi_mode else None
+            sub_out_dir, target_4k = _resolve_sub_output_dir_and_target_4k(
+                args.output,
+                vid_dir,
+                base_vid_name,
+                explicit_t4k,
+            )
+            if not getattr(args, "dry_run", False):
+                os.makedirs(sub_out_dir, exist_ok=True)
+            sub_pipeline = TranslationPipeline(
+                local_only=False,
+                output_dir=sub_out_dir,
+                output_format="srt",
+                dry_run=getattr(args, "dry_run", False),
+                require_approved_cast=False,
+                allow_latest_alias=False,
+                subs_quality=getattr(args, "subs_quality", "normal"),
+                auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
+            )
+            out_base = os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else base_vid_name
+            res = sub_pipeline.run(
+                ja_path=Path(ja_sub),
+                en_path=Path(en_sub) if en_sub else None,
+                output_basename=out_base,
+                glossary_path=glossary_path_obj,
+                subs_upgrade=args.subs_upgrade,
+                sub_offset_ms=args.sub_offset_ms,
+                auto_offset=use_auto_offset,
+                sound_cues=args.sound_cues,
+                video_path=Path(target_subs_vid),
+            )
+            srt_path = res.get('subtitle_path') or res.get('output_path')
+            print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
+
+            if getattr(args, "dry_run", False):
+                cleanup_subtitle_extracts(vid_dir, base_vid_name)
+                print("🔍 [DRY RUN] Bỏ qua bước nhúng MKV và ghi đè phụ đề cạnh video gốc.")
+                continue
+
+            # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
+            if srt_path and os.path.exists(srt_path):
+                is_partial_sub = str(srt_path).endswith(".partial.srt")
+                if is_partial_sub:
+                    print(f"⚠️ [CHƯA ĐỦ ĐIỀU KIỆN NHÚNG] File phụ đề là bản một phần ({os.path.basename(str(srt_path))}). Không nhúng vào MKV.")
+                else:
+                    from src.ffmpeg_ops import embed_subtitle_track
+                    target_mkv = target_4k if os.path.exists(target_4k) else (target_subs_vid if target_subs_vid.lower().endswith(".mkv") else None)
+                    if target_mkv and os.path.exists(target_mkv):
+                        if not getattr(args, "no_embed", False):
+                            print(f"🎬 Đang nhúng track phụ đề tiếng Việt vào container MKV: {os.path.basename(target_mkv)}...")
+                            ok = embed_subtitle_track(target_mkv, str(srt_path), original_source_path=target_subs_vid)
+                            if ok:
+                                print("✅ Đã nhúng phụ đề tiếng Việt (mặc định) trực tiếp vào container MKV!")
+                            else:
+                                print("⚠️ Không thể nhúng phụ đề vào container (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
                         else:
-                            print("⚠️ Không thể nhúng phụ đề vào container (audit không đạt hoặc lỗi), file phụ đề ngoài vẫn sẵn sàng.")
-                    else:
-                        print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container MKV, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
+                            print(f"ℹ️ Cờ --no-embed được bật: Giữ nguyên container MKV, chỉ dùng file phụ đề ngoài '{os.path.basename(str(srt_path))}'.")
 
-                # Chỉ đồng bộ file .vi.srt cạnh video gốc khi bản dịch đạt chuẩn (KHÔNG copy đè .partial.srt)
-                raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
-                if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
-                    import shutil
-                    shutil.copy2(str(srt_path), raw_side_srt)
-                    print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
-        cleanup_subtitle_extracts(vid_dir, base_vid_name)
-        if not getattr(args, "no_organize_audit", False):
-            organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
+                    # Chỉ đồng bộ file .vi.srt cạnh video gốc khi bản dịch đạt chuẩn (KHÔNG copy đè .partial.srt)
+                    raw_side_srt = os.path.join(vid_dir, f"{base_vid_name}.vi.srt")
+                    if srt_path and os.path.exists(srt_path) and os.path.abspath(srt_path) != os.path.abspath(raw_side_srt):
+                        import shutil
+                        shutil.copy2(str(srt_path), raw_side_srt)
+                        print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
+            cleanup_subtitle_extracts(vid_dir, base_vid_name)
+            if not getattr(args, "no_organize_audit", False):
+                organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
 
-        sys.exit(0)
+        sys.exit(1 if sub_failures else 0)
 
     # Kiểm tra cờ liệt kê mô hình (--list-models)
     if args.list_models:
@@ -1095,6 +1129,25 @@ def main():
         print(f"\n{'='*75}")
         print("📝 [STAGE B] HOÀN TẤT & ĐỒNG BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ ĐỘC LẬP")
         print(f"{'='*75}")
+        _stage_b_live_path = os.path.join("logs", "live_status.json")
+        def _set_stage_b_live_status(stage_val: str, detail_val: str) -> None:
+            if not os.path.isfile(_stage_b_live_path):
+                return
+            try:
+                import json as _json
+                with open(_stage_b_live_path, "r", encoding="utf-8") as _rf:
+                    _cur = _json.load(_rf)
+                if isinstance(_cur, dict):
+                    _cur["stage"] = stage_val
+                    _cur["stage_detail"] = detail_val
+                    _tmp = f"{_stage_b_live_path}.{os.getpid()}.tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _wf:
+                        _json.dump(_cur, _wf, ensure_ascii=False, indent=2)
+                    os.replace(_tmp, _stage_b_live_path)
+            except Exception:
+                pass
+
+        _set_stage_b_live_status("subtrans", "Đang hoàn tất dịch & nhúng phụ đề (Stage B)...")
 
         sub_timeout = 1560  # Watchdog 25 phút + 60s buffer
         launched_async_srcs = set()
@@ -1129,6 +1182,8 @@ def main():
                 print(f"⏱️ Tiến trình con phụ đề vượt quá thời gian tối đa ({sub_timeout}s) và đã bị ngắt an toàn. Video 4K không bị ảnh hưởng!")
             except Exception as se:
                 print(f"⚠️ Lỗi khởi chạy tiến trình con phụ đề: {se}")
+
+        _set_stage_b_live_status("completed", "Hoàn tất dịch & nhúng phụ đề Stage B")
 
     # -------------------------------------------------------------------------
     # DỌN DẸP PHỤ ĐỀ TẠM & GOM GỌN CÁC FILE KỸ THUẬT (AUDIT/CAST) SAU KHI HOÀN TẤT

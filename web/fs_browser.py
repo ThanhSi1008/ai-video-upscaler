@@ -130,6 +130,8 @@ class SafeLocalFSBrowser:
         lower_to_key = {str(k).lower(): str(k) for k in registry.keys()}
 
         vid_str = str(video_path)
+        if "\x00" in vid_str:
+            raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
         vid_name = os.path.basename(vid_str.rstrip("\\/"))
         parent_dir = os.path.basename(os.path.dirname(os.path.abspath(vid_str)))
 
@@ -150,26 +152,50 @@ class SafeLocalFSBrowser:
         else:
             source_desc = "Mặc định hệ thống (models.yaml)"
 
+        matched_model_pattern = ""
+        matched_dedup_pattern = ""
+        dedup_source = "Mặc định hệ thống (default)"
+
+        # Tách 2 vòng khớp độc lập để đồng bộ với src/models_resolver.py và src/dedup.py
+        # (một bộ anime có thể khai báo model và dedup_policy ở 2 rule riêng biệt trong shows.yaml).
         for rule in shows_rules:
+            if not isinstance(rule, dict):
+                continue
             pat = str(rule.get("pattern", "")).strip()
             if not pat:
                 continue
             if match_show_pattern(vid_name, pat) or match_show_pattern(parent_dir, pat):
-                matched_rule_pattern = pat
                 m_target = str(rule.get("model", "")).strip().lower()
-                if not chosen_model and m_target in lower_to_key:
-                    chosen_model = lower_to_key[m_target]
-                    source_desc = f"shows.yaml ('{pat}')"
+                if m_target and m_target in lower_to_key:
+                    if not chosen_model:
+                        chosen_model = lower_to_key[m_target]
+                        source_desc = f"shows.yaml ('{pat}')"
+                    matched_model_pattern = pat
+                    break
+
+        for rule in shows_rules:
+            if not isinstance(rule, dict):
+                continue
+            pat = str(rule.get("pattern", "")).strip()
+            if not pat:
+                continue
+            if match_show_pattern(vid_name, pat) or match_show_pattern(parent_dir, pat):
                 pol_target = str(rule.get("dedup_policy", "")).strip().lower()
-                if pol_target in DEDUP_POLICY_PARAMS:
+                if pol_target and pol_target in DEDUP_POLICY_PARAMS:
                     rule_dedup = pol_target
-                break
+                    dedup_source = f"shows.yaml ('{pat}')"
+                    matched_dedup_pattern = pat
+                    break
+
+        matched_rule_pattern = matched_model_pattern or matched_dedup_pattern
 
         if not chosen_model:
             chosen_model = default_id
 
-        if override_dedup and override_dedup.strip() in DEDUP_POLICY_PARAMS:
-            chosen_dedup = override_dedup.strip()
+        norm_override_dedup = override_dedup.strip().lower() if override_dedup else ""
+        if norm_override_dedup and norm_override_dedup in DEDUP_POLICY_PARAMS:
+            chosen_dedup = norm_override_dedup
+            dedup_source = f"Chỉ định thủ công ({norm_override_dedup})"
         elif rule_dedup:
             chosen_dedup = rule_dedup
         else:
@@ -180,7 +206,10 @@ class SafeLocalFSBrowser:
             "model_id": chosen_model,
             "model_name": str(model_meta.get("name") or chosen_model),
             "dedup_policy": chosen_dedup,
+            "dedup_source": dedup_source,
             "matched_pattern": matched_rule_pattern or "",
+            "matched_model_pattern": matched_model_pattern or "",
+            "matched_dedup_pattern": matched_dedup_pattern or "",
             "resolution_source": source_desc,
         }
 
@@ -234,6 +263,8 @@ class SafeLocalFSBrowser:
             }
 
         cleaned = raw_path.strip()
+        if "\x00" in cleaned:
+            raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
         if "\x00" in cleaned:
             raise ValueError("Đường dẫn không hợp lệ.")
 

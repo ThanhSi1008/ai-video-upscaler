@@ -13,20 +13,25 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Optional
+import urllib.parse
 import yaml
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from subtrans.cache import compute_key_id, get_next_pt_reset, get_now_pt
 from web.fs_browser import (
@@ -48,6 +53,30 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # PYDANTIC PAYLOAD SCHEMAS
 # =====================================================================
 
+_DEADLINE_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _validate_no_nul_str(val: Optional[str], field_name: str = "path") -> Optional[str]:
+    if val is not None and "\x00" in val:
+        raise ValueError(f"Trường '{field_name}' chứa ký tự NUL (\\x00) không hợp lệ.")
+    return val
+
+
+def _validate_deadline_str(val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    m = _DEADLINE_RE.match(s)
+    if not m:
+        raise ValueError(f"Định dạng deadline '{val}' không hợp lệ (cần HH:MM, ví dụ 07:00).")
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"Giờ deadline '{val}' nằm ngoài phạm vi 00:00..23:59.")
+    return f"{hh:02d}:{mm:02d}"
+
+
 class SchedulePreviewRequest(BaseModel):
     inputs: List[str] = Field(default_factory=list)
     deadline: Optional[str] = None
@@ -58,6 +87,18 @@ class SchedulePreviewRequest(BaseModel):
     use_tensorrt: bool = True
     subs_after_upscale: bool = True
     output_dir: Optional[str] = None
+
+    @field_validator("inputs")
+    @classmethod
+    def _validate_inputs_no_nul(cls, v: List[str]) -> List[str]:
+        for item in v:
+            _validate_no_nul_str(item, "inputs")
+        return v
+
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "output_dir")
 
 
 class StartUpscaleRequest(BaseModel):
@@ -80,6 +121,18 @@ class StartUpscaleRequest(BaseModel):
     force: bool = False
     dry_run: bool = False
 
+    @field_validator("inputs")
+    @classmethod
+    def _validate_inputs_no_nul(cls, v: List[str]) -> List[str]:
+        for item in v:
+            _validate_no_nul_str(item, "inputs")
+        return v
+
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "output_dir")
+
 
 class StartPreviewRequest(BaseModel):
     video_path: str
@@ -90,6 +143,18 @@ class StartPreviewRequest(BaseModel):
     use_tensorrt: bool = True
     force: bool = True
     auto_open_player: bool = False
+
+    @field_validator("video_path")
+    @classmethod
+    def _validate_vp(cls, v: str) -> str:
+        return _validate_no_nul_str(v, "video_path") or ""
+
+    @field_validator("seconds")
+    @classmethod
+    def _validate_sec(cls, v: int) -> int:
+        if v < 1 or v > 3600:
+            raise ValueError("seconds phải nằm trong khoảng 1..3600.")
+        return v
 
 
 class StartSubtransRequest(BaseModel):
@@ -104,6 +169,11 @@ class StartSubtransRequest(BaseModel):
     glossary: Optional[str] = None
     dry_run: bool = False
 
+    @field_validator("input_path", "output_dir", "glossary")
+    @classmethod
+    def _validate_paths_no_nul(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "path")
+
 
 class StartSubsPendingRequest(BaseModel):
     subs_quality: str = "normal"
@@ -114,6 +184,11 @@ class OpenMediaRequest(BaseModel):
     path: str
     prefer_mpv: bool = True
 
+    @field_validator("path")
+    @classmethod
+    def _validate_p(cls, v: str) -> str:
+        return _validate_no_nul_str(v, "path") or ""
+
 
 class CompareFramesRequest(BaseModel):
     source_path: str
@@ -121,20 +196,51 @@ class CompareFramesRequest(BaseModel):
     timestamp_sec: float = 2.0
     source_offset_sec: Optional[float] = None
 
+    @field_validator("source_path", "upscaled_path")
+    @classmethod
+    def _reject_null_paths(cls, v: str) -> str:
+        if "\x00" in v:
+            raise ValueError("Đường dẫn không được chứa ký tự NUL (\\x00).")
+        return v
+
+    @field_validator("timestamp_sec", "source_offset_sec")
+    @classmethod
+    def _reject_non_finite_floats(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not math.isfinite(v):
+            raise ValueError("Giá trị thời gian phải là số hữu hạn (không nhận NaN/Infinity).")
+        return v
+
 
 class TestShowsMatchRequest(BaseModel):
     sample_path: str
     yaml_content: Optional[str] = None
 
+    @field_validator("sample_path", "yaml_content")
+    @classmethod
+    def _reject_nul(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "sample_path/yaml_content")
+
 
 class SaveShowsYamlRequest(BaseModel):
     yaml_content: str
+
+    @field_validator("yaml_content")
+    @classmethod
+    def _reject_nul(cls, v: str) -> str:
+        return _validate_no_nul_str(v, "yaml_content") or ""
 
 
 class UpdateApiKeysRequest(BaseModel):
     key_1: Optional[str] = None
     key_2: Optional[str] = None
     key_3: Optional[str] = None
+
+    @field_validator("key_1", "key_2", "key_3")
+    @classmethod
+    def _reject_crlf_and_null(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and any(ch in v for ch in ("\r", "\n", "\x00")):
+            raise ValueError("API key không được chứa ký tự xuống dòng (CR/LF) hoặc NUL.")
+        return v
 
 
 # =====================================================================
@@ -174,8 +280,22 @@ def _read_dotenv_map(dotenv_path: Path) -> Dict[str, str]:
     return result
 
 
+def _validate_dotenv_value(raw_val: str, key_name: str = "API key") -> str:
+    """Chống chèn dòng mới (CR/LF) hoặc ký tự NUL khi ghi tệp .env."""
+    if any(ch in raw_val for ch in ("\r", "\n", "\x00")):
+        raise ValueError(f"Giá trị '{key_name}' chứa ký tự xuống dòng (CR/LF) hoặc NUL không hợp lệ.")
+    return raw_val.strip()
+
+
 def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> None:
-    """Cập nhật an toàn các biến GEMINI_API_KEY_1..3 vào .env cục bộ, bảo toàn mọi dòng khác."""
+    """Cập nhật an toàn các biến API key vào .env cục bộ, chống CR/LF injection và bảo toàn mọi dòng khác."""
+    sanitized_updates: Dict[str, Optional[str]] = {}
+    for key_name, raw_val in updates.items():
+        if raw_val is None:
+            sanitized_updates[key_name] = None
+        else:
+            sanitized_updates[key_name] = _validate_dotenv_value(str(raw_val), key_name=key_name)
+
     existing_lines: List[str] = []
     if dotenv_path.is_file():
         existing_lines = dotenv_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -190,8 +310,10 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
             continue
         check_line = stripped[len("export "):].strip() if stripped.startswith("export ") else stripped
         key_name = check_line.split("=", 1)[0].strip()
-        if key_name in updates and updates[key_name] is not None:
-            val = (updates[key_name] or "").strip()
+        if key_name in sanitized_updates and sanitized_updates[key_name] is not None:
+            if key_name in handled:
+                continue
+            val = sanitized_updates[key_name] or ""
             handled.add(key_name)
             if val:
                 new_lines.append(f"{key_name}={val}")
@@ -199,10 +321,9 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
         else:
             new_lines.append(raw_line)
 
-    for key_name, raw_val in updates.items():
-        if raw_val is None or key_name in handled:
+    for key_name, val in sanitized_updates.items():
+        if val is None or key_name in handled:
             continue
-        val = raw_val.strip()
         if val:
             new_lines.append(f"{key_name}={val}")
 
@@ -210,6 +331,97 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
     content = "\n".join(new_lines).rstrip("\n") + ("\n" if new_lines else "")
     tmp_path.write_text(content, encoding="utf-8")
     os.replace(tmp_path, dotenv_path)
+
+
+def _split_gemini_key_tokens(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    return [tok.strip() for tok in re.split(r"[;,]", raw) if tok.strip()]
+
+
+def _resolve_subtrans_key_slots(
+    dotenv_path: Path,
+    key_id_fn: Optional[Callable[[str], str]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """
+    Giải mã trạng thái 3 khe API Key & tổng số khóa hoạt động khớp logic ưu tiên của subtrans/config.py:
+    1) os.environ luôn thắng file .env cục bộ của workspace (hành vi load_dotenv(..., override=False)).
+       Lưu ý: luôn đọc file workspace dotenv_path truyền vào (kể cả khi pytest cô lập đặt SUBTRANS_DISABLE_DOTENV=1
+       để chặn python-dotenv tự đọc .env gốc của repo).
+    2) Hỗ trợ GEMINI_API_KEYS (phân tách ',' hoặc ';'), GEMINI_API_KEY và GEMINI_API_KEY_1..N.
+    """
+    dotenv_map = _read_dotenv_map(dotenv_path)
+
+    def _effective_var(name: str) -> tuple[str, str]:
+        if os.environ.get(name) and os.environ[name].strip():
+            return os.environ[name].strip(), "env"
+        if dotenv_map.get(name) and dotenv_map[name].strip():
+            return dotenv_map[name].strip(), "dotenv"
+        return "", ""
+
+    multi_raw, multi_src = _effective_var("GEMINI_API_KEYS")
+    multi_tokens = _split_gemini_key_tokens(multi_raw)
+
+    prim_raw, prim_src = _effective_var("GEMINI_API_KEY")
+    prim_tokens = _split_gemini_key_tokens(prim_raw)
+
+    slots_summary: List[Dict[str, Any]] = []
+    for idx in (1, 2, 3):
+        slot_key_name = f"GEMINI_API_KEY_{idx}"
+        slot_val, slot_src = _effective_var(slot_key_name)
+        slot_tokens = _split_gemini_key_tokens(slot_val)
+
+        chosen_val = ""
+        chosen_src = ""
+        chosen_var = slot_key_name
+
+        # Ưu tiên tuyệt đối: biến từ process env (override=False) theo thứ tự GEMINI_API_KEYS -> GEMINI_API_KEY -> GEMINI_API_KEY_N
+        if multi_src == "env" and idx - 1 < len(multi_tokens):
+            chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "env", "GEMINI_API_KEYS"
+        elif idx == 1 and prim_src == "env" and prim_tokens:
+            chosen_val, chosen_src, chosen_var = prim_tokens[0], "env", "GEMINI_API_KEY"
+        elif slot_src == "env" and slot_tokens:
+            chosen_val, chosen_src, chosen_var = slot_tokens[0], "env", slot_key_name
+        elif idx >= 2 and prim_src == "env" and idx - 1 < len(prim_tokens):
+            chosen_val, chosen_src, chosen_var = prim_tokens[idx - 1], "env", "GEMINI_API_KEY"
+        # Kế đến: biến từ .env theo đúng thứ tự ưu tiên của subtrans/config.py
+        elif multi_src == "dotenv" and idx - 1 < len(multi_tokens):
+            chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "dotenv", "GEMINI_API_KEYS"
+        elif idx == 1 and prim_src == "dotenv" and prim_tokens:
+            chosen_val, chosen_src, chosen_var = prim_tokens[0], "dotenv", "GEMINI_API_KEY"
+        elif slot_src == "dotenv" and slot_tokens:
+            chosen_val, chosen_src, chosen_var = slot_tokens[0], "dotenv", slot_key_name
+        elif idx >= 2 and prim_src == "dotenv" and idx - 1 < len(prim_tokens):
+            chosen_val, chosen_src, chosen_var = prim_tokens[idx - 1], "dotenv", "GEMINI_API_KEY"
+
+        slots_summary.append(
+            {
+                "slot": idx,
+                "env_name": chosen_var,
+                "configured": bool(chosen_val),
+                "masked": _mask_secret(chosen_val) if chosen_val else "",
+                "key_id": key_id_fn(chosen_val) if (chosen_val and key_id_fn) else ("configured" if chosen_val else "none"),
+                "source": chosen_src,
+            }
+        )
+
+    ordered_pool: List[str] = []
+    seen_keys: set[str] = set()
+
+    def _add_tokens(toks: List[str]) -> None:
+        for t in toks:
+            if t not in seen_keys:
+                seen_keys.add(t)
+                ordered_pool.append(t)
+
+    _add_tokens(multi_tokens)
+    _add_tokens(prim_tokens)
+    all_var_names = set(dotenv_map.keys()) | set(os.environ.keys())
+    for extra_name in sorted(k for k in all_var_names if k.startswith("GEMINI_API_KEY_")):
+        e_val, _ = _effective_var(extra_name)
+        _add_tokens(_split_gemini_key_tokens(e_val))
+
+    return slots_summary, len(ordered_pool)
 
 
 def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
@@ -283,12 +495,112 @@ def _default_open_media(target_path: Path, prefer_mpv: bool = True) -> str:
 # APPLICATION FACTORY
 # =====================================================================
 
+_INLINE_THEME_SCRIPT_SHA256 = "sha256-uwuIZqV9D8DaFdBXlW9a6ICGWbLeDFMqwRUM1xF0W04="
+_CSP_HEADER_VALUE = (
+    f"default-src 'self'; "
+    f"script-src 'self' '{_INLINE_THEME_SCRIPT_SHA256}'; "
+    f"style-src 'self'; "
+    f"img-src 'self' data:; "
+    f"connect-src 'self'; "
+    f"font-src 'self'; "
+    f"object-src 'none'; "
+    f"base-uri 'self'; "
+    f"frame-ancestors 'none'; "
+    f"form-action 'self'"
+)
+_SINGLE_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _parse_host_header(raw_host: Optional[str]) -> tuple[str, Optional[int], bool]:
+    if not raw_host:
+        return "", None, False
+    h = raw_host.strip()
+    if not h or "," in h or "@" in h or any(c.isspace() for c in h):
+        return "", None, False
+    try:
+        parsed = urllib.parse.urlsplit(f"//{h}")
+        port = parsed.port
+    except ValueError:
+        return "", None, False
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not hostname:
+        return "", None, False
+    return hostname, port, True
+
+
+def _is_allowed_hostname(hostname: str, allow_lan: bool, client_host: str) -> bool:
+    if not hostname:
+        return False
+    if hostname == "testserver" and client_host == "testclient":
+        return True
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback:
+            return True
+        if allow_lan and (ip.is_private or ip.is_link_local) and not ip.is_unspecified and not ip.is_multicast:
+            return True
+        return False
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    if allow_lan:
+        local_name = socket.gethostname().rstrip(".").lower()
+        if hostname == local_name:
+            return True
+        if hostname.endswith(".local"):
+            stem = hostname[:-6]
+            if stem and _SINGLE_LABEL_RE.match(stem):
+                return True
+        if "." not in hostname and _SINGLE_LABEL_RE.match(hostname):
+            return True
+    return False
+
+
+def _validate_origin_header(
+    raw_origin: Optional[str],
+    host_name: str,
+    host_port: Optional[int],
+    allow_lan: bool,
+    client_host: str,
+) -> bool:
+    if raw_origin is None:
+        return True
+    o_val = raw_origin.strip()
+    if not o_val or o_val.lower() == "null":
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(o_val)
+        o_port = parsed.port
+    except ValueError:
+        return False
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or parsed.username or parsed.password:
+        return False
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return False
+    o_host = (parsed.hostname or "").rstrip(".").lower()
+    if not _is_allowed_hostname(o_host, allow_lan=allow_lan, client_host=client_host):
+        return False
+    if o_host != host_name:
+        return False
+    if host_port is not None:
+        eff_o_port = o_port if o_port is not None else (443 if scheme == "https" else 80)
+        if eff_o_port != host_port:
+            return False
+    elif o_port is not None:
+        return False
+    return True
+
+
 def create_app(
     workspace_root: Optional[Path] = None,
     gpu_query_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     popen_factory: Optional[Callable[..., Any]] = None,
     open_media_fn: Optional[Callable[[Path, bool], str]] = None,
     frame_extract_fn: Optional[Callable[[Path, float, Path], None]] = None,
+    allow_lan: bool = False,
 ) -> FastAPI:
     """Khởi tạo FastAPI app gắn với thư mục gốc dự án (hỗ trợ cô lập hoàn toàn khi test)."""
     root = Path(workspace_root or Path(__file__).resolve().parent.parent).resolve()
@@ -314,13 +626,65 @@ def create_app(
     app.state.job_manager = job_manager
     app.state.telemetry_hub = telemetry_hub
 
+    def _apply_security_headers(resp: Any) -> Any:
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        resp.headers.setdefault("Content-Security-Policy", _CSP_HEADER_VALUE)
+        return resp
+
+    def _sanitize_json_value(val: Any) -> Any:
+        if isinstance(val, float) and not math.isfinite(val):
+            return str(val)
+        if isinstance(val, dict):
+            return {str(k): _sanitize_json_value(v) for k, v in val.items()}
+        if isinstance(val, (list, tuple)):
+            return [_sanitize_json_value(item) for item in val]
+        if isinstance(val, BaseException):
+            return str(val)
+        return val
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(_request: Any, exc: RequestValidationError) -> JSONResponse:
+        return _apply_security_headers(
+            JSONResponse(status_code=422, content={"detail": _sanitize_json_value(exc.errors())})
+        )
+
     @app.middleware("http")
     async def _security_headers_middleware(request: Any, call_next: Callable[[Any], Any]) -> Any:
+        client_obj = getattr(request, "client", None)
+        client_host = (getattr(client_obj, "host", "") or "").lower()
+        host_name, host_port, host_ok = _parse_host_header(request.headers.get("host"))
+        if not host_ok or not _is_allowed_hostname(host_name, allow_lan=allow_lan, client_host=client_host):
+            return _apply_security_headers(
+                JSONResponse(
+                    status_code=403,
+                    content={"detail": "Từ chối kết nối: Host header không thuộc localhost hoặc mạng LAN hợp lệ."},
+                )
+            )
+        if not _validate_origin_header(
+            request.headers.get("origin"),
+            host_name=host_name,
+            host_port=host_port,
+            allow_lan=allow_lan,
+            client_host=client_host,
+        ):
+            return _apply_security_headers(
+                JSONResponse(
+                    status_code=403,
+                    content={"detail": "Từ chối kết nối: Origin không khớp hoặc không hợp lệ (anti-DNS-rebinding)."},
+                )
+            )
+        for _, raw_qv in request.query_params.multi_items():
+            if "\x00" in raw_qv:
+                return _apply_security_headers(
+                    JSONResponse(
+                        status_code=400,
+                        content={"detail": "Tham số truy vấn không được chứa ký tự NUL (\\x00)."},
+                    )
+                )
         response = await call_next(request)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-        return response
+        return _apply_security_headers(response)
 
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -376,13 +740,17 @@ def create_app(
     @app.post("/api/queue/preview-schedule")
     def api_preview_schedule(req: SchedulePreviewRequest) -> Dict[str, Any]:
         if not req.inputs:
+            try:
+                norm_dl = _validate_deadline_str(req.deadline)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {
                 "total_episodes": 0,
                 "accepted_count": 0,
                 "already_done_count": 0,
                 "skipped_count": 0,
                 "total_eta_minutes": 0.0,
-                "deadline_str": req.deadline or "",
+                "deadline_str": norm_dl or "",
                 "episodes": [],
             }
         try:
@@ -442,6 +810,8 @@ def create_app(
             return {"ok": True, "job": job}
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/pause-graceful")
     def api_pause_graceful() -> Dict[str, Any]:
@@ -665,6 +1035,8 @@ def create_app(
                 extractor(src_p, src_ts, src_png)
             if not up_png.is_file():
                 extractor(up_p, up_ts, up_png)
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -846,18 +1218,34 @@ def create_app(
             chosen_pol = "default"
             src_desc = "Mặc định hệ thống (models.yaml)"
 
+            matched_model_pat = ""
+            matched_dedup_pat = ""
             for r in rules:
+                if not isinstance(r, dict):
+                    continue
                 pat = str(r.get("pattern") or "").strip()
+                if not pat:
+                    continue
                 if match_show_pattern(vid_name, pat) or (parent_dir and match_show_pattern(parent_dir, pat)):
-                    matched_pat = pat
                     m_target = str(r.get("model") or "").strip().lower()
-                    if m_target in lower_to_key:
+                    if m_target and m_target in lower_to_key:
                         chosen_mod = lower_to_key[m_target]
                         src_desc = f"shows.yaml ('{pat}')"
+                        matched_model_pat = pat
+                        break
+            for r in rules:
+                if not isinstance(r, dict):
+                    continue
+                pat = str(r.get("pattern") or "").strip()
+                if not pat:
+                    continue
+                if match_show_pattern(vid_name, pat) or (parent_dir and match_show_pattern(parent_dir, pat)):
                     p_target = str(r.get("dedup_policy") or "").strip().lower()
-                    if p_target in DEDUP_POLICY_PARAMS:
+                    if p_target and p_target in DEDUP_POLICY_PARAMS:
                         chosen_pol = p_target
-                    break
+                        matched_dedup_pat = pat
+                        break
+            matched_pat = matched_model_pat or matched_dedup_pat
 
             med_fps, _ = MODEL_REFERENCE_FPS.get(chosen_mod, (10.5, 8.5))
             return {
@@ -898,34 +1286,8 @@ def create_app(
         today_pt_str = now_pt.strftime("%Y-%m-%d")
         reset_seconds = max(0, int((next_pt - now_pt).total_seconds()))
 
-        # Kiểm tra trạng thái các khe API Key (chỉ trả về dạng đã che, tuyệt đối không lộ khóa thật)
-        dotenv_map = _read_dotenv_map(root / ".env")
-        allow_proc_env = os.environ.get("SUBTRANS_DISABLE_DOTENV") != "1"
-
-        def _slot_val(slot_key: str, fallback_primary: bool = False) -> str:
-            if slot_key in dotenv_map and dotenv_map[slot_key]:
-                return dotenv_map[slot_key]
-            if fallback_primary and dotenv_map.get("GEMINI_API_KEY"):
-                return dotenv_map["GEMINI_API_KEY"]
-            if allow_proc_env:
-                if os.environ.get(slot_key):
-                    return os.environ[slot_key]
-                if fallback_primary and os.environ.get("GEMINI_API_KEY"):
-                    return os.environ["GEMINI_API_KEY"]
-            return ""
-
-        key_slots: List[Dict[str, Any]] = []
-        for idx, env_name in enumerate(
-            ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"), start=1
-        ):
-            raw_v = _slot_val(env_name, fallback_primary=(idx == 1))
-            key_slots.append({
-                "slot": idx,
-                "env_name": env_name,
-                "configured": bool(raw_v),
-                "masked": _mask_secret(raw_v),
-                "key_id": compute_key_id(raw_v) if raw_v else "none",
-            })
+        # Kiểm tra trạng thái các khe API Key khớp 100% subtrans/config.py (chỉ trả dạng che, tuyệt đối không lộ khóa thật)
+        key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
 
         # Đọc subtrans/models.yaml
         sub_models_path = root / "subtrans" / "models.yaml"
@@ -960,7 +1322,8 @@ def create_app(
         if db_file.is_file():
             cache_stats["db_exists"] = True
             try:
-                ro_uri = f"file:{db_file.as_posix()}?mode=ro"
+                escaped_db_uri = db_file.resolve().as_uri()
+                ro_uri = f"{escaped_db_uri}?mode=ro"
                 conn = sqlite3.connect(ro_uri, uri=True, timeout=3.0)
                 try:
                     cur = conn.cursor()
@@ -1036,7 +1399,7 @@ def create_app(
             "next_reset_vn": next_vn.strftime("%Y-%m-%d %H:%M:%S"),
             "reset_in_seconds": reset_seconds,
             "key_slots": key_slots,
-            "configured_keys_count": sum(1 for s in key_slots if s["configured"]),
+            "configured_keys_count": active_key_count,
             "models": sub_models,
             "chain": chain,
             "cache": cache_stats,
@@ -1046,46 +1409,50 @@ def create_app(
 
     @app.put("/api/subtrans/api-keys")
     def api_update_subtrans_keys(req: UpdateApiKeysRequest) -> Dict[str, Any]:
-        """Cập nhật các khe GEMINI_API_KEY_1..3 vào .env cục bộ (không bao giờ trả hay log khóa thô)."""
+        """Cập nhật hoặc xóa các khe GEMINI_API_KEY_1..3 vào .env cục bộ (không bao giờ trả hay log khóa thô)."""
+        dotenv_path = root / ".env"
+        existing = _read_dotenv_map(dotenv_path)
+
         updates: Dict[str, Optional[str]] = {
             "GEMINI_API_KEY_1": req.key_1,
             "GEMINI_API_KEY_2": req.key_2,
             "GEMINI_API_KEY_3": req.key_3,
         }
-        # Nếu người dùng đặt slot 1, đồng bộ cả GEMINI_API_KEY chính nếu chưa có
-        dotenv_path = root / ".env"
-        existing = _read_dotenv_map(dotenv_path)
-        if req.key_1 is not None and req.key_1.strip() and not existing.get("GEMINI_API_KEY"):
-            updates["GEMINI_API_KEY"] = req.key_1.strip()
 
-        _write_dotenv_keys(dotenv_path, updates)
+        # Nếu .env cũ đang dùng GEMINI_API_KEYS gộp (comma/semicolon-separated) và người dùng sửa/xóa slot,
+        # tách các khe còn lại sang GEMINI_API_KEY_1..3 và gỡ GEMINI_API_KEYS để không che bóng bản cập nhật mới.
+        has_any_edit = any(v is not None for v in (req.key_1, req.key_2, req.key_3))
+        if has_any_edit and existing.get("GEMINI_API_KEYS"):
+            old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
+            for idx in range(1, max(4, len(old_multi) + 1)):
+                k_name = f"GEMINI_API_KEY_{idx}"
+                if idx <= 3:
+                    if updates[k_name] is None and not existing.get(k_name) and idx - 1 < len(old_multi):
+                        updates[k_name] = old_multi[idx - 1]
+                elif k_name not in updates and not existing.get(k_name) and idx - 1 < len(old_multi):
+                    updates[k_name] = old_multi[idx - 1]
+            updates["GEMINI_API_KEYS"] = ""
 
-        # Chỉ cập nhật os.environ khi không chạy trong môi trường cô lập cấm dotenv của pytest
-        if os.environ.get("SUBTRANS_DISABLE_DOTENV") != "1":
-            for env_k, raw_v in updates.items():
-                if raw_v is None:
-                    continue
-                clean_v = raw_v.strip()
-                if clean_v:
-                    os.environ[env_k] = clean_v
-                else:
-                    os.environ.pop(env_k, None)
+        # Luôn đồng bộ GEMINI_API_KEY chính với slot 1 khi slot 1 được cập nhật hoặc xóa
+        # để subtrans/config.py (vốn ưu tiên GEMINI_API_KEY trước GEMINI_API_KEY_1) không bị khóa cũ che mất.
+        if req.key_1 is not None:
+            clean_1 = req.key_1.strip()
+            updates["GEMINI_API_KEY"] = clean_1
 
-        refreshed = _read_dotenv_map(dotenv_path)
-        slots_summary = []
-        for idx, env_name in enumerate(
-            ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"), start=1
-        ):
-            val = refreshed.get(env_name) or (refreshed.get("GEMINI_API_KEY") if idx == 1 else "") or ""
-            slots_summary.append({
-                "slot": idx,
-                "env_name": env_name,
-                "configured": bool(val),
-                "masked": _mask_secret(val),
-                "key_id": compute_key_id(val) if val else "none",
-            })
+        try:
+            _write_dotenv_keys(dotenv_path, updates)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
 
-        return {"ok": True, "key_slots": slots_summary}
+        # Không chép khóa từ .env vào os.environ của tiến trình Web Studio: tiến trình con upscale/subtrans
+        # tự gọi load_dotenv(override=False) khi khởi chạy, còn giữ os.environ sạch giúp các khe còn lại
+        # không bị gắn nhãn nhầm [ENV] và vẫn giữ nguyên nút Xóa / chỉnh sửa trực tiếp trong UI.
+        slots_summary, active_key_count = _resolve_subtrans_key_slots(dotenv_path, key_id_fn=compute_key_id)
+        return {
+            "ok": True,
+            "key_slots": slots_summary,
+            "configured_count": active_key_count,
+        }
 
     @app.get("/api/audits")
     def api_list_audits() -> Dict[str, Any]:
@@ -1110,10 +1477,67 @@ def create_app(
 
         for af in discovered_files[:60]:
             try:
+                st = af.stat()
+                mtime_val = st.st_mtime
+                size_kb_val = round(st.st_size / 1024.0, 1)
+            except OSError:
+                mtime_val = 0.0
+                size_kb_val = 0.0
+            raw_stem = af.name[:-len(".audit.json")] if af.name.endswith(".audit.json") else af.stem
+            corrupt_ep_label = re.sub(r"_4K(?:_animejanai)?$", "", raw_stem, flags=re.IGNORECASE)
+            try:
                 adata = json.loads(af.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                audits.append({
+                    "episode": corrupt_ep_label,
+                    "audit_json_path": str(af.resolve()),
+                    "output_file": "",
+                    "source_file": "",
+                    "status": "CORRUPT",
+                    "corrupt": True,
+                    "error": f"JSON lỗi ({type(exc).__name__}): {exc}",
+                    "sanity_status": "CORRUPT",
+                    "model_id": "",
+                    "average_pipeline_fps": 0.0,
+                    "ai_steady_fps": 0.0,
+                    "source_frames": 0,
+                    "output_frames": 0,
+                    "frames_matched": False,
+                    "audio_tracks_count": 0,
+                    "subtitle_tracks_count": 0,
+                    "fonts_count": 0,
+                    "output_file_size_mb": size_kb_val / 1024.0,
+                    "completed_at": "",
+                    "sub_audit_md_path": "",
+                    "cast_yaml_path": "",
+                    "mtime": mtime_val,
+                })
                 continue
             if not isinstance(adata, dict):
+                audits.append({
+                    "episode": corrupt_ep_label,
+                    "audit_json_path": str(af.resolve()),
+                    "output_file": "",
+                    "source_file": "",
+                    "status": "CORRUPT",
+                    "corrupt": True,
+                    "error": "Cấu trúc audit JSON không phải object",
+                    "sanity_status": "CORRUPT",
+                    "model_id": "",
+                    "average_pipeline_fps": 0.0,
+                    "ai_steady_fps": 0.0,
+                    "source_frames": 0,
+                    "output_frames": 0,
+                    "frames_matched": False,
+                    "audio_tracks_count": 0,
+                    "subtitle_tracks_count": 0,
+                    "fonts_count": 0,
+                    "output_file_size_mb": size_kb_val / 1024.0,
+                    "completed_at": "",
+                    "sub_audit_md_path": "",
+                    "cast_yaml_path": "",
+                    "mtime": mtime_val,
+                })
                 continue
 
             stem_4k = af.name[:-len(".audit.json")]
@@ -1189,11 +1613,13 @@ def create_app(
 
         return {
             "audits": audits,
-            "checkpoints": scan_temp_checkpoints(root),
+            "checkpoints": telemetry_hub.read_pipeline_state().get("checkpoints", []),
         }
 
     @app.get("/api/audits/detail")
-    def api_audit_detail(path: str = Query(...)) -> Dict[str, Any]:
+    def api_audit_detail(path: str = Query(...)) -> Any:
+        if "\x00" in path:
+            raise HTTPException(status_code=400, detail="Đường dẫn file audit chứa ký tự NUL (\\x00) không hợp lệ.")
         cand = Path(os.path.expanduser(path.strip()))
         if not cand.is_absolute():
             cand = (root / cand).resolve()
@@ -1218,7 +1644,29 @@ def create_app(
 
         raw_text = cand.read_text(encoding="utf-8", errors="replace")
         if low_name.endswith(".audit.json"):
-            return {"type": "json", "path": str(cand), "data": json.loads(raw_text)}
+            try:
+                parsed_json = json.loads(raw_text)
+            except (json.JSONDecodeError, ValueError) as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": f"File audit JSON bị hỏng cú pháp ({exc}).",
+                        "corrupt": True,
+                        "path": str(cand),
+                        "raw_preview": raw_text[:4000],
+                    },
+                )
+            if not isinstance(parsed_json, dict):
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": "Cấu trúc audit JSON không phải object",
+                        "corrupt": True,
+                        "path": str(cand),
+                        "raw_preview": raw_text[:4000],
+                    },
+                )
+            return {"type": "json", "path": str(cand), "data": parsed_json}
         return {"type": "text", "path": str(cand), "content": raw_text}
 
     return app

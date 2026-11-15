@@ -84,11 +84,15 @@ export async function apiFetch(url, options = {}) {
     : await response.text().catch(() => "");
 
   if (!response.ok) {
-    const detail =
+    const rawDetail =
       typeof payload === "object" && payload !== null
         ? payload.detail || payload.message || JSON.stringify(payload)
         : String(payload || `HTTP ${response.status}`);
-    throw new Error(detail);
+    const detail = typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail);
+    const err = new Error(detail);
+    err.status = response.status;
+    err.payload = typeof payload === "object" && payload !== null ? payload : null;
+    throw err;
   }
   return payload;
 }

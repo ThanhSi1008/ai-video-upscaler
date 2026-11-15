@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     from web.app import create_app
 
     bind_host = "0.0.0.0" if args.lan else args.host
+    normalized_bind = bind_host.strip().strip("[]").lower()
+    is_loopback_bind = normalized_bind in {"localhost", "127.0.0.1", "::1"} or normalized_bind.startswith("127.")
+    allow_lan = bool(args.lan or not is_loopback_bind)
     local_url = f"http://127.0.0.1:{args.port}"
 
     print("=" * 72)
@@ -112,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
 
         threading.Thread(target=_open_later, name="WebGuiOpenBrowser", daemon=True).start()
 
-    app = create_app(workspace_root=ROOT_DIR)
+    app = create_app(workspace_root=ROOT_DIR, allow_lan=allow_lan)
     uvicorn.run(app, host=bind_host, port=args.port, log_level=args.log_level)
     return 0
 

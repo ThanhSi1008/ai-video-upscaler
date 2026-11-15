@@ -1,8 +1,8 @@
 # Trạng Thái Hệ Thống & Ngữ Cảnh Hoạt Động (STATE)
 
-> **Cập nhật ngày:** 2026-11-15
+> **Cập nhật ngày:** 2026-11-16
 >
-> **Commit Baseline:** `930dcbc` (`feat(web): add real-time Web Studio GUI (FastAPI + SSE 1Hz) & modern-web-guidance skill`)
+> **Commit Baseline:** `2196175` (`docs(state): synchronize STATE.md baseline`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -10,7 +10,7 @@
 
 ## 1. Trạng Thái Hiện Tại Của Codebase
 
-- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (750 ca kiểm thử tự động không GPU qua runner cô lập `scripts/verify_offline.py` với `TEMP`/`TMP` trên NVMe Gen4 `E:\ai-video-upscaler\scratch\`, bao gồm 16/16 ca mới `tests/test_web_gui.py`, 5/5 ca `tests/test_cli_and_shows_polish.py`, 13/13 ca `tests/test_nvme_cache_and_input_triton.py`, 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py`, `2/2` ca đối chiếu độc lập `tests/test_model_regression.py` PSNR >= 50 dB và 115/115 ca `tests/e2e/`).
+- **Bộ kiểm thử tự động:** Đạt **PASS 100%** (756 ca kiểm thử tự động không GPU qua runner cô lập `scripts/verify_offline.py` với `TEMP`/`TMP` trên NVMe Gen4 `E:\ai-video-upscaler\scratch\`, bao gồm 22/22 ca `tests/test_web_gui.py`, 5/5 ca `tests/test_cli_and_shows_polish.py`, 13/13 ca `tests/test_nvme_cache_and_input_triton.py`, 169/169 ca E2E Acceptance `tests/test_e2e_*.py`, 141/141 ca `subtrans/tests/`, 30/30 ca `tests/test_benchmark_infra.py`, `2/2` ca đối chiếu độc lập `tests/test_model_regression.py` PSNR >= 50 dB và 115/115 ca `tests/e2e/`).
 - **Hiệu chuẩn trần vật lý Silicon GA106 & Thực nghiệm 3 chế độ R3 trên mẫu đại cảnh `Fate/Apocrypha Tập 22` (`BD 1080p H.264 Hi10P`, `1,478` frames, `95.06%` unique ở Climax `13:30`) trên RTX 3060 12GB (`GA106-302-A1`, `2.25 MiB` L2, `170.0 W` TGP, `BAR1=256 MiB`) + i5-12600K + `32 GiB` DDR4 `2,133 MT/s` + `WD_BLACK SN7100 500GB` NVMe Gen4 (`--zero-disk` TensorRT `10.16.1.11` FP16):**
   - **Trần Silicon thực đo (`out/benchmark_r3_final/silicon_probe.json`):** Dense `cublasGemmEx(16F)` = **`38.844 TFLOPS`** (`50.95 T` lý thuyết @ `1,777 MHz`), `cublasGemmEx(32F)` = **`23.211 TFLOPS`** (`25.48 / 27.96 T` lý thuyết), GDDR6 STREAM Triad = **`302.61 GB/s`**, PCIe 4.0 x16 DMA = **`22.81 GB/s` H2D / `22.64 GB/s` D2H**, Fused Input Norm `@triton.jit` = **`0.5133 ms/batch` (`290.88 GB/s`, nhanh gấp `3.20x` PyTorch)**, 7th-Gen NVENC 4K Main10 `-multipass fullres` hội tụ biên **`22.70 fps` (`44.05 ms/frame`)**.
   - **Regime 1 — `animevideov3` (`64f16c`, `2.571 TFLOPs/f`, Tensor Core & `170W` TGP Bound):** Climax 60s **`10.13 fps` E2E** (`145.95s`), **`10.52 fps` steady**, **`11.00 fps` TensorRT (`727.48 ms/b` = `28.27 TFLOPS`)**, Active GPU `94.90%`, Power `157.61 / 170.38 W` (Preview Hậu Nhóm A: `9.81 fps` E2E / `11.14 fps` AI).
@@ -25,7 +25,7 @@
 
 | Phân hệ | Module / File | Trạng thái kiểm chứng | Chi tiết kỹ thuật |
 | :--- | :--- | :--- | :--- |
-| **Real-Time Web Studio & SSE 1Hz** | `web_gui.py`, `web_gui.bat`, `web/`, `src/logger.py`, `src/pipeline.py`, `tests/test_web_gui.py` | PASS | FastAPI + Uvicorn cục bộ (`http://127.0.0.1:8765`, không nạp `torch`/CUDA trong tiến trình Web), SSE 1.0 Hz (`logs/live_status.json`, 17+ chỉ số phần cứng, Chunk Heatmap, `.temp_*` checkpoints), dừng êm `logs/.graceful_pause.flag`, vận hành 24/7 Upscale/Preview/Subtrans/`shows.yaml`/`.env` 3-key, đối chiếu `1080p vs 4K` BT.709 kèm kính lúp 200%–400%, giao diện tuân thủ `modern-web-guidance` (`0` lỗi `legacy-scan`, `0` `innerHTML`). |
+| **Real-Time Web Studio & SSE 1Hz** | `web_gui.py`, `web_gui.bat`, `web/`, `src/logger.py`, `src/pipeline.py`, `tests/test_web_gui.py` | PASS | FastAPI + Uvicorn cục bộ (`http://127.0.0.1:8765`, `--lan` tùy chọn), chống DNS-rebinding `Host`/`Origin` + CSP `sha256` nghiêm ngặt, SSE 1.0 Hz cô lập cursor đa tab (`logs/live_status.json`, `last_stage`/`failed_stage`, 17+ chỉ số phần cứng, Chunk Heatmap, `.temp_*`), dừng êm `logs/.graceful_pause.flag`, khóa race `JobManager`, vận hành 24/7 Upscale/Preview/Subtrans/`shows.yaml`/`.env` 3-key (hỗ trợ `[LIST]`, xóa slot, chống CR/LF), đối chiếu `1080p vs 4K` BT.709 kèm kính lúp 200%–400%, giao diện `modern-web-guidance` (`0` lỗi `legacy-scan`, `0` `innerHTML`, đạt `390×844` & `320×256` Reflow). |
 | **PyAV 18.1.0 In-Process Probing & Audit** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | Thay thế ~230-290 `ffprobe` subprocesses/tập bằng PyAV 18.1.0 in-process, giữ nguyên tuyệt đối Concat-Mux `-max_interleave_delta 0` và Single-Pass `streamhash` MD5 subprocesses. |
 | **Track Defaults CLI** | `scripts/set_track_defaults.py` | PASS | Tham số hóa `argparse` CLI, tùy biến đường dẫn video/mkvpropedit, xử lý đường dẫn tương đối và hỗ trợ cờ `--dry-run`. |
 | **Triton Input/P010LE Kernels, Event Pool & NVMe Cache** | `src/trt_zero_copy_upscaler.py`, `src/config.py`, `scripts/verify_offline.py` | PASS | Fused 1-pass `@triton.jit` `_nhwc_u8_to_nchw_fp16_norm_kernel` (`0.5133 ms/b`, `290.88 GB/s`, `3.20x` nhanh hơn PyTorch), `@triton.jit` BT.709 TV-range P010LE + clamp RGB `[0,1]` (0 LSB rò rỉ sắc độ), pool `CUDA Event` tiền cấp phát `_ensure_cuda_event_pools` tách `avg_h2d_dma_ms` / `avg_in_norm_ms`, và `configure_nvme_jit_caches` định tuyến `.cache` + `TEMP` về NVMe Gen4 `WD_BLACK SN7100`. |

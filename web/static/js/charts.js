@@ -36,9 +36,26 @@ export class TelemetryChartsController {
 
   setSnapshot(historySamples, liveData) {
     const arr = Array.isArray(historySamples) ? historySamples.slice(-this.maxPoints) : [];
+    const prevFps = Array.isArray(this.fpsHistory) ? this.fpsHistory.slice() : [];
     this.history = arr;
     const baseFps = Number(liveData?.steady_fps || liveData?.latest_fps || 0);
-    this.fpsHistory = arr.map((_, idx) => (idx === arr.length - 1 ? baseFps : 0));
+    if (arr.length === 0) {
+      this.fpsHistory = [];
+    } else if (prevFps.length > 0) {
+      // Bảo toàn chuỗi FPS lịch sử qua các lần reconnect SSE / đồng bộ snapshot
+      const priorSlots = arr.length - 1;
+      const kept = priorSlots > 0 ? prevFps.slice(-priorSlots) : [];
+      const padCount = Math.max(0, priorSlots - kept.length);
+      this.fpsHistory = [
+        ...arr.slice(0, padCount).map((s) => Number(s?.fps_est ?? s?.fps ?? 0) || 0),
+        ...kept,
+        baseFps,
+      ];
+    } else {
+      this.fpsHistory = arr.map((s, idx) =>
+        idx === arr.length - 1 ? baseFps : Number(s?.fps_est ?? s?.fps ?? 0) || 0
+      );
+    }
     this.redrawAll(liveData);
   }
 
@@ -81,13 +98,13 @@ export class TelemetryChartsController {
 
     if (latest) {
       if (this.readouts.gpu) {
-        this.readouts.gpu.textContent = `${latest.gpu_util_pct.toFixed(0)}% GPU / ${latest.enc_util_pct.toFixed(0)}% NVENC`;
+        this.readouts.gpu.textContent = `${Number(latest.gpu_util_pct || 0).toFixed(0)}% GPU / ${Number(latest.enc_util_pct || 0).toFixed(0)}% NVENC`;
       }
       if (this.readouts.mem) {
-        this.readouts.mem.textContent = `${Math.round(latest.vram_used_mib)} MiB / ${latest.ram_used_gb.toFixed(1)} GB`;
+        this.readouts.mem.textContent = `${Math.round(Number(latest.vram_used_mib || 0))} MiB / ${Number(latest.ram_used_gb || 0).toFixed(1)} GB`;
       }
       if (this.readouts.power) {
-        this.readouts.power.textContent = `${latest.power_w.toFixed(1)} W / ${latest.temp_c.toFixed(0)} °C`;
+        this.readouts.power.textContent = `${Number(latest.power_w || 0).toFixed(1)} W / ${Number(latest.temp_c || 0).toFixed(0)} °C`;
       }
       const curFps =
         liveData !== null
