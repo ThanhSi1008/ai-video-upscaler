@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `aa421b0` (`docs(benchmarks): theoretical roofline model, empirical benchmarks, and gap analysis audit`)
+> **Commit Baseline:** `f61b933` (`perf(roofline-r3): calibrate GA106 silicon roofline, fuse Triton input norm & NVMe cache routing`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
