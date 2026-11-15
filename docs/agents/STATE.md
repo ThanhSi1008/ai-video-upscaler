@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `eff33ef` (`feat(cli): sync sakuga dedup flags, bracket-safe shows/folder queue & purge legacy ollama config`)
+> **Commit Baseline:** `ced0a0a` (`feat(pipeline): enable zero-disk by default, auto-route shows.yaml, enforce CRLF .bat & record ADR-010`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
