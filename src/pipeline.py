@@ -110,7 +110,7 @@ def run_upscale_pipeline(
     keep_temp: bool = False,
     dedup_policy: Optional[str] = None,
     batch_size: Optional[int] = None,
-    zero_disk: bool = False,
+    zero_disk: bool = True,
     use_tensorrt: bool = True,
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""

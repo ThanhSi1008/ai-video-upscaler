@@ -4,8 +4,8 @@
 
 ## Điểm vào và luồng chính
 
-- [`upscale.py`](../../upscale.py): `build_arg_parser`/`parse_args` nhận CLI (đồng bộ đủ `sakuga`/`dis-sakuga`); `expand_video_inputs` mở rộng thư mục thành hàng đợi sắp xếp tự nhiên (bỏ qua file ẩn và bản `*_4K`); `main` điều phối queue, deadline, retry, mode phụ đề và cleanup. `check_deadline_and_eta` kiểm tra ETA trước mỗi tập.
-- [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): chạy từ root; chọn Python trong `.venv`, `venv`, rồi PATH (`upscale_turbo.bat` bật `--zero-disk`).
+- [`upscale.py`](../../upscale.py): `build_arg_parser`/`parse_args` nhận CLI (`--zero-disk` mặc định `True` kèm `--no-zero-disk`/`--disk`, đồng bộ đủ `sakuga`/`dis-sakuga`); `expand_video_inputs` mở rộng thư mục thành hàng đợi sắp xếp tự nhiên (bỏ qua file ẩn và bản `*_4K`); `main` điều phối queue, deadline, retry, mode phụ đề và cleanup. `check_deadline_and_eta` kiểm tra ETA trước mỗi tập.
+- [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): chạy từ root (chuẩn CRLF trên `cmd.exe`); chọn Python trong `.venv`, `venv`, rồi PATH (cả hai chạy mặc định Zero-Disk TensorRT 10 FP16).
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) → [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI với subcommand `run`, `batch`, `eval`, `rag` và các công cụ khác. Đọc [AGENTS Subtrans](../../subtrans/AGENTS.md) trước sửa.
 
 ```text
@@ -24,7 +24,7 @@ subtrans.cli → TranslationPipeline
   → lint/cascade repair → chuẩn hóa playback/write → QA report/quality gate
 ```
 
-Đọc code nhánh thực tế trước khi thay đổi: các nhánh `--clean-temp`, `--subs-pending`, `--subs-only` ở `upscale.main` đều đã có chốt bảo vệ `--dry-run`; đường `--zero-disk` hỗ trợ độ phân giải động nhưng vẫn là cờ tùy chọn cần người dùng kích hoạt.
+Đọc code nhánh thực tế trước khi thay đổi: các nhánh `--clean-temp`, `--subs-pending`, `--subs-only` ở `upscale.main` đều đã có chốt bảo vệ `--dry-run`; đường `--zero-disk` (mặc định `True`) hỗ trợ độ phân giải động và có cờ đối ứng `--no-zero-disk` / `--disk` để lùi về lưu PNG khi cần đối soát.
 
 ## Các cụm module video
 

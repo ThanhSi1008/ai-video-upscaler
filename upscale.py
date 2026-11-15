@@ -414,8 +414,14 @@ def build_arg_parser():
     parser.add_argument(
         "--zero-disk",
         action="store_true",
-        default=False,
-        help="Kích hoạt pipeline Zero-Disk: Giải mã NVDEC raw RGB24 pipe -> TensorRT/CUDA FP16 -> p010le pipe -> NVENC, triệt tiêu 100%% file PNG trung gian trên SSD"
+        default=True,
+        help="Kích hoạt pipeline Zero-Disk (Mặc định: Bật): Giải mã NVDEC raw RGB24 pipe -> TensorRT/CUDA FP16 -> p010le pipe -> NVENC, triệt tiêu 100%% file PNG trung gian trên SSD"
+    )
+    parser.add_argument(
+        "--no-zero-disk", "--disk",
+        dest="zero_disk",
+        action="store_false",
+        help="Tắt chế độ Zero-Disk và dùng pipeline truyền thống lưu file PNG trung gian trên SSD/RAM-disk (chế độ dự phòng đối soát/debug)"
     )
     parser.add_argument(
         "--no-tensorrt",
@@ -816,13 +822,13 @@ def main():
         if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
             import importlib.util
             has_trt = importlib.util.find_spec("tensorrt") is not None
-        if has_trt and getattr(args, "zero_disk", False):
-            # RTX 3060 TensorRT FP16 Zero-Disk: unique inference speed ~10.5 fps (effective ~22.0 fps with ~52% dedup)
+        if has_trt and getattr(args, "zero_disk", True):
+            # RTX 3060 TensorRT FP16 Zero-Disk (Mặc định): unique inference speed ~10.5 fps (effective ~22.0 fps with ~52% dedup)
             fps_median = 10.5
             fps_p5 = 8.5
             video_overhead = 420.0
         elif has_trt:
-            # RTX 3060 TensorRT FP16 Standard: unique inference speed ~8.5 fps (effective ~18.0 fps)
+            # RTX 3060 TensorRT FP16 Standard (--no-zero-disk): unique inference speed ~8.5 fps (effective ~18.0 fps)
             fps_median = 8.5
             fps_p5 = 7.0
             video_overhead = 660.0
@@ -830,8 +836,10 @@ def main():
             # RTX 3060 PyTorch CUDA FP16: unique inference speed ~5.2 fps (effective ~11.0 fps)
             fps_median = 5.2
             fps_p5 = 4.5
-            if getattr(args, "zero_disk", False):
+            if getattr(args, "zero_disk", True):
                 video_overhead = 540.0
+            else:
+                video_overhead = 780.0
     else:
         fps_median = 1.35
         fps_p5 = 1.25
@@ -970,7 +978,7 @@ def main():
                 keep_temp=args.keep_temp,
                 dedup_policy=args.dedup_policy,
                 batch_size=args.batch_size,
-                zero_disk=getattr(args, "zero_disk", False),
+                zero_disk=getattr(args, "zero_disk", True),
                 use_tensorrt=not getattr(args, "no_tensorrt", False),
             )
             # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
@@ -1061,7 +1069,7 @@ def main():
                     deadline_dt=None,
                     keep_temp=args.keep_temp,
                     dedup_policy=args.dedup_policy,
-                    zero_disk=getattr(args, "zero_disk", False),
+                    zero_disk=getattr(args, "zero_disk", True),
                     use_tensorrt=not getattr(args, "no_tensorrt", False),
                 )
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):

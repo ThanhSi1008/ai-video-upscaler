@@ -24,7 +24,7 @@
 
 Hệ thống loại bỏ hoàn toàn thời gian chết của GPU thông qua mô hình chạy song song 3 tầng trong [`src/pipeline.py`](../src/pipeline.py) cho cả hai chế độ vận hành:
 
-### A. Chế Độ Turbo Zero-Disk (`--zero-disk` / `upscale_turbo.bat`)
+### A. Chế Độ Mặc Định Turbo Zero-Disk (`--zero-disk` / `upscale.bat` / `upscale_turbo.bat`)
 ```text
 Thời gian ──────►
 Chunk N-1: [EncodeWorker: Xả 32-frame lookahead NVENC & đóng gói MP4] ──► up_{N-1}.mp4
@@ -32,7 +32,7 @@ Chunk N:   [GPU: H2D NHWC -> TensorRT 10 FP16 -> Triton p010le Pipe]  ──► 
 Chunk N+1: [DecodeWorker: NVDEC giải mã GOP -> readinto RGB24 RAM]    ──► Prefetch sẵn trên RAM 32GB (0 PNG đĩa)
 ```
 
-### B. Chế Độ Chuẩn Đệm Cuốn Chiếu (Standard Rolling Buffer — `upscale.bat`)
+### B. Chế Độ Dự Phòng Đệm Cuốn Chiếu (Fallback Rolling Buffer — `--no-zero-disk` / `--disk`)
 ```text
 Thời gian ──────►
 Chunk N-1: [EncodeWorker: Concat Demuxer + NVENC HEVC 10-bit]         ──► Xuất up_{N-1}.mp4 & xóa sạch PNG
@@ -66,8 +66,8 @@ Chunk N+1: [DecodeWorker: FFmpeg trích xuất PNG 1080p đã lọc Dedup]   ─
 ## 4. Bảo Vệ Bộ Nhớ & Lưu Trữ Đệm Khung Hình (`src/ramdisk.py`)
 
 * **Thứ tự ưu tiên định tuyến bộ đệm tự động:**
-  1. **Zero-Disk Pipe (`--zero-disk`):** Triệt tiêu 100% file ảnh trung gian trên ổ đĩa.
-  2. **RAM Disk vật lý:** Tự động phát hiện ổ RAM thật qua `UPSCALER_RAMDISK_DIR` hoặc ổ `R:`/`Z:` mang nhãn `"RAM"` (ImDisk / OSFMount).
+  1. **Zero-Disk Pipe (`--zero-disk` — Mặc định):** Triệt tiêu 100% file ảnh trung gian trên ổ đĩa.
+  2. **RAM Disk vật lý (khi dùng `--no-zero-disk`):** Tự động phát hiện ổ RAM thật qua `UPSCALER_RAMDISK_DIR` hoặc ổ `R:`/`Z:` mang nhãn `"RAM"` (ImDisk / OSFMount).
   3. **NVMe PCIe Gen4 tốc độ cao:** Định tuyến về `scratch/rolling_buffer` trên ổ workspace NVMe Gen4 (`WD_BLACK SN7100 ~7.25 GB/s`), tránh nghẽn `%TEMP%` trên ổ hệ thống Gen3 và xóa cuốn chiếu ngay sau mỗi chunk 8s.
 
 ---

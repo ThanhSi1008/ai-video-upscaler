@@ -72,11 +72,11 @@ python upscale.py samples/sample_sword_3min.mkv --preview 10
 .\upscale.bat samples/sample_sword_3min.mkv
 .\upscale_turbo.bat samples/sample_sword_3min.mkv
 
-# 3. Chạy đầy đủ 1 tập video qua CLI Python (tự động dùng CQ 18 fullres trên hevc_nvenc):
-python upscale.py samples/sample_sword_3min.mkv --zero-disk -o out/sword_4K.mkv
+# 3. Chạy đầy đủ 1 tập video qua CLI Python (mặc định Turbo Zero-Disk CQ 18 fullres trên hevc_nvenc):
+python upscale.py samples/sample_sword_3min.mkv -o out/sword_4K.mkv
 
 # 4. Chạy hàng đợi nhiều tập qua đêm (preflight nền tách sẵn GOP, auto-offset và deadline an toàn):
-python upscale.py --queue ep1.mkv ep2.mkv -o out/ --zero-disk --deadline 07:00 --allow-partial
+python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-partial
 ```
 
 ### Bảng Tham Số Tùy Chọn Chính:
@@ -85,7 +85,8 @@ python upscale.py --queue ep1.mkv ep2.mkv -o out/ --zero-disk --deadline 07:00 -
 * `--engine`: Động cơ suy luận (`cuda` cho NVIDIA GPU hoặc `cpu`; mặc định: `cuda`).
 * `--precision`: Độ chính xác suy luận (`fp16` hoặc `fp32`, mặc định: `fp16`).
 * `--batch-size`: Kích thước lô xử lý khung hình trên GPU (Mặc định: `8` trên RTX 3060 12GB).
-* `--zero-disk`: Kích hoạt pipeline Zero-Disk (`NVDEC RGB24 pipe -> TensorRT/CUDA FP16 -> Triton p010le pipe -> NVENC`, 0 file PNG trung gian).
+* `--zero-disk`: Kích hoạt pipeline Zero-Disk (Mặc định: Bật; `NVDEC RGB24 pipe -> TensorRT/CUDA FP16 -> Triton p010le pipe -> NVENC`, 0 file PNG trung gian).
+* `--no-zero-disk`: Tắt chế độ Zero-Disk và dùng pipeline truyền thống lưu file PNG trung gian trên đĩa (alias `--disk`).
 * `--no-tensorrt`: Tắt tự động biên dịch/chạy TensorRT 10 FP16 và dùng thuần PyTorch CUDA FP16.
 * `--dedup-policy`: Chính sách khử trùng lặp (`default`, `sensitive-a`, `sensitive-b`, `motion`, `drift`, `dis`, `off`; mặc định: `default` hoặc theo `shows.yaml`).
 * `--dis-thresh`: Ngưỡng dòng chảy quang học $\tau$ tính bằng pixel 1080p cho chính sách `dis` (Mặc định: `0.30`).
@@ -110,7 +111,7 @@ python upscale.py --queue ep1.mkv ep2.mkv -o out/ --zero-disk --deadline 07:00 -
 * `--target-4k`: Chỉ định container MKV 4K đích cụ thể để nhúng phụ đề trong chế độ `--subs-only`.
 * `-b`, `--bitrate`: Bitrate dự phòng cho encoder không phải NVENC (trên `hevc_nvenc`, hệ thống mặc định dùng `CQ 18` VBR với `maxrate 45M`).
 * `-s`, `--segment`: Độ dài phân đoạn cuốn chiếu tính bằng giây (Mặc định: `8` giây).
-* `-f`, `--format`: Định dạng khung hình trung gian khi không bật `--zero-disk` (`png` lossless BT.709 mặc định hoặc `jpg`).
+* `-f`, `--format`: Định dạng khung hình trung gian khi chạy chế độ đệm đĩa `--no-zero-disk` (`png` lossless BT.709 mặc định hoặc `jpg`).
 * `--keep-temp`: Giữ lại thư mục tạm `.temp_<basename>` sau khi Mux Audit PASS (Mặc định: tự động xóa sạch).
 * `--clean-temp`, `--cleanup`: Quét dọn toàn bộ thư mục tạm `.temp_*`, symlinks mồ côi và gom báo cáo vào `audit/` rồi thoát.
 * `--no-ramdisk`: Buộc dùng thư mục tạm trên ổ cứng thay vì RAM Disk / rolling buffer.

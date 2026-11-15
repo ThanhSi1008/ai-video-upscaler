@@ -1,6 +1,6 @@
 # Hồ Sơ Quyết Định Kiến Trúc (Architectural Decision Records - ADR)
 
-> **Cập nhật ngày:** 2026-11-13
+> **Cập nhật ngày:** 2026-11-15
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [STATE](STATE.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Video Pipeline](../video-pipeline.md) | [Dedup Architecture](../dedup-architecture.md) | [Audit & Safety](../audit-and-safety.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
@@ -72,3 +72,27 @@
   - **Zero-Disk Pipe (`--zero-disk` / `upscale_turbo.bat`):** Đọc luồng RGB24 trực tiếp vào mảng NumPy cấp phát sẵn (`readinto` 0-copy), truyền tuần tự `NHWC` qua Pinned Memory lên GPU, hoán vị ở `uint8`, chuyển màu BT.709 `p010le` bằng kernel **Triton JIT** ngay trên VRAM và bơm thẳng sang ống `hevc_nvenc`.
   - **Gối đầu 3 tầng thực sự & Queue GOP-RLE:** Prefetch `Decode(N+1)` ngay trước khi GPU suy luận `Chunk N`, đẩy bước đóng gói đuôi MP4 sang `EncodeWorker`; lưu chuỗi nén `raw_actions_rle` trong `plan.json` để tái phân hoạch GOP trong `< 1 ms` và tách sẵn `raw_segs` cho tập kế tiếp trong `--queue`.
   - **Cyclic Cel Memoization & 1-Pass Mux:** Băm `BLAKE2b` + kiểm tra nhiễu lượng tử OpenCV SIMD kết hợp thuật toán loại bỏ tối ưu **Belady's OPT** để không suy luận lại các bức vẽ lặp chu kỳ `A->B->A` (nhép miệng/chớp mắt); ghép trực tiếp `up_*.mp4` với audio/sub/font gốc bằng `mux_segments_directly` (khử ~8 GB ghi/đọc `merged_4k.mp4`) và đối soát MD5 đa luồng bằng 1 lượt `-f streamhash`.
+
+### ADR-010: Từ Chối (Reject) Cross-Episode OP/ED Cache — Bảo Toàn Tính Toàn Vẹn Khung Hình, Tín Dụng Nhân Sự & Đồng Bộ Mux Phòng Thu
+- **Bối cảnh:**
+  - Có đề xuất xây dựng cơ chế nhận diện và tái sử dụng video 4K của đoạn nhạc mở đầu (Opening - OP ~90s) và nhạc kết thúc (Ending - ED ~90s) giữa các tập phim trong cùng một bộ anime để giảm thời gian suy luận GPU (~12.5% tổng thời lượng phim trên lý thuyết).
+- **Quyết định:**
+  - **Chính thức bác bỏ và không triển khai tính năng Cross-Episode OP/ED Cache.**
+  - Duy trì toàn vẹn nguyên tắc suy luận độc lập từng tập phim; tiếp tục tận dụng tối đa cơ chế Deduplication Keyframe GOP + DIS Optical Flow (`ADR-004`) và Cyclic Cel Memoization `A->B->A` (`ADR-009`) ngay trong luồng RAM của tập hiện hành.
+  - Ưu tiên tăng tốc toàn diện thông qua cấu hình mặc định Zero-Disk Pipe (`--zero-disk=True`) và quy tắc tự động hóa mô hình trong `shows.yaml` (tiết kiệm thực tế 45%–50% thời gian chạy mà an toàn tuyệt đối).
+- **Lý do kỹ thuật & Phân tích từ nguyên lý đầu tiên:**
+  1. **Sai lệch tín dụng nhân sự và diễn viên lồng tiếng (Staff & Cast Credits Mutation):**
+     - Trong quy trình sản xuất anime, danh sách diễn viên lồng tiếng (Cast), họa sĩ diễn hoạt (Key Animators), studio phụ trợ và đạo diễn từng tập (Episode Directors) thay đổi **100% ở ED và hơn 70% ở OP** theo từng tập cụ thể. Chữ tín dụng này được render cứng vào hình ảnh nguồn. Việc tái sử dụng video 4K từ tập trước sẽ làm hiển thị sai tên nhân sự của tập hiện tại, gây lỗi nghiêm trọng về tính chính xác nội dung và tiêu chuẩn lưu trữ.
+     - Chữ tín dụng xuất hiện trên 80%–90% số frame của OP/ED, khiến cơ chế kiểm tra khớp frame chính xác (Bit-exact / Hash Matching) bị trượt cache (miss) gần như 100%.
+  2. **Lệch ranh giới GOP & Gãy chuỗi thời gian (GOP Jitter & PTS Discontinuity):**
+     - Ranh giới bắt đầu OP thay đổi linh hoạt theo độ dài đoạn mở đầu (Cold Open). Chuỗi Keyframe IDR của video nén nguồn không trùng khớp giữa các tập.
+     - Việc cắt ghép video 4K ngoài ranh giới IDR gốc buộc phải re-encode phân đoạn chuyển tiếp (smart-cut) hoặc làm đứt gãy chuỗi Presentation Time Stamp (PTS/DTS), gây lỗi nhấp nháy/nhòe frame đầu và vi phạm trực tiếp bất biến bảo toàn số lượng khung hình (`ffprobe -count_frames` khớp 1:1, `AGENTS.md` §7).
+  3. **Hòa trộn âm thanh đè thoại & Biến thể SFX (Audio Bleeding & SFX Variants):**
+     - Lời thoại nhân vật thường kéo dài đè lên nốt nhạc đầu của OP hoặc nhạc nền ED nổi lên từ cảnh cao trào cuối phim; một số tập đặc biệt có thêm hiệu ứng âm thanh (SFX) riêng trong OP.
+     - Dự án áp dụng Stream Copy âm thanh gốc nguyên bản (`ADR-002`). Tách rời video và audio OP để ghép nối sẽ dẫn đến lệch pha đồng bộ microsecond ($0.0\text{ ms}$), gây hiện tượng lệch khẩu hình hát và lệch nhịp phách.
+  4. **Nguy cơ lệch vĩnh viễn phụ đề mềm (Subtitle Timeline Drift):**
+     - Phụ đề mềm (ASS/SRT) được canh chỉnh theo thời gian tuyệt đối của từng tập. Chỉ cần lệch 1 khung hình ($41.7\text{ ms}$) tại điểm ghép nối OP, toàn bộ phụ đề thoại trong hơn 20 phút còn lại của tập phim sẽ bị trôi mốc thời gian vĩnh viễn.
+  5. **Nghịch lý Pareto — Lợi ích thực tế quá nhỏ so với chi phí và rủi ro:**
+     - Với pipeline hiện tại (TensorRT 10 FP16, `--zero-disk`, GOP Dedup lọc 55%–62% frame), một đoạn OP 90s chỉ mất khoảng **~65 giây** GPU.
+     - Do ED không thể cache vì đổi chữ, tổng thời gian tiết kiệm thực tế trên toàn mùa phim chỉ đạt **~1.7% – 2.2%** (khoảng ~10 phút trên ca chạy qua đêm 8 tiếng).
+     - Việc đánh đổi độ ổn định của toàn bộ hệ thống muxing phòng thu và tính toàn vẹn của video/audio/phụ đề để lấy 2% thời gian là đi ngược lại hoàn toàn Tôn chỉ Pareto của dự án (`AGENTS.md` §1).

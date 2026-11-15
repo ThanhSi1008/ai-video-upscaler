@@ -463,7 +463,7 @@ def test_t1_f07_02_standard_disk_pipeline_execution(mock_pipeline_env, tmp_path,
     src_vid = create_synthetic_video(tmp_path / "disk02.mkv", num_frames=8)
     out_dir = tmp_path / "out"
 
-    exit_code, out, err = run_upscale_cli([str(src_vid), "-o", str(out_dir)], monkeypatch, capsys)
+    exit_code, out, err = run_upscale_cli([str(src_vid), "--no-zero-disk", "-o", str(out_dir)], monkeypatch, capsys)
     assert exit_code == 0, f"exit={exit_code}\nOUT:\n{out}\nERR:\n{err}"
     assert (out_dir / "disk02_4K.mkv").exists()
 

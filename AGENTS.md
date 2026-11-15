@@ -8,8 +8,7 @@
 
 ## 1. Mục Tiêu & Ràng Buộc Cốt Lõi (Core Invariants)
 
-* **Thiết bị vận hành mục tiêu:**
-  * **Windows Workstation:** Windows 11 64-bit, Intel Core i5-12600K (10C/16T AVX2), NVIDIA GeForce RTX 3060 (12GB VRAM GDDR6, CUDA & Tensor Cores), 32GB RAM, FFmpeg `hevc_nvenc`.
+* **Thiết bị mục tiêu:** Windows 11 64-bit, Intel i5-12600K (10C/16T AVX2), NVIDIA RTX 3060 12GB (Tensor Cores), 32GB RAM, FFmpeg `hevc_nvenc`.
 * **Môi trường bắt buộc:** **100% CỤC BỘ trên máy người dùng (Windows 11)**. Tuyệt đối không đề xuất Cloud GPU, Colab, Kaggle.
 * **Tôn chỉ Pareto:** Cân bằng chất lượng anime và thời gian. Không hy sinh nét vẽ lấy tốc độ rẻ tiền; không lãng phí tài nguyên cho cải thiện vô hình.
 * **Sức chứa thực tế:**
@@ -22,7 +21,7 @@
 ### A. Lệnh Vận Hành Thường Dùng (PowerShell / CMD)
 
 ```powershell
-# Nâng cấp 1 tập video đơn lẻ (Chuẩn / Turbo Zero-Disk TensorRT):
+# Nâng cấp 1 tập video đơn lẻ (Mặc định Turbo Zero-Disk TensorRT):
 python upscale.py path/to/source.mkv -o out/
 .\upscale.bat path/to/source.mkv
 .\upscale_turbo.bat path/to/source.mkv
@@ -53,7 +52,8 @@ python subtrans.py path/to/source.mkv -o out/
 | `--engine` | `cuda` | Engine suy luận: `cuda` (NVIDIA CUDA FP16) hoặc `cpu` |
 | `--model` | `animevideov3` | Model Super-Resolution đăng ký trong `models/models.yaml` |
 | `--batch-size` | `8` (RTX 3060) | Kích thước batch cho AI Inference GPU (Tensor Cores) |
-| `--zero-disk` | `False` | Giải mã NVDEC pipe -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (0 PNG đĩa) |
+| `--zero-disk` | `True` | Giải mã NVDEC pipe -> TensorRT/CUDA FP16 -> `p010le` pipe -> NVENC (0 PNG đĩa) |
+| `--no-zero-disk` | `False` | Tắt Zero-Disk, lùi về lưu PNG trung gian trên đĩa (alias `--disk`) |
 | `--no-tensorrt` | `False` | Tắt tự động biên dịch/chạy TensorRT 10 FP16 và dùng thuần PyTorch CUDA FP16 |
 | `--subs-quality` | `normal` | Chất lượng dịch: `normal`/`fast` (`gemini-3.5-flash-lite`) hoặc `high` (`gemini-3.8-flash`) |
 | `--subs-only` | `False` | Chỉ trích xuất và dịch phụ đề, bỏ qua video upscale |
@@ -79,7 +79,7 @@ python subtrans.py path/to/source.mkv -o out/
 
 - **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 Zero-Alloc Ring / CUDA FP16, 3-Stage Overlapped Zero-Disk Pipe, Cyclic Cel Memoization `A->B->A`, GOP-RLE Queue Preflight, 1-Pass Concat-Mux & `streamhash`).
 - **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
-- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `unlock_rtx3060_admin.ps1`, `batch_translate_all.py`, `set_track_defaults.py`).
+- **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `batch_translate_all.py`, `set_track_defaults.py`).
 - **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.
 - **`tests/` & `subtrans/tests/`:** 100% Pytest tự động hóa kiểm thử đơn vị và tích hợp.
 
@@ -88,7 +88,7 @@ python subtrans.py path/to/source.mkv -o out/
 ## 4. Những Bất Biến Kỹ Thuật (Do NOT Break)
 
 1. **Bảo vệ Bộ Nhớ & Ổ Cứng (Storage & RAM Discipline):**
-   * Khung hình trung gian của từng chunk 8s phải được xóa cuốn chiếu (Rolling Segments Cleanup) ngay khi chunk được mã hóa xong sang file HEVC `.mp4`.
+   * Khung hình trung gian của từng chunk 8s phải được xóa cuốn chiếu ngay khi chunk mã hóa xong sang file HEVC `.mp4`.
    * Thư mục SSD chỉ lưu trữ các segment HEVC đã nén (`up_*.mp4`) trong `.temp_<basename>` để phục vụ resume.
    * Tối ưu I/O khung hình qua OpenCV C++ `cv2.imwrite` tận dụng AVX2 của CPU Core i5-12600K.
 2. **Bit-exact Stream Copy & Cờ Mux Phòng Thu:**

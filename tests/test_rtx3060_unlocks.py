@@ -228,15 +228,18 @@ def test_extract_frames_raw_rgb24_reads_pipe_and_falls_back_on_hwaccel_error():
 
 
 def test_cli_tensorrt_and_zero_disk_flags():
-    """Xác minh CLI parser giữ mặc định --zero-disk=False và thêm --no-tensorrt=False."""
+    """Xác minh CLI parser giữ mặc định --zero-disk=True và --no-tensorrt=False, hỗ trợ --no-zero-disk."""
     parser = upscale.build_arg_parser()
     args = parser.parse_args(["samples/sample_30s.mkv"])
-    assert args.zero_disk is False
+    assert args.zero_disk is True
     assert args.no_tensorrt is False
 
-    args_off = parser.parse_args(["samples/sample_30s.mkv", "--zero-disk", "--no-tensorrt"])
-    assert args_off.zero_disk is True
+    args_off = parser.parse_args(["samples/sample_30s.mkv", "--no-zero-disk", "--no-tensorrt"])
+    assert args_off.zero_disk is False
     assert args_off.no_tensorrt is True
+
+    args_disk = parser.parse_args(["samples/sample_30s.mkv", "--disk"])
+    assert args_disk.zero_disk is False
 
 
 def test_cuda_lazy_module_loading_and_jit_cache_env():

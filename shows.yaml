@@ -10,20 +10,35 @@
 #       • animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3
 #     dedup_policy: (Tùy chọn) default | dis | sakuga | dis-sakuga | sensitive-b | motion | drift | off
 
-shows: []
-  # --- MẪU GỢI Ý (bỏ dấu '#' ở đầu dòng và xóa '[]' phía trên `shows:` khi muốn bật tự động) ---
+shows:
+  # 1. Nguồn phát sóng hằng tuần Crunchyroll Web-DL ([SubsPlease], [Erai-raws]):
+  - pattern: "[SubsPlease]*"
+    model: "animejanai-hd-v3-ultracompact"
+    dedup_policy: "default"
+  - pattern: "*[SubsPlease]*"
+    model: "animejanai-hd-v3-ultracompact"
+    dedup_policy: "default"
+  - pattern: "[Erai-raws]*"
+    model: "animejanai-hd-v3-ultracompact"
+    dedup_policy: "default"
+  - pattern: "*[Erai-raws]*"
+    model: "animejanai-hd-v3-ultracompact"
+    dedup_policy: "default"
+
+  # 2. Nguồn đĩa Blu-ray 1080p sạch ([BD 1080p], BluRay, BDRip):
+  - pattern: "*[BD*"
+    model: "animevideov3"
+    dedup_policy: "dis"
+  - pattern: "*BluRay*"
+    model: "animevideov3"
+    dedup_policy: "dis"
+  - pattern: "*BDRip*"
+    model: "animevideov3"
+    dedup_policy: "dis"
+
+  # --- MẪU GỢI Ý BỔ SUNG CHO TỪNG BỘ RIÊNG LẺ (bỏ dấu '#' khi muốn áp dụng) ---
   #
-  # 1. Bộ hành động nặng (Sakuga / lia máy liên tục):
+  # Bộ hành động nặng (Sakuga / lia máy liên tục):
   # - pattern: "*Fate*"
   #   model: "animejanai-hd-v3-sharp1-ultracompact"
   #   dedup_policy: "sakuga"
-  #
-  # 2. Nguồn phát sóng hằng tuần Crunchyroll Web-DL ([SubsPlease], [Erai-raws]):
-  # - pattern: "[SubsPlease]*"
-  #   model: "animejanai-hd-v3-ultracompact"
-  #   dedup_policy: "default"
-  #
-  # 3. Nguồn đĩa Blu-ray 1080p sạch ([BD 1080p], BluRay):
-  # - pattern: "*[BD*"
-  #   model: "animejanai-hd-v3-sharp1-ultracompact"
-  #   dedup_policy: "dis"

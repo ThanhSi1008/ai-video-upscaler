@@ -165,13 +165,19 @@ def test_double_buffered_upscaler_pipelined_processing():
 
 
 def test_cli_zero_disk_argument_parser():
-    """Verifies that upscale.py CLI argument parser supports --zero-disk flag."""
+    """Verifies that upscale.py CLI argument parser supports --zero-disk flag and defaults to True."""
     from upscale import build_arg_parser
     parser = build_arg_parser()
     args = parser.parse_args(["--zero-disk"])
     assert args.zero_disk is True
 
     args_default = parser.parse_args([])
-    assert args_default.zero_disk is False
+    assert args_default.zero_disk is True
+
+    args_no = parser.parse_args(["--no-zero-disk"])
+    assert args_no.zero_disk is False
+
+    args_disk = parser.parse_args(["--disk"])
+    assert args_disk.zero_disk is False
 
 

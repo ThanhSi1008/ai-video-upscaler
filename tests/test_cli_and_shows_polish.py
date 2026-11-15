@@ -94,7 +94,17 @@ def test_shows_yaml_valid_and_subtrans_configs_purged_of_ollama():
     """Đảm bảo shows.yaml hợp lệ và cấu hình subtrans không còn mục ollama/translategemma/local."""
     shows_data = yaml.safe_load(Path("shows.yaml").read_text(encoding="utf-8"))
     assert isinstance(shows_data, dict)
-    assert shows_data.get("shows") == []
+    shows_list = shows_data.get("shows")
+    assert isinstance(shows_list, list)
+    assert len(shows_list) >= 7
+    patterns = [r.get("pattern") for r in shows_list]
+    assert "[SubsPlease]*" in patterns
+    assert "*[SubsPlease]*" in patterns
+    assert "[Erai-raws]*" in patterns
+    assert "*[Erai-raws]*" in patterns
+    assert "*[BD*" in patterns
+    assert "*BluRay*" in patterns
+    assert "*BDRip*" in patterns
 
     sub_cfg = load_config()
     assert "ollama" not in sub_cfg

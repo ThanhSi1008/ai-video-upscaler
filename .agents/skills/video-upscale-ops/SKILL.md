@@ -10,7 +10,7 @@ description: >-
 
 ## 1. Non-Negotiable Hardware & Quality Invariants
 
-- **100% Local Execution:** Windows 11, Intel Core i5-12600K (P-Core HighQoS, AVX2 `cv2.imwrite`), NVIDIA RTX 3060 12GB (TensorRT 10 FP16 / PyTorch `cuda` FP16, `batch_size=8`, `--zero-disk` optional). Never propose Cloud GPUs or load local LLMs concurrently.
+- **100% Local Execution:** Windows 11, Intel Core i5-12600K (P-Core HighQoS, AVX2 `cv2.imwrite`), NVIDIA RTX 3060 12GB (TensorRT 10 FP16 / PyTorch `cuda` FP16, `batch_size=8`, `--zero-disk` default `True` with `--no-zero-disk` fallback). Never propose Cloud GPUs or load local LLMs concurrently.
 - **Approval Gate:** Ask the user before running real GPU inference > 100 frames or changing default SR models / NVENC quality flags.
 - **Checkpoint Safety:** Never delete or modify `.temp_<basename>/` (`manifest.json`, `plan.json`, `raw_segs/`, `upscaled_segs/`) without explicit user confirmation.
 - **Two-Way BT.709 Matrix:**
