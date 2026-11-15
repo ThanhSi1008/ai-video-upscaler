@@ -2,7 +2,7 @@
 
 > **Cập nhật ngày:** 2026-11-15
 >
-> **Commit Baseline:** `705516a` (`docs(state): synchronize STATE.md baseline`)
+> **Commit Baseline:** `930dcbc` (`feat(web): add real-time Web Studio GUI (FastAPI + SSE 1Hz) & modern-web-guidance skill`)
 >
 > **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
 
