@@ -39,7 +39,11 @@ python upscale.py path/to/source.mkv -o out/
 python subtrans.py path/to/source.mkv -o out/
 .\subtrans.bat path/to/source.mkv
 
-# Kiểm tra bộ nhớ Agent và chạy kiểm thử an toàn offline (không chạy bare pytest trên root):
+# Khởi chạy Web GUI theo dõi thời gian thực (127.0.0.1:8765):
+.\web_gui.bat
+python web_gui.py
+
+# Kiểm tra bộ nhớ Agent và chạy kiểm thử offline (không chạy bare pytest):
 .\.venv\Scripts\python.exe scripts/agent_context.py --check
 .\.venv\Scripts\python.exe scripts/verify_offline.py
 ```
@@ -77,38 +81,39 @@ python subtrans.py path/to/source.mkv -o out/
 
 > **Chi tiết vị trí từng file, hàm và cấu trúc module:** Xem [`docs/agents/PROJECT_MAP.md`](docs/agents/PROJECT_MAP.md).
 
-- **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 Zero-Alloc Ring / CUDA FP16, 3-Stage Overlapped Zero-Disk Pipe, Cyclic Cel Memoization `A->B->A`, GOP-RLE Queue Preflight, 1-Pass Concat-Mux & `streamhash`).
-- **`subtrans.py` / `subtrans/`:** Engine dịch thuật phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
+- **`upscale.py` / `src/`:** Pipeline phóng to video (TensorRT 10 Zero-Alloc Ring / CUDA FP16, 3-Stage Overlapped Zero-Disk Pipe, Cyclic Cel `A->B->A`, GOP-RLE Queue Preflight, 1-Pass Concat-Mux & `streamhash`).
+- **`subtrans.py` / `subtrans/`:** Engine dịch phụ đề (Gemini 3-Key Round-Robin, Whisper STT Fallback, Multi-Speaker CC).
+- **`web_gui.py` / `web/`:** Web Studio cục bộ thời gian thực (FastAPI + SSE 1Hz, Queue ETA, đối chiếu 1080p/4K, `shows.yaml`, Subtrans & Audit).
 - **`scripts/`:** Tiện ích vận hành (`agent_context.py`, `verify_offline.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `batch_translate_all.py`, `set_track_defaults.py`).
-- **`models/` & `shows.yaml`:** Registry mô hình Super-Resolution và ánh xạ riêng từng bộ anime.
-- **`tests/` & `subtrans/tests/`:** 100% Pytest tự động hóa kiểm thử đơn vị và tích hợp.
+- **`models/` & `shows.yaml`:** Registry model SR và ánh xạ theo bộ anime.
+- **`tests/` & `subtrans/tests/`:** 100% Pytest kiểm thử đơn vị và tích hợp.
 
 ---
 
 ## 4. Những Bất Biến Kỹ Thuật (Do NOT Break)
 
 1. **Bảo vệ Bộ Nhớ & Ổ Cứng (Storage & RAM Discipline):**
-   * Khung hình trung gian của từng chunk 8s phải được xóa cuốn chiếu ngay khi chunk mã hóa xong sang file HEVC `.mp4`.
-   * Thư mục SSD chỉ lưu trữ các segment HEVC đã nén (`up_*.mp4`) trong `.temp_<basename>` để phục vụ resume.
-   * Tối ưu I/O khung hình qua OpenCV C++ `cv2.imwrite` tận dụng AVX2 của CPU Core i5-12600K.
+   * Khung hình trung gian của mỗi chunk 8s phải xóa cuốn chiếu ngay khi mã hóa xong sang HEVC `.mp4`.
+   * SSD chỉ giữ các segment HEVC nén (`up_*.mp4`) trong `.temp_<basename>` để phục vụ resume.
+   * Tối ưu I/O khung hình qua OpenCV C++ `cv2.imwrite` tận dụng AVX2 trên i5-12600K.
 2. **Bit-exact Stream Copy & Cờ Mux Phòng Thu:**
-   * Video 4K thành phẩm **bắt buộc Stream Copy nguyên bản**: Audio đa kênh, Phụ đề mềm (ASS/SRT), Font chữ nhúng (TTF/OTF) và Chapters.
+   * Video 4K thành phẩm **bắt buộc Stream Copy nguyên bản**: Audio đa kênh, Phụ đề mềm (ASS/SRT), Font nhúng (TTF/OTF) và Chapters.
    * Lệnh mux bắt buộc dùng cờ:
      `-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0`
-   * Cờ `-max_interleave_delta 0` là bắt buộc để ngăn lỗi tràn buffer và mất tiếng cục bộ sau vài phút phát lại.
+   * Cờ `-max_interleave_delta 0` bắt buộc có để ngăn tràn buffer và mất tiếng cục bộ khi phát lại.
 3. **Chuỗi ma trận màu sắc chuẩn xác (BT.709 Two-way Matrix):**
    * Trích xuất: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (YUV Limited -> RGB24 Full).
    * Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full -> YUV Limited `p010le`).
    * Metadata gắn cờ: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
 4. **Mã hóa phần cứng 10-bit NVENC:**
-   * Bắt buộc dùng `hevc_nvenc` với profile `main10`, định dạng `p010le`, preset `p6`, `CQ 18` (`maxrate 45M`), multipass `fullres`, lookahead `32` và AQ kép (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
+   * Bắt buộc dùng `hevc_nvenc` với profile `main10`, `p010le`, preset `p6`, `CQ 18` (`maxrate 45M`), multipass `fullres`, lookahead `32` và AQ kép (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
 5. **Vòng đời an toàn (Process Lifecycle & Anti-Sleep):**
-   * Sử dụng Win32 API native `SetThreadExecutionState` ngăn hệ thống đi vào chế độ ngủ (sleep/suspend) trong suốt quá trình chạy.
-   * Tất cả tài nguyên đệm tạm và tiến trình con phải nằm trong Context Manager với `atexit` để thu hồi sạch sẽ kể cả khi bị `Ctrl+C` (SIGINT).
+   * Dùng Win32 API native `SetThreadExecutionState` ngăn máy ngủ (sleep/suspend) trong suốt quá trình chạy.
+   * Mọi tài nguyên đệm tạm và tiến trình con phải nằm trong Context Manager với `atexit` để thu hồi sạch kể cả khi `Ctrl+C` (SIGINT).
 6. **Độc quyền GPU & Điều phối tài nguyên:**
-   * Tại một thời điểm chỉ duy nhất 1 tiến trình infer GPU được hoạt động.
-   * Pipeline chạy gối đầu 3 tầng: CPU Decode (chunk N+1) và NVENC Encoder (chunk N-1) chạy song song với GPU Infer (chunk N).
-   * Tuyệt đối không nạp mô hình cục bộ LLM khi tiến trình Upscale GPU đang hoạt động.
+   * Tại một thời điểm chỉ duy nhất 1 tiến trình infer GPU hoạt động.
+   * Pipeline gối đầu 3 tầng: CPU Decode (chunk N+1) và NVENC Encoder (chunk N-1) chạy song song với GPU Infer (chunk N).
+   * Tuyệt đối không nạp LLM cục bộ khi tiến trình Upscale GPU đang chạy.
 
 ---
 

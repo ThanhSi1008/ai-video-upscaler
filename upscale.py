@@ -997,6 +997,11 @@ def main():
                     except Exception as bg_err:
                         print(f"⚠️ [ASYNC-SUBS] Không thể chạy nền cho '{os.path.basename(vid)}' ({bg_err}), sẽ chạy ở Stage B cuối hàng đợi.")
             else:
+                from src.logger import was_graceful_paused
+                if was_graceful_paused():
+                    unfinished_videos[vid] = "Dừng êm theo yêu cầu người dùng (bảo toàn checkpoint)"
+                    print(f"\n⏸️ [GRACEFUL PAUSE] Tập '{os.path.basename(vid)}' đã dừng êm và giữ nguyên checkpoint. Tạm ngưng hàng đợi.")
+                    break
                 unfinished_videos[vid] = "Dừng sạch ranh giới phân đoạn theo --allow-partial"
                 print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
 

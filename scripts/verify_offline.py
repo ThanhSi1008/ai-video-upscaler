@@ -13,14 +13,18 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs"}
-ROOT_FILES = {"upscale.py", "subtrans.py", "pytest.ini", "requirements.txt", "shows.yaml",
+SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs", "web"}
+ROOT_FILES = {"upscale.py", "subtrans.py", "web_gui.py", "web_gui.bat", "pytest.ini", "requirements.txt", "shows.yaml",
               "AGENTS.md", "GEMINI.md", "CLAUDE.md", "README.md"}
-SUFFIXES = {".py", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt"}
+SUFFIXES = {".py", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt", ".html", ".css", ".js", ".svg"}
 GUARD = '''"""Offline guard loaded before test collection in the source snapshot."""
+import _socket
 import socket
+import sys
 
 def deny_network(*args, **kwargs):
+    if hasattr(socket, "socketpair") and sys._getframe(1).f_code is socket.socketpair.__code__:
+        return _socket.socket.connect(*args, **kwargs)
     raise RuntimeError("Network disabled by verify_offline.py; use a stub backend")
 
 socket.socket.connect = deny_network

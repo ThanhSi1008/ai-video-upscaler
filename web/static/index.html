@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <script>try{document.querySelector('meta[name="color-scheme"]').content=localStorage.getItem("color-scheme")??"light dark";}catch{}</script>
+  <title>AI Video Upscaler &amp; Subtrans — Real-Time Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b132b'/%3E%3Cpath d='M14 44L26 20l10 18 6-10 8 16H14z' fill='%2300d4ff'/%3E%3Ccircle cx='46' cy='18' r='5' fill='%237bf1a8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="studio-header">
+    <div class="brand-cluster">
+      <svg class="brand-logo" width="36" height="36" viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="14" fill="currentColor" opacity="0.14"></rect>
+        <path d="M13 45L26 19l10 18 7-11 8 19H13z" fill="currentColor"></path>
+        <circle cx="47" cy="18" r="5" fill="currentColor"></circle>
+      </svg>
+      <div>
+        <h1 class="studio-title">AI Video Upscaler &amp; Subtrans Studio</h1>
+        <p class="studio-subtitle">Điều phối 4K TensorRT 10 Zero-Disk &amp; Dịch phụ đề Anime thời gian thực</p>
+      </div>
+    </div>
+
+    <div class="header-pills" aria-label="Trạng thái hệ thống tóm tắt">
+      <span id="sse-badge" class="status-pill" data-tone="neutral">
+        <span class="pill-icon" aria-hidden="true">◌</span>
+        <span id="sse-badge-text">Đang kết nối SSE…</span>
+      </span>
+      <span id="source-badge" class="status-pill" data-tone="idle">
+        <span class="pill-icon" aria-hidden="true">■</span>
+        <span id="source-badge-text">Hệ thống rảnh</span>
+      </span>
+      <span id="gpu-badge" class="status-pill" data-tone="info">
+        <span class="pill-icon" aria-hidden="true">⚡</span>
+        <span id="gpu-badge-text">GPU: Đang dò…</span>
+      </span>
+
+      <div class="theme-control">
+        <label for="theme-select" class="visually-hidden">Giao diện sáng tối</label>
+        <select id="theme-select" class="compact-select" aria-label="Chế độ giao diện sáng tối">
+          <option value="light dark">Giao diện: Tự động</option>
+          <option value="dark">Giao diện: Tối</option>
+          <option value="light">Giao diện: Sáng</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <main class="studio-main">
+    <div class="tabs-shell">
+      <div class="tablist scroller" role="tablist" focusgroup="tablist nomemory" aria-label="Phân hệ điều khiển Studio">
+        <button type="button" role="tab" id="tab-monitor" aria-controls="panel-monitor" aria-selected="true" focusgroupstart>
+          <span aria-hidden="true">📡</span>
+          <span>Giám sát Trực tiếp</span>
+        </button>
+        <button type="button" role="tab" id="tab-queue" aria-controls="panel-queue" aria-selected="false">
+          <span aria-hidden="true">🗂️</span>
+          <span>Hàng đợi &amp; Lập lịch</span>
+        </button>
+        <button type="button" role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false">
+          <span aria-hidden="true">🔍</span>
+          <span>Đối chiếu 1080p vs 4K</span>
+        </button>
+        <button type="button" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="false">
+          <span aria-hidden="true">🧠</span>
+          <span>Mô hình &amp; shows.yaml</span>
+        </button>
+        <button type="button" role="tab" id="tab-subtrans" aria-controls="panel-subtrans" aria-selected="false">
+          <span aria-hidden="true">💬</span>
+          <span>Subtrans &amp; Kiểm định</span>
+        </button>
+      </div>
+
+      <div class="tabpanels-stack">
+        <!-- =========================================================
+             TAB 1: LIVE MONITOR
+             ========================================================= -->
+        <div role="tabpanel" id="panel-monitor" aria-labelledby="tab-monitor">
+          <div class="panel-surface">
+            <section class="hero-status-card" aria-labelledby="live-hero-heading">
+              <div class="hero-top-row">
+                <div>
+                  <h2 id="live-hero-heading" class="section-heading" tabindex="-1">Trạng thái Pipeline Thời gian thực</h2>
+                  <p id="live-episode-title" class="episode-banner-title">Chưa có tiến trình nào đang chạy — Sẵn sàng nhận tập phim mới</p>
+                </div>
+                <div class="hero-actions">
+                  <button type="button" id="btn-go-queue" class="btn btn-secondary">
+                    <span aria-hidden="true">➕</span> Chọn Video / Hàng đợi
+                  </button>
+                  <button type="button" id="btn-pause-graceful" class="btn btn-warning" disabled>
+                    <span aria-hidden="true">⏸</span> Dừng êm sau Chunk này
+                  </button>
+                  <button type="button" id="btn-clear-pause" class="btn btn-secondary" hidden>
+                    <span aria-hidden="true">▶</span> Hủy lệnh dừng êm
+                  </button>
+                  <button type="button" id="btn-abort-job" class="btn btn-danger" disabled>
+                    <span aria-hidden="true">⏹</span> Buộc dừng Web Job
+                  </button>
+                </div>
+              </div>
+
+              <ol class="pipeline-stepper" id="pipeline-stepper" aria-label="Các bước tiến trình xử lý video">
+                <li class="step-item" data-step="probing">
+                  <span class="step-marker" aria-hidden="true">1</span>
+                  <span class="step-label">Probe &amp; Khởi tạo</span>
+                </li>
+                <li class="step-item" data-step="preflight_dedup">
+                  <span class="step-marker" aria-hidden="true">2</span>
+                  <span class="step-label">GOP Dedup &amp; DIS</span>
+                </li>
+                <li class="step-item" data-step="upscaling">
+                  <span class="step-marker" aria-hidden="true">3</span>
+                  <span class="step-label">Suy luận 4K GPU</span>
+                </li>
+                <li class="step-item" data-step="muxing">
+                  <span class="step-marker" aria-hidden="true">4</span>
+                  <span class="step-label">1-Pass Concat Mux</span>
+                </li>
+                <li class="step-item" data-step="auditing">
+                  <span class="step-marker" aria-hidden="true">5</span>
+                  <span class="step-label">Mux &amp; Sanity Audit</span>
+                </li>
+                <li class="step-item" data-step="completed">
+                  <span class="step-marker" aria-hidden="true">6</span>
+                  <span class="step-label">Hoàn tất 4K</span>
+                </li>
+              </ol>
+
+              <div class="progress-cluster">
+                <div class="progress-labels">
+                  <label for="episode-progress" id="episode-progress-label">Tiến độ khung hình: 0%</label>
+                  <span id="live-stage-detail" class="muted-meta">Đang chờ tác vụ…</span>
+                </div>
+                <progress id="episode-progress" class="studio-progress" value="0" max="100" style="--progress-pct: 0;"></progress>
+              </div>
+
+              <dl class="kpi-strip">
+                <div class="kpi-box">
+                  <dt>Mô hình &amp; Chế độ</dt>
+                  <dd id="kpi-model">—</dd>
+                </div>
+                <div class="kpi-box">
+                  <dt>Khung hình</dt>
+                  <dd id="kpi-frames">0 / 0</dd>
+                </div>
+                <div class="kpi-box">
+                  <dt>Chunk 8s</dt>
+                  <dd id="kpi-chunks">0 / 0</dd>
+                </div>
+                <div class="kpi-box">
+                  <dt>Tốc độ AI / Thực tế</dt>
+                  <dd id="kpi-fps">0.00 / 0.00 fps</dd>
+                </div>
+                <div class="kpi-box">
+                  <dt>Đã chạy / ETA còn lại</dt>
+                  <dd id="kpi-eta">00:00 / --:--</dd>
+                </div>
+                <div class="kpi-box">
+                  <dt>Ổ đĩa trống</dt>
+                  <dd id="kpi-disk">-- GB</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="charts-section" aria-labelledby="telemetry-charts-heading">
+              <div class="section-header-inline">
+                <h2 id="telemetry-charts-heading" class="section-heading">Viễn trắc Phần cứng 1.0 Hz (Cửa sổ trượt 120 giây)</h2>
+                <p id="hw-live-summary" class="muted-meta">CPU: --% | P-State: -- | Clock: -- MHz</p>
+              </div>
+
+              <div class="charts-grid">
+                <article class="chart-card">
+                  <div class="chart-card-head">
+                    <h3>GPU Compute &amp; NVENC (%)</h3>
+                    <span id="chart-val-gpu" class="chart-readout">--% / --%</span>
+                  </div>
+                  <canvas id="chart-gpu" width="560" height="170" aria-label="Biểu đồ phần trăm GPU Compute và NVENC trong 120 giây qua"></canvas>
+                </article>
+
+                <article class="chart-card">
+                  <div class="chart-card-head">
+                    <h3>VRAM GPU &amp; System RAM</h3>
+                    <span id="chart-val-mem" class="chart-readout">-- MiB / -- GB</span>
+                  </div>
+                  <canvas id="chart-mem" width="560" height="170" aria-label="Biểu đồ dung lượng VRAM và RAM hệ thống trong 120 giây qua"></canvas>
+                </article>
+
+                <article class="chart-card">
+                  <div class="chart-card-head">
+                    <h3>Điện năng (W) &amp; Nhiệt độ (°C)</h3>
+                    <span id="chart-val-power" class="chart-readout">-- W / -- °C</span>
+                  </div>
+                  <canvas id="chart-power" width="560" height="170" aria-label="Biểu đồ công suất tiêu thụ và nhiệt độ GPU trong 120 giây qua"></canvas>
+                </article>
+
+                <article class="chart-card">
+                  <div class="chart-card-head">
+                    <h3>Tốc độ AI (FPS) &amp; NVMe I/O (MB/s)</h3>
+                    <span id="chart-val-io" class="chart-readout">-- fps / -- MB/s</span>
+                  </div>
+                  <canvas id="chart-io" width="560" height="170" aria-label="Biểu đồ tốc độ khung hình và đọc ghi ổ cứng trong 120 giây qua"></canvas>
+                </article>
+              </div>
+            </section>
+
+            <div class="monitor-bottom-split">
+              <section class="card-panel" aria-labelledby="chunk-heatmap-heading">
+                <div class="section-header-inline">
+                  <h2 id="chunk-heatmap-heading" class="section-heading">Bản đồ Chunk &amp; Checkpoint (.temp_*)</h2>
+                  <span id="chunk-legend-summary" class="muted-meta">0 chunk hoàn tất</span>
+                </div>
+                <div class="heatmap-legend" aria-label="Chú giải trạng thái chunk">
+                  <span><strong aria-hidden="true">✓</strong> Đã nén HEVC</span>
+                  <span><strong aria-hidden="true">▶</strong> Đang suy luận</span>
+                  <span><strong aria-hidden="true">·</strong> Chờ xử lý</span>
+                </div>
+                <div id="chunk-heatmap" class="chunk-heatmap" role="region" aria-labelledby="chunk-heatmap-heading" tabindex="0">
+                  <p class="empty-hint">Bản đồ tiến độ từng chunk 8s sẽ hiển thị ngay khi tập phim bắt đầu chạy.</p>
+                </div>
+                <div id="checkpoint-list" class="checkpoint-strip"></div>
+              </section>
+
+              <section class="card-panel log-panel" aria-labelledby="live-log-heading">
+                <div class="section-header-inline">
+                  <h2 id="live-log-heading" class="section-heading">Nhật ký Tiến trình Trực tiếp</h2>
+                  <div class="log-toolbar-actions">
+                    <label class="inline-check">
+                      <input type="checkbox" id="log-autoscroll" checked>
+                      <span>Tự cuộn cuối</span>
+                    </label>
+                    <button type="button" id="btn-copy-logs" class="btn btn-ghost">Sao chép Log</button>
+                  </div>
+                </div>
+
+                <search class="log-search-bar">
+                  <label for="log-filter-input" class="visually-hidden">Lọc dòng nhật ký</label>
+                  <input type="search" id="log-filter-input" placeholder="Tìm theo từ khóa (vd: Chunk, MUX, FPS, ERROR)…">
+                  <label for="log-level-select" class="visually-hidden">Mức nhật ký</label>
+                  <select id="log-level-select" class="compact-select">
+                    <option value="all">Mọi dòng log</option>
+                    <option value="chunk">Chỉ Chunk &amp; FPS</option>
+                    <option value="warn">Cảnh báo &amp; Lỗi</option>
+                    <option value="subtrans">Dịch phụ đề</option>
+                  </select>
+                </search>
+
+                <pre id="live-log-pre" class="log-console" role="region" aria-labelledby="live-log-heading" tabindex="0"><code id="live-log-code">Đang tải nhật ký mới nhất…</code></pre>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <!-- =========================================================
+             TAB 2: QUEUE & SCHEDULER
+             ========================================================= -->
+        <div role="tabpanel" id="panel-queue" aria-labelledby="tab-queue" hidden="until-found">
+          <div class="panel-surface">
+            <div class="two-col-layout">
+              <section class="card-panel" aria-labelledby="queue-builder-heading">
+                <div class="section-header-inline">
+                  <h2 id="queue-builder-heading" class="section-heading" tabindex="-1">1. Chọn Video Nguồn / Thư mục Bộ Phim</h2>
+                  <div class="button-cluster">
+                    <button type="button" id="btn-open-fs-queue" class="btn btn-primary">
+                      <span aria-hidden="true">📂</span> Duyệt Ổ đĩa &amp; Thư mục
+                    </button>
+                    <button type="button" id="btn-clear-queue" class="btn btn-ghost">Xóa danh sách</button>
+                  </div>
+                </div>
+
+                <div class="manual-path-row">
+                  <label for="manual-queue-path" class="visually-hidden">Nhập đường dẫn file hoặc thư mục</label>
+                  <input type="text" id="manual-queue-path" placeholder="Dán đường dẫn file .mkv/.mp4 hoặc cả thư mục anime…">
+                  <button type="button" id="btn-add-manual-path" class="btn btn-secondary">Thêm</button>
+                </div>
+
+                <ul id="queue-inputs-list" class="selected-inputs-list" aria-label="Danh sách nguồn đã chọn">
+                  <li class="empty-hint">Chưa có file hay thư mục nào. Nhấn “Duyệt Ổ đĩa &amp; Thư mục” để chọn nhanh các tập anime.</li>
+                </ul>
+              </section>
+
+              <section class="card-panel" aria-labelledby="queue-options-heading">
+                <h2 id="queue-options-heading" class="section-heading">2. Cấu hình Nâng cấp 4K &amp; Hạn chót Ca đêm</h2>
+                <form id="upscale-config-form" class="form-grid">
+                  <div class="field-group">
+                    <label for="opt-model">Mô hình Super-Resolution</label>
+                    <select id="opt-model">
+                      <option value="">Tự động phân giải theo shows.yaml (Khuyên dùng)</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-dedup">Chính sách Khử trùng lặp (Dedup / DIS)</label>
+                    <select id="opt-dedup">
+                      <option value="">Tự động theo shows.yaml / Mặc định</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-batch-size">Batch Size GPU (RTX 3060 = 8)</label>
+                    <input type="number" id="opt-batch-size" min="1" max="32" value="8">
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-deadline">Giờ hạn chót dừng ca đêm (--deadline HH:MM)</label>
+                    <input type="text" id="opt-deadline" placeholder="Để trống nếu chạy hết, hoặc vd: 07:00" pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$">
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-output-dir">Thư mục xuất thành phẩm (-o)</label>
+                    <input type="text" id="opt-output-dir" placeholder="Mặc định: out/">
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-subs-quality">Chất lượng Dịch Phụ đề đi kèm</label>
+                    <select id="opt-subs-quality">
+                      <option value="normal">Chuẩn — Tiết kiệm hạn mức (gemini-3.5-flash-lite)</option>
+                      <option value="high">Cao cấp — Ưu tiên Flash (gemini-3.8-flash)</option>
+                    </select>
+                  </div>
+
+                  <fieldset class="checkbox-fieldset">
+                    <legend>Tùy chọn Pipeline &amp; Phụ đề</legend>
+                    <label class="inline-check"><input type="checkbox" id="opt-zero-disk" checked> <span>Turbo Zero-Disk Pipe (0 PNG đĩa)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-tensorrt" checked> <span>Biên dịch / Chạy TensorRT 10 FP16</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-allow-partial"> <span>Cho phép chạy 1 phần khi chạm deadline (--allow-partial)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-subs-after" checked> <span>Tự dịch &amp; nhúng phụ đề VI sau khi Upscale</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-async-subs"> <span>Dịch gối đầu song song tập kế (--async-subs)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-prefer-whisper"> <span>Ưu tiên Whisper 5.1 FC STT (--prefer-whisper)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-force"> <span>Ghi đè nếu đã có bản _4K (--force)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-dry-run"> <span>Chế độ mô phỏng lập lịch (--dry-run)</span></label>
+                  </fieldset>
+
+                  <div class="form-cta-row">
+                    <button type="button" id="btn-calc-schedule" class="btn btn-secondary">
+                      <span aria-hidden="true">📊</span> Tính bảng dự báo ETA
+                    </button>
+                    <button type="button" id="btn-run-preview-10s" class="btn btn-secondary">
+                      <span aria-hidden="true">⚡</span> Chạy Xem trước 10s (30% phim)
+                    </button>
+                    <button type="submit" id="btn-start-upscale" class="btn btn-primary">
+                      <span aria-hidden="true">🚀</span> Bắt đầu Nâng cấp 4K
+                    </button>
+                  </div>
+                </form>
+              </section>
+            </div>
+
+            <section class="card-panel" aria-labelledby="schedule-table-caption">
+              <div class="section-header-inline">
+                <h2 class="section-heading">3. Bảng Dự báo Phân giải Model &amp; Lịch trình Hoàn thành</h2>
+                <p id="schedule-summary-pill" class="muted-meta">Chọn tập phim để xem dự báo tự động theo shows.yaml</p>
+              </div>
+
+              <div tabindex="0" role="region" aria-labelledby="schedule-table-caption" class="table-wrapper">
+                <table class="studio-table" id="schedule-table">
+                  <caption id="schedule-table-caption" class="visually-hidden">Bảng dự báo mô hình SR, tỷ lệ khử trùng lặp và thời gian hoàn thành từng tập</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Tập phim</th>
+                      <th scope="col">Mô hình phân giải</th>
+                      <th scope="col">Chính sách Dedup</th>
+                      <th scope="col">Frame Duy nhất</th>
+                      <th scope="col">FPS Tham chiếu</th>
+                      <th scope="col">ETA Dự kiến</th>
+                      <th scope="col">Khung giờ</th>
+                      <th scope="col">Quyết định</th>
+                    </tr>
+                  </thead>
+                  <tbody id="schedule-tbody">
+                    <tr>
+                      <th scope="row">—</th>
+                      <td colspan="7">Chưa có dữ liệu dự báo. Hãy thêm ít nhất 1 file hoặc thư mục ở mục 1.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <!-- =========================================================
+             TAB 3: PREVIEW SPLIT-COMPARE (1080p vs 4K)
+             ========================================================= -->
+        <div role="tabpanel" id="panel-compare" aria-labelledby="tab-compare" hidden="until-found">
+          <div class="panel-surface">
+            <section class="card-panel" aria-labelledby="compare-heading">
+              <div class="section-header-inline">
+                <div>
+                  <h2 id="compare-heading" class="section-heading" tabindex="-1">Bàn Ánh sáng Đối chiếu Trực tiếp 1080p Gốc vs 4K AI (BT.709)</h2>
+                  <p class="muted-meta">Kéo thanh gạt hoặc dùng phím mũi tên để soi chi tiết nét vẽ; bật Kính lúp 200%–400% để kiểm tra khử nhiễu &amp; độ sắc nét.</p>
+                </div>
+                <div class="button-cluster">
+                  <button type="button" id="btn-refresh-candidates" class="btn btn-ghost">↻ Làm mới danh sách out/</button>
+                  <button type="button" id="btn-open-4k-mpv" class="btn btn-secondary">
+                    <span aria-hidden="true">🎬</span> Mở bản 4K trên Máy phát
+                  </button>
+                </div>
+              </div>
+
+              <div class="compare-controls-grid">
+                <div class="field-group">
+                  <label for="compare-candidate-select">Chọn nhanh cặp thành phẩm trong out/</label>
+                  <select id="compare-candidate-select">
+                    <option value="">-- Chọn file 4K / Preview có sẵn trong out/ --</option>
+                  </select>
+                </div>
+
+                <div class="field-group">
+                  <label for="compare-src-input">Đường dẫn Video Gốc (1080p)</label>
+                  <div class="input-with-btn">
+                    <input type="text" id="compare-src-input" placeholder="Đường dẫn file gốc .mkv / .mp4…">
+                    <button type="button" id="btn-browse-compare-src" class="btn btn-secondary">Chọn…</button>
+                  </div>
+                </div>
+
+                <div class="field-group">
+                  <label for="compare-up-input">Đường dẫn Video Thành phẩm (4K)</label>
+                  <div class="input-with-btn">
+                    <input type="text" id="compare-up-input" placeholder="Đường dẫn file _4K.mkv…">
+                    <button type="button" id="btn-browse-compare-up" class="btn btn-secondary">Chọn…</button>
+                  </div>
+                </div>
+
+                <div class="field-group">
+                  <label for="compare-ts-input">Mốc thời gian bản 4K (giây)</label>
+                  <input type="number" id="compare-ts-input" min="0" step="0.25" value="2.0">
+                </div>
+
+                <div class="field-group">
+                  <label for="compare-offset-input">Độ lệch gốc (giây, để trống = tự khớp 30%)</label>
+                  <input type="number" id="compare-offset-input" step="0.25" placeholder="Tự động">
+                </div>
+
+                <div class="field-group compare-extract-cta">
+                  <button type="button" id="btn-extract-compare" class="btn btn-primary">
+                    <span aria-hidden="true">🖼</span> Trích xuất Khung hình Đối chiếu
+                  </button>
+                </div>
+              </div>
+
+              <div class="compare-toolbar">
+                <div class="wipe-slider-group">
+                  <label for="compare-wipe-range">Vị trí vách ngăn Gốc / 4K:</label>
+                  <input type="range" id="compare-wipe-range" min="0" max="100" value="50">
+                  <span id="compare-wipe-label">50%</span>
+                </div>
+
+                <div class="loupe-controls">
+                  <label class="inline-check">
+                    <input type="checkbox" id="compare-loupe-toggle" checked>
+                    <span>Kính lúp soi điểm ảnh khi di chuột</span>
+                  </label>
+                  <label for="compare-zoom-select" class="visually-hidden">Độ phóng đại kính lúp</label>
+                  <select id="compare-zoom-select" class="compact-select">
+                    <option value="2">Phóng đại 200%</option>
+                    <option value="3" selected>Phóng đại 300%</option>
+                    <option value="4">Phóng đại 400%</option>
+                  </select>
+                </div>
+              </div>
+
+              <div id="compare-stage" class="compare-stage" style="--wipe-pct: 50%;">
+                <canvas id="compare-canvas" width="1280" height="720" aria-label="Khung đối chiếu trực quan giữa bản gốc 1080p bên trái và bản nâng cấp 4K bên phải"></canvas>
+                <p id="compare-placeholder" class="compare-placeholder">
+                  Chọn một file thành phẩm trong <code>out/</code> (hoặc chạy Xem trước 10s ở Tab Hàng đợi) rồi nhấn “Trích xuất Khung hình Đối chiếu”.
+                </p>
+              </div>
+              <p id="compare-meta-caption" class="muted-meta">Chưa nạp khung hình.</p>
+            </section>
+          </div>
+        </div>
+
+        <!-- =========================================================
+             TAB 4: MODELS & SHOWS.YAML CONFIGURATOR
+             ========================================================= -->
+        <div role="tabpanel" id="panel-models" aria-labelledby="tab-models" hidden="until-found">
+          <div class="panel-surface">
+            <section class="card-panel" aria-labelledby="models-table-caption">
+              <div class="section-header-inline">
+                <h2 class="section-heading" tabindex="-1">Danh mục Mô hình Super-Resolution Cục bộ (models/models.yaml)</h2>
+                <button type="button" id="btn-refresh-models" class="btn btn-ghost">↻ Kiểm tra lại Trọng số &amp; Engine</button>
+              </div>
+
+              <div tabindex="0" role="region" aria-labelledby="models-table-caption" class="table-wrapper">
+                <table class="studio-table" id="models-table">
+                  <caption id="models-table-caption" class="visually-hidden">Danh sách các mô hình nâng cấp độ phân giải anime và trạng thái trọng số TensorRT</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">ID Mô hình</th>
+                      <th scope="col">Tên &amp; Kiến trúc</th>
+                      <th scope="col">Tỷ lệ Gốc</th>
+                      <th scope="col">Trọng số (.pth)</th>
+                      <th scope="col">Cache TensorRT 10</th>
+                      <th scope="col">FPS Tham chiếu (RTX 3060)</th>
+                      <th scope="col">SHA-256 / Giấy phép</th>
+                    </tr>
+                  </thead>
+                  <tbody id="models-tbody">
+                    <tr>
+                      <th scope="row">Đang tải…</th>
+                      <td colspan="6">Đang đọc models/models.yaml…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <div class="two-col-layout">
+              <section class="card-panel" aria-labelledby="rule-tester-heading">
+                <h2 id="rule-tester-heading" class="section-heading">Bộ Thử nghiệm Quy tắc Định tuyến Tự động</h2>
+                <p class="muted-meta">Kiểm tra xem tên tập phim hoặc thư mục sẽ khớp với rule nào trong trình soạn thảo <code>shows.yaml</code> bên cạnh.</p>
+
+                <div class="field-group">
+                  <label for="test-match-input">Tên file hoặc đường dẫn mẫu cần thử</label>
+                  <div class="input-with-btn">
+                    <input type="text" id="test-match-input" value="[SubsPlease] Frieren - 08 (1080p) [ABCD1234].mkv">
+                    <button type="button" id="btn-test-match" class="btn btn-primary">Thử khớp ngay</button>
+                  </div>
+                </div>
+
+                <dl id="test-match-result" class="match-result-card">
+                  <div>
+                    <dt>Mô hình được chọn</dt>
+                    <dd id="match-res-model">—</dd>
+                  </div>
+                  <div>
+                    <dt>Chính sách Dedup</dt>
+                    <dd id="match-res-dedup">—</dd>
+                  </div>
+                  <div>
+                    <dt>Nguồn quy tắc khớp</dt>
+                    <dd id="match-res-source">—</dd>
+                  </div>
+                  <div>
+                    <dt>Tốc độ tham chiếu</dt>
+                    <dd id="match-res-fps">—</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section class="card-panel" aria-labelledby="shows-editor-heading">
+                <div class="section-header-inline">
+                  <h2 id="shows-editor-heading" class="section-heading">Trình soạn thảo có kiểm tra hợp lệ <code>shows.yaml</code></h2>
+                  <div class="button-cluster">
+                    <button type="button" id="btn-reload-shows" class="btn btn-ghost">↺ Nạp lại từ đĩa</button>
+                    <button type="button" id="btn-save-shows" class="btn btn-primary">💾 Lưu shows.yaml</button>
+                  </div>
+                </div>
+                <label for="shows-yaml-editor" class="visually-hidden">Nội dung tệp cấu hình shows.yaml</label>
+                <textarea id="shows-yaml-editor" class="code-textarea" rows="16" spellcheck="false"></textarea>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <!-- =========================================================
+             TAB 5: SUBTRANS STUDIO & AUDIT VAULT
+             ========================================================= -->
+        <div role="tabpanel" id="panel-subtrans" aria-labelledby="tab-subtrans" hidden="until-found">
+          <div class="panel-surface">
+            <div class="two-col-layout">
+              <section class="card-panel" aria-labelledby="subtrans-runner-heading">
+                <h2 id="subtrans-runner-heading" class="section-heading" tabindex="-1">Dịch Phụ đề Anime Tiếng Việt (Hoạt động mọi khung giờ)</h2>
+                <p class="muted-meta">Trích xuất và dịch trực tiếp từ container MKV/MP4 hoặc tệp phụ đề rời (.srt/.ass) với Gemini 3-Key Round-Robin, DTW Auto-Align và tự động nhúng softsub.</p>
+
+                <form id="subtrans-form" class="form-grid">
+                  <div class="field-group span-full">
+                    <label for="sub-input-path">Tệp Video (.mkv/.mp4) hoặc Phụ đề (.srt/.ass)</label>
+                    <div class="input-with-btn">
+                      <input type="text" id="sub-input-path" placeholder="Chọn file video hoặc phụ đề cần dịch…">
+                      <button type="button" id="btn-browse-sub-input" class="btn btn-secondary">Chọn tệp…</button>
+                    </div>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="sub-quality-select">Chế độ Chất lượng Gemini</label>
+                    <select id="sub-quality-select">
+                      <option value="normal">Chuẩn (gemini-3.5-flash-lite + Cascade)</option>
+                      <option value="high">Cao cấp (gemini-3.8-flash ưu tiên)</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="sub-glossary-select">Từ điển Thuật ngữ (Glossary)</label>
+                    <select id="sub-glossary-select">
+                      <option value="">Tự động nhận diện theo tên phim</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="sub-offset-input">Bù lệch thời gian thủ công (ms)</label>
+                    <input type="number" id="sub-offset-input" value="0" step="50">
+                  </div>
+
+                  <div class="field-group">
+                    <label for="sub-output-dir">Thư mục xuất (-o)</label>
+                    <input type="text" id="sub-output-dir" placeholder="Mặc định: out/">
+                  </div>
+
+                  <fieldset class="checkbox-fieldset">
+                    <legend>Tùy chọn Dịch thuật &amp; Đồng bộ âm thanh</legend>
+                    <label class="inline-check"><input type="checkbox" id="sub-auto-align" checked> <span>Ghim mốc thời gian theo track EN phòng thu (--auto-align-en)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="sub-prefer-whisper"> <span>Trích xuất Whisper 5.1 FC STT (--prefer-whisper)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="sub-upgrade"> <span>Nâng cấp bản dịch cũ lên model cao hơn (--subs-upgrade)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="sub-no-embed"> <span>Chỉ xuất file phụ đề rời, không nhúng vào MKV (--no-embed)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="sub-dry-run"> <span>Chạy thử không gọi API (--dry-run)</span></label>
+                  </fieldset>
+
+                  <div class="form-cta-row">
+                    <button type="submit" id="btn-start-subtrans" class="btn btn-primary">
+                      <span aria-hidden="true">🌐</span> Bắt đầu Dịch Phụ đề
+                    </button>
+                    <button type="button" id="btn-run-subs-pending" class="btn btn-secondary">
+                      <span aria-hidden="true">📥</span> Chạy Hàng đợi Tồn đọng (<span id="pending-subs-count">0</span>)
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section class="card-panel" aria-labelledby="subtrans-quota-heading">
+                <div class="section-header-inline">
+                  <h2 id="subtrans-quota-heading" class="section-heading">Trạng thái Gemini 3-Key, Hạn mức PT &amp; SQLite Cache</h2>
+                  <button type="button" id="btn-refresh-subtrans" class="btn btn-ghost">↻ Làm mới</button>
+                </div>
+
+                <dl class="kpi-strip compact-kpi">
+                  <div class="kpi-box">
+                    <dt>Khóa API sẵn sàng</dt>
+                    <dd id="sub-kpi-keys">0 / 3 khe</dd>
+                  </div>
+                  <div class="kpi-box">
+                    <dt>Câu lưu trong Cache</dt>
+                    <dd id="sub-kpi-cache">0 câu</dd>
+                  </div>
+                  <div class="kpi-box">
+                    <dt>Làm mới Quota (00:00 PT)</dt>
+                    <dd id="sub-kpi-reset">--</dd>
+                  </div>
+                </dl>
+
+                <div id="sub-today-usage" class="usage-pills-box">
+                  <p class="muted-meta">Đang tải thống kê SQLite hôm nay…</p>
+                </div>
+
+                <details class="api-keys-disclosure">
+                  <summary>Quản lý 3 Khe Khóa Gemini API cục bộ (.env)</summary>
+                  <div class="disclosure-body">
+                    <p class="muted-meta">Khóa được lưu cục bộ vào tệp <code>.env</code> trên máy của bạn và luôn được che kín trên giao diện. Để trống một ô nếu không muốn thay đổi khe đó.</p>
+                    <div id="key-slots-status" class="key-slots-list"></div>
+                    <form id="api-keys-form" class="form-grid">
+                      <div class="field-group">
+                        <label for="input-api-key-1">Khe 1 (GEMINI_API_KEY_1)</label>
+                        <input type="password" id="input-api-key-1" placeholder="Giữ nguyên nếu để trống…">
+                      </div>
+                      <div class="field-group">
+                        <label for="input-api-key-2">Khe 2 (GEMINI_API_KEY_2)</label>
+                        <input type="password" id="input-api-key-2" placeholder="Giữ nguyên nếu để trống…">
+                      </div>
+                      <div class="field-group">
+                        <label for="input-api-key-3">Khe 3 (GEMINI_API_KEY_3)</label>
+                        <input type="password" id="input-api-key-3" placeholder="Giữ nguyên nếu để trống…">
+                      </div>
+                      <div class="form-cta-row">
+                        <button type="submit" class="btn btn-secondary">Lưu Khóa API vào .env</button>
+                      </div>
+                    </form>
+                  </div>
+                </details>
+              </section>
+            </div>
+
+            <section class="card-panel" aria-labelledby="audits-table-caption">
+              <div class="section-header-inline">
+                <h2 class="section-heading">Kho Kiểm định Thành phẩm 4K (Mux Integrity &amp; Output Sanity Audit)</h2>
+                <button type="button" id="btn-refresh-audits" class="btn btn-ghost">↻ Làm mới Kho Kiểm định</button>
+              </div>
+
+              <div tabindex="0" role="region" aria-labelledby="audits-table-caption" class="table-wrapper">
+                <table class="studio-table" id="audits-table">
+                  <caption id="audits-table-caption" class="visually-hidden">Danh sách biên bản kiểm định toàn vẹn container MKV 4K, khớp số khung hình, âm thanh, phụ đề và font chữ</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Tập thành phẩm</th>
+                      <th scope="col">Mux Audit</th>
+                      <th scope="col">Sanity Màu</th>
+                      <th scope="col">Khung hình</th>
+                      <th scope="col">Luồng A / S / Font</th>
+                      <th scope="col">Tốc độ &amp; Dung lượng</th>
+                      <th scope="col">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody id="audits-tbody">
+                    <tr>
+                      <th scope="row">Đang tải…</th>
+                      <td colspan="6">Đang quét các tệp kiểm định trong out/…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="studio-footer">
+    <span>100% Cục bộ trên Windows 11 • BT.709 10-bit <code>hevc_nvenc</code> Stream Copy chuẩn phòng thu</span>
+    <span id="footer-clock" class="muted-meta"></span>
+  </footer>
+
+  <!-- ===========================================================
+       MODAL DIALOG 1: FILE & FOLDER BROWSER (closedby="any")
+       =========================================================== -->
+  <dialog id="fs-picker-dialog" class="studio-dialog" closedby="any" aria-labelledby="fs-picker-title">
+    <div class="dialog-header">
+      <h2 id="fs-picker-title">Chọn Video hoặc Thư mục trên Máy trạm</h2>
+      <form method="dialog">
+        <button type="submit" value="cancel" class="btn btn-ghost" aria-label="Đóng hộp thoại chọn tệp">✕ Đóng</button>
+      </form>
+    </div>
+
+    <div class="dialog-body">
+      <div class="fs-nav-bar">
+        <button type="button" id="fs-btn-drives" class="btn btn-secondary">🖴 Danh sách Ổ đĩa</button>
+        <button type="button" id="fs-btn-workspace" class="btn btn-secondary">🏠 Thư mục Dự án</button>
+        <button type="button" id="fs-btn-up" class="btn btn-secondary">⬆ Lên thư mục cha</button>
+        <code id="fs-current-path" class="fs-path-pill">Ổ đĩa máy tính</code>
+      </div>
+
+      <div id="fs-folder-banner" class="fs-folder-banner" hidden>
+        <span id="fs-folder-summary">Thư mục này có 0 video nguồn.</span>
+        <button type="button" id="fs-btn-pick-folder" class="btn btn-primary">✓ Chọn cả thư mục này</button>
+      </div>
+
+      <div id="fs-entries-list" class="fs-entries-list" role="region" aria-label="Danh sách thư mục và tệp" tabindex="0"></div>
+    </div>
+
+    <div class="dialog-footer">
+      <span id="fs-selection-count" class="muted-meta">Nhấp vào thư mục để mở, hoặc đánh dấu các tệp cần chọn.</span>
+      <form method="dialog" class="button-cluster">
+        <button type="submit" value="cancel" class="btn btn-ghost">Hủy</button>
+        <button type="submit" value="confirm" id="fs-btn-confirm" class="btn btn-primary">Xác nhận lựa chọn</button>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- ===========================================================
+       MODAL DIALOG 2: AUDIT / CAST INSPECTOR (closedby="any")
+       =========================================================== -->
+  <dialog id="audit-detail-dialog" class="studio-dialog" closedby="any" aria-labelledby="audit-detail-title">
+    <div class="dialog-header">
+      <h2 id="audit-detail-title">Chi tiết Biên bản Kiểm định</h2>
+      <form method="dialog">
+        <button type="submit" value="close" class="btn btn-ghost" autofocus>✕ Đóng</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <div id="audit-doc-switcher" class="button-cluster"></div>
+      <pre id="audit-detail-pre" class="log-console" role="region" aria-labelledby="audit-detail-title" tabindex="0"><code id="audit-detail-code"></code></pre>
+    </div>
+  </dialog>
+
+  <!-- ===========================================================
+       PERSISTENT TOAST NOTIFICATIONS & LIVE REGION FALLBACK
+       =========================================================== -->
+  <div id="toast-region" class="toast-region" role="region" aria-label="Thông báo hệ thống"></div>
+  <p class="visually-hidden">Thông báo trình đọc màn hình</p>
+  <div id="sr-live-region" class="visually-hidden" aria-live="polite"></div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

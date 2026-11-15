@@ -1,0 +1,281 @@
+// -*- coding: utf-8 -*-
+/**
+ * web/static/js/charts.js
+ * High-DPI Canvas 2D 120-second sliding telemetry charts:
+ * - Zero external chart libraries, crisp devicePixelRatio scaling, ResizeObserver responsive.
+ * - Reads active theme colors directly from computed CSS tokens (Light / Dark / Forced Colors).
+ */
+
+export class TelemetryChartsController {
+  constructor() {
+    this.maxPoints = 120;
+    this.history = [];
+    this.fpsHistory = [];
+    this.canvases = {
+      gpu: document.getElementById("chart-gpu"),
+      mem: document.getElementById("chart-mem"),
+      power: document.getElementById("chart-power"),
+      io: document.getElementById("chart-io"),
+    };
+    this.readouts = {
+      gpu: document.getElementById("chart-val-gpu"),
+      mem: document.getElementById("chart-val-mem"),
+      power: document.getElementById("chart-val-power"),
+      io: document.getElementById("chart-val-io"),
+    };
+
+    if (typeof ResizeObserver === "function") {
+      this._ro = new ResizeObserver(() => this.redrawAll());
+      for (const c of Object.values(this.canvases)) {
+        if (c instanceof HTMLCanvasElement) {
+          this._ro.observe(c);
+        }
+      }
+    }
+  }
+
+  setSnapshot(historySamples, liveData) {
+    const arr = Array.isArray(historySamples) ? historySamples.slice(-this.maxPoints) : [];
+    this.history = arr;
+    const baseFps = Number(liveData?.steady_fps || liveData?.latest_fps || 0);
+    this.fpsHistory = arr.map((_, idx) => (idx === arr.length - 1 ? baseFps : 0));
+    this.redrawAll(liveData);
+  }
+
+  pushTick(sample, liveData) {
+    if (!sample || typeof sample !== "object") return;
+    this.history.push(sample);
+    if (this.history.length > this.maxPoints) {
+      this.history.shift();
+    }
+    const fpsVal = Number(liveData?.steady_fps || liveData?.latest_fps || 0);
+    this.fpsHistory.push(fpsVal);
+    if (this.fpsHistory.length > this.maxPoints) {
+      this.fpsHistory.shift();
+    }
+    this.redrawAll(liveData);
+  }
+
+  _palette() {
+    const cs = getComputedStyle(document.documentElement);
+    const pick = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+    return {
+      accent: pick("--accent", "#38bdf8"),
+      success: pick("--success", "#34d399"),
+      warning: pick("--warning", "#fbbf24"),
+      danger: pick("--danger", "#f87171"),
+      muted: pick("--fg-muted", "#9fb0cc"),
+      grid: pick("--border-subtle", "#273759"),
+      bg: pick("--bg-elevated", "#18233c"),
+    };
+  }
+
+  redrawAll(liveData = null) {
+    const monitorPanel = document.getElementById("panel-monitor");
+    if (monitorPanel && monitorPanel.hasAttribute("hidden")) {
+      return;
+    }
+
+    const latest = this.history.length > 0 ? this.history[this.history.length - 1] : null;
+    const pal = this._palette();
+
+    if (latest) {
+      if (this.readouts.gpu) {
+        this.readouts.gpu.textContent = `${latest.gpu_util_pct.toFixed(0)}% GPU / ${latest.enc_util_pct.toFixed(0)}% NVENC`;
+      }
+      if (this.readouts.mem) {
+        this.readouts.mem.textContent = `${Math.round(latest.vram_used_mib)} MiB / ${latest.ram_used_gb.toFixed(1)} GB`;
+      }
+      if (this.readouts.power) {
+        this.readouts.power.textContent = `${latest.power_w.toFixed(1)} W / ${latest.temp_c.toFixed(0)} °C`;
+      }
+      const curFps =
+        liveData !== null
+          ? Number(liveData?.steady_fps || liveData?.latest_fps || 0)
+          : this.fpsHistory[this.fpsHistory.length - 1] || 0;
+      const diskRate = Number(latest.ssd_read_mb_s || 0) + Number(latest.ssd_write_mb_s || 0);
+      if (this.readouts.io) {
+        this.readouts.io.textContent = `${curFps.toFixed(2)} fps / ${diskRate.toFixed(1)} MB/s`;
+      }
+    }
+
+    // 1. GPU Compute % & NVENC %
+    this._drawDualChart(this.canvases.gpu, {
+      seriesA: this.history.map((s) => Number(s.gpu_util_pct || 0)),
+      seriesB: this.history.map((s) => Number(s.enc_util_pct || 0)),
+      maxA: 100,
+      maxB: 100,
+      colorA: pal.accent,
+      colorB: pal.success,
+      labelA: "GPU %",
+      labelB: "NVENC %",
+      yTopLabel: "100%",
+      pal,
+    });
+
+    // 2. VRAM % & System RAM %
+    this._drawDualChart(this.canvases.mem, {
+      seriesA: this.history.map((s) => {
+        const tot = Math.max(1, Number(s.vram_total_mib || 12288));
+        return (Number(s.vram_used_mib || 0) / tot) * 100;
+      }),
+      seriesB: this.history.map((s) => {
+        const tot = Math.max(1, Number(s.ram_total_gb || 32));
+        return (Number(s.ram_used_gb || 0) / tot) * 100;
+      }),
+      maxA: 100,
+      maxB: 100,
+      colorA: pal.accent,
+      colorB: pal.warning,
+      labelA: "VRAM %",
+      labelB: "RAM %",
+      yTopLabel: "100%",
+      pal,
+    });
+
+    // 3. Power (W, 0..185W) & Temp (°C, 0..95°C)
+    this._drawDualChart(this.canvases.power, {
+      seriesA: this.history.map((s) => Number(s.power_w || 0)),
+      seriesB: this.history.map((s) => Number(s.temp_c || 0)),
+      maxA: 185,
+      maxB: 95,
+      colorA: pal.warning,
+      colorB: pal.danger,
+      labelA: "Power (W)",
+      labelB: "Temp (°C)",
+      yTopLabel: "185W / 95°C",
+      pal,
+    });
+
+    // 4. AI FPS & NVMe R+W MB/s
+    const ioSeries = this.history.map(
+      (s) => Number(s.ssd_read_mb_s || 0) + Number(s.ssd_write_mb_s || 0)
+    );
+    const maxFps = Math.max(25, ...this.fpsHistory, 1);
+    const maxIo = Math.max(100, ...ioSeries, 1);
+    this._drawDualChart(this.canvases.io, {
+      seriesA: this.fpsHistory,
+      seriesB: ioSeries,
+      maxA: maxFps,
+      maxB: maxIo,
+      colorA: pal.success,
+      colorB: pal.accent,
+      labelA: "AI FPS",
+      labelB: "NVMe MB/s",
+      yTopLabel: `${Math.round(maxFps)} fps`,
+      pal,
+    });
+  }
+
+  _drawDualChart(canvas, cfg) {
+    if (!(canvas instanceof HTMLCanvasElement)) return;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(240, Math.floor(rect.width || canvas.width || 520));
+    const cssH = Math.max(120, Math.floor(rect.height || canvas.height || 170));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const pxW = Math.round(cssW * dpr);
+    const pxH = Math.round(cssH * dpr);
+
+    if (canvas.width !== pxW || canvas.height !== pxH) {
+      canvas.width = pxW;
+      canvas.height = pxH;
+    }
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const padLeft = 10;
+    const padRight = 10;
+    const padTop = 22;
+    const padBottom = 18;
+    const plotW = cssW - padLeft - padRight;
+    const plotH = cssH - padTop - padBottom;
+
+    // Horizontal grid lines (25%, 50%, 75%)
+    ctx.strokeStyle = cfg.pal.grid;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    for (const frac of [0.25, 0.5, 0.75]) {
+      const y = padTop + plotH * frac;
+      ctx.beginPath();
+      ctx.moveTo(padLeft, y);
+      ctx.lineTo(padLeft + plotW, y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    const drawSeries = (values, maxVal, color, fillAlpha, dashed = false) => {
+      if (!values || values.length === 0) return;
+      const denom = Math.max(1, this.maxPoints - 1);
+      const startOffset = this.maxPoints - values.length;
+
+      const points = values.map((v, i) => {
+        const clamped = Math.max(0, Math.min(maxVal, Number(v || 0)));
+        const x = padLeft + ((startOffset + i) / denom) * plotW;
+        const y = padTop + plotH - (clamped / Math.max(0.001, maxVal)) * plotH;
+        return { x, y };
+      });
+
+      if (fillAlpha > 0 && points.length >= 2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, padTop + plotH);
+        for (const pt of points) {
+          ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.lineTo(points[points.length - 1].x, padTop + plotH);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = fillAlpha;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      if (dashed) {
+        ctx.setLineDash([5, 3]);
+      }
+      ctx.beginPath();
+      points.forEach((pt, idx) => {
+        if (idx === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.stroke();
+
+      // Latest sample dot
+      const lastPt = points[points.length - 1];
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(lastPt.x, lastPt.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+
+    drawSeries(cfg.seriesA, cfg.maxA, cfg.colorA, 0.14, false);
+    drawSeries(cfg.seriesB, cfg.maxB, cfg.colorB, 0.0, true);
+
+    // Compact legend + axis markers
+    ctx.font = "600 11px system-ui, sans-serif";
+    ctx.fillStyle = cfg.colorA;
+    ctx.fillText(`● ${cfg.labelA}`, padLeft + 2, 14);
+    const wA = ctx.measureText(`● ${cfg.labelA}`).width;
+    ctx.fillStyle = cfg.colorB;
+    ctx.fillText(`┄ ${cfg.labelB}`, padLeft + wA + 14, 14);
+
+    ctx.fillStyle = cfg.pal.muted;
+    ctx.textAlign = "right";
+    ctx.fillText(cfg.yTopLabel, cssW - padRight, 14);
+    ctx.fillText("Hiện tại (0s)", cssW - padRight, cssH - 4);
+    ctx.textAlign = "left";
+    ctx.fillText("-120s", padLeft, cssH - 4);
+
+    ctx.restore();
+  }
+}

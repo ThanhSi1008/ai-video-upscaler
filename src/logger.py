@@ -8,13 +8,82 @@ Quản lý hiển thị terminal và ghi file log có cấu trúc:
 - Thu thập và lưu bảng tổng kết Benchmark thực tế
 """
 
+import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Iterator, Optional
 
 from src.config import LOGS_DIR, HEVC_ENCODER, DEVICE_NAME
+
+_LAST_GRACEFUL_PAUSE_TRIGGERED: bool = False
+
+
+def get_live_status_path() -> str:
+    """Đường dẫn file trạng thái thời gian thực logs/live_status.json cho Web GUI & CLI."""
+    return os.path.join(LOGS_DIR, "live_status.json")
+
+
+def get_graceful_pause_flag_path() -> str:
+    """Đường dẫn file cờ yêu cầu dừng êm sau khi hoàn tất chunk hiện tại."""
+    return os.path.join(LOGS_DIR, ".graceful_pause.flag")
+
+
+def request_graceful_pause(reason: str = "user_request") -> str:
+    """Tạo cờ yêu cầu dừng êm ở ranh giới chunk 8s kế tiếp (bảo toàn checkpoint)."""
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    flag_path = get_graceful_pause_flag_path()
+    tmp_path = f"{flag_path}.{os.getpid()}.tmp"
+    payload = {
+        "requested_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "reason": reason,
+        "pid": os.getpid(),
+    }
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp_path, flag_path)
+    return flag_path
+
+
+def clear_graceful_pause() -> None:
+    """Xóa cờ dừng êm nếu đang tồn tại."""
+    flag_path = get_graceful_pause_flag_path()
+    try:
+        if os.path.exists(flag_path):
+            os.remove(flag_path)
+    except OSError:
+        pass
+
+
+def is_graceful_pause_requested() -> bool:
+    """Kiểm tra xem có yêu cầu dừng êm đang chờ xử lý hay không."""
+    return os.path.exists(get_graceful_pause_flag_path())
+
+
+def mark_graceful_pause_triggered(triggered: bool = True) -> None:
+    """Ghi nhận trạng thái vừa dừng êm trong tiến trình hiện tại."""
+    global _LAST_GRACEFUL_PAUSE_TRIGGERED
+    _LAST_GRACEFUL_PAUSE_TRIGGERED = bool(triggered)
+
+
+def was_graceful_paused() -> bool:
+    """Trả về True nếu tập vừa kết thúc do yêu cầu dừng êm của người dùng."""
+    return _LAST_GRACEFUL_PAUSE_TRIGGERED
+
+
+def read_live_status() -> Dict[str, Any]:
+    """Đọc an toàn logs/live_status.json; trả về dict rỗng nếu chưa có hoặc đang ghi."""
+    path = get_live_status_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def format_time(seconds: float) -> str:
@@ -84,16 +153,50 @@ class RunLogger:
 
     def __init__(self, video_name: str):
         os.makedirs(LOGS_DIR, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now_dt = datetime.now()
+        timestamp = now_dt.strftime("%Y%m%d_%H%M%S")
+        now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%S")
         safe_name = os.path.splitext(os.path.basename(video_name))[0]
         self.log_filename = f"{safe_name}_{timestamp}.log"
         self.log_filepath = os.path.join(LOGS_DIR, self.log_filename)
         self.latest_symlink = os.path.join(LOGS_DIR, "latest.log")
+        self.live_status_path = get_live_status_path()
+        self._chunk_map: Dict[int, Dict[str, Any]] = {}
+        self._live_state: Dict[str, Any] = {
+            "video_name": video_name,
+            "pid": os.getpid(),
+            "started_at": now_iso,
+            "updated_at": now_iso,
+            "stage": "initializing",
+            "stage_detail": "Khởi tạo phiên xử lý...",
+            "input_path": "",
+            "output_path": "",
+            "model_id": "",
+            "model_name": "",
+            "dedup_policy": "default",
+            "zero_disk": True,
+            "engine": "cuda",
+            "is_preview": False,
+            "total_frames": 0,
+            "unique_frames": 0,
+            "dedup_ratio_percent": 0.0,
+            "total_chunks": 0,
+            "completed_chunks": 0,
+            "resumed_chunks": [],
+            "active_chunk": None,
+            "chunks": [],
+            "latest_fps": 0.0,
+            "steady_fps": 0.0,
+            "effective_fps": 0.0,
+            "eta_seconds": None,
+            "last_error": None,
+            "log_file": self.log_filename,
+        }
 
         # Khởi tạo file log
         with open(self.log_filepath, "w", encoding="utf-8") as f:
-            f.write(f"# AI Video Upscaler 4K - Execution Log\n")
-            f.write(f"# Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("# AI Video Upscaler 4K - Execution Log\n")
+            f.write(f"# Started: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Video: {video_name}\n\n")
 
         # Tạo/cập nhật symlink hoặc file copy latest.log
@@ -106,6 +209,60 @@ class RunLogger:
                 shutil.copyfile(self.log_filepath, self.latest_symlink)
             except Exception:
                 pass
+
+        self._flush_live_status()
+
+    def _flush_live_status(self) -> None:
+        """Ghi nguyên tử trạng thái hiện tại ra logs/live_status.json (< 0.2ms, không ảnh hưởng FPS)."""
+        try:
+            os.makedirs(os.path.dirname(self.live_status_path), exist_ok=True)
+            self._live_state["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            tmp_path = f"{self.live_status_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._live_state, f, ensure_ascii=False)
+            os.replace(tmp_path, self.live_status_path)
+        except Exception:
+            pass
+
+    def update_live_context(self, **kwargs: Any) -> None:
+        """Cập nhật siêu dữ liệu phiên chạy trên live_status.json."""
+        for k, v in kwargs.items():
+            if v is not None:
+                self._live_state[k] = v
+        self._flush_live_status()
+
+    def set_stage(
+        self,
+        stage: str,
+        detail: str = "",
+        active_chunk: Optional[int] = None,
+    ) -> None:
+        """Cập nhật chặng pipeline hiện tại (probing | preflight_dedup | upscaling | muxing | auditing | subtrans | completed | paused | error)."""
+        self._live_state["stage"] = stage
+        if detail:
+            self._live_state["stage_detail"] = detail
+        self._live_state["active_chunk"] = active_chunk
+        self._flush_live_status()
+
+    @contextmanager
+    def stage_guard(self) -> Iterator[None]:
+        """Đảm bảo mọi ngoại lệ hoặc Ctrl+C đều cập nhật trạng thái dừng/lỗi lên live_status.json."""
+        try:
+            yield
+        except KeyboardInterrupt:
+            self.set_stage("paused", "Đã tạm dừng theo yêu cầu người dùng (Ctrl+C).")
+            raise
+        except Exception as exc:
+            if type(exc).__name__ == "FailedResumableError":
+                self._live_state["last_error"] = str(exc)
+                self.set_stage("paused", f"Tạm dừng bảo toàn checkpoint (ENOSPC): {exc}")
+            else:
+                self._live_state["last_error"] = str(exc)
+                if self._live_state.get("stage") != "error":
+                    self.set_stage("error", f"Lỗi pipeline: {exc}")
+                else:
+                    self._flush_live_status()
+            raise
 
     def _write_file(self, message: str):
         """Ghi dòng log kèm timestamp vào file"""
@@ -135,9 +292,13 @@ class RunLogger:
         if to_console:
             print(f"⚠️  {message}")
 
+    warning = warn
+
     def error(self, message: str, to_console: bool = True):
         """Ghi log mức ERROR"""
         self._write_file(f"[ERROR] {message}")
+        self._live_state["last_error"] = message
+        self._flush_live_status()
         if to_console:
             print(f"❌ {message}")
 
@@ -166,6 +327,16 @@ class RunLogger:
         # Ghi vào file log
         with open(self.log_filepath, "a", encoding="utf-8") as f:
             f.write("\n".join(banner_lines) + "\n\n")
+
+        self.update_live_context(
+            output_path=info.get("output_path", ""),
+            width=info.get("width", 0),
+            height=info.get("height", 0),
+            target_w=info.get("target_w", 0),
+            target_h=info.get("target_h", 0),
+            duration_s=round(float(info.get("duration", 0.0)), 2),
+            source_fps=round(float(info.get("fps", 0.0)), 3),
+        )
 
     def log_chunk_done(
         self,
@@ -199,6 +370,34 @@ class RunLogger:
         )
         self._write_file(log_entry)
 
+        eff_fps = (frames / total_chunk_time) if total_chunk_time > 0 else ai_fps
+        s_fps = steady_fps if (steady_fps is not None and steady_fps > 0) else ai_fps
+        chunk_rec = {
+            "chunk_idx": int(chunk_idx),
+            "frames": int(frames),
+            "ai_fps": round(float(ai_fps), 2),
+            "steady_fps": round(float(s_fps), 2),
+            "effective_fps": round(float(eff_fps), 2),
+            "ai_time_s": round(float(ai_time), 3),
+            "enc_time_s": round(float(enc_time), 3),
+            "total_time_s": round(float(total_chunk_time), 3),
+            "size_mb": round(seg_size / (1024 * 1024), 2),
+        }
+        self._chunk_map[int(chunk_idx)] = chunk_rec
+        resumed_set = set(self._live_state.get("resumed_chunks") or [])
+        completed_total = len(set(self._chunk_map.keys()) | resumed_set)
+        remaining_chunks = max(0, int(total_chunks) - completed_total)
+        eta_sec = round(remaining_chunks * float(total_chunk_time), 1) if total_chunk_time > 0 else None
+
+        self._live_state["total_chunks"] = int(total_chunks)
+        self._live_state["completed_chunks"] = completed_total
+        self._live_state["chunks"] = [self._chunk_map[k] for k in sorted(self._chunk_map.keys())]
+        self._live_state["latest_fps"] = round(float(ai_fps), 2)
+        self._live_state["steady_fps"] = round(float(s_fps), 2)
+        self._live_state["effective_fps"] = round(float(eff_fps), 2)
+        self._live_state["eta_seconds"] = eta_sec
+        self._flush_live_status()
+
     def print_benchmark_summary(self, stats: Dict[str, Any]):
         """In bảng tổng kết Benchmark ra console và lưu vĩnh viễn vào file log"""
         dev_name = stats.get('device_name') or DEVICE_NAME
@@ -231,11 +430,17 @@ class RunLogger:
 
         print("\n" + "\n".join(summary_lines))
         if sys.platform == "win32":
-            print(f"\n💡 Thưởng thức ngay video 4K chất lượng cao:")
+            print("\n💡 Thưởng thức ngay video 4K chất lượng cao:")
             print(f"   start \"\" \"{stats['output_path']}\"\n")
         else:
-            print(f"\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")
+            print("\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")
             print(f"   open -a IINA \"{stats['output_path']}\"\n")
 
         with open(self.log_filepath, "a", encoding="utf-8") as f:
             f.write("\n" + "\n".join(summary_lines) + "\n")
+
+        self._live_state["stage"] = "completed"
+        self._live_state["stage_detail"] = "Hoàn tất xuất xưởng 4K thành công!"
+        self._live_state["active_chunk"] = None
+        self._live_state["eta_seconds"] = 0.0
+        self._flush_live_status()

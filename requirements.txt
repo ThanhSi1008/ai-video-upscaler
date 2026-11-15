@@ -29,6 +29,10 @@ unidic-lite>=1.0.8
 pytest>=8.0.0
 ruff>=0.8.0
 
+# Local Realtime Web GUI (web_gui.py / web/)
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
 # Optional Hardware Acceleration (RTX 3060 Ampere TensorRT 10 FP16 & Triton)
 # Install via:
 #   pip install --extra-index-url https://pypi.nvidia.com onnx onnxscript tensorrt-cu12 triton-windows

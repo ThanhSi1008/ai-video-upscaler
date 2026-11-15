@@ -1,6 +1,6 @@
 # AI Video Upscaler 4K & AI Subtitle Translator (Windows 11 & NVIDIA RTX)
 
-Công cụ tối ưu hóa chuyên sâu để **Upscale Video Anime lên 4K (2x Super-Resolution)** và **Dịch phụ đề Anime bằng AI (Subtrans V2)** chạy 100% cục bộ trên Terminal / PowerShell Windows 11.
+Công cụ tối ưu hóa chuyên sâu để **Upscale Video Anime lên 4K (2x Super-Resolution)** và **Dịch phụ đề Anime bằng AI (Subtrans V2)** chạy 100% cục bộ trên Terminal / PowerShell và **Giao diện Web thời gian thực (`web_gui.bat`)** trên Windows 11.
 
 Hệ thống được thiết kế và tối ưu hóa kịch trần cho cấu hình phần cứng mục tiêu:
 * **Hệ điều hành:** Windows 11 64-bit (`HAGS = 2`, Power Plan `Ultimate Performance`, PCIe ASPM Off).
@@ -77,6 +77,10 @@ python upscale.py samples/sample_sword_3min.mkv -o out/sword_4K.mkv
 
 # 4. Chạy hàng đợi nhiều tập qua đêm (preflight nền tách sẵn GOP, auto-offset và deadline an toàn):
 python upscale.py --queue ep1.mkv ep2.mkv -o out/ --deadline 07:00 --allow-partial
+
+# 5. Mở giao diện Web Studio thời gian thực trên trình duyệt (http://127.0.0.1:8765):
+.\web_gui.bat
+python web_gui.py --port 8765
 ```
 
 ### Bảng Tham Số Tùy Chọn Chính:
@@ -169,6 +173,9 @@ ai-video-upscaler/
 ├── unlock_rtx3060_admin.bat    # Tiện ích Admin mở khóa HAGS=2, PCIe ASPM Off & CUDA P0 (7500 MHz)
 ├── subtrans.py                 # CLI Entrypoint cho Anime Subtitle Translator (Subtrans V2)
 ├── subtrans.bat                # Windows launcher cho Subtrans (UTF-8, multi-key)
+├── web_gui.py                  # Entrypoint khởi chạy Local Real-Time Web Studio (FastAPI + Uvicorn)
+├── web_gui.bat                 # Windows launcher mở nhanh Web GUI trên trình duyệt mặc định
+├── web/                        # Backend SSE 1Hz, duyệt ổ đĩa cục bộ, đối chiếu 1080p/4K & giao diện web/static/
 ├── shows.yaml                  # Ánh xạ model SR & chính sách dedup riêng theo từng bộ anime
 ├── pytest.ini                  # Cấu hình Pytest (tests/ & subtrans/tests/)
 ├── ruff.toml                   # Cấu hình trình kiểm tra mã nguồn tĩnh Ruff

@@ -37,8 +37,8 @@ ROOT_BUDGET = 12 * 1024
 COMBINED_BUDGET = 32 * 1024
 LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)")
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
-RUNTIME_PATHS = ("upscale.py", "subtrans.py", "src", "subtrans", "scripts")
-SOURCE_DIRS = frozenset({"src", "subtrans", "tests", "scripts", "benchmarks"})
+RUNTIME_PATHS = ("upscale.py", "subtrans.py", "web_gui.py", "src", "subtrans", "scripts", "web")
+SOURCE_DIRS = frozenset({"src", "subtrans", "tests", "scripts", "benchmarks", "web"})
 PRIVATE_DIRS = frozenset({"venv", "env", "__pycache__", "scratch", "out", "models_bench", "samples", "test_frames"})
 MANAGED_HOOK = (
     "#!/bin/sh\n"

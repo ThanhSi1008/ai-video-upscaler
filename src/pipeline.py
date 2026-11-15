@@ -79,7 +79,10 @@ from src.logger import (
     render_progress,
     RunLogger,
     get_swap_usage,
-    get_thermal_state
+    get_thermal_state,
+    clear_graceful_pause,
+    is_graceful_pause_requested,
+    mark_graceful_pause_triggered,
 )
 from src.preflight import (
     AntiSleepContext,
@@ -154,6 +157,7 @@ def run_upscale_pipeline(
         base_name = f"{base_name}_preview_{preview_dur}s"
 
     # Khởi tạo logger cho phiên chạy
+    mark_graceful_pause_triggered(False)
     logger = RunLogger(base_name)
 
     # Xác định hậu tố tên file đầu ra theo model (D7)
@@ -169,6 +173,19 @@ def run_upscale_pipeline(
             output_path = os.path.join(output_path, f"{base_name}{out_suffix}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    logger.update_live_context(
+        input_path=input_path,
+        output_path=output_path,
+        model_id=str(model_info.get("id", "")),
+        model_name=str(model_info.get("name", "")),
+        dedup_policy=str(dedup_policy or "default"),
+        zero_disk=bool(zero_disk),
+        engine=str(engine),
+        is_preview=bool(is_preview),
+        total_frames=int(meta.get("nb_frames") or 0),
+    )
+    logger.set_stage("probing", "Đang kiểm tra video nguồn & môi trường...")
+
     # Kiểm tra nếu file 4K thành phẩm đã tồn tại (không ghi đè trừ khi có cờ --force)
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024 and not force:
         logger.info(
@@ -176,18 +193,20 @@ def run_upscale_pipeline(
             f"({format_bytes(os.path.getsize(output_path))}). Bỏ qua không xử lý lại (dùng --force để ghi đè).",
             to_console=True
         )
+        logger.set_stage("completed", "Đã có bản 4K hoàn tất từ trước (bỏ qua).")
         return output_path
 
     # 2. Thực thi kiểm tra an toàn trước khi chạy (Pre-flight checks)
-    run_preflight_checks(
-        output_dir=os.path.dirname(output_path),
-        duration_seconds=meta["duration"],
-        bitrate=bitrate,
-        logger=logger
-    )
+    with logger.stage_guard():
+        run_preflight_checks(
+            output_dir=os.path.dirname(output_path),
+            duration_seconds=meta["duration"],
+            bitrate=bitrate,
+            logger=logger
+        )
 
     # Kích hoạt AntiSleep để chống Sleep máy trong suốt phiên chạy
-    with AntiSleepContext(enabled=anti_sleep):
+    with AntiSleepContext(enabled=anti_sleep), logger.stage_guard():
         if anti_sleep:
             logger.info("Cơ chế chống ngủ máy (Windows SetThreadExecutionState) đã được kích hoạt thành công.")
 
@@ -289,6 +308,7 @@ def run_upscale_pipeline(
             # -----------------------------------------------------------------
             # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
             # -----------------------------------------------------------------
+            logger.set_stage("preflight_dedup", f"Phân đoạn GOP {segment_time}s & lập kế hoạch Deduplication...")
             existing_segs = sorted([
                 os.path.join(segs_dir, f)
                 for f in os.listdir(segs_dir)
@@ -305,6 +325,7 @@ def run_upscale_pipeline(
             seg_frame_counts = get_segments_frame_counts(existing_segs)
 
             dedup_plan = None
+            effective_dedup_policy = "off"
             if dedup:
                 effective_dedup_policy = resolve_dedup_policy(input_path, dedup_policy)
                 plan_file = os.path.join(work_dir, "plan.json")
@@ -337,6 +358,24 @@ def run_upscale_pipeline(
                     to_console=True
                 )
 
+            measured_total_f = (
+                int(dedup_plan["total_frames"])
+                if dedup_plan
+                else int(sum(seg_frame_counts) if seg_frame_counts else (meta.get("nb_frames") or 0))
+            )
+            measured_unique_f = (
+                int(dedup_plan["total_kept_frames"])
+                if dedup_plan
+                else measured_total_f
+            )
+            logger.update_live_context(
+                total_chunks=total_segs,
+                total_frames=measured_total_f,
+                unique_frames=measured_unique_f,
+                dedup_ratio_percent=float(dedup_plan.get("dedup_ratio_percent", 0.0)) if dedup_plan else 0.0,
+                dedup_policy=str(effective_dedup_policy),
+            )
+
             logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU ({DEVICE_NAME})...", to_console=True)
             print()
 
@@ -352,6 +391,7 @@ def run_upscale_pipeline(
 
             # Lọc các phân đoạn cần xử lý (bỏ qua những đoạn đã xong nếu bật resume và kiểm tra frame khớp)
             chunks_to_process = []
+            resumed_chunk_indices = []
             for idx, seg_file in enumerate(existing_segs):
                 seg_out_file = os.path.join(up_segs_dir, f"up_{idx:04d}.mp4")
                 expected_frames = (
@@ -364,6 +404,7 @@ def run_upscale_pipeline(
                         logger.info(f"Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước ({expected_frames} frames), tiếp tục...")
                         print(f"⏭️  Phân đoạn [{idx+1:02d}/{total_segs:02d}] đã hoàn thành từ trước ({expected_frames} frames), tiếp tục...")
                         total_frames_processed += expected_frames if expected_frames is not None else 192
+                        resumed_chunk_indices.append(idx)
                         continue
                     else:
                         logger.warning(
@@ -376,6 +417,12 @@ def run_upscale_pipeline(
                         except OSError:
                             pass
                 chunks_to_process.append((idx, seg_file, seg_out_file))
+
+            if resumed_chunk_indices:
+                logger.update_live_context(
+                    resumed_chunks=resumed_chunk_indices,
+                    completed_chunks=len(resumed_chunk_indices),
+                )
 
             if not chunks_to_process:
                 logger.info("Tất cả phân đoạn đã hoàn thành từ trước!", to_console=True)
@@ -635,6 +682,11 @@ def run_upscale_pipeline(
                         for i, target_chunk in enumerate(chunks_to_process):
                             c_idx, c_seg_file, c_seg_out = target_chunk
                             prev_c_idx = c_idx
+                            logger.set_stage(
+                                "upscaling",
+                                f"Đang suy luận 4K phân đoạn {c_idx + 1}/{total_segs}",
+                                active_chunk=c_idx,
+                            )
 
                             # Chờ giải mã CPU chunk hiện tại sẵn sàng (chỉ lấy 1 lần cho chunk i)
                             if future_extract is not None:
@@ -648,6 +700,7 @@ def run_upscale_pipeline(
                             if (
                                 i + 1 < len(chunks_to_process)
                                 and not (allow_partial and deadline_dt and datetime.now() >= deadline_dt)
+                                and not is_graceful_pause_requested()
                             ):
                                 can_prefetch_early = (zero_disk and engine == "cuda") or (
                                     shutil.disk_usage(cache_root).free / (1024 * 1024) >= 1600.0
@@ -1263,6 +1316,7 @@ def run_upscale_pipeline(
                                     )
                                     zero_disk_pending_finalize = None
                                 else:
+                                    prev_c_idx = c_idx
                                     chunk_elapsed = time.time() - seg_start_time
                                     total_enc_time += 0.001
                                     render_progress(
@@ -1302,8 +1356,31 @@ def run_upscale_pipeline(
                                 future_encode = enc_exec.submit(worker_encode, encode_item, ai_result)
 
                             # Khởi động giải mã CPU cho chunk tiếp theo ở luồng nền (nếu chưa prefetch sớm ở đầu chunk)
-                            if future_extract is None and i + 1 < len(chunks_to_process):
+                            if (
+                                future_extract is None
+                                and i + 1 < len(chunks_to_process)
+                                and not is_graceful_pause_requested()
+                            ):
                                 future_extract = dec_exec.submit(worker_extract, chunks_to_process[i + 1])
+
+                            # Kiểm tra yêu cầu dừng êm (Graceful Pause) từ Web GUI / CLI
+                            if is_graceful_pause_requested():
+                                clear_graceful_pause()
+                                mark_graceful_pause_triggered(True)
+                                logger.info(
+                                    f"⏸️ [GRACEFUL PAUSE] Nhận yêu cầu dừng êm. "
+                                    f"Dừng sạch tại ranh giới phân đoạn {c_idx+1}/{total_segs} và bảo toàn checkpoint.",
+                                    to_console=True,
+                                )
+                                partial_paused = True
+                                if future_extract is not None:
+                                    try:
+                                        res_ext = future_extract.result()
+                                        shutil.rmtree(res_ext.get("in_dir", ""), ignore_errors=True)
+                                    except Exception:
+                                        pass
+                                    future_extract = None
+                                break
 
                             # Kiểm tra mốc hạn chót nếu bật --allow-partial
                             if allow_partial and deadline_dt and datetime.now() >= deadline_dt:
@@ -1353,6 +1430,10 @@ def run_upscale_pipeline(
 
                     if partial_paused:
                         resume_out_dir = os.path.dirname(os.path.abspath(output_path))
+                        logger.set_stage(
+                            "paused",
+                            f"Đã dừng êm tại phân đoạn {prev_c_idx + 1}/{total_segs} (giữ nguyên checkpoint).",
+                        )
                         logger.info(
                             f"\n{'='*75}\n"
                             f"⏸️ [PARTIAL RUN PAUSED] ĐÃ DỪNG SẠCH TẠI RANH GIỚI PHÂN ĐOẠN {prev_c_idx+1}/{total_segs} THEO --allow-partial.\n"
@@ -1381,6 +1462,7 @@ def run_upscale_pipeline(
             # -----------------------------------------------------------------
             # BƯỚC 3 & 4 (HỢP NHẤT 1 LƯỢT): CONCAT + MUX CONTAINER PHÒNG THU
             # -----------------------------------------------------------------
+            logger.set_stage("muxing", "Đang ghép nối phân đoạn 4K & đóng gói Container gốc (1-Pass Mux)...")
             logger.info("Đang ghép nối phân đoạn 4K và đóng gói Audio, Subtitles, Fonts, Chapters gốc (1-Pass Concat-Mux)...", to_console=True)
             all_upscaled_segs = sorted([
                 os.path.join(up_segs_dir, f)
@@ -1427,6 +1509,7 @@ def run_upscale_pipeline(
             }
             # Ghi báo cáo kiểm định tập (audit.json)
             audit_file = os.path.splitext(output_path)[0] + ".audit.json"
+            logger.set_stage("auditing", "Đang kiểm định toàn vẹn Mux & MD5 Audio Streamhash...")
             try:
                 from src.mux_audit import verify_mux_integrity
                 mux_res = verify_mux_integrity(input_path, output_path, src_meta=meta)
@@ -1494,8 +1577,11 @@ def run_upscale_pipeline(
                 logger.info(f"Đã xuất báo cáo kiểm định tập: {audit_file} (Mux Audit: {mux_res.get('status')})", to_console=True)
 
                 if mux_res.get("status") == "FAIL":
+                    logger.set_stage("error", f"Mux Audit thất bại: {mux_res.get('failure_reasons')}")
                     logger.error(f"❌ MUX AUDIT THẤT BẠI: {mux_res.get('failure_reasons')}", to_console=True)
                     raise RuntimeError(f"Mux audit container thất bại: {mux_res.get('failure_reasons')}")
+
+                logger.set_stage("completed", f"Hoàn tất 4K ({avg_fps:.2f} fps E2E | Mux Audit PASS)")
 
                 # -------------------------------------------------------------
                 # TỰ ĐỘNG DỌN DẸP THƯ MỤC CHECKPOINT TRÊN SSD KHI XUẤT XƯỞNG PASS
