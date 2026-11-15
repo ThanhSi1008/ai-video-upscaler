@@ -47,14 +47,20 @@ def allowed_source(relative: Path) -> bool:
     return relative.parts[0] in SOURCE_DIRS and relative.suffix.lower() in SUFFIXES
 
 
-def isolated_environment(environ: dict[str, str]) -> dict[str, str]:
+def isolated_environment(
+    environ: dict[str, str],
+    tmp_dir: Path | str | None = None,
+) -> dict[str, str]:
     clean = {key: value for key, value in environ.items()
              if not any(token in key.upper() for token in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
              and key.upper() not in {"GOOGLE_APPLICATION_CREDENTIALS", "PYTHONPATH",
-                                     "PYTEST_ADDOPTS", "PYTEST_PLUGINS"}}
+                                     "PYTEST_ADDOPTS", "PYTEST_PLUGINS",
+                                     "TEMP", "TMP", "TMPDIR"}}
+    resolved_tmp = str(Path(tmp_dir) if tmp_dir is not None else (ROOT / "scratch" / "tmp"))
     clean.update(CUDA_VISIBLE_DEVICES="-1", RUN_GPU_TESTS="0", PYTHON_DOTENV_DISABLED="1",
                  SUBTRANS_DISABLE_DOTENV="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
-                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+                 TEMP=resolved_tmp, TMP=resolved_tmp, TMPDIR=resolved_tmp)
     return clean
 
 
@@ -89,13 +95,16 @@ def main() -> int:
     run_dir = Path(tempfile.mkdtemp(prefix="agent-validation-", dir=scratch))
     snapshot = run_dir / "repo"
     snapshot.mkdir()
+    tmp_dir = run_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     count = snapshot_sources(ROOT, snapshot)
     (snapshot / "agent_offline_guard.py").write_text(GUARD, encoding="utf-8")
-    env = isolated_environment(dict(os.environ))
+    env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
+    env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(tmp_dir)
     # Pytest may inspect Git for tests of the context helper; snapshot has no parent repository.
     env["GIT_CEILING_DIRECTORIES"] = str(run_dir)
     command = [sys.executable, "-m", "pytest", "-m", "not gpu", "-q", "--tb=short",
-               "-p", "agent_offline_guard", "--basetemp", str(run_dir / "tmp"),
+               "-p", "agent_offline_guard", "--basetemp", str(tmp_dir / "pytest"),
                "--junitxml", str(run_dir / "junit.xml")]
     print(f"Snapshot: {snapshot}\nSource files: {count}\nCPU only; Python sockets blocked; no production cache/weights copied.", flush=True)
     with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:

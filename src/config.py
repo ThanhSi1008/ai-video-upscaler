@@ -4,7 +4,9 @@ src/config.py
 Quản lý cấu hình tập trung, đường dẫn binary, thông số mã hóa phần cứng và RAM Disk.
 """
 
+import contextlib
 import os
+from pathlib import Path
 import shutil
 import sys
 import json
@@ -14,15 +16,56 @@ import json
 # -----------------------------------------------------------------------------
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SRC_DIR)
+PROJECT_ROOT = Path(ROOT_DIR)
+
+CACHE_ROOT_DIR = PROJECT_ROOT / ".cache"
+CUDA_COMPUTE_CACHE_DIR = CACHE_ROOT_DIR / "cuda_compute_cache"
+TRITON_CACHE_DIR_DEFAULT = CACHE_ROOT_DIR / "triton_cache"
+INDUCTOR_CACHE_DIR_DEFAULT = CACHE_ROOT_DIR / "inductor_cache"
+NVME_JIT_CACHE_DEFAULTS: dict[str, Path] = {
+    "CUDA_CACHE_PATH": CUDA_COMPUTE_CACHE_DIR,
+    "TRITON_CACHE_DIR": TRITON_CACHE_DIR_DEFAULT,
+    "TORCHINDUCTOR_CACHE_DIR": INDUCTOR_CACHE_DIR_DEFAULT,
+}
+
+
+def configure_nvme_jit_caches(
+    project_root: str | os.PathLike[str] | None = None,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+    create_dirs: bool = True,
+) -> dict[str, str]:
+    """
+    Định tuyến mặc định các thư mục cache biên dịch GPU/JIT/Triton sang ổ NVMe Gen4
+    (PROJECT_ROOT / ".cache" / {cuda_compute_cache, triton_cache, inductor_cache})
+    thông qua setdefault; tạo thư mục bên trong try/except OSError để không bao giờ
+    gây lỗi trên môi trường sandbox hoặc chỉ đọc.
+    """
+    base_root = Path(project_root) if project_root is not None else PROJECT_ROOT
+    cache_base = base_root / ".cache"
+    target_env = os.environ if environ is None else environ
+    defaults = {
+        "CUDA_CACHE_PATH": str(cache_base / "cuda_compute_cache"),
+        "TRITON_CACHE_DIR": str(cache_base / "triton_cache"),
+        "TORCHINDUCTOR_CACHE_DIR": str(cache_base / "inductor_cache"),
+    }
+    resolved: dict[str, str] = {}
+    for env_key, default_dir in defaults.items():
+        chosen = target_env.setdefault(env_key, default_dir)
+        resolved[env_key] = chosen
+        if create_dirs and chosen:
+            try:
+                Path(chosen).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+    return resolved
+
 
 # Tối ưu hóa cấp Driver CUDA trước khi nạp PyTorch/TensorRT:
 # - CUDA_MODULE_LOADING=LAZY: giảm ~300-500 MB VRAM chiếm dụng ban đầu và rút ngắn thời gian khởi động.
-# - CUDA_CACHE_MAXSIZE=2GB & định tuyến cache biên dịch JIT sang ổ NVMe Gen4 (ROOT_DIR/.cache).
+# - CUDA_CACHE_MAXSIZE=2GB & định tuyến cache biên dịch JIT/Triton/Inductor sang ổ NVMe Gen4 (PROJECT_ROOT/.cache).
 os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
 os.environ.setdefault("CUDA_CACHE_MAXSIZE", "2147483648")
-if not os.environ.get("PYTEST_CURRENT_TEST"):
-    os.environ.setdefault("CUDA_CACHE_PATH", os.path.join(ROOT_DIR, ".cache", "cuda_jit"))
-    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(ROOT_DIR, ".cache", "inductor"))
+configure_nvme_jit_caches()
 
 BIN_DIR = os.path.join(ROOT_DIR, "bin", "realesrgan")
 REALESRGAN_BIN = os.path.join(BIN_DIR, "realesrgan-ncnn-vulkan")
@@ -143,6 +186,16 @@ def release_gpu_lock() -> None:
             os.remove(GPU_LOCK_FILE)
     except Exception:
         pass
+
+
+@contextlib.contextmanager
+def gpu_exclusivity_lock():
+    """Context manager đảm bảo độc quyền GPU qua .gpu_active.lock và luôn thu hồi sạch sẽ."""
+    acquire_gpu_lock()
+    try:
+        yield GPU_LOCK_FILE
+    finally:
+        release_gpu_lock()
 
 
 def _atexit_release_gpu_lock() -> None:

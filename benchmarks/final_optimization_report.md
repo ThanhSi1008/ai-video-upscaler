@@ -1,12 +1,12 @@
 # Báo Cáo Tổng Kết Tối Ưu Hóa Toàn Diện & Kiểm Định An Toàn Pipeline
 ## Comprehensive Performance Optimization, Profiling & Safety Invariant Synthesis Report
 
-> **Tài liệu:** `benchmarks/final_optimization_report.md`  
-> **Dự án:** `ai-video-upscaler` (4K Anime Video Upscaling Pipeline)  
-> **Môi trường vận hành:** 100% Cục bộ trên Windows 11 Workstation (Intel Core i5-12600K, NVIDIA GeForce RTX 3060 12GB GDDR6)  
-> **Cột mốc hoàn thành:** Milestone 4 (R4) + Đợt Kiểm Định & Vi Tối Ưu Vòng 2 (`B1–B2`, `P1–P5`)  
-> **Ngày lập báo cáo:** 2026-11-14  
-> **Trạng thái kiểm định:** **CERTIFIED PASS 100%** (495/495 Offline Tests PASS, 115/115 E2E Tests PASS, Bit-exact Mux Audit PASS, 0 Frame Count Drift)
+> - **Tài liệu:** `benchmarks/final_optimization_report.md`
+> - **Dự án:** `ai-video-upscaler` (4K Anime Video Upscaling Pipeline)
+> - **Môi trường vận hành:** 100% Cục bộ trên Windows 11 Workstation (Intel Core i5-12600K, NVIDIA GeForce RTX 3060 12GB GDDR6)
+> - **Cột mốc hoàn thành:** Milestone 4 (R4) + Đợt Kiểm Định & Vi Tối Ưu Vòng 2 (`B1–B2`, `P1–P5`) + Nhóm A/B + Hiệu Chuẩn Trần Vật Lý Silicon GA106 & Vi Tối Ưu R3 (`silicon_probe.json`, 3-Regime Climax R3)
+> - **Ngày lập báo cáo:** 2026-11-15
+> - **Trạng thái kiểm định:** **CERTIFIED PASS 100%** (729+ Offline Tests PASS qua `scripts/verify_offline.py`, 115/115 E2E Tests PASS, Bit-exact Mux Audit PASS, 0 Frame Count Drift)
 
 ---
 
@@ -18,37 +18,41 @@ Dự án `ai-video-upscaler` đã hoàn thành toàn bộ 4 yêu cầu cốt lõ
    - Khảo sát toàn bộ kho phim tại `E:\Films\Raw_Sources`, xác định tập phim có độ phức tạp cao nhất toàn hệ thống là **`Fate Apocrypha - 22`** (đại cảnh chiến đấu Karna vs Sieg / Achilles vs Chiron, entropy chuyển động đỉnh cao, tỷ lệ khung hình vẽ tay 24 fps thực tế đạt 95.06% unique frames, giải mã phần mềm CPU H.264 Hi10P).
    - Thiết lập bộ dữ liệu đối chứng **Golden Baseline** với 2 tầng benchmark tiêu chuẩn: **Preview (10s @ 30%)** và **Climax (60s @ 13:30)**, ghi nhận đầy đủ 17 chỉ số viễn trắc phần cứng theo thời gian thực tại `benchmarks/baseline_summary.md`.
 
-2. **R2 — Tối ưu hóa codebase theo chu trình lặp Profiling - Optimize - Verify (Hoàn thành trong Milestone 3):**
-   - Thực thi 5 mục tiêu kiến trúc trọng điểm (Targets 1–5): Sửa lỗi Open-GOP CRA discard và bổ sung chốt chặn xác thực segment resume (`src/ffmpeg_ops.py`, `src/pipeline.py`), tối ưu hóa I/O P010LE pipe streaming 8 MiB và xây dựng worker bất đồng bộ `_PipeDrainWorker` (`src/trt_zero_copy_upscaler.py`), thiết kế bộ nhớ Cel tuần hoàn phân tầng 3 lớp tăng tốc 27.02 lần (`src/dedup.py`), tích hợp hook đo vi thời gian bất đồng bộ CUDA Events (`src/trt_zero_copy_upscaler.py`), và tách biệt ngưỡng dòng chảy quang học DIS cho đại cảnh anime sakuga (`src/dedup.py`).
+2. **R2 — Tối ưu hóa codebase theo chu trình lặp Profiling - Optimize - Verify (Hoàn thành trong Milestone 3 & Vi tối ưu R3):**
+   - Thực thi 5 mục tiêu kiến trúc trọng điểm (Targets 1–5) cùng các bản nâng cấp Nhóm A/B và R3: Sửa lỗi Open-GOP CRA discard và bổ sung chốt chặn xác thực segment resume (`src/ffmpeg_ops.py`, `src/pipeline.py`), tối ưu hóa I/O P010LE pipe streaming 8 MiB và xây dựng worker bất đồng bộ `_PipeDrainWorker` (`src/trt_zero_copy_upscaler.py`), thiết kế bộ nhớ Cel tuần hoàn phân tầng 3 lớp tăng tốc 27.02 lần (`src/dedup.py`), tích hợp kernel `@triton.jit` chuẩn hóa đầu vào 1-pass + pool `CUDA Event` tiền cấp phát tách biệt `avg_h2d_dma_ms` / `avg_in_norm_ms` (`src/trt_zero_copy_upscaler.py`), định tuyến cache JIT về NVMe Gen4 `WD_BLACK SN7100` (`src/config.py`), và tách biệt ngưỡng dòng chảy quang học DIS cho đại cảnh anime sakuga (`src/dedup.py`).
    - Khắc phục triệt để lỗ hổng deadlock tiềm ẩn khi vỡ pipe downstream thông qua bản vá commit `d786a80`.
-   - Đưa hiệu năng suy luận 4K vượt mốc lịch sử **10 FPS** trên card đồ họa đơn RTX 3060 12GB và tiệm cận **92.9% trần giới hạn vật lý** của chip silicon GA106.
+   - Đưa hiệu năng Climax 4K vượt mốc **10.13 FPS toàn trình (`10.52 FPS` steady / `11.00 FPS` TensorRT = `28.27 TFLOPS`)** với `animevideov3`, **`18.52 FPS` toàn trình (`22.83 FPS` TensorRT = `28.77 TFLOPS`)** với Native `2x` `sharp1-ultracompact`, và **`20.80 FPS` toàn trình (`44.91 FPS` TensorRT)** với `sharp1-superultracompact` trên card đồ họa đơn RTX 3060 12GB (`170.0 W` TGP).
 
-3. **R3 — Nâng cấp bộ kiểm thử và đo lường (Hoàn thành trong Milestone 1 & E2E Track):**
-   - Xây dựng trọn bộ công cụ viễn trắc và đo lường chuẩn hóa: `scripts/telemetry_collector.py` (bộ lấy mẫu 17 thông số phần cứng độc lập), `scripts/benchmark_pipeline.py` (harness benchmark turnkey khép kín), và `scripts/compare_benchmarks.py` (công cụ tự động đối soát delta hiệu năng và kiểm định bất biến).
-   - Thiết kế và hoàn thiện bộ kiểm thử Opaque-Box E2E gồm 115 bài test tự động bao phủ 4 tầng (Tiers 1–4) trong `tests/e2e/`, nâng tổng quy mô kiểm thử offline của dự án lên **488 bài test**, đạt tỷ lệ **PASS 100%** không có lỗi thoái lui.
+3. **R3 — Nâng cấp bộ kiểm thử và đo lường (Hoàn thành trong Milestone 1, E2E Track & R3 Silicon Probe):**
+   - Xây dựng trọn bộ công cụ viễn trắc và đo lường chuẩn hóa: `scripts/telemetry_collector.py` (bộ lấy mẫu 17 thông số phần cứng độc lập), `scripts/benchmark_pipeline.py` (harness benchmark turnkey khép kín), `scripts/compare_benchmarks.py` (công cụ tự động đối soát delta hiệu năng và kiểm định bất biến), và `scripts/silicon_roofline_probe.py` (đo thực nghiệm trần vật lý silicon GA106 cô lập).
+   - Thiết kế và hoàn thiện bộ kiểm thử Opaque-Box E2E gồm 115 bài test tự động bao phủ 4 tầng (Tiers 1–4) trong `tests/e2e/`, cùng 169 ca `tests/test_e2e_*.py` và 13 ca `tests/test_nvme_cache_and_input_triton.py`, nâng tổng quy mô kiểm thử offline của dự án lên **729+ bài test**, đạt tỷ lệ **PASS 100%** không có lỗi thoái lui.
 
-4. **R4 — Báo cáo tổng kết và bàn giao (Hoàn thành trong Milestone 4):**
-   - Đối chiếu định lượng toàn diện mọi chỉ số trước và sau tối ưu hóa.
-   - Phân tích bão hòa Pareto chứng minh tính tối ưu tuyệt đối của giải pháp.
+4. **R4 — Báo cáo tổng kết và bàn giao (Hoàn thành trong Milestone 4 & Hiệu chuẩn R3):**
+   - Đối chiếu định lượng toàn diện mọi chỉ số trước và sau tối ưu hóa cùng trần vật lý silicon thực tế (`out/benchmark_r3_final/silicon_probe.json`).
+   - Phân tích bão hòa Pareto chứng minh tính tối ưu của giải pháp trên cả 3 chế độ giới hạn vật lý (Tensor Core Compute/TDP, Cân bằng Compute–NVENC, và 7th-Gen NVENC `-multipass fullres` Ceiling).
    - Kiểm định độc lập toàn bộ các bất biến kỹ thuật: Mux Audit bit-exact streamhash, bảo toàn 100% số lượng khung hình, ma trận màu BT.709 hai chiều, mã hóa phần cứng 10-bit NVENC và kỷ luật bộ nhớ Agent.
 
 ---
 
-## 2. System & Hardware Baseline Environment
+## 2. System & Hardware Baseline Environment (Audited Ground Truth)
 
-Toàn bộ quá trình nghiên cứu, đo đạc viễn trắc và kiểm định tự động được thực thi **100% cục bộ** trên máy trạm Windows 11 của người dùng:
+Toàn bộ quá trình nghiên cứu, đo đạc viễn trắc và kiểm định tự động được thực thi **100% cục bộ** trên máy trạm Windows 11 của người dùng (kiểm toán phần cứng & `.venv` chính xác tại `scratch/hw_and_model_exact_audit.json`):
 
-- **Hệ điều hành:** Microsoft Windows 11 Pro 64-bit (Build 22631, WDDM 3.1)
-- **Bộ vi xử lý (CPU):** Intel Core i5-12600K (Alder Lake, 10 Cores: 6 P-Cores @ 3.7–4.9 GHz + 4 E-Cores @ 2.8–3.6 GHz, 16 Threads, 20 MB L3 Cache, tập lệnh AVX2 / FMA3 kích hoạt, luồng chính ưu tiên ghim trên P-Cores).
-- **Bộ xử lý đồ họa (GPU):** NVIDIA GeForce RTX 3060 12GB GDDR6 (Kiến trúc GA106 Ampere, 3584 CUDA Cores, 112 Gen 2 RT Cores, 112 Gen 3 Tensor Cores, VRAM Bus 192-bit @ 360 GB/s, P0 Lock Memory Clock 7501 MHz, Resizable BAR enabled, Hardware-Accelerated GPU Scheduling — HAGS enabled).
-- **Bộ nhớ hệ thống (RAM):** 32 GB Dual-Channel DDR4 3200 MHz.
-- **Hệ thống lưu trữ (Storage):** NVMe PCIe Gen4 High-Speed SSD (`WD_BLACK SN7100`, tốc độ đọc/ghi tuần tự > 5000 MB/s, độ trễ ngẫu nhiên cực thấp).
-- **Nền tảng phần mềm & AI Toolchain:**
-  - Python 3.11.9 64-bit (CPython)
-  - TensorRT 10.16.0 FP16 (`HMMA.16816.F16` Tensor Core execution provider)
-  - PyTorch 2.x CUDA 12.x
-  - FFmpeg 8.1.2-full_build (hỗ trợ native `hevc_nvenc`, `libplacebo`, `mpdecimate`, Concat Demuxer)
-- **Kiến trúc Pipeline xử lý:** 3-Stage Overlapped Zero-Disk Pipe (`Decode N+1` || `GPU N` || `Encode N-1`), Triton JIT `p010le` BT.709 VRAM Kernel, Cyclic Cel Memoization với Belady's OPT cache replacement.
+- **Hệ điều hành & Bo mạch chủ:** Microsoft Windows 11 Pro 64-bit (`10.0.26300`, Build `26300`, WDDM) trên bo mạch chủ Gigabyte `B760M G P WIFI DDR4` (PCIe 5.0 CPU root).
+- **Bộ vi xử lý (CPU):** `12th Gen Intel(R) Core(TM) i5-12600K` (Alder Lake, `10C/16T`: `6 P-Cores @ 3.7–4.9 GHz` [`4.5 GHz` all-core] + `4 E-Cores @ 2.8–3.6 GHz`, `9.5 MiB` [`9,728 KB`] L2 Cache, `20.0 MiB` [`20,480 KB`] L3 Cache, tập lệnh `AVX2 / FMA3` = `1.08 TFLOPS` FP32, luồng chính ghim P-Cores qua `configure_alder_lake_pcore_qos`).
+- **Bộ xử lý đồ họa (GPU):** `NVIDIA GeForce RTX 3060` 12GB GDDR6 (`GA106-302-A1`, `sm_86`, VBIOS `94.06.2f.00.9a`, Driver `617.42`, `28 SMs`, `3,584` CUDA Cores, `112` Gen 2 RT Cores, `112` Gen 3 Tensor Cores, **`2.25 MiB` (`2,359,296 B`) L2 Cache**, VRAM Bus 192-bit @ `360.0 GB/s` P0 `7,501 MHz`, PCIe `4.0 x16` = `31.51 GB/s` [`22.81 GB/s` H2D / `22.64 GB/s` D2H thực tế], **`BAR1 = 256 MiB` (`Resizable BAR` đang tắt)**, **`TGP = 170.0 W`**, HAGS bật).
+- **Bộ nhớ hệ thống (RAM):** `32 GiB` Dual-Channel DDR4 (`G.Skill F4-3200C16-16GVK` 16 GiB + `PNY 16GF2X16QFHH36-135-K` 16 GiB) đang chạy ở **`ConfiguredClockSpeed = 2,133 MT/s` @ `1.20 V` JEDEC (`34.13 GB/s` băng thông đỉnh)** do ghép 2 thanh khác hãng chưa bật XMP.
+- **Hệ thống lưu trữ (Storage):**
+  - **Disk 0 (`C:` OS `378.21 GiB` + `D:`):** `OCPC MFL-300 512GB` (NVMe PCIe Gen3 x4).
+  - **Disk 1 (`E:` Workspace, `.cache`, `scratch/`, `Raw_Sources` `464.67 GiB`):** **`WD_BLACK SN7100 500GB`** (NVMe PCIe Gen4 x4, Firmware `7615M0WD`, tốc độ tuần tự theo datasheet **`6,800 MB/s` đọc / `5,800 MB/s` ghi**).
+- **Nền tảng phần mềm & AI Toolchain (`.venv`):**
+  - Python `3.11.9` 64-bit (CPython)
+  - PyTorch `2.6.0+cu124` (CUDA `12.4`, cuDNN `90100`)
+  - TensorRT `10.16.1.11` FP16 (`HMMA.16816.F16` / `HMMA.16816.F32` Tensor Core execution)
+  - OpenAI Triton `3.2.0` (`triton-windows 3.2.0.post21`)
+  - PyAV `18.1.0`, `faster-whisper 1.2.1` (`ctranslate2 4.9.0`), `spandrel 0.4.2`, `numpy 2.4.6`, `opencv-python-headless 5.0.0` (`5.0.0.93`)
+  - FFmpeg `8.1.2-full_build-www.gyan.dev` (hỗ trợ native `hevc_nvenc`, `mpdecimate`, Concat Demuxer)
+- **Kiến trúc Pipeline xử lý:** 3-Stage Overlapped Zero-Disk Pipe (`Decode N+1` || `GPU N` || `Encode N-1`), Fused `@triton.jit` Input Normalization (`_nhwc_u8_to_nchw_fp16_norm_kernel`) + Output `p010le` BT.709 VRAM Kernel, Pre-allocated CUDA Event Pool, Cyclic Cel Memoization với Belady's OPT cache replacement.
 
 ---
 
@@ -311,7 +315,7 @@ Ngày **2026-11-15**, toàn bộ nâng cấp **Nhóm A** (tối ưu vi cấu tr�
 | **`gb_sharp1_uc_climax`** (Chuẩn sắc nét 2x) | `animejanai-hd-v3-sharp1-ultracompact` (`64f8c` 2x) | **`80.89 s`** (`-53.3%` vs Base / `-48.2%` vs Opt) | **`18.27 fps`** (**`2.14x`** vs Base / **`1.93x`** vs Opt) | **`19.99 fps`** (Peak `20.81`) | **`354.71 ms`** | **`5.72 ms`** | **`6,838 MiB`** (`-24.8%`) | `PASS` (`1478/1478`) |
 | **`gb_sharp1_suc_climax`** (Siêu tốc 2x) | `animejanai-hd-v3-sharp1-superultracompact` (`24f8c` 2x) | **`69.94 s`** (`-59.6%` vs Base / `-55.2%` vs Opt) | **`21.13 fps`** (**`2.48x`** vs Base / **`2.23x`** vs Opt) | **`24.32 fps`** (Peak `28.03`) | **`183.30 ms`** | **`5.53 ms`** | **`6,212 MiB`** (`-31.7%`) | `PASS` (`1478/1478`) |
 
-> **Giải thích vật lý kiến trúc:** Mô hình `SPAN` 48 kênh (`2x_AnimeJaNai_V3` / `span-2x`) duy trì 3 nhánh skip song song mỗi khối `SPAB` và phép ghép `Concat` 4 luồng `192 kênh` ở độ phân giải `1080p` cuối mạng, vượt quá `3 MB L2 Cache` của GA106 nên bị nghẽn băng thông GDDR6 ở `~9.9–10.4 FPS`. Ngược lại, họ **`AnimeJaNai HD V3 Sharp1 UltraCompact` (`64f8c` Native 2x)** và **`Sharp1 SuperUltraCompact` (`24f8c` Native 2x)** bỏ hoàn toàn nhánh trung gian `8K (7680x4320)` lẫn `192ch Concat`, nằm gọn trong SRAM/L2 của Ampere Tensor Cores và đạt trọn vẹn mục tiêu **1.6x–2.5x (`18.27–21.13 FPS` toàn trình / `19.99–28.03 FPS` AI ở đại cảnh Sakuga Climax `95.06%` unique frames)**.
+> **Giải thích vật lý kiến trúc:** Mô hình `SPAN` 48 kênh (`2x_AnimeJaNai_V3` / `span-2x`) duy trì 3 nhánh skip song song mỗi khối `SPAB` và phép ghép `Concat` 4 luồng `192 kênh` ở độ phân giải `1080p` cuối mạng, vượt xa `2.25 MiB L2 Cache` của GA106 nên bị nghẽn băng thông đọc/ghi kích hoạt GDDR6 ở `~9.9–10.5 FPS`. Ngược lại, họ **`AnimeJaNai HD V3 Sharp1 UltraCompact` (`64f8c` Native 2x)** và **`Sharp1 SuperUltraCompact` (`24f8c` Native 2x)** bỏ hoàn toàn nhánh trung gian `8K (7680x4320)` lẫn `192ch Concat`, giữ luồng kích hoạt tuần tự gọn nhẹ để duy trì **`~28.77 TFLOPS` Tensor Core thực tế** trên `64f8c` và đạt trọn vẹn mục tiêu **1.6x–2.5x (`18.27–21.13 FPS` toàn trình / `19.99–28.03 FPS` AI ở đại cảnh Sakuga Climax `95.06%` unique frames)**.
 
 ### C. Kiểm Định Thực Nghiệm Không Giảm Chất Lượng Hình Ảnh (12 Khung Hình Sakuga Climax `3840x2160` Main 10)
 
@@ -341,4 +345,38 @@ Ngày **2026-11-15**, toàn bộ nâng cấp **Nhóm A** (tối ưu vi cấu tr�
   5. **Vệ sinh tài nguyên & chống tạo file `.srt` rỗng 0 cue trong `transcribe_japanese_audio` (`src/subtitles.py`):** Không ghi file `.ja.srt` rỗng khi toàn bộ segment bị lọc bỏ (tránh đánh lừa `find_or_extract_subtitles` ở lần chạy sau), đồng thời luôn xóa `.temp.wav` và giải phóng VRAM của `WhisperModel` trong khối `finally:`.
   6. **Tách biệt lỗi trọng số tất định trong Pre-Init Chunk 0 (`src/pipeline.py`):** Chuyển tiếp ngay `FileNotFoundError` và lỗi sai lệch `SHA-256` thay vì nuốt lỗi và tải/nạp lặp lần hai.
 
-**Phán quyết nghiệm thu cuối cùng:** **HOÀN THÀNH XUẤT SẮC (PROJECT MISSION ACCOMPLISHED — READY FOR PRODUCTION DEPLOYMENT).**
+---
+
+## 13. Hiệu Chuẩn Trần Vật Lý Silicon GA106, Vi Tối Ưu Hóa R3 & Thực Nghiệm 3 Chế Độ Climax Cuối Cùng
+
+Ngày **2026-11-15**, dự án thực hiện đợt kiểm toán phần cứng gốc (`scratch/hw_and_model_exact_audit.json`), đo trần vật lý silicon cô lập (`scripts/silicon_roofline_probe.py` $\to$ `out/benchmark_r3_final/silicon_probe.json`), triển khai 3 vi tối ưu hóa R3 và chạy lại benchmark thực nghiệm toàn trình trên cả 3 chế độ giới hạn vật lý của `Fate/Apocrypha - 22` Climax (`out/benchmark_r3_final/`).
+
+### A. Hiệu Chuẩn Toán Học Kiến Trúc Consumer Ampere GA106 & Đo Trần Silicon Cô Lập (`silicon_probe.json`)
+- **Khắc phục triệt để sai lệch hằng số Tensor Core lịch sử:** Tài liệu NVIDIA Ampere GA10x Whitepaper V2.1 (Bảng 1 & Bảng 3) quy định chip tiêu dùng **GA106 (`28 SMs`, `4` Tensor Cores Gen 3/SM, trọng số đặc `0%` sparsity)** đạt tốc độ Dense FP16 với bộ cộng `FP16` (`HMMA.16816.F16`) là **`512 FMAs/SM/clk` (`1,024 FLOPs/SM/clk`) = `50.95 TFLOPS` @ `1,777 MHz`** (`49.78 TFLOPS` @ `1,736.25 MHz` TDP) và với bộ cộng `FP32` (`HMMA.16816.F32`, GeForce half-rate) là **`256 FMAs/SM/clk` (`512 FLOPs/SM/clk`) = `25.48 TFLOPS` @ `1,777 MHz` (`27.96 TFLOPS` @ `1,950 MHz`)**. Các con số `101.90 / 50.95 TFLOPS` trước đây chỉ áp dụng cho trọng số thưa cấu trúc `2:4 Structured Sparsity` (mà các trọng số SR thực tế không sử dụng).
+- **Trần vật lý đo trực tiếp bằng CUDA Events trên RTX 3060 12GB (`out/benchmark_r3_final/silicon_probe.json`):**
+  - **Dense `4096^3` GEMM:** Shader FP32 = **`6.702 TFLOPS`** (`20.5058 ms`); `cublasGemmEx(CUBLAS_COMPUTE_32F)` = **`23.211 TFLOPS`** (`5.9214 ms`, `83.03%` trần `27.96 TFLOPS` @ `1,950 MHz`; `torch.matmul` FP16 luôn khóa cứng ở `32F` = `23.178–23.344 TFLOPS`); `cublasGemmEx(CUBLAS_COMPUTE_16F)` = **`38.844 TFLOPS`** (`3.5382 ms`, `78.03%` trần `49.78 TFLOPS` @ `1,736.25 MHz`, điểm gãy Roofline thực tế `I_knee,emp = 128.36 FLOPs/B`).
+  - **SR `3x3 Conv2d(64->64)` Implicit GEMM ở `170.0 W` TGP:** TensorRT 10.16 FP16 đạt **`28.27 TFLOPS` (`animevideov3` `11.00 FPS`)** và **`28.77 TFLOPS` (`sharp1-uc` `22.83 FPS`)** — nhanh gấp **`2.37x`** so với PyTorch eager cuDNN FP16 NCHW (`12.140 TFLOPS`), giới hạn bởi chiều rộng kênh `N=64` (tile CTA `64` cột thay vì `128/256` của GEMM vuông), mỗi tensor kích hoạt `265.42 MB/frame` vượt `112.5x` (và `4.25 GB/batch/layer` vượt `1,800x`) bộ đệm `2.25 MiB L2 Cache` cùng trần điện năng `170.0 W` TGP (`170.38–170.93 W` thực đo).
+  - **Băng thông bộ nhớ & PCIe 4.0 x16 Pinned DMA:** GDDR6 STREAM Triad = **`302.61 GB/s`** (`84.06%` lý thuyết `360.0 GB/s`; D2D Copy = `295.69 GB/s`); PCIe H2D `49.77 MB` = **`2.1822 ms/batch` (`22.81 GB/s`)**; PCIe D2H `199.07 MB` = **`8.7918 ms/batch` (`22.64 GB/s`)**.
+  - **Kernel `@triton.jit` cô lập:** Fused R3 Input Norm `_nhwc_u8_to_nchw_fp16_norm` (`149.30 MB` 1-pass) = **`0.5133 ms/batch` (`290.88 GB/s` — nhanh gấp `3.20x` so với 2 kernel PyTorch cũ `1.6429 ms` / `348.36 MB`)**; Output BT.709 `rgb_to_p010le` = **`5.6683 ms/batch` (`105.36 GB/s`)**.
+  - **Trần 7th-Gen NVENC 4K Main10 (`p6 CQ 18 -lookahead_level 32`):** Chế độ chuẩn phòng thu **`-multipass fullres` (2-pass full-4K)** đạt `18.96 FPS` (`120f`), `20.67 FPS` (`240f`) và hội tụ biên ổn định ở **`22.70 FPS` (`44.053 ms/frame`)** (so với `29.50 FPS` khi tắt multipass `-multipass disabled`).
+
+### B. Ba Vi Tối Ưu Hóa Hệ Thống R3 (`src/config.py`, `src/trt_zero_copy_upscaler.py`, `scripts/verify_offline.py`)
+1. **Định tuyến toàn bộ Cache Biên Dịch JIT & Temp Kiểm Thử về NVMe Gen4 `WD_BLACK SN7100` (`6,800/5,800 MB/s`):**
+   - `configure_nvme_jit_caches()` trong `src/config.py` chuyển hướng `CUDA_CACHE_PATH`, `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR` sang `E:\ai-video-upscaler\.cache` thay vì ổ hệ thống `C:` (`OCPC MFL-300` Gen3).
+   - `scripts/verify_offline.py` cô lập `TEMP`, `TMP`, `TMPDIR` và `--basetemp` vào `E:\ai-video-upscaler\scratch\test_runs\<stamp>\tmp`.
+2. **Kernel `@triton.jit` Chuẩn Hóa Đầu Vào 1-Pass (`_nhwc_u8_to_nchw_fp16_norm_kernel`):**
+   - Hợp nhất chuyển trục `NHWC -> NCHW` + ép kiểu `uint8 -> float16` + nhân `1.0 / 255.0` ngay trên thanh ghi, xóa bỏ hoàn toàn tensor đệm trung gian `NCHW uint8` và cắt lưu lượng GDDR6 từ `348.36 MB` xuống `149.30 MB/batch` (`1.6429 ms -> 0.5133 ms`, **tăng tốc `3.20x`**, đạt `96.18%` trần băng thông STREAM Triad), được biên dịch nóng sẵn trong `DoubleBufferedPipeUpscaler.warmup()`.
+3. **Pool `CUDA Event` Tiền Cấp Phát & Tách Bạch `avg_h2d_dma_ms` / `avg_in_norm_ms`:**
+   - `_ensure_cuda_event_pools()` tiền cấp phát và tái sử dụng các cặp `torch.cuda.Event(enable_timing=True)` theo số batch của chunk (`0` lệnh `cudaEventCreate` trong vòng lặp nóng), đồng thời tách riêng thời gian DMA `copy_(non_blocking=True)` (`avg_h2d_dma_ms`, gồm cả hàng đợi luồng WDDM khi gối đầu với TensorRT) khỏi thời gian thực thi kernel chuẩn hóa thực tế trên SM (`avg_in_norm_ms = 0.59–0.72 ms/batch`) mà vẫn tương thích ngược 100% với các khóa `last_micro_timings` cũ.
+
+### C. Bảng Tổng Hợp Thực Nghiệm 3 Chế Độ Giới Hạn Vật Lý R3 Trên Climax `Fate/Apocrypha - 22` (`1,478` Frames, `95.06%` Unique)
+
+| Chế độ giới hạn vật lý (Regime) | Model (`out/benchmark_r3_final/`) | FLOPs / `AI_realized` | Tổng thời gian | E2E Effective FPS | Steady Pipeline FPS | Isolated TRT FPS (`ms/b`) | In-Norm / P010LE / D2H (`ms/b`) | Active GPU / Mem / NVENC | Active Power / Peak VRAM | Sanity & Mux Audit |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Regime 1: Tensor Core & `170W` TGP Bound** | `animevideov3` (`64f16c` 4x$\to$2x) | `2.571 T` / `252.70` | `145.95 s` | **`10.13 fps`** | **`10.52 fps`** | **`11.00 fps`** (`727.48 ms`, `28.27 T`) | `0.72` / `5.94` / `8.84 ms` | `94.90%` / `44.53%` / `40.88%` | `157.61 W` (`170.38 W` pk) / `8,156 MiB` | `PASS` (`1.87`, `0.99985`, `1478/1478`) |
+| **Regime 2: Balanced Compute–NVENC Knee** | `sharp1-ultracompact` (`64f8c` Native 2x) | `1.260 T` / `272.45` | **`79.79 s`** | **`18.52 fps`** (`1.83x`) | **`20.69 fps`** (`1.97x`) | **`22.83 fps`** (`350.36 ms`, `28.77 T`) | `0.59` / `5.72` / `9.54 ms` | `94.24%` / `50.70%` / **`89.06%`** (`100%` pk) | `161.24 W` (`170.93 W` pk) / `8,061 MiB` | `PASS` (`0.32`, `0.99992`, `1478/1478`) |
+| **Regime 3: 7th-Gen NVENC `fullres` Ceiling** | `sharp1-superultracompact` (`24f8c` Native 2x) | `0.1859 T` / `94.32` | **`71.05 s`** | **`20.80 fps`** (`2.05x`) | **`24.56 fps`** (`2.33x`) | **`44.91 fps`** (`178.15 ms`, `8.35 T`) | `0.63` / `5.50` / `14.54 ms` | `64.20%` / `31.27%` / **`96.36%`** (`100%` pk) | `121.53 W` (`167.42 W` pk) / `7,425 MiB` | `PASS` (`0.31`, `0.99992`, `1478/1478`) |
+
+- **Kho lưu trữ bằng chứng kiểm toán R3:** Toàn bộ dữ liệu đo trần silicon (`out/benchmark_r3_final/silicon_probe.json`), 3 báo cáo viễn trắc & vi thời gian (`r3_climax_*_summary.json`, `*_telemetry.csv`), 3 biên bản kiểm định bit-exact (`r3_climax_*.audit.json`, khớp 100% MD5 `b7840791f53a0653c08a9fdaaf9c1f67` / `12f8a4845d7f67e0e2da1a58298da5a3`) và mô hình toán học tự kiểm chứng bằng Python tại [`docs/roofline_theoretical_model.md`](../docs/roofline_theoretical_model.md), [`docs/empirical_benchmark_report.md`](../docs/empirical_benchmark_report.md) và [`docs/benchmarks_gap_analysis_audit.md`](../docs/benchmarks_gap_analysis_audit.md) đều nhất quán tuyệt đối.
+
+**Phán quyết nghiệm thu cuối cùng:** **HOÀN THÀNH XUẤT SẮC & BÃO HÒA TRẦN VẬT LÝ SILICON GA106 (PROJECT MISSION ACCOMPLISHED — READY FOR PRODUCTION DEPLOYMENT).**

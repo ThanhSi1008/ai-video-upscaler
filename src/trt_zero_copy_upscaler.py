@@ -34,6 +34,8 @@ except Exception:
     tl = None
     HAS_TRITON = False
 
+_HAS_TRITON = HAS_TRITON
+
 from src.config import (
     HEVC_ENCODER,
     HEVC_PROFILE,
@@ -47,7 +49,38 @@ from src.config import (
 )
 
 
-if HAS_TRITON:
+if _HAS_TRITON:
+    @triton.jit
+    def _nhwc_u8_to_nchw_fp16_norm_kernel(
+        in_ptr,
+        out_ptr,
+        HW,
+        stride_in_b,
+        stride_out_b,
+        stride_out_c,
+        BLOCK_P: tl.constexpr,
+    ):
+        pid_p = tl.program_id(axis=0)
+        pid_b = tl.program_id(axis=1).to(tl.int64)
+
+        offs_p = pid_p * BLOCK_P + tl.arange(0, BLOCK_P)
+        mask = offs_p < HW
+
+        in_pix = in_ptr + pid_b * stride_in_b + offs_p * 3
+        r_u8 = tl.load(in_pix + 0, mask=mask, other=0).to(tl.float32)
+        g_u8 = tl.load(in_pix + 1, mask=mask, other=0).to(tl.float32)
+        b_u8 = tl.load(in_pix + 2, mask=mask, other=0).to(tl.float32)
+
+        inv_255 = 1.0 / 255.0
+        r_f16 = (r_u8 * inv_255).to(tl.float16)
+        g_f16 = (g_u8 * inv_255).to(tl.float16)
+        b_f16 = (b_u8 * inv_255).to(tl.float16)
+
+        out_base = out_ptr + pid_b * stride_out_b
+        tl.store(out_base + 0 * stride_out_c + offs_p, r_f16, mask=mask)
+        tl.store(out_base + 1 * stride_out_c + offs_p, g_f16, mask=mask)
+        tl.store(out_base + 2 * stride_out_c + offs_p, b_f16, mask=mask)
+
     @triton.jit
     def _rgb_to_p010le_triton_kernel(
         rgb_ptr,
@@ -149,7 +182,72 @@ if HAS_TRITON:
         tl.store(out_b + uv_row * stride_out_h + x0 * stride_out_w, u_p010, mask=mask)
         tl.store(out_b + uv_row * stride_out_h + x1 * stride_out_w, v_p010, mask=mask)
 else:
+    _nhwc_u8_to_nchw_fp16_norm_kernel = None
     _rgb_to_p010le_triton_kernel = None
+
+
+def _nhwc_u8_to_nchw_fp16_norm(
+    nhwc_u8: torch.Tensor,
+    out_nchw_fp16: Optional[torch.Tensor] = None,
+    use_triton: Optional[bool] = None,
+) -> torch.Tensor:
+    """
+    Chuyển đổi và chuẩn hóa 1-pass (B, H, W, 3) uint8 -> (B, 3, H, W) float16 * (1/255)
+    trực tiếp vào vùng đệm cố định out_nchw_fp16 (bảo toàn địa chỉ con trỏ cho TensorRT).
+    Ưu tiên kernel @triton.jit trên CUDA (~150 MB VRAM traffic/batch thay vì ~350 MB của 2-kernel PyTorch),
+    với nhánh fallback PyTorch sạch sẽ khi chạy trên CPU hoặc không có Triton.
+    """
+    if nhwc_u8.ndim != 4 or nhwc_u8.shape[-1] != 3:
+        raise ValueError(f"Kỳ vọng tensor NHWC (B, H, W, 3), nhận được shape={tuple(nhwc_u8.shape)}")
+
+    B, H, W, _ = nhwc_u8.shape
+    if out_nchw_fp16 is None:
+        out_buf = torch.empty((B, 3, H, W), dtype=torch.float16, device=nhwc_u8.device)
+    else:
+        if out_nchw_fp16.shape != (B, 3, H, W) or out_nchw_fp16.dtype != torch.float16:
+            raise ValueError(
+                f"out_nchw_fp16 phải có shape={(B, 3, H, W)} và dtype=float16, "
+                f"nhận được shape={tuple(out_nchw_fp16.shape)}, dtype={out_nchw_fp16.dtype}"
+            )
+        out_buf = out_nchw_fp16
+
+    if B == 0 or H == 0 or W == 0:
+        return out_buf
+
+    should_use_triton = (
+        bool(use_triton)
+        if use_triton is not None
+        else (_HAS_TRITON and nhwc_u8.is_cuda and out_buf.is_cuda)
+    )
+    if (
+        should_use_triton
+        and _HAS_TRITON
+        and _nhwc_u8_to_nchw_fp16_norm_kernel is not None
+        and nhwc_u8.dtype == torch.uint8
+        and nhwc_u8.stride(1) == W * 3
+        and nhwc_u8.stride(2) == 3
+        and nhwc_u8.stride(3) == 1
+        and out_buf.stride(2) == W
+        and out_buf.stride(3) == 1
+    ):
+        HW = H * W
+        BLOCK_P = 1024
+        grid = (triton.cdiv(HW, BLOCK_P), B)
+        _nhwc_u8_to_nchw_fp16_norm_kernel[grid](
+            nhwc_u8,
+            out_buf,
+            HW,
+            nhwc_u8.stride(0),
+            out_buf.stride(0),
+            out_buf.stride(1),
+            BLOCK_P=BLOCK_P,
+            num_warps=4,
+        )
+        return out_buf
+
+    out_buf.copy_(nhwc_u8.permute(0, 3, 1, 2))
+    out_buf.mul_(1.0 / 255.0)
+    return out_buf
 
 
 # =============================================================================
@@ -446,11 +544,28 @@ class DoubleBufferedPipeUpscaler:
         self.host_out_pins: List[torch.Tensor] = []
         self.gpu_in_ring: List[torch.Tensor] = []
         self.gpu_nhwc_ring: List[torch.Tensor] = []
+        self._micro_event_pool: List[Tuple[Any, ...]] = []
+        self._sync_event_pool: List[Any] = []
         self.last_first_rgb_small: Optional[np.ndarray] = None
         self.last_distinct_count: int = 0
         self.ensure_resolution(input_hw[0], input_hw[1])
         if self.device.type == "cuda" and not os.environ.get("PYTEST_CURRENT_TEST"):
             self.warmup(batch_size=min(2, self.batch_size))
+
+    def _ensure_cuda_event_pools(self, num_batches: int, record_micro: bool) -> None:
+        """
+        Cấp phát trước và tái sử dụng các CUDA Event theo lô bên ngoài vòng lặp nóng,
+        loại bỏ hoàn toàn 8*N lệnh gọi driver cudaEventCreate giữa chừng.
+        """
+        if self.device.type != "cuda":
+            return
+        while len(self._sync_event_pool) < num_batches:
+            self._sync_event_pool.append(torch.cuda.Event(enable_timing=False))
+        if record_micro:
+            while len(self._micro_event_pool) < num_batches:
+                self._micro_event_pool.append(
+                    tuple(torch.cuda.Event(enable_timing=True) for _ in range(9))
+                )
 
     def ensure_resolution(self, in_h: int, in_w: int) -> Tuple[int, int]:
         """Đảm bảo bộ đệm Pinned Memory khớp độ phân giải khung hình thực tế (hỗ trợ tái sử dụng xuyên suốt tập)."""
@@ -488,7 +603,7 @@ class DoubleBufferedPipeUpscaler:
 
     def warmup(self, batch_size: int = 2) -> None:
         """
-        Khởi động sớm (Warm-up) 1-batch qua Triton JIT Color Converter và Engine Context
+        Khởi động sớm (Warm-up) 1-batch qua Triton JIT Input Norm + Color Converter và Engine Context
         trước khi bắt đầu đo đạc pipeline video, triệt tiêu hoàn toàn 3-4s độ trễ biên dịch cold-start.
         """
         if self.device.type != "cuda" or not torch.cuda.is_available():
@@ -499,8 +614,18 @@ class DoubleBufferedPipeUpscaler:
             cur_bs = min(max(1, batch_size), self.batch_size)
             in_h, in_w = self.input_hw if self.input_hw[0] > 0 else (1080, 1920)
             out_h, out_w = self.output_hw if self.output_hw[0] > 0 else (in_h * self.scale, in_w * self.scale)
-            dummy_in = torch.zeros((cur_bs, 3, in_h, in_w), dtype=torch.float16, device=self.device)
+            if self.gpu_nhwc_ring and self.gpu_nhwc_ring[0].shape[0] >= cur_bs and self.gpu_nhwc_ring[0].shape[1:3] == (in_h, in_w):
+                dummy_nhwc = self.gpu_nhwc_ring[0][:cur_bs]
+                dummy_nhwc.zero_()
+            else:
+                dummy_nhwc = torch.zeros((cur_bs, in_h, in_w, 3), dtype=torch.uint8, device=self.device)
+            dummy_in_buf = (
+                self.gpu_in_ring[0][:cur_bs]
+                if self.gpu_in_ring and self.gpu_in_ring[0].shape[0] >= cur_bs and self.gpu_in_ring[0].shape[2:4] == (in_h, in_w)
+                else torch.empty((cur_bs, 3, in_h, in_w), dtype=torch.float16, device=self.device)
+            )
             with torch.inference_mode():
+                dummy_in = _nhwc_u8_to_nchw_fp16_norm(dummy_nhwc, out_nchw_fp16=dummy_in_buf)
                 if callable(self.model):
                     dummy_out = self.model(dummy_in)
                 else:
@@ -510,10 +635,13 @@ class DoubleBufferedPipeUpscaler:
         except Exception:
             try:
                 cur_bs = min(max(1, batch_size), self.batch_size)
+                in_h, in_w = self.input_hw if self.input_hw[0] > 0 else (1080, 1920)
                 out_h = self.output_hw[0] if self.output_hw[0] > 0 else 2160
                 out_w = self.output_hw[1] if self.output_hw[1] > 0 else 3840
+                dummy_nhwc = torch.zeros((cur_bs, in_h, in_w, 3), dtype=torch.uint8, device=self.device)
                 dummy_out = torch.zeros((cur_bs, 3, out_h, out_w), dtype=torch.float16, device=self.device)
                 with torch.inference_mode():
+                    _nhwc_u8_to_nchw_fp16_norm(dummy_nhwc)
                     self.color_conv.rgb_to_p010le(dummy_out, slot=0)
                     torch.cuda.synchronize(self.device)
             except Exception:
@@ -699,6 +827,7 @@ class DoubleBufferedPipeUpscaler:
                     batches.append((start_idx, end_idx))
                 num_batches = len(batches)
                 sanity_gpu_box: List[Optional[torch.Tensor]] = [None]
+                self._ensure_cuda_event_pools(num_batches, record_micro)
                 batch_timings = []
 
                 def _dispatch_batch_cuda(batch_k: int):
@@ -706,18 +835,27 @@ class DoubleBufferedPipeUpscaler:
                     s_idx, e_idx = batches[batch_k]
                     cur_B = e_idx - s_idx
 
-                    evt_h2d_s = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_h2d_e = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_trt_s = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_trt_e = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_tri_s = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_tri_e = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_d2h_s = torch.cuda.Event(enable_timing=True) if record_micro else None
-                    evt_d2h_e = torch.cuda.Event(enable_timing=True) if record_micro else None
+                    if record_micro:
+                        (
+                            evt_h2d_s,
+                            evt_h2d_dma_e,
+                            evt_h2d_e,
+                            evt_trt_s,
+                            evt_trt_e,
+                            evt_tri_s,
+                            evt_tri_e,
+                            evt_d2h_s,
+                            evt_d2h_e,
+                        ) = self._micro_event_pool[batch_k]
+                    else:
+                        evt_h2d_s = evt_h2d_dma_e = evt_h2d_e = None
+                        evt_trt_s = evt_trt_e = None
+                        evt_tri_s = evt_tri_e = None
+                        evt_d2h_s = evt_d2h_e = None
 
                     # 1. Nạp dữ liệu tuần tự NHWC vào Pinned Memory (0 transpose trên DDR4 CPU) và truyền H2D bất đồng bộ
                     with torch.cuda.stream(self.stream_h2d):
-                        if record_micro and evt_h2d_s:
+                        if record_micro and evt_h2d_s is not None:
                             evt_h2d_s.record(self.stream_h2d)
                         first_arr = distinct_frames[s_idx]
                         is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
@@ -731,25 +869,21 @@ class DoubleBufferedPipeUpscaler:
                                 gpu_nhwc.copy_(hwc_pin[:cur_B], non_blocking=True)
                             else:
                                 gpu_nhwc = hwc_pin[:cur_B].to(self.device, non_blocking=True)
-                            if is_trt and self.gpu_in_ring:
-                                # Transpose NCHW trực tiếp vào bộ đệm VRAM cố định self.gpu_in_ring (1-kernel, 0 alloc mới, cố định địa chỉ con trỏ TRT)
+                            if record_micro and evt_h2d_dma_e is not None:
+                                evt_h2d_dma_e.record(self.stream_h2d)
+                            if self.gpu_in_ring:
+                                # Fused 1-pass @triton.jit NHWC uint8 -> NCHW float16 * (1/255) trực tiếp vào self.gpu_in_ring[slot][:cur_B]
+                                # (~150 MB VRAM traffic/batch, bảo toàn tuyệt đối địa chỉ con trỏ cố định cho TensorRT execute_async_v3)
                                 in_buf = self.gpu_in_ring[slot][:cur_B]
-                                in_buf.copy_(gpu_nhwc.permute(0, 3, 1, 2))
-                                gpu_tensor = in_buf.mul_(1.0 / 255.0)
-                            elif is_trt:
-                                # Transpose NCHW ngay ở uint8 (1 byte/kênh = 49.7 MB) giảm 50% băng thông VRAM so với transpose FP16
-                                gpu_tensor = (
-                                    gpu_nhwc.permute(0, 3, 1, 2)
-                                    .contiguous()
-                                    .to(dtype=torch.float16)
-                                    .mul_(1.0 / 255.0)
-                                )
+                                gpu_tensor = _nhwc_u8_to_nchw_fp16_norm(gpu_nhwc, out_nchw_fp16=in_buf)
                             else:
-                                gpu_tensor = gpu_nhwc.permute(0, 3, 1, 2).to(dtype=torch.float16).mul_(1.0 / 255.0)
+                                gpu_tensor = _nhwc_u8_to_nchw_fp16_norm(gpu_nhwc)
                         else:
                             for i in range(cur_B):
                                 self.host_in_pins[slot][i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
                             gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
+                            if record_micro and evt_h2d_dma_e is not None:
+                                evt_h2d_dma_e.record(self.stream_h2d)
                             if is_trt and self.gpu_in_ring:
                                 in_buf = self.gpu_in_ring[slot][:cur_B]
                                 in_buf.copy_(gpu_in)
@@ -762,17 +896,17 @@ class DoubleBufferedPipeUpscaler:
                                     .to(torch.float16)
                                     .mul_(1.0 / 255.0)
                                 )
-                        if record_micro and evt_h2d_e:
+                        if record_micro and evt_h2d_e is not None:
                             evt_h2d_e.record(self.stream_h2d)
 
                     # 2. Chờ H2D xong, chạy suy luận + chuyển màu P010LE trực tiếp trên VRAM
                     self.stream_compute.wait_stream(self.stream_h2d)
                     with torch.cuda.stream(self.stream_compute):
                         gpu_tensor.record_stream(self.stream_compute)
-                        if record_micro and evt_trt_s:
+                        if record_micro and evt_trt_s is not None:
                             evt_trt_s.record(self.stream_compute)
                         upscaled_rgb = self.model(gpu_tensor)
-                        if record_micro and evt_trt_e:
+                        if record_micro and evt_trt_e is not None:
                             evt_trt_e.record(self.stream_compute)
                         if capture_first_rgb_small and batch_k == 0:
                             u0 = upscaled_rgb[0:1].float().clamp(0.0, 1.0)
@@ -787,17 +921,17 @@ class DoubleBufferedPipeUpscaler:
                                 .permute(1, 2, 0)
                                 .contiguous()
                             )
-                        if record_micro and evt_tri_s:
+                        if record_micro and evt_tri_s is not None:
                             evt_tri_s.record(self.stream_compute)
                         gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb, slot=slot)
-                        if record_micro and evt_tri_e:
+                        if record_micro and evt_tri_e is not None:
                             evt_tri_e.record(self.stream_compute)
 
                     # 3. Chờ Compute xong, rút D2H về Pinned Memory (gắn record_stream để chống tái cấp phát sớm)
                     slot_drain_events[slot].wait(timeout=10.0)
                     self.stream_d2h.wait_stream(self.stream_compute)
                     with torch.cuda.stream(self.stream_d2h):
-                        if record_micro and evt_d2h_s:
+                        if record_micro and evt_d2h_s is not None:
                             evt_d2h_s.record(self.stream_d2h)
                         gpu_p010.record_stream(self.stream_d2h)
                         self.host_out_pins[slot][:cur_B].copy_(gpu_p010, non_blocking=True)
@@ -806,13 +940,25 @@ class DoubleBufferedPipeUpscaler:
                             sanity_cpu = sanity_gpu_box[0].to("cpu", non_blocking=True)
                         else:
                             sanity_cpu = None
-                        if record_micro and evt_d2h_e:
+                        if record_micro and evt_d2h_e is not None:
                             evt_d2h_e.record(self.stream_d2h)
 
-                    evt = torch.cuda.Event()
+                    evt = self._sync_event_pool[batch_k]
                     evt.record(self.stream_d2h)
                     if record_micro:
-                        batch_timings.append((evt_h2d_s, evt_h2d_e, evt_trt_s, evt_trt_e, evt_tri_s, evt_tri_e, evt_d2h_s, evt_d2h_e))
+                        batch_timings.append(
+                            (
+                                evt_h2d_s,
+                                evt_h2d_dma_e,
+                                evt_h2d_e,
+                                evt_trt_s,
+                                evt_trt_e,
+                                evt_tri_s,
+                                evt_tri_e,
+                                evt_d2h_s,
+                                evt_d2h_e,
+                            )
+                        )
                     return evt, sanity_cpu
 
                 # PROLOGUE: Phát lệnh Batch 0
@@ -839,29 +985,39 @@ class DoubleBufferedPipeUpscaler:
                     curr_event, curr_sanity_cpu = next_event, next_sanity_cpu
 
                 if record_micro and batch_timings:
+                    total_h2d_dma = 0.0
+                    total_in_norm = 0.0
                     total_h2d = 0.0
                     total_trt = 0.0
                     total_tri = 0.0
                     total_d2h = 0.0
-                    for h_s, h_e, t_s, t_e, r_s, r_e, d_s, d_e in batch_timings:
+                    for h_s, h_dma_e, h_e, t_s, t_e, r_s, r_e, d_s, d_e in batch_timings:
                         try:
-                            if h_s and h_e:
+                            if h_s is not None and h_dma_e is not None:
+                                total_h2d_dma += h_s.elapsed_time(h_dma_e)
+                            if h_dma_e is not None and h_e is not None:
+                                total_in_norm += h_dma_e.elapsed_time(h_e)
+                            if h_s is not None and h_e is not None:
                                 total_h2d += h_s.elapsed_time(h_e)
-                            if t_s and t_e:
+                            if t_s is not None and t_e is not None:
                                 total_trt += t_s.elapsed_time(t_e)
-                            if r_s and r_e:
+                            if r_s is not None and r_e is not None:
                                 total_tri += r_s.elapsed_time(r_e)
-                            if d_s and d_e:
+                            if d_s is not None and d_e is not None:
                                 total_d2h += d_s.elapsed_time(d_e)
                         except Exception:
                             pass
                     n_b = max(1, len(batch_timings))
                     self.last_micro_timings = {
                         "num_batches": len(batch_timings),
+                        "total_h2d_dma_ms": round(total_h2d_dma, 2),
+                        "total_in_norm_ms": round(total_in_norm, 2),
                         "total_h2d_ms": round(total_h2d, 2),
                         "total_trt_ms": round(total_trt, 2),
                         "total_triton_ms": round(total_tri, 2),
                         "total_d2h_ms": round(total_d2h, 2),
+                        "avg_h2d_dma_ms": round(total_h2d_dma / n_b, 2),
+                        "avg_in_norm_ms": round(total_in_norm / n_b, 2),
                         "avg_h2d_ms": round(total_h2d / n_b, 2),
                         "avg_trt_ms": round(total_trt / n_b, 2),
                         "avg_triton_ms": round(total_tri / n_b, 2),
@@ -870,11 +1026,13 @@ class DoubleBufferedPipeUpscaler:
 
             else:
                 # CPU Fallback
+                cpu_total_norm_ms = 0.0
                 cpu_total_infer_ms = 0.0
                 cpu_total_conv_ms = 0.0
                 for start_idx in range(0, num_distinct, self.batch_size):
                     end_idx = min(start_idx + self.batch_size, num_distinct)
                     cur_B = end_idx - start_idx
+                    t_nrm_s = time.perf_counter()
                     batch_tensors = []
                     for i in range(cur_B):
                         t = torch.from_numpy(distinct_frames[start_idx + i])
@@ -882,6 +1040,7 @@ class DoubleBufferedPipeUpscaler:
                             t = t.permute(2, 0, 1)
                         batch_tensors.append(t)
                     tensor = torch.stack(batch_tensors, dim=0).float().div_(255.0)
+                    cpu_total_norm_ms += (time.perf_counter() - t_nrm_s) * 1000.0
                     t_inf_s = time.perf_counter()
                     out_rgb = self.model(tensor)
                     cpu_total_infer_ms += (time.perf_counter() - t_inf_s) * 1000.0
@@ -912,10 +1071,14 @@ class DoubleBufferedPipeUpscaler:
                     n_b = max(1, (num_distinct + self.batch_size - 1) // self.batch_size)
                     self.last_micro_timings = {
                         "num_batches": n_b,
+                        "total_h2d_dma_ms": 0.0,
+                        "total_in_norm_ms": round(cpu_total_norm_ms, 2),
                         "total_h2d_ms": 0.0,
                         "total_trt_ms": round(cpu_total_infer_ms, 2),
                         "total_triton_ms": round(cpu_total_conv_ms, 2),
                         "total_d2h_ms": 0.0,
+                        "avg_h2d_dma_ms": 0.0,
+                        "avg_in_norm_ms": round(cpu_total_norm_ms / n_b, 2),
                         "avg_h2d_ms": 0.0,
                         "avg_trt_ms": round(cpu_total_infer_ms / n_b, 2),
                         "avg_triton_ms": round(cpu_total_conv_ms / n_b, 2),

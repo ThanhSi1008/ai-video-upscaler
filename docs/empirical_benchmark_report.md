@@ -1,178 +1,129 @@
-# Báo Cáo Đo Đạc Thực Nghiệm Benchmarks (Empirical Benchmark Report)
-## Hệ Thống AI Video Upscaler 4K — NVIDIA GeForce RTX 3060 12GB & Intel Core i5-12600K
+# Báo Cáo Đo Đạc Thực Nghiệm Benchmarks & Vi Thăm Dò Silicon (Empirical Benchmark & Silicon Probe Report)
+## Hệ Thống AI Video Upscaler 4K — NVIDIA GeForce RTX 3060 12GB (`GA106-302-A1`) & Intel Core i5-12600K
 
-> **Phiên bản tài liệu:** 2.0 (Milestone M2 Execution)  
-> **Thời điểm thực hiện:** 2026-11-15T03:08:00Z  
-> **Môi trường:** 100% Cục bộ trên Windows 11 64-bit Workstation  
-> **Trạng thái kiểm định:** **PASS 100%** (Toàn bộ bất biến an toàn, bit-exact mux audit, output sanity guard)  
-> **Đơn vị thực thi:** Worker M2 (Empirical Benchmarking Execution)
+> - **Phiên bản tài liệu:** 3.0 (Calibrated R3 Final — Silicon Probe + 3-Regime Live Climax Execution)
+> - **Thời điểm thực hiện:** 2026-11-15T12:15:09+07:00 – 2026-11-15T12:29:27+07:00
+> - **Môi trường:** 100% Cục bộ trên Windows 11 Pro 64-bit (`Build 26300`)
+> - **Trạng thái kiểm định:** **PASS 100%** (Khớp `1478/1478` frames, Bit-Exact `streamhash` MD5 Mux Audit, Output Sanity Guard, `.gpu_active.lock` giải phóng sạch)
+> - **Kho dữ liệu gốc:** `out/benchmark_r3_final/` (`silicon_probe.json`, `r3_climax_*_summary.json`, `r3_climax_*.audit.json`) & `scratch/hw_and_model_exact_audit.json`
 
 ---
 
-## 1. Môi Trường Phần Cứng & Thiết Lập Thực Nghiệm
+## 1. Môi Trường Phần Cứng & Toolchain Đã Kiểm Toán (Zero-Hallucination Ground Truth)
 
-Toàn bộ các phép đo đạc thực nghiệm được thực thi trực tiếp trên phần cứng máy trạm với video mẫu chuẩn canonical `Fate Apocrypha - 22` (BD 1080p Hi10P FLAC Dual-Audio):
+Toàn bộ cấu hình máy trạm và `.venv` được truy vấn trực tiếp từ WMI/CIM (`Win32_Processor`, `Win32_PhysicalMemory`, `Get-PhysicalDisk`), `nvidia-smi -q`, `torch.cuda.get_device_properties`, và metadata gói Python (xóa bỏ triệt để các thông số ghi nhầm ở bản nháp cũ như `Python 3.10.11`, `TRT 10.7`, `XMP 3200`, `SN770 5150 MB/s`, hay `FLAC 5.1`):
 
-| Hạng mục phần cứng / phần mềm | Chi tiết thông số thực nghiệm |
+| Hạng mục phần cứng / phần mềm | Thông số thực tế đã kiểm toán (`hw_and_model_exact_audit.json`) |
 | :--- | :--- |
-| **CPU** | Intel Core i5-12600K (10 Cores: 6P @ 4.5–4.9 GHz + 4E @ 3.4 GHz, 16 Threads, AVX2, FMA3, 20 MB L3 Cache) |
-| **GPU** | NVIDIA GeForce RTX 3060 12GB GDDR6 (GA106-302, 28 SMs, 3584 CUDA Cores, 112 3rd Gen Tensor Cores) |
-| **Bộ nhớ VRAM / Bus** | 12,288 MiB GDDR6, 192-bit bus @ 15.0 Gbps (Băng thông lý thuyết: 360.0 GB/s, P0 locked 7501 MHz) |
-| **Khối phần cứng chuyên dụng** | 5th Gen NVDEC (1080p decode), 7th Gen NVENC (`hevc_nvenc` 4K 10-bit Main 10, Preset p6, CQ 18) |
-| **Bộ nhớ hệ thống (RAM)** | 32 GB Dual-Channel DDR4-3200 (XMP) |
-| **Ổ cứng lưu trữ** | NVMe PCIe Gen4 SSD (>5000 MB/s tuần tự) |
-| **Môi trường thực thi** | Windows 11 Pro 64-bit, Python 3.10.11, PyTorch 2.5.1+cu124, TensorRT 10.7.0.23, CUDA 12.4 |
-| **Video nguồn Canonical** | `E:\Films\Raw_Sources\Fate Apocrypha\[AC] Fate Apocrypha - 22 [BD 1080p Hi10 FLAC][DualAudio][695AB63E].mkv` |
-| **Cấu hình pipeline** | `--zero-disk` (VRAM Triton JIT BT.709 `p010le` pipe trực tiếp vào NVENC), 3-Stage Overlapped Concurrency |
+| **Hệ điều hành & Bo mạch chủ** | Microsoft Windows 11 Pro 64-bit `10.0.26300` (**Build `26300`**, WDDM) trên **Gigabyte `B760M G P WIFI DDR4`** (LGA1700, PCIe 5.0 CPU root) |
+| **CPU** | `12th Gen Intel(R) Core(TM) i5-12600K` (10C/16T: `6P` Golden Cove @ `3.7–4.9 GHz` [`4.5 GHz` all-core] + `4E` Gracemont @ `2.8–3.6 GHz`, `L2 = 9,728 KB` [`9.5 MiB`], `L3 = 20,480 KB` [`20.0 MiB`], AVX2/FMA3/VNNI) |
+| **GPU & Bộ đệm L2** | `NVIDIA GeForce RTX 3060` (`GA106-302-A1`, `sm_86`, VBIOS `94.06.2f.00.9a`, Driver `617.42`, `28 SMs`, `3,584 CUDA Cores`, `112` 3rd-Gen Tensor Cores, **`L2 Cache = 2,359,296 B` (`2.25 MiB`)**, **`TGP = 170.0 W`**) |
+| **VRAM & Giao tiếp PCIe** | `12,288 MiB` (`12,115 MiB` WDDM khả dụng) GDDR6, `192-bit` @ `7,501 MHz` P0 (`15.0 Gbps` = **`360.0 GB/s`** lý thuyết, **`302.61 GB/s`** STREAM Triad thực tế); PCIe `4.0 x16` (`31.51 GB/s`), **`BAR1 = 256 MiB` (`Resizable BAR`: Tắt)** |
+| **Bộ nhớ hệ thống (RAM)** | **`32 GiB` Dual-Channel DDR4** (`G.Skill F4-3200C16-16GVK` 16 GiB + `PNY 16GF2X16QFHH36-135-K` 16 GiB) đang chạy ở **`ConfiguredClockSpeed = 2,133 MT/s` @ `1.20 V` JEDEC (`34.13 GB/s` lý thuyết)** do lắp 2 thanh khác mã không bật XMP |
+| **Hệ thống ổ cứng NVMe** | **Disk 0 (`C:` `378.21 GiB` OS + `D:`):** `OCPC MFL-300 512GB` (NVMe PCIe Gen3 x4) <br> **Disk 1 (`E:` `464.67 GiB` Workspace, `.cache`, `scratch/`, `Raw_Sources`):** **`WD_BLACK SN7100 500GB`** (NVMe PCIe Gen4 x4, FW `7615M0WD`, datasheet **`6,800 MB/s` đọc / `5,800 MB/s` ghi**) |
+| **Toolchain `.venv` chính xác** | **Python `3.11.9`**, **PyTorch `2.6.0+cu124`** (CUDA `12.4`, cuDNN `90100`), **TensorRT `10.16.1.11`**, **Triton `3.2.0`** (`triton-windows 3.2.0.post21`), **PyAV `18.1.0`**, **`faster-whisper` `1.2.1`** (`ctranslate2 4.9.0`), **`spandrel` `0.4.2`**, **NumPy `2.4.6`**, **OpenCV `5.0.0`** (`5.0.0.93`), **FFmpeg `8.1.2-full_build-www.gyan.dev`** |
+| **Video nguồn Canonical** | `E:\Films\Raw_Sources\Fate Apocrypha\[AC] Fate Apocrypha - 22 [BD 1080p Hi10 FLAC][DualAudio][695AB63E].mkv` (`1920x1080` H.264 Hi10P `23.976 fps`; `2x` luồng **FLAC `2.0` Stereo** 24-bit/48kHz ENG + JPN; `2x` ASS; `5` Fonts; `9` chapters cả tập / `1` chapter trên clip 60s Climax) |
 
 ---
 
-## 2. Ma Trận Hiệu Năng Tổng Thể (Performance Matrix)
+## 2. Kết Quả Vi Thăm Dò Trần Vật Lý Silicon (`out/benchmark_r3_final/silicon_probe.json`)
 
-Ba bài đo đạc chuẩn hóa đã được thực thi đầy đủ và thu thập viễn trắc continuous 1.0s:
-1. **Tier 1 Preview Benchmark:** Đoạn 10s trích xuất tại 30% phim (270 frames), model `animevideov3`.
-2. **Tier 2 Climax Benchmark:** Đoạn 60s trích xuất tại 13:30 (810.0s, cảnh chiến đấu Sakuga biến thiên cao, 1478 frames), model `animevideov3`.
-3. **Tier 2 Native 2x Climax Benchmark:** Đoạn 60s trích xuất tại 13:30 (1478 frames), model Native 2x `animejanai-hd-v3-sharp1-ultracompact`.
+Script độc lập `scripts/silicon_roofline_probe.py` đã đo trực tiếp các trần vật lý cô lập của chiếc card `RTX 3060 12GB` (`GA106-302-A1`) trong `41.58s`:
 
-### Bảng Ma Trận Hiệu Năng Thực Nghiệm (R2 vs Baseline)
-
-| Chỉ số hiệu năng | Baseline Preview | **R2 Preview (`animevideov3`)** | Baseline Climax | **R2 Climax (`animevideov3`)** | **R2 Climax (Native 2x `sharp1_uc`)** |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Model Super-Resolution** | `animevideov3` | `animevideov3` | `animevideov3` | `animevideov3` | `sharp1-ultracompact` |
-| **Kiến trúc mô hình** | 64f16c (x4) | 64f16c (x4) | 64f16c (x4) | 64f16c (x4) | 64f8c (x2 Native) |
-| **Thời lượng video** | 10.0 s | 10.0 s | 60.0 s | 60.0 s | 60.0 s |
-| **Tổng số khung hình** | 270 frames | 270 frames | 1478 frames | 1478 frames | 1478 frames |
-| **Khung hình suy luận (Kept)** | 224 frames | 224 frames | 1405 frames | 1405 frames | 1405 frames |
-| **Tỷ lệ Deduplication** | 17.04% | 17.04% | 4.94% | 4.94% | 4.94% |
-| **Tổng thời gian xử lý** | 74.69 s | **33.08 s** (-55.71%) | 173.24 s | **149.83 s** (-13.51%) | **87.02 s** (-49.77%) |
-| **Effective Pipeline FPS** | 3.61 fps | **8.16 fps** (+126.04%) | 8.53 fps | **9.86 fps** (+15.59%) | **16.98 fps** (+99.06%) |
-| **AI Inference Steady FPS** | 4.88 fps | **10.34 fps** (+111.89%) | 8.90 fps | **10.26 fps** (+15.28%) | **18.92 fps** (+112.58%) |
-| **Peak Chunk FPS** | N/A | **11.56 fps** | N/A | **9.02 fps** | **16.02 fps** |
-| **Peak VRAM Allocation** | 8023.0 MiB | **6914.0 MiB** (-13.82%) | 8119.0 MiB | **7979.0 MiB** (-1.72%) | **7841.0 MiB** (-3.42%) |
-| **Average VRAM Allocation** | 6057.93 MiB | **5528.58 MiB** | 7416.58 MiB | **6534.59 MiB** | **5930.74 MiB** |
-| **Average GPU Compute Util** | 34.52% | **75.68%** (+41.16%) | 73.88% | **93.31%** (+19.43%) | **87.26%** |
-| **NVENC Engine Util (Avg / Peak)** | N/A | **40.39% / 100%** | N/A | **42.42% / 100%** | **72.75% / 100%** (Bão hòa) |
-| **Host CPU Util (Avg / Peak)** | 33.19% / 60.9% | **19.29% / 56.3%** | 19.85% / 94.8% | **22.39% / 93.3%** | **25.24% / 94.7%** |
-| **System RAM Usage (Avg / Peak)** | N/A | **14.29 GB / 15.54 GB** | N/A | **18.30 GB / 20.31 GB** | **17.52 GB / 21.73 GB** |
-| **Output Sanity Guard ($|\Delta Y|$, $r$)**| PASS | **PASS** (1.04, 0.9998) | PASS | **PASS** (1.87, 0.9998) | **PASS** (0.32, 0.9999) |
-| **Bit-exact Mux Audit** | PASS | **PASS** | PASS | **PASS** | **PASS** |
-
----
-
-## 3. Phân Rã Chi Tiết Micro-Timings (CUDA Event Timings)
-
-Tất cả các micro-timings được ghi nhận độc lập qua CUDA Events trên luồng suy luận, tính trung bình cho từng batch 8 frames ($1080p \to 4K$):
-
-| Giai đoạn trong Batch (Batch size = 8) | R2 Preview (`animevideov3`) | R2 Climax (`animevideov3`) | R2 Climax (Native 2x `sharp1_uc`) | Tỷ trọng thời gian (`sharp1_uc`) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Số lượng Batch đo đạc** | 28 batches | 178 batches | 178 batches | — |
-| **H2D Transfer (Host Pinned $\to$ VRAM)** | 714.08 ms (89.26 ms/frame) | 731.94 ms (91.49 ms/frame) | **371.75 ms** (46.47 ms/frame) | 48.65% |
-| **TensorRT 10 FP16 Compute Kernel** | 747.39 ms (93.42 ms/frame) | 743.68 ms (92.96 ms/frame) | **383.92 ms** (47.99 ms/frame) | **50.24%** |
-| **Triton JIT BT.709 VRAM Kernel** | 6.12 ms (0.77 ms/frame) | 6.16 ms (0.77 ms/frame) | **6.41 ms** (0.80 ms/frame) | 0.84% |
-| **D2H Transfer (VRAM $\to$ Pipe Buffer)** | 9.10 ms (1.14 ms/frame) | 9.10 ms (1.14 ms/frame) | **9.98 ms** (1.25 ms/frame) | 1.31% |
-| **Tổng chu kỳ Batch (Batch Cycle)** | **762.61 ms** | **758.94 ms** | **400.31 ms** | **100.0%** |
-| **Raw TensorRT Compute Throughput** | **10.70 FPS** | **10.76 FPS** | **20.84 FPS** | — |
-
-### Nhận định Kỹ thuật về Micro-Timings:
-1. **Độ gối đầu hoàn hảo giữa H2D và TensorRT Compute:**  
-   Thời gian H2D transfer (~731.9 ms trên batch 8 đối với 4x, ~371.8 ms đối với 2x) gần như khớp hoàn toàn với thời gian tính toán TRT Compute (~743.7 ms và ~383.9 ms). Cơ chế Triple CUDA Streams (`stream_h2d`, `stream_compute`, `stream_d2h`) kết hợp bộ đệm Pinned Memory 2-slot Ring Buffer đã ẩn hoàn toàn độ trễ I/O bộ nhớ dưới bóng của thời gian suy luận GPU.
-2. **Hiệu năng vượt trội của Kernel Triton JIT:**  
-   Kernel `@triton.jit` chuyển đổi không gian màu BT.709 trực tiếp trong VRAM sang định dạng `p010le` chỉ tiêu tốn **~6.16–6.41 ms cho cả batch 8 frame 4K** (~0.77 ms/frame), chiếm chưa tới 1% tổng chu kỳ batch, loại bỏ hoàn toàn nhu cầu chuyển đổi màu bằng CPU hay OpenCV.
-3. **Tiệm cận trần suy luận phần cứng:**  
-   Đối với `animevideov3`, TRT compute thực tế đạt **10.76 FPS**, tương đương **97.95%** so với trần lý thuyết của mô hình (10.985 FPS).  
-   Đối với `sharp1-ultracompact`, TRT compute thực tế đạt **20.84 FPS**, tương đương **92.42%** so với trần lý thuyết (22.55 FPS).
-
----
-
-## 4. Thống Kê Viễn Trắc Phần Cứng Continuous 17-Metric (Telemetry Breakdown)
-
-Dữ liệu viễn trắc được lấy mẫu tự động mỗi giây (1.0s interval) bởi module `TelemetryCollector`, bao gồm toàn bộ 17 thông số trạng thái của phần cứng:
-
-### Bảng Thống Kê Viễn Trắc Chi Tiết (Min / Avg / Peak)
-
-| Thông số Viễn Trắc (17 Metrics) | R2 Preview (`animevideov3`) [31 samples] | R2 Climax (`animevideov3`) [140 samples] | R2 Climax (Native 2x `sharp1_uc`) [81 samples] |
+| Phép đo vi thăm dò cô lập (`silicon_probe.json`) | Trần Lý Thuyết GA106 (`1,777 MHz` / `P0`) | Kết Quả Thực Nghiệm Đo Trực Tiếp | Hiệu Suất Silicon & Ý Nghĩa Vật Lý |
 | :--- | :--- | :--- | :--- |
-| **GPU Compute Util (`gpu_util_pct`)** | 11.0% / **75.68%** / 100.0% | 11.0% / **93.31%** / 100.0% | 8.0% / **87.26%** / 100.0% |
-| **GPU Memory Controller Util (`mem_util_pct`)** | 1.0% / **33.48%** / 54.0% | 1.0% / **43.49%** / 56.0% | 1.0% / **42.94%** / 55.0% |
-| **NVENC Encoder Util (`enc_util_pct`)** | 0.0% / **40.39%** / 100.0% | 0.0% / **42.42%** / 100.0% | 0.0% / **72.75%** / **100.0%** (Bão hòa) |
-| **NVDEC Decoder Util (`dec_util_pct`)** | 0.0% / 0.0% / 0.0% (Hi10P CPU) | 0.0% / 0.0% / 0.0% (Hi10P CPU) | 0.0% / 0.0% / 0.0% (Hi10P CPU) |
-| **GPU Core Clock (`core_clock_mhz`)** | 457 MHz / **1503.58 MHz** / 1957 MHz | 450 MHz / **1701.24 MHz** / 1927 MHz | 450 MHz / **1658.78 MHz** / 1950 MHz |
-| **GPU Memory Clock (`mem_clock_mhz`)** | 810 MHz / **5990.13 MHz** / 7501 MHz | 810 MHz / **7118.66 MHz** / 7501 MHz | 810 MHz / **6840.16 MHz** / 7501 MHz |
-| **GPU Power Draw (`power_w`)** | 22.05 W / **123.21 W** / 169.94 W | 22.07 W / **156.83 W** / **170.35 W** | 23.57 W / **146.65 W** / **170.25 W** |
-| **GPU Temperature (`temp_c`)** | 53.0°C / **62.23°C** / 68.0°C | 48.0°C / **67.96°C** / **73.0°C** | 52.0°C / **66.77°C** / 72.0°C |
-| **VRAM Đã cấp phát (`vram_used_mib`)** | 1975 MiB / **5528.58 MiB** / 6914 MiB | 1975 MiB / **6534.59 MiB** / **7979 MiB** | 1809 MiB / **5930.74 MiB** / **7841 MiB** |
-| **VRAM Còn trống (`vram_free_mib`)** | 5202 MiB / **6587.42 MiB** / 10141 MiB | 4137 MiB / **5581.41 MiB** / 10141 MiB | 4275 MiB / **6185.26 MiB** / 10307 MiB |
-| **Host CPU Utilization (`cpu_pct`)** | 0.0% / **19.29%** / 56.3% | 0.0% / **22.39%** / **93.3%** | 0.0% / **25.24%** / **94.7%** |
-| **System RAM Usage (`ram_used_gb`)** | 10.53 GB / **14.29 GB** / 15.54 GB | 10.81 GB / **18.30 GB** / 20.31 GB | 10.29 GB / **17.52 GB** / 21.73 GB |
-| **SSD Read Throughput (`ssd_read_mb_s`)**| 0.0 MB/s / **51.19 MB/s** / 1427.5 MB/s| 0.0 MB/s / **0.24 MB/s** / 1.85 MB/s | 0.0 MB/s / **0.19 MB/s** / 2.44 MB/s |
-| **SSD Write Throughput (`ssd_write_mb_s`)**| 0.0 MB/s / **3.69 MB/s** / 23.23 MB/s | 0.0 MB/s / **4.92 MB/s** / 67.03 MB/s | 0.0 MB/s / **5.51 MB/s** / 16.38 MB/s |
-| **P-State GPU** | P0 (Performance) | P0 (Performance) | P0 (Performance) |
-| **Độ trễ đọc đĩa (I/O Wait)** | ~0.00 ms (Zero-Disk) | ~0.00 ms (Zero-Disk) | ~0.00 ms (Zero-Disk) |
-| **Tính toàn vẹn khóa GPU** | Clean Release (`None`) | Clean Release (`None`) | Clean Release (`None`) |
+| **1. IEEE FP32 GEMM (`4096^3`, `allow_tf32=False`)** | `12.74 TFLOPS` (`12.20 T` @ `1,702 MHz` live) | **`6.702 TFLOPS`** (`20.5058 ms`, `128.05 W`) | **`54.93%`** (Datapath thứ 2 trên `sm_86` chia sẻ lệnh FP32/INT32) |
+| **2. Dense TC FP16 (`FP32-Accum` `HMMA.16816.F32`)** | **`25.48 TFLOPS`** (**`27.96 T`** @ `1,950 MHz` live) | **`23.211 TFLOPS`** (`cublasGemmEx 32F`, `5.9214 ms`, `148.44 W`, `cos=1.0`) | **`83.03%`** trần xung thực; `torch.matmul` FP16 luôn gọi `32F` (`23.178–23.344 TFLOPS`) |
+| **3. Dense TC FP16 (`FP16-Accum` `HMMA.16816.F16`)** | **`50.95 TFLOPS`** (`49.78 T` @ `1,736.25 MHz` TDP; `101.90 T` chỉ khi 2:4 sparse!) | **`38.844 TFLOPS`** (`cublasGemmEx 16F`, `3.5382 ms`, `158.47 W`, `cos=0.999995`; burst `42.63 T`) | **`78.03%`** trần xung TDP (**`1.6735x`** nhanh hơn `FP32-accum`), bác bỏ hoàn toàn con số `101.9 TFLOPS` cũ |
+| **4. Eager cuDNN `Conv2d(64->64, 3x3)` `8x1080p`** | `AI = 288.0 FLOPs/B`, `4.25 GB/batch` DRAM | **`12.140 TFLOPS`** (`100.7421 ms/layer`, `168.13 W`) | Chứng minh TensorRT 10 `NHWC` (`28.27–28.77 TFLOPS`) nhanh gấp **`2.33x–2.37x`** PyTorch cuDNN thuần |
+| **5. GDDR6 Bandwidth (`256 MiB` Copy / STREAM Triad)** | `360.0 GB/s` (`192-bit` @ `7,501 MHz` P0) | Copy: **`295.69 GB/s`** (`1.8157 ms`) <br> Triad: **`302.61 GB/s`** (`2.6612 ms`, `97%` `mem_util`) | **`84.06%`** băng thông lý thuyết; xác lập điểm gãy thực nghiệm **`128.36 FLOPs/B`** (`HMMA.F16`) & **`76.70 FLOPs/B`** (`HMMA.F32`) |
+| **6. PCIe 4.0 x16 Pinned DMA (`H2D` & `D2H`)** | `31.51 GB/s` PCIe / `34.13 GB/s` DDR4-2133 | H2D (`49.77 MB`): **`2.1822 ms`** (**`22.81 GB/s`**) <br> D2H (`199.07 MB`): **`8.7918 ms`** (**`22.64 GB/s`**) | **`72.38%` / `71.86%`** trần vật lý PCIe 4.0 x16 (`0.273 ms/f` H2D, `1.099 ms/f` D2H) |
+| **7. Fused R3 `@triton.jit` Input Norm (`8x1080p`)** | `149.30 MB/batch` (1-pass VRAM) vs `348.36 MB` cũ | **`0.5133 ms/batch`** (`0.0642 ms/f`, **`290.88 GB/s`**) vs `1.6429 ms` PyTorch 2-kernel | Đạt **`80.80%`** đỉnh `360 GB/s`, **nhanh gấp `3.20x`** đường chuẩn hóa PyTorch cũ |
+| **8. Output `@triton.jit` BT.709 `rgb_to_p010le` (`8x4K`)**| `597.20 MB/batch` (`RGB FP16 -> P010LE`) | **`5.6683 ms/batch`** (`0.7085 ms/f`, **`105.36 GB/s`**) | Kèm clamp thanh ghi `[0,1]` chống rò rỉ sắc độ Sakuga (`0 LSB` sai lệch) |
+| **9. 7th-Gen NVENC 4K Main10 `p6 CQ 18 lookahead 32`** | `hevc_nvenc` raw `stdin` pipe (`0` AI inference) | **`-multipass fullres`:** `18.96 FPS` (120f), **`20.67 FPS`** (240f), **`22.70 FPS` (`44.053 ms/f`) steady!** <br> *1-pass (`disabled`):* **`29.50 FPS`** (120f) | **Phát hiện quyết định:** `-multipass fullres` mã hóa 2 lượt full 4K trên 1 chip NVENC, khóa cứng trần E2E ở **`~21–24.6 FPS`**! |
 
 ---
 
-## 5. Bằng Chứng Kiểm Định An Toàn & Bảo Toàn Dữ Liệu (Safety & Mux Audit)
+## 3. Các Tối Ưu Hóa Vi Cấu Trúc R3 & Ma Trận Hiệu Năng 3 Chế Độ (3-Regime Matrix)
 
-### 5.1. Output Sanity Guard (Bảo vệ Chất Lượng & Màu Sắc VRAM)
-Thuật toán Sanity Guard thực hiện downscale song song trong VRAM xuống thumbnail $270 \times 480$ để tính toán độ lệch kênh sáng Luma ($|\Delta Y|$) và hệ số tương quan Pearson ($r$):
+### 3.1 Ba Tối Ưu Hóa Mới Trong R3 (`src/config.py`, `src/trt_zero_copy_upscaler.py`, `scripts/verify_offline.py`)
+1. **Định tuyến Cache GPU/JIT/Triton & Test `TEMP` sang `WD_BLACK SN7100` Gen4 (`E:\ai-video-upscaler\.cache` & `scratch/`):** Cấu hình `CUDA_CACHE_PATH`, `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR` sang ổ NVMe Gen4 `E:` (`6,800/5,800 MB/s`) và cô lập `TEMP`/`TMP`/`TMPDIR` của `verify_offline.py` khỏi ổ hệ thống `C:` (`OCPC MFL-300` Gen3).
+2. **Kernel `@triton.jit` Chuẩn Hóa Đầu Vào Gộp 1 Lượt (`_nhwc_u8_to_nchw_fp16_norm_kernel`):** Chuyển `(B, H, W, 3) uint8` sang `(B, 3, H, W) float16 * (1/255)` trực tiếp vào địa chỉ cố định `self.gpu_in_ring[slot]` trong 1 lượt đọc/ghi VRAM (`149.30 MB/batch` thay vì `348.36 MB`), giảm độ trễ từ `1.6429 ms` xuống **`0.5133 ms/batch` (`3.20x`)** và được warm-up sẵn trước khi bấm giờ.
+3. **Hồ Sự Kiện CUDA Tiền Cấp Phát (`_ensure_cuda_event_pools`) & Tách Bạch `avg_h2d_dma_ms` / `avg_in_norm_ms`:** Khử 100% lệnh gọi driver `cudaEventCreate` trong vòng lặp nóng và đặt mốc `evt_h2d_dma_e` ngay sau `gpu_nhwc.copy_(..., non_blocking=True)`, tách riêng thời gian thực thi kernel chuẩn hóa đầu vào (`avg_in_norm_ms = 0.593–0.724 ms/batch`) khỏi thời gian xếp hàng Copy-Engine dưới Windows WDDM `HwSchMode=2`.
 
-| Benchmark Run | Giá trị $|\Delta Y|$ đo được | Ngưỡng an toàn $|\Delta Y|$ | Hệ số tương quan $r$ | Ngưỡng an toàn $r$ | Kết luận Sanity |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **R2 Preview (`animevideov3`)** | **1.0378** | $\le 6.0 / 255$ | **0.999814** | $\ge 0.98$ | **PASS** |
-| **R2 Climax (`animevideov3`)** | **1.8706** | $\le 6.0 / 255$ | **0.999846** | $\ge 0.98$ | **PASS** |
-| **R2 Climax (`sharp1_uc`)** | **0.3219** | $\le 6.0 / 255$ | **0.999921** | $\ge 0.98$ | **PASS** |
+### 3.2 Bảng Ma Trận Hiệu Năng Thực Nghiệm Toàn Trình (Baseline $\to$ R2 $\to$ R3 Final)
 
-*Nhận định:* Tất cả các bài test đều vượt trội so với ngưỡng an toàn. Model Native 2x `sharp1_uc` có độ lệch Luma cực thấp ($\Delta Y = 0.3219$) và hệ số tương quan gần như tuyệt đối ($r = 0.999921$), khẳng định ma trận BT.709 hai chiều hoàn toàn bảo toàn màu sắc gốc.
+Tất cả 3 chế độ R3 đều chạy tuần tự trên đoạn Climax `60s @ 13:30` (`810s`, `1478` frames, `1405` unique = `95.06%`, `178` batches / `8` chunks, `--zero-disk`, `--no-subs`), làm nguội GPU xuống **`< 50°C` (`42°C–46°C`)** trước mỗi lượt chạy:
 
-### 5.2. Mux Audit Stream Copy & Đối Chiếu Bit-Exact
-Kiểm tra tính toàn vẹn 100% của video 4K xuất xưởng so với video nguồn:
+| Chỉ số hiệu năng | Baseline Climax (`PNG`) | R2 Climax (`animevideov3`) | **R3 Regime 1: `animevideov3` (`64f16c`)** | **R3 Regime 2: `sharp1-uc` (`64f8c` 2x)** | **R3 Regime 3: `sharp1-suc` (`24f8c` 2x)** |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Khối lượng tính toán / frame** | `2.571 TFLOPs` | `2.571 TFLOPs` | **`2.571 TFLOPs`** (`621K` params) | **`1.260 TFLOPs`** (`305K` params) | **`0.1859 TFLOPs`** (`45.2K` params) |
+| **Nhiệt độ GPU trước khi chạy** | — | `48.0 °C` | **`46.0 °C`** | **`42.0 °C`** | **`43.0 °C`** |
+| **Tổng thời gian xử lý (`total_time_s`)** | `173.24 s` | `149.83 s` | **`145.95 s`** (`-15.75%` vs Base) | **`79.79 s`** (`-53.94%` vs Base) | **`71.05 s`** (`-58.99%` vs Base) |
+| **Effective Pipeline FPS** | `8.53 fps` | `9.86 fps` | **`10.13 fps`** (`+18.76%` vs Base) | **`18.52 fps`** (`2.17x` vs Base) | **`20.80 fps`** (`2.44x` vs Base) |
+| **AI / Pipe Steady-State FPS** | `8.90 fps` | `10.26 fps` | **`10.52 fps`** (`+18.20%` vs Base) | **`20.69 fps`** (`2.32x` vs Base) | **`24.56 fps`** (`2.76x` vs Base) |
+| **Pure TensorRT Isolated FPS (`8000/avg_trt_ms`)**| — | `10.76 fps` | **`11.00 fps`** (**`28.27 TFLOPS`**) | **`22.83 fps`** (**`28.77 TFLOPS`**) | **`44.91 fps`** (`8.35 TFLOPS`) |
+| **Peak / Avg VRAM (`MiB`)** | `8119 / 7417` | `7979 / 6535` | **`8156.0 / 6586.6 MiB`** | **`8061.0 / 6081.9 MiB`** | **`7425.0 / 5533.8 MiB`** |
+| **Active GPU Compute Util (`avg`)** | `73.88%` | `93.31%` | **`94.90%`** (`94.20%` toàn run) | **`94.24%`** (`84.28%` toàn run) | **`64.20%`** (`55.52%` toàn run) |
+| **Active GDDR6 Mem Controller Util** | — | `43.49%` | **`44.53%`** | **`50.70%`** | **`31.27%`** |
+| **Active NVENC ASIC Util (`avg / peak`)**| — | `42.42% / 100%` | **`40.88% / 100.0%`** | **`89.06% / 100.0%`** (Bão hòa kép) | **`96.36% / 100.0%`** (Kịch trần ASIC) |
+| **Active GPU Power (`avg / peak`)** | — | `156.83 / 170.35 W`| **`157.61 / 170.38 W`** (`73°C`) | **`161.24 / 170.93 W`** (`70°C`) | **`121.53 / 167.42 W`** (`65°C`) |
+| **Output Sanity (`|\Delta Y|`, `r`)** | `PASS` | `PASS` (`1.87`, `0.9998`) | **`PASS`** (`1.8706`, `0.999846`) | **`PASS`** (`0.3219`, `0.999921`) | **`PASS`** (`0.3101`, `0.999923`) |
+| **Mux Audit & Frame Count** | `1478/1478` | `1478/1478` | **`PASS` (`1478/1478`, `247.86 MB`)**| **`PASS` (`1478/1478`, `255.98 MB`)**| **`PASS` (`1478/1478`, `258.46 MB`)**|
 
-- **Số lượng luồng (Stream Counts):**
-  - Audio: Nguồn 2 luồng $\to$ Đích 2 luồng (Khớp 100%).
-  - Phụ đề (Softsubs): Nguồn 2 luồng $\to$ Đích 2 luồng (Khớp 100%).
-  - Fonts đính kèm: Nguồn 5 fonts $\to$ Đích 5 fonts (Khớp 100%).
-  - Chapters: Nguồn 1 chapter $\to$ Đích 1 chapter (Khớp 100%).
-- **Mã băm MD5 dòng âm thanh (Streamhash bit-exact):**
-  - **Track 0 (English FLAC 5.1):**
-    - Source MD5: `b7840791f53a0653c08a9fdaaf9c1f67`
-    - Output MD5: `b7840791f53a0653c08a9fdaaf9c1f67`
-    - Kết quả: **TRÙNG KHỚP TUYỆT ĐỐI (Bit-Exact Copy)**
-  - **Track 1 (Japanese FLAC 2.0):**
-    - Source MD5: `12f8a4845d7f67e0e2da1a58298da5a3`
-    - Output MD5: `12f8a4845d7f67e0e2da1a58298da5a3`
-    - Kết quả: **TRÙNG KHỚP TUYỆT ĐỐI (Bit-Exact Copy)**
-- **Bảo toàn số khung hình (Zero Frame Drop):**
-  - Source frames: `1478` $\to$ Output frames: `1478` ($\Delta = 0$, `frames_matched: true`).
+*(Ghi chú tham chiếu Preview 10s `270` frames: Baseline `3.61 fps` / `74.69s` $\to$ R2 `animevideov3` `8.16 fps` / `33.08s` $\to$ Hậu Nhóm A `animevideov3` `9.81 fps` / `27.53s` $\to$ Native 2x `sharp1-uc` `13.58 fps` / `19.88s`, AI Steady `20.18 fps`.)*
 
 ---
 
-## 6. Phân Tích Điểm Nghẽn & Đánh Giá Giới Hạn Phần Cứng
+## 4. Phân Rã Vi Thời Gian CUDA Events R3 (`micro_timings`, 178 Batches $\times$ 8 Frames)
 
-### 6.1. Bão hòa GPU Compute trên `animevideov3` (93.31% Utilization)
-Trong bài test Climax của `animevideov3`:
-- GPU Compute Utilization duy trì ở mức trung bình **93.31%**, thường xuyên chạm mức đỉnh **100.0%**.
-- Công suất GPU đạt **156.83 W trung bình** và chạm trần công suất tối đa của card đồ họa là **170.35 W** (100% TDP).
-- Băng thông GPU memory clock đạt mức tối đa **7501 MHz** (trạng thái P0).
-- **Kết luận:** Đối với mô hình 4x nặng như RealESR-AnimeVideoV3 (64f16c, 2.568 TFLOPs/frame), GPU RTX 3060 đã hoạt động ở mức **bão hòa tính toán toàn phần** (~98% công suất Tensor Core thực tế).
-
-### 6.2. Hiện tượng bão hòa NVENC 7th Gen trên Native 2x (`sharp1-ultracompact`)
-Khi chuyển sang mô hình Native 2x `sharp1-ultracompact`:
-- Tốc độ suy luận tăng vọt lên **18.92 FPS AI Steady** và **16.98 FPS Effective Pipeline**.
-- GPU Compute Util giảm nhẹ xuống **87.26%**, nhưng **NVENC Engine Utilization tăng vọt lên trung bình 72.75% và chạm đỉnh 100.0%**.
-- Đây là bằng chứng thực nghiệm rõ ràng nhất cho thấy khi tốc độ suy luận AI tiệm cận 19–20 FPS 4K 10-bit, khối phần cứng mã hóa NVENC bắt đầu chạm giới hạn thông lượng của chip ASIC NVENC đơn trên GA106 (trần giới hạn ở preset p6 CQ 18 là ~45–55 FPS cho video thông thường và ~20–25 FPS cho video anime 10-bit độ tương phản cao với lookahead 32 + dual AQ).
-
-### 6.3. Tối ưu Bộ nhớ và Ổ cứng (Zero-Disk Discipline)
-- Tốc độ ghi ổ đĩa trung bình chỉ ở mức **3.69–5.51 MB/s** (chỉ ghi stream HEVC nén của file MKV thành phẩm), so với việc xuất hàng ngàn file PNG lossless nặng hàng chục GB nếu không dùng Zero-Disk.
-- Dung lượng VRAM đỉnh chỉ chiếm **7979 MiB** (khoảng 65% tổng dung lượng 12GB VRAM), để lại vùng đệm an toàn tuyệt đối >4.2 GB ngăn ngừa rủi ro Out-Of-Memory (OOM).
+| Pha vi thời gian GPU (`Batch = 8`) | Cô lập (`silicon_probe.json`) | R3 Regime 1: `animevideov3` (`avg` / `steady`) | R3 Regime 2: `sharp1-uc` (`avg` / `steady`) | R3 Regime 3: `sharp1-suc` (`avg` / `steady`) | Giải thích vật lý & cơ chế chồng lấp |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Pure PCIe H2D DMA (`49.77 MB`)** | **`2.1822 ms`** (`22.81 GB/s`) | `715.001` / `711.140 ms`* | `335.505` / `339.600 ms`* | `66.339` / `79.059 ms`* | *Trong pipeline, `evt_h2d_s` đóng dấu sớm trên `stream_h2d` rảnh trong khi WDDM `HwSchMode=2` xếp gói DMA sau batch `stream_compute` đang chạy; DMA vật lý thật chỉ tốn **`2.18 ms`** và ẩn **100%**! |
+| **Fused Input Norm (`avg_in_norm_ms`)** | **`0.5133 ms`** (`290.88 GB/s`) | **`0.724`** / **`0.721 ms`** | **`0.593`** / **`0.590 ms`** | **`0.634`** / **`0.628 ms`** | Kernel `@triton.jit` 1-pass mới giảm 3.2x độ trễ chuẩn hóa đầu vào, chiếm **`< 0.17%`** chu kỳ batch. |
+| **Tổng `stream_h2d` (`avg_h2d_ms`)** | `2.6955 ms` | `715.725 ms` | `336.097 ms` | `66.973 ms` | Luôn nhỏ hơn `avg_trt_ms` (`715.7 < 727.5`, `336.1 < 350.4`, `67.0 < 178.1`), chứng minh batch $b+1$ luôn nạp xong trước khi TensorRT xong batch $b$! |
+| **TensorRT 10 FP16 (`avg_trt_ms`)** | — | **`727.477`** / **`722.069 ms`** | **`350.358`** / **`350.531 ms`** | **`178.148`** / **`178.410 ms`** | `90.93 ms/f` (`v3`), `43.80 ms/f` (`uc`), `22.27 ms/f` (`suc`). |
+| **Output Triton P010LE (`avg_triton_ms`)**| **`5.6683 ms`** (`105.36 GB/s`) | **`5.939`** / **`6.020 ms`** | **`5.724`** / **`5.717 ms`** | **`5.504`** / **`5.508 ms`** | Biến đổi màu BT.709 TV-range 10-bit + clamp `[0,1]` cho 8 khung 4K trong `~0.71 ms/f`. |
+| **PCIe D2H P010LE (`avg_d2h_ms`)** | **`8.7918 ms`** (`22.64 GB/s`) | **`8.836`** / **`8.666 ms`** | **`9.535`** / **`9.299 ms`** | **`14.542`** / **`14.418 ms`** | Khớp sát `8.79 ms` cô lập trên `v3`/`uc`; tăng lên `14.54 ms` ở `suc` do áp lực ngược từ ống NVENC đầy. |
 
 ---
 
-## 7. Tổng Hợp & Đề Xuất Cho Milestone Tiếp Theo (M3)
+## 5. Thống Kê Viễn Trắc Continuous 17-Metric Trên 3 Chế Độ R3 (`active_telemetry`)
 
-1. **Bộ số liệu thực nghiệm đã sẵn sàng:**
-   - Cả 3 file `_summary.json` và 3 file `_telemetry.csv` đã được chuẩn hóa tại `out/benchmark_r2/`.
-   - Các báo cáo so sánh `comparison_preview.md`, `comparison_climax.md`, và `comparison_native2x_vs_v3.md` đã xác nhận **PASS** toàn bộ các tiêu chí nghiệm thu.
-2. **Dữ liệu cho M3 Gap Analysis:**
-   - Dữ liệu thực nghiệm này hoàn toàn tương thích và khớp với mô hình trần lý thuyết đã tính toán ở Milestone M1 (chỉ ra mức độ tối ưu hóa đạt 92.4% – 97.9% trần lý thuyết của phần cứng GA106).
-   - Module M3 có thể tiến hành ngay lập tức việc phân tích phân rã Amdahl và đánh giá Pareto tối ưu.
+| Thông số Viễn Trắc Phần Cứng | R3 Regime 1: `animevideov3` [136 active samples] | R3 Regime 2: `sharp1-uc` [66 active samples] | R3 Regime 3: `sharp1-suc` [56 active samples] |
+| :--- | :---: | :---: | :---: |
+| **GPU Compute Util (`avg_gpu_util_pct`)** | **`94.90%`** (Toàn run: `94.20%`, Peak `100%`) | **`94.24%`** (Toàn run: `84.28%`, Peak `100%`) | **`64.20%`** (Toàn run: `55.52%`, do chờ NVENC) |
+| **GDDR6 Mem Controller (`avg_mem_util_pct`)**| **`44.53%`** (`~111.8 GB/s` + L2 halo) | **`50.70%`** (`~105.5 GB/s` + NVENC 2-pass) | **`31.27%`** |
+| **NVENC ASIC Util (`avg / peak_enc_util`)** | `40.88%` / `100.0%` | **`89.06%` / `100.0%`** (Bão hòa kép) | **`96.36%` / `100.0%`** (Nghẽn cứng ASIC) |
+| **NVDEC Decoder Util (`avg_dec_util_pct`)** | `0.0%` (H.264 Hi10P giải mã trên P-Cores) | `0.0%` (H.264 Hi10P giải mã trên P-Cores) | `0.0%` (H.264 Hi10P giải mã trên P-Cores) |
+| **GPU Core Clock (`avg / peak_core_clock`)**| **`1,701.11 MHz`** / `1,957.0 MHz` | **`1,785.74 MHz`** / `1,957.0 MHz` | **`1,918.48 MHz`** / `1,965.0 MHz` |
+| **GPU Memory Clock (`avg_mem_clock_mhz`)** | `7,107.41 MHz` (Active P0 `7,501 MHz`) | **`7,501.00 MHz`** (Khóa cứng P0) | **`7,501.00 MHz`** (Khóa cứng P0) |
+| **GPU Power Draw (`avg / peak_power_w`)** | **`157.61 W` / `170.38 W`** (`100.2%` TGP) | **`161.24 W` / `170.93 W`** (`100.5%` TGP) | **`121.53 W` / `167.42 W`** |
+| **GPU Temperature (`pre -> peak_temp_c`)** | `46.0 °C` $\to$ **`73.0 °C`** | `42.0 °C` $\to$ **`70.0 °C`** | `43.0 °C` $\to$ **`65.0 °C`** |
+| **VRAM Allocation (`avg / peak_vram_mib`)** | `6,586.6 MiB` / **`8,156.0 MiB`** | `6,081.9 MiB` / **`8,061.0 MiB`** | `5,533.8 MiB` / **`7,425.0 MiB`** |
+| **Host CPU Util (`avg / peak_cpu_pct`)** | `19.91%` / `94.0%` | `23.36%` / `91.4%` | `22.76%` / `93.0%` |
+| **System RAM Usage (`avg / peak_ram_gb`)** | `18.42 GB` / `21.70 GB` (trên `32 GiB`) | `18.80 GB` / `21.85 GB` | `19.15 GB` / `22.30 GB` |
+| **SSD Read / Write (`WD_BLACK SN7100` E:)** | `0.29 MB/s` / **`3.36 MB/s`** (Zero-Disk) | `0.02 MB/s` / **`5.10 MB/s`** (Zero-Disk) | `0.15 MB/s` / **`5.49 MB/s`** (Zero-Disk) |
+
+---
+
+## 6. Bằng Chứng Kiểm Định An Toàn & Bit-Exact Mux Audit (`r3_climax_*.audit.json`)
+
+1. **Output Sanity Guard (`270x480` Luma & Pearson $r$):**
+   - `r3_climax_animevideov3`: $|\Delta Y| = \mathbf{1.8706} \le 6.0$, $r = \mathbf{0.999846} \ge 0.98$ $\to$ **`PASS`**.
+   - `r3_climax_sharp1_uc`: $|\Delta Y| = \mathbf{0.3219} \le 6.0$, $r = \mathbf{0.999921} \ge 0.98$ $\to$ **`PASS`**.
+   - `r3_climax_sharp1_suc`: $|\Delta Y| = \mathbf{0.3101} \le 6.0$, $r = \mathbf{0.999923} \ge 0.98$ $\to$ **`PASS`**.
+2. **Bit-Exact Stream Copy & Bảo Toàn Khung Hình Trên Cả 3 Run R3:**
+   - Khung hình video (`ffprobe -count_frames`): Nguồn **`1478`** $\to$ Đích **`1478`** (`frames_matched: true`, độ trôi thời lượng `0.001s`).
+   - Mã băm `streamhash` MD5 âm thanh trùng khớp 100% trên cả 3 thành phẩm:
+     - **Track 0 (`English 2.0 FLAC` stereo, 24-bit/48kHz):** `b7840791f53a0653c08a9fdaaf9c1f67` == `b7840791f53a0653c08a9fdaaf9c1f67` (**PASS**).
+     - **Track 1 (`Japanese 2.0 FLAC` stereo, 24-bit/48kHz):** `12f8a4845d7f67e0e2da1a58298da5a3` == `12f8a4845d7f67e0e2da1a58298da5a3` (**PASS**).
+   - Bảo toàn `2/2` luồng phụ đề ASS (`0` và `11` packets trong cửa sổ 60s), `5/5` font TTF/OTF, `1/1` chapter, `7/7` cửa sổ interleaving 10s (`-max_interleave_delta 0`) và `7/7` điểm kiểm tra âm lượng `0.0 dB` sai lệch.
+
+---
+
+## 7. Kết Luận Thực Nghiệm: Ba Chế Độ Chuyển Dịch Điểm Nghẽn Vật Lý
+
+1. **Chế độ 1 (`animevideov3`, `2.571 TFLOPs/f`):** Bão hòa hoàn toàn **Tensor Cores & trần nhiệt điện `170W` TGP** (`94.90%` GPU util, `170.38W` đỉnh, đạt `10.13 FPS` E2E / `11.00 FPS` TRT = `28.27 TFLOPS`), trong khi NVENC mới tải `40.88%`.
+2. **Chế độ 2 (`sharp1-ultracompact`, `1.260 TFLOPs/f`):** Chạm **Điểm Cân Bằng Bão Hòa Kép Pareto Hoàn Hảo** — tốc độ suy luận TensorRT (`22.83 FPS`) khớp chính xác với trần ổn định của chip 7th-Gen NVENC `-multipass fullres` (`22.70 FPS`), đồng thời vắt kiệt **`94.24%` GPU Compute VÀ `89.06%` NVENC ASIC** ở `18.52 FPS` E2E (`20.69 FPS` steady).
+3. **Chế độ 3 (`sharp1-superultracompact`, `0.1859 TFLOPs/f`):** TensorRT vọt lên **`44.91 FPS`**, vượt xa khả năng mã hóa 2 lượt full-4K của 7th-Gen NVENC (`22.70 FPS`), đẩy NVENC chạm trần cứng **`96.36%` trung bình / `100.0%` đỉnh** và ghìm pipeline ở **`20.80 FPS` E2E (`24.56 FPS` steady)** do áp lực ngược từ bộ mã hóa phần cứng.
