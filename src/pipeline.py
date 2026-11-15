@@ -134,9 +134,12 @@ def run_upscale_pipeline(
     preview_temp_input = None
 
     if is_preview:
-        preview_dur = min(int(preview_seconds), int(meta["duration"]))
-        # Chọn điểm bắt đầu ở khoảng 30% thời lượng phim để tránh màn hình đen mở đầu
-        start_pt = max(0, int(meta["duration"] * 0.3))
+        max_dur = max(1, int(round(meta["duration"]))) if meta.get("duration") else int(preview_seconds)
+        preview_dur = min(int(preview_seconds), max_dur)
+        if preview_dur >= max_dur:
+            start_pt = 0
+        else:
+            start_pt = max(0, min(int(meta["duration"] * 0.3), max_dur - preview_dur))
         preview_temp_input = os.path.join(DEFAULT_OUTPUT_DIR, f".preview_clip_{base_name}.mkv")
         os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
         print(f"\n🔍 [PREVIEW] Đang trích xuất đoạn xem trước {preview_dur}s (từ {format_time(start_pt)})...")
