@@ -2,7 +2,7 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `95621e7` (`docs(agents): sync STATE baseline to e117af6`)
+> **Commit Baseline:** `b996a09` (`feat(agent): add Antigravity scoped rules, isolated subagents, lifecycle hooks, smoke pipeline, and web mock mode`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
