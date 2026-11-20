@@ -30,12 +30,17 @@ Run targeted tests directly ONLY for pure stdlib agent-tooling tests, or inside 
 | Subsystem / Module | Targeted Command |
 | :--- | :--- |
 | **Agent Context & Setup** (`scripts/agent_context.py`, `.agents/`) | `.\.venv\Scripts\python.exe -m pytest tests/test_agent_context.py tests/test_agent_setup.py tests/test_verify_offline.py -q` |
-| **Full Offline Suite** (All non-GPU modules) | `.\.venv\Scripts\python.exe scripts/verify_offline.py` |
+| **Fast Video/Mux Smoke** (`< 5s` CPU-safe 24f pipeline) | `.\.venv\Scripts\python.exe scripts/smoke_test_pipeline.py` *(or `.\.venv\Scripts\python.exe -m pytest -m smoke`)* |
+| **Web Studio Offline & Mock** (`web/`, `web_gui.py --mock`) | `.\.venv\Scripts\python.exe -m pytest tests/test_web_gui.py -q` *(or `.\.venv\Scripts\python.exe web_gui.py --mock` on `127.0.0.1`)* |
+| **Full Offline Suite** (All non-GPU modules, final gate) | `.\.venv\Scripts\python.exe scripts/verify_offline.py` |
 | **E2E Acceptance Suite** (`tests/e2e/`, Group A/B, T1-T4) | `pytest -m "e2e and not gpu" -q` *(inside `verify_offline` snapshot)* |
-| **Subtrans Engine** (`subtrans/*.py`, `glossaries/`) | `pytest -m "subtrans and not gpu" -q` *(inside `verify_offline` snapshot)* |
+| **Subtrans Engine** (`subtrans/*.py`, `glossaries/`) | `pytest -m "subtrans and not gpu" -q` *(inside `verify_offline` snapshot; delegate evals to [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md))* |
 | **Video Core / Dedup / TRT / Mux** (`src/`, `upscale.py`) | `pytest -m "unit and not subtrans and not gpu" -q` *(inside `verify_offline` snapshot)* |
-| **Web Studio** (`web/`, `web_gui.py`) | `pytest tests/test_web_gui.py -q` *(inside `verify_offline` snapshot)* |
 | **Static Linter** | `.\.venv\Scripts\ruff.exe check .` |
+
+## Subagent Delegation & Pytest Markers
+- **Custom Subagents (`inheritMcp: false`):** [test-verifier](../../.agents/agents/test-verifier.md) (pytest, lint, `smoke_test_pipeline.py`, `verify_offline.py`) | [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md) (`subtrans/eval/runner.py`, pronoun benchmarks).
+- **`pytest.ini` Markers (`--strict-markers`):** `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`. During iteration use targeted commands or `smoke_test_pipeline.py`; run `verify_offline.py` **once** at the final regression gate.
 
 ## Acceptance & Reporting Rules
 - Record exact commands, interpreter (`.venv`), `passed`/`failed`/`skipped`/`deselected` counts, wall-clock duration, and `scratch/agent-validation-*` evidence path.

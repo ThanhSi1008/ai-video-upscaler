@@ -23,5 +23,30 @@
         ]
       }
     ]
+  },
+  "upscaler-post-tool-lint": {
+    "enabled": true,
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python hooks/post_tool_lint.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  },
+  "upscaler-stop-audit": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python hooks/stop_audit.py",
+        "timeout": 2
+      }
+    ]
   }
 }

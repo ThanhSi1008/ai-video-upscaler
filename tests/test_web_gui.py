@@ -2310,4 +2310,46 @@ def test_frontend_a11y_mobile_and_perf_guards(studio_env):
     assert "requestAnimationFrame" in app_js
 
 
+def test_web_gui_mock_mode_routes_and_sse(tmp_path):
+    """Verify web_gui.py --mock and create_app(..., mock_mode=True) serve deterministic telemetry, jobs, and SSE."""
+    parsed = web_gui.build_parser().parse_args(["--mock", "--no-browser"])
+    assert parsed.mock is True
+    assert parsed.no_browser is True
+
+    app = create_app(workspace_root=tmp_path, mock_mode=True)
+    assert app.state.mock_mode is True
+
+    with TestClient(app) as client:
+        status_resp = client.get("/api/status")
+        assert status_resp.status_code == 200
+        status_data = status_resp.json()
+        assert "Mock" in status_data["gpu_info"]["gpu_name"]
+        assert status_data["telemetry"]["vram_used_mib"] >= 6144.0
+        assert status_data["pipeline"]["effective_stage"] == "upscaling"
+        assert status_data["pipeline"]["mock_mode"] is True
+        assert status_data["pipeline"]["live"]["steady_fps"] > 0
+        assert status_data["pipeline"]["job"]["active_job"]["job_type"] == "upscale"
+        history_types = {h["job_type"] for h in status_data["pipeline"]["job"]["history"]}
+        assert {"upscale", "subtrans"}.issubset(history_types)
+        assert len(status_data["logs"]) >= 2
+
+        sse_resp = client.get("/api/events?once=1")
+        assert sse_resp.status_code == 200
+        assert "event: snapshot" in sse_resp.text
+        assert "data: " in sse_resp.text
+        assert "mock-upscale-ep02" in sse_resp.text
+
+        sub_resp = client.get("/api/subtrans/overview")
+        assert sub_resp.status_code == 200
+        sub_data = sub_resp.json()
+        assert sub_data["mock_mode"] is True
+        assert len(sub_data["pending_subs"]) >= 1
+
+        audit_resp = client.get("/api/audits")
+        assert audit_resp.status_code == 200
+        audit_data = audit_resp.json()
+        assert len(audit_data["audits"]) >= 1
+        assert audit_data["audits"][0]["status"] == "PASS"
+
+
 

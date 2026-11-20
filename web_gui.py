@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Không tự động mở trình duyệt khi khởi động máy chủ.",
     )
     parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Run with deterministic simulated telemetry, jobs, and SSE ticks (no CUDA/TensorRT/external drives).",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="warning",
@@ -112,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         lan_mode_note = "Điều khiển đầy đủ (--lan-control)" if allow_lan_control else "Chỉ-đọc an toàn (mặc định; thêm --lan-control để điều khiển)"
         print(f"  • Địa chỉ mạng LAN : http://{_detect_lan_ip()}:{args.port} [{lan_mode_note}]")
     print(f"  • Thư mục dự án    : {ROOT_DIR}")
+    if args.mock:
+        print("  • Mode             : MOCK (--mock deterministic telemetry/jobs; no GPU/CUDA)")
     print("  • Nhấn Ctrl+C để đóng máy chủ Web (các tiến trình CLI độc lập không bị ảnh hưởng).")
     print("=" * 72)
 
@@ -129,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace_root=ROOT_DIR,
         allow_lan=allow_lan,
         allow_lan_control=allow_lan_control,
+        mock_mode=bool(args.mock),
     )
     uvicorn.run(app, host=bind_host, port=args.port, log_level=args.log_level)
     return 0

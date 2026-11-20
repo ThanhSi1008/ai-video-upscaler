@@ -38,6 +38,11 @@ venv.bak/
 *.flac
 *.tmp
 *.lock
+requirements.lock
+*.db
+*.sqlite*
+*-wal
+*-shm
 *.vi.srt
 .temp_*
 vid_probe.json
@@ -78,8 +83,7 @@ models/*.onnx
 *.swp
 
 # Environment & API Key security
-.env
-.env.*
+.env*
 !.env.example
 .cache/
 .pytest_cache/

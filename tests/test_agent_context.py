@@ -13,6 +13,31 @@ def make_memory(root: Path) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# Fixture\n", encoding="utf-8")
+    rules_dir = root / ".agents" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    for rule_name in agent_context.EXPECTED_RULES:
+        (rules_dir / rule_name).write_text(
+            "---\n"
+            "trigger: glob\n"
+            'globs: "*.py"\n'
+            f'description: "Test rule {rule_name}"\n'
+            "---\n\n# Rule Fixture\n",
+            encoding="utf-8",
+        )
+    agents_dir = root / ".agents" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    for agent_name in agent_context.EXPECTED_SUBAGENTS:
+        stem = Path(agent_name).stem
+        (agents_dir / agent_name).write_text(
+            "---\n"
+            f"name: {stem}\n"
+            f"description: Test subagent {stem}\n"
+            "subagent: true\n"
+            "inheritMcp: false\n"
+            "enableWriteTools: false\n"
+            "---\n\n# Subagent Fixture\n",
+            encoding="utf-8",
+        )
 
 
 def test_valid_memory_accepts_relative_links_and_ignores_remote_and_code(tmp_path):
@@ -247,4 +272,30 @@ def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_p
     warn = agent_context.check_freshness(tmp_path, head_short="0d6e3b6")
     assert warn is not None
     assert "6dae441" in warn and "0d6e3b6" in warn and "2 runtime path(s)" in warn
+
+
+def test_rules_and_subagents_validation_enforces_frontmatter_and_flatness(tmp_path):
+    make_memory(tmp_path)
+    assert agent_context.check_memory(tmp_path) == []
+
+    # Nested folder inside .agents/rules must be rejected
+    nested = tmp_path / ".agents" / "rules" / "nested_dir"
+    nested.mkdir()
+    errors_nested = agent_context.check_memory(tmp_path)
+    assert any(".agents/rules must remain flat" in e for e in errors_nested)
+    nested.rmdir()
+
+    # Malformed frontmatter / wrong trigger or oversized rule must fail
+    bad_rule = tmp_path / ".agents" / "rules" / "video-gpu.md"
+    bad_rule.write_text("---\ntrigger: always_on\n---\n# Bad\n", encoding="utf-8")
+    errors_fm = agent_context.check_memory(tmp_path)
+    assert any("missing 'globs'" in e for e in errors_fm)
+    assert any("expected trigger: glob" in e for e in errors_fm)
+
+    # Subagent must declare inheritMcp: false and subagent: true
+    make_memory(tmp_path)
+    bad_agent = tmp_path / ".agents" / "agents" / "test-verifier.md"
+    bad_agent.write_text("---\nname: test-verifier\ndescription: x\nsubagent: true\ninheritMcp: true\n---\n", encoding="utf-8")
+    errors_agent = agent_context.check_memory(tmp_path)
+    assert any("inheritMcp: false" in e for e in errors_agent)
 

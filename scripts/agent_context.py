@@ -20,6 +20,8 @@ from urllib.parse import unquote, urlsplit
 
 
 SUBTRANS_SKILL_REL = ".agents/skills/subtrans-anime-ops/SKILL.md"
+EXPECTED_RULES = ("video-gpu.md", "subtrans.md", "web-ui.md")
+EXPECTED_SUBAGENTS = ("test-verifier.md", "subtrans-evaluator.md")
 REQUIRED_FILES = (
     "GEMINI.md",
     "docs/agents/PROJECT_MAP.md",
@@ -30,8 +32,10 @@ REQUIRED_FILES = (
     SUBTRANS_SKILL_REL,
 )
 BOOTSTRAP_FILES = ("docs/agents/STATE.md",)
-ROOT_BUDGET = 12 * 1024
-MAX_ROOT_LINES = 120
+ROOT_BUDGET = 4500
+MAX_ROOT_LINES = 45
+RULE_BUDGET = 4096
+MAX_RULE_LINES = 60
 COMBINED_BUDGET = 32 * 1024
 LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)")
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
@@ -86,17 +90,49 @@ def git_output(root: Path, *args: str) -> str | None:
 
 
 def memory_files(root: Path) -> list[str]:
-    """Bound validation to the active memory system and workspace skills, not historical archives."""
+    """Bound validation to the active memory system, rules, subagents, and workspace skills."""
     files = {"GEMINI.md"}
     memory_dir = root / "docs" / "agents"
     if memory_dir.is_dir() and _inside(root, memory_dir):
         files.update(p.relative_to(root).as_posix() for p in memory_dir.rglob("*.md"))
+    rules_dir = root / ".agents" / "rules"
+    if rules_dir.is_dir() and _inside(root, rules_dir):
+        for rule_md in rules_dir.glob("*.md"):
+            if _inside(root, rule_md):
+                files.add(rule_md.relative_to(root).as_posix())
+    agents_dir = root / ".agents" / "agents"
+    if agents_dir.is_dir() and _inside(root, agents_dir):
+        for agent_md in agents_dir.glob("*.md"):
+            if _inside(root, agent_md):
+                files.add(agent_md.relative_to(root).as_posix())
     skills_dir = root / ".agents" / "skills"
     if skills_dir.is_dir() and _inside(root, skills_dir):
         for skill_md in skills_dir.glob("*/SKILL.md"):
             if _inside(root, skill_md):
                 files.add(skill_md.relative_to(root).as_posix())
     return sorted(files)
+
+
+def _parse_frontmatter(markdown: str) -> dict[str, str] | None:
+    """Parse flat YAML key/value frontmatter from the start of a Markdown file."""
+    norm = markdown.replace("\r\n", "\n")
+    if not norm.startswith("---\n"):
+        return None
+    end_idx = norm.find("\n---\n", 4)
+    if end_idx == -1:
+        return None
+    block = norm[4:end_idx]
+    parsed: dict[str, str] = {}
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        val = val.strip()
+        if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+            val = val[1:-1]
+        parsed[key.strip()] = val.strip()
+    return parsed
 
 
 def _links(markdown: str):
@@ -146,6 +182,67 @@ def check_memory(root: Path) -> list[str]:
             pass  # Read failure will be reported in the link-validation loop below.
     if sum(sizes.values()) > COMBINED_BUDGET:
         errors.append(f"Root + subtrans skill exceed {COMBINED_BUDGET} bytes: {sum(sizes.values())}")
+
+    has_workspace_agents_tree = any(
+        (root / ".agents" / sub).exists() for sub in ("rules", "agents", "plugins")
+    )
+    if has_workspace_agents_tree:
+        rules_dir = root / ".agents" / "rules"
+        if not rules_dir.is_dir() or not _inside(root, rules_dir):
+            errors.append("Missing or unsafe rules directory: .agents/rules")
+        else:
+            nested_dirs = [p.name for p in rules_dir.iterdir() if p.is_dir()]
+            if nested_dirs:
+                errors.append(f".agents/rules must remain flat (found subdirectories: {', '.join(sorted(nested_dirs))})")
+            for rule_name in EXPECTED_RULES:
+                if not (rules_dir / rule_name).is_file():
+                    errors.append(f"Missing required rule file: .agents/rules/{rule_name}")
+            for rule_path in sorted(rules_dir.glob("*.md")):
+                rel_rule = rule_path.relative_to(root).as_posix()
+                try:
+                    raw_rule = _read_memory(root, rel_rule)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    errors.append(f"Cannot read {rel_rule}: {exc}")
+                    continue
+                if rule_path.stat().st_size > RULE_BUDGET:
+                    errors.append(f"{rel_rule} exceeds {RULE_BUDGET} bytes: {rule_path.stat().st_size}")
+                rule_lines = len(raw_rule.splitlines())
+                if rule_lines > MAX_RULE_LINES:
+                    errors.append(f"{rel_rule} exceeds {MAX_RULE_LINES} lines: {rule_lines}")
+                fm = _parse_frontmatter(raw_rule)
+                if fm is None:
+                    errors.append(f"{rel_rule}: missing or malformed YAML frontmatter")
+                else:
+                    for key in ("trigger", "globs", "description"):
+                        if not fm.get(key):
+                            errors.append(f"{rel_rule}: frontmatter missing '{key}'")
+                    if fm.get("trigger") and fm["trigger"] != "glob":
+                        errors.append(f"{rel_rule}: expected trigger: glob, got '{fm['trigger']}'")
+
+        agents_dir = root / ".agents" / "agents"
+        if not agents_dir.is_dir() or not _inside(root, agents_dir):
+            errors.append("Missing or unsafe custom subagents directory: .agents/agents")
+        else:
+            for agent_name in EXPECTED_SUBAGENTS:
+                if not (agents_dir / agent_name).is_file():
+                    errors.append(f"Missing required subagent spec: .agents/agents/{agent_name}")
+            for agent_path in sorted(agents_dir.glob("*.md")):
+                rel_agent = agent_path.relative_to(root).as_posix()
+                try:
+                    raw_agent = _read_memory(root, rel_agent)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    errors.append(f"Cannot read {rel_agent}: {exc}")
+                    continue
+                fm = _parse_frontmatter(raw_agent)
+                if fm is None:
+                    errors.append(f"{rel_agent}: missing or malformed YAML frontmatter")
+                else:
+                    if not fm.get("name") or not fm.get("description"):
+                        errors.append(f"{rel_agent}: frontmatter missing 'name' or 'description'")
+                    if fm.get("subagent", "").lower() != "true":
+                        errors.append(f"{rel_agent}: subagent frontmatter must set 'subagent: true'")
+                    if fm.get("inheritMcp", "").lower() != "false":
+                        errors.append(f"{rel_agent}: subagent frontmatter must set 'inheritMcp: false'")
 
     for relative in memory_files(root):
         path = root / relative

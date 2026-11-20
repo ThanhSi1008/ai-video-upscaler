@@ -158,12 +158,18 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res["decision"] == "allow", f"Expected allow for: {safe_cmd}"
 
-    # 5. Bare pytest asks; GPU lock triggers force_ask
+    # 5. Bare pytest asks; safe targeted pytest allowed; GPU lock triggers force_ask
     res_pytest = mod.evaluate_tool_call(
         {"toolCall": {"name": "run_command", "args": {"CommandLine": "pytest"}}},
         repo_root=tmp_path,
     )
     assert res_pytest["decision"] == "ask"
+
+    res_smoke = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/smoke_test_pipeline.py"}}},
+        repo_root=tmp_path,
+    )
+    assert res_smoke["decision"] == "allow"
 
     (tmp_path / ".gpu_active.lock").write_text("1234", encoding="utf-8")
     res_gpu = mod.evaluate_tool_call(
@@ -171,6 +177,135 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         repo_root=tmp_path,
     )
     assert res_gpu["decision"] == "force_ask"
+    (tmp_path / ".gpu_active.lock").unlink()
+
+    # 6. Environment mutation guard (requirements.lock locked ABI)
+    for mut_cmd in (
+        "pip install torch",
+        ".\\.venv\\Scripts\\python.exe -m pip uninstall -y numpy",
+        "uv pip install fastapi",
+        "conda install ffmpeg",
+    ):
+        res_mut = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": mut_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res_mut["decision"] == "deny", f"Expected deny for: {mut_cmd}"
+
+    res_freeze = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe -m pip freeze"}}},
+        repo_root=tmp_path,
+    )
+    assert res_freeze["decision"] == "allow"
+
+    # 7. Unapproved TensorRT engine build & unflagged full-episode upscale guards
+    res_trt = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe src/build_trt_engine.py"}}},
+        repo_root=tmp_path,
+    )
+    assert res_trt["decision"] == "deny"
+
+    res_trt_inspect = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/agent_context.py --symbols src/build_trt_engine.py"}}},
+        repo_root=tmp_path,
+    )
+    assert res_trt_inspect["decision"] == "allow"
+
+    res_full = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "python upscale.py ep1.mkv -o out/"}}},
+        repo_root=tmp_path,
+    )
+    assert res_full["decision"] == "deny"
+
+    for bounded_up in (
+        "python upscale.py ep1.mkv --preview 10",
+        "python upscale.py ep1.mkv --dry-run",
+        "python scripts/batch_translate_all.py --dry-run",
+    ):
+        res_ok = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bounded_up}}},
+            repo_root=tmp_path,
+        )
+        assert res_ok["decision"] == "allow", f"Expected allow for: {bounded_up}"
+
+    res_live_batch = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/batch_translate_all.py"}}},
+        repo_root=tmp_path,
+    )
+    assert res_live_batch["decision"] == "force_ask"
+
+
+def test_workspace_scoped_rules_and_custom_subagents():
+    rules_dir = AGENTS_DIR / "rules"
+    agents_dir = AGENTS_DIR / "agents"
+    assert rules_dir.is_dir() and agents_dir.is_dir()
+
+    for rule_name in ("video-gpu.md", "subtrans.md", "web-ui.md"):
+        rule_path = rules_dir / rule_name
+        assert rule_path.is_file(), f"Missing scoped rule: {rule_name}"
+        text = rule_path.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert "trigger: glob" in text
+        assert "globs:" in text and "description:" in text
+
+    for agent_name in ("test-verifier.md", "subtrans-evaluator.md"):
+        agent_path = agents_dir / agent_name
+        assert agent_path.is_file(), f"Missing subagent spec: {agent_name}"
+        text = agent_path.read_text(encoding="utf-8")
+        assert "subagent: true" in text
+        assert "inheritMcp: false" in text
+        assert "enableWriteTools: false" in text
+
+
+def test_hooks_json_and_lifecycle_post_tool_and_stop(tmp_path):
+    hooks_cfg = json.loads((AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks.json").read_text(encoding="utf-8"))
+    assert "upscaler-post-tool-lint" in hooks_cfg
+    assert "upscaler-stop-audit" in hooks_cfg
+
+    post_mod = _load_module(
+        AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "post_tool_lint.py",
+        "upscaler_post_tool_lint",
+    )
+    clean_py = tmp_path / "clean_mod.py"
+    clean_py.write_text('"""Clean."""\n\nVALUE = 1\n', encoding="utf-8")
+    res_clean = post_mod.run_post_tool_lint(
+        {"toolCall": {"name": "write_file", "args": {"Path": str(clean_py)}}},
+        repo_root=tmp_path,
+    )
+    assert res_clean == {"ok": True, "lintErrors": ""}
+
+    bad_py = tmp_path / "bad_mod.py"
+    bad_py.write_text("def broken(:\n    pass\n", encoding="utf-8")
+    res_bad = post_mod.run_post_tool_lint(
+        {"toolCall": {"name": "edit_file", "args": {"Path": str(bad_py)}}},
+        repo_root=tmp_path,
+    )
+    assert res_bad["ok"] is False
+    assert res_bad["lintErrors"]
+
+    stop_mod = _load_module(
+        AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "stop_audit.py",
+        "upscaler_stop_audit",
+    )
+    import subprocess
+    stop_repo = tmp_path / "stop_repo"
+    stop_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(stop_repo)], check=True)
+    # Clean repo -> empty dict (0 token overhead)
+    assert stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo) == {}
+    # Modified broken Python triggers Stop block
+    (stop_repo / "broken_stop.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    res_ruff = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)
+    assert res_ruff.get("decision") == "continue"
+    assert "Ruff:" in res_ruff.get("reason", "")
+    (stop_repo / "broken_stop.py").unlink()
+    # Continuation loop protection
+    (stop_repo / "stray.tmp").write_text("x", encoding="utf-8")
+    assert stop_mod.evaluate_stop({"continuationActive": True}, repo_root=stop_repo) == {}
+    # Stray root temp file detected when stopping normally
+    res_stray = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)
+    assert res_stray.get("decision") == "continue"
+    assert "stray.tmp" in res_stray.get("reason", "")
 
 
 def test_upscaler_mcp_server_jsonrpc_handlers():

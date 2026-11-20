@@ -1,14 +1,14 @@
 ---
 name: agent-handoff-commit
 description: >-
-  Manage persistent multi-agent context handoffs (docs/agents/tasks/), AST symbol lookups,
+  Manage persistent multi-agent context handoffs (in-place updates to docs/agents/STATE.md and DECISIONS.md), AST symbol lookups,
   memory byte-budget checks, and mandatory per-request Git commits in e:\ai-video-upscaler.
   Activate at the start of multi-step work, before context compaction, and before committing.
 ---
 
 # Agent Context, Handoff & Mandatory Commit Workflow
 
-## 1. Start / Resume Protocol
+## 1. Start / Resume & Daily Handoff Protocol
 
 ```powershell
 # Read-only bootstrap (Git branch, HEAD, dirty tree, STATE, freshness check):
@@ -19,14 +19,14 @@ description: >-
 .\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/pipeline.py
 ```
 
-For multi-step tasks, immediately create `docs/agents/tasks/YYYY-MM-DD-<slug>.md` from [TEMPLATE.md](../../../docs/agents/tasks/TEMPLATE.md) and update it as milestones complete (never wait until the end of a long session).
+For daily development handoffs, update [STATE.md](../../../docs/agents/STATE.md) (and [DECISIONS.md](../../../docs/agents/DECISIONS.md) when an architectural decision changes) **in place**, keeping `Commit Baseline` aligned with the latest runtime commit so `agent_context.py --check` reports 0 freshness warnings. Do **not** generate new dated task files in `docs/agents/tasks/` unless explicitly requested by the user (use [TEMPLATE.md](../../../docs/agents/tasks/TEMPLATE.md) only when requested).
 
 ## 2. Pre-Commit Verification Gate
 
 Before staging or committing, verify all Definition of Done gates:
 
 ```powershell
-# 1. Instruction budgets (GEMINI.md <= 12 KiB & <= 120 lines, GEMINI + subtrans-anime-ops <= 32 KiB) & relative links:
+# 1. Instruction budgets (GEMINI.md <= 4.5 KB & <= 45 lines, scoped .agents/rules/*.md <= 4 KB, GEMINI + subtrans skill <= 32 KiB) & relative links:
 .\.venv\Scripts\python.exe scripts/agent_context.py --check
 
 # 2. Isolated offline test suite & linter:
@@ -38,7 +38,7 @@ git status --short
 git diff --cached --check
 ```
 
-## 3. Mandatory Per-Request Commit Format (`GEMINI.md` §5)
+## 3. Mandatory Per-Request Commit Format (`GEMINI.md` §4)
 
 Commit **immediately** upon completing each user or research request (never batch unrelated requests). Every commit message body MUST be in English and contain 3 explicit sections:
 

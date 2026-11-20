@@ -19,16 +19,21 @@ bin/python311/
 bin/ffmpeg/
 scratch/
 
-# 3. Runtime logs, locks & mutable queue/workspace state
+# 3. Runtime logs, locks, local environment lock & SQLite state
 logs/
 *.log
 out/
 state/
 pending_subs.json
 skills-lock.json
+requirements.lock
 .gpu_active.lock
 .temp_*
 subtrans/.cache/
+*.db
+*.sqlite*
+*-wal
+*-shm
 test_frames/
 archive_subtitles/
 
@@ -60,7 +65,6 @@ subtrans/samples/sample_3min_*
 benchmarks/upscale/ab_test/KEY_ANSWER.json
 
 # 7. Secrets & credentials
-.env
-.env.*
+.env*
 !.env.example
 subtrans/.env

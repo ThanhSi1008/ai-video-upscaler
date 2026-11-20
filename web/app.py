@@ -775,6 +775,171 @@ def _validate_origin_header(
     return True
 
 
+def _build_mock_gpu_query() -> Callable[[], Dict[str, Any]]:
+    """Return deterministic simulated RTX 3060 12GB GPU metrics without invoking nvidia-smi."""
+    tick_state = {"step": 0}
+
+    def _query() -> Dict[str, Any]:
+        step = tick_state["step"]
+        tick_state["step"] += 1
+        wave = step % 6
+        vram_used = 6144.0 + wave * 48.0
+        return {
+            "pstate": "P0",
+            "gpu_util_pct": float(76 + (wave * 3) % 15),
+            "mem_util_pct": float(58 + (wave * 2) % 10),
+            "enc_util_pct": float(44 + (wave * 4) % 16),
+            "dec_util_pct": float(30 + (wave * 3) % 12),
+            "mem_clock_mhz": 7500.0,
+            "core_clock_mhz": 1867.0 + wave * 15.0,
+            "power_w": 138.0 + wave * 2.5,
+            "temp_c": 62.0 + float(wave % 3),
+            "vram_used_mib": vram_used,
+            "vram_free_mib": max(0.0, 12288.0 - vram_used),
+        }
+
+    return _query
+
+
+def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryHub) -> None:
+    """Attach deterministic simulated active/completed jobs, telemetry ticks, and SSE logs."""
+    now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    mock_active_job: Dict[str, Any] = {
+        "job_id": "mock-upscale-ep02",
+        "job_type": "upscale",
+        "status": "running",
+        "pid": 90420,
+        "started_at": now_str,
+        "finished_at": None,
+        "return_code": None,
+        "command": ["python", "upscale.py", "[Demo] Anime_EP02.mkv", "-o", "out/"],
+        "queue_items": ["[Demo] Anime_EP02 (1080p).mkv"],
+        "options": {"model": "animevideov3", "zero_disk": True, "dedup_policy": "dis"},
+    }
+    mock_history: List[Dict[str, Any]] = [
+        {
+            "job_id": "mock-subtrans-ep01",
+            "job_type": "subtrans",
+            "status": "completed",
+            "pid": 90412,
+            "started_at": now_str,
+            "finished_at": now_str,
+            "return_code": 0,
+            "command": ["python", "subtrans.py", "run", "Anime_EP01.ja.srt", "-o", "out/"],
+            "queue_items": ["[Demo] Anime_EP01 (1080p).mkv"],
+            "options": {"subs_quality": "high", "dry_run": True},
+        },
+        {
+            "job_id": "mock-upscale-ep01",
+            "job_type": "upscale",
+            "status": "completed",
+            "pid": 90401,
+            "started_at": now_str,
+            "finished_at": now_str,
+            "return_code": 0,
+            "command": ["python", "upscale.py", "[Demo] Anime_EP01.mkv", "-o", "out/"],
+            "queue_items": ["[Demo] Anime_EP01 (1080p).mkv"],
+            "options": {"model": "animevideov3", "zero_disk": True, "dedup_policy": "default"},
+        },
+    ]
+
+    orig_get_state = job_manager.get_state
+
+    def _mock_get_state() -> Dict[str, Any]:
+        real_state = orig_get_state()
+        if real_state.get("active_job") is not None:
+            return real_state
+        combined_history = list(real_state.get("history") or []) + [dict(h) for h in mock_history]
+        return {
+            "status": "running",
+            "active_job": dict(mock_active_job),
+            "history": combined_history[:25],
+        }
+
+    job_manager.get_state = _mock_get_state  # type: ignore[method-assign]
+    telemetry_hub.gpu_static = {
+        "gpu_name": "NVIDIA GeForce RTX 3060 12GB (Mock)",
+        "driver_version": "Mock 572.x",
+        "vram_total_mib": 12288.0,
+    }
+
+    tick_counter = {"n": 0}
+    total_chunks = 12
+    total_frames = 34560
+
+    def _mock_read_pipeline_state() -> Dict[str, Any]:
+        n = tick_counter["n"]
+        tick_counter["n"] += 1
+        completed_chunks = min(total_chunks - 1, 4 + (n % 5))
+        done_frames = min(total_frames, completed_chunks * (total_frames // total_chunks) + (n % 6) * 120)
+        chunks = []
+        for idx in range(total_chunks):
+            if idx < completed_chunks:
+                st = "done"
+            elif idx == completed_chunks:
+                st = "running"
+            else:
+                st = "pending"
+            chunks.append({"idx": idx, "chunk_id": idx + 1, "status": st})
+        latest_fps = round(41.2 + (n % 4) * 0.4, 1)
+        return {
+            "active_source": "web",
+            "gpu_lock": {"locked": True, "pid": 90420, "mock": True},
+            "graceful_pause_pending": False,
+            "effective_stage": "upscaling",
+            "pid_alive": True,
+            "mock_mode": True,
+            "live": {
+                "video_name": "[Demo] Anime_EP02 (1080p).mkv",
+                "pid": 90420,
+                "job_id": "mock-upscale-ep02",
+                "job_type": "upscale",
+                "started_at": now_str,
+                "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "stage": "upscaling",
+                "stage_detail": f"Mock TensorRT 10.16 FP16 Zero-Disk 4K ({completed_chunks + 1}/{total_chunks} chunks)",
+                "model_id": "animevideov3",
+                "zero_disk": True,
+                "total_frames": total_frames,
+                "unique_frames": 18240,
+                "done_frames": done_frames,
+                "total_chunks": total_chunks,
+                "completed_chunks": completed_chunks,
+                "chunks": chunks,
+                "resumed_chunks": [1, 2],
+                "active_chunk": completed_chunks + 1,
+                "steady_fps": 41.2,
+                "latest_fps": latest_fps,
+                "effective_fps": 41.5,
+                "eta_seconds": max(15, 620 - n * 5),
+            },
+            "checkpoints": [],
+            "job": _mock_get_state(),
+        }
+
+    def _mock_logs_with_cursor(max_lines: int = 120) -> tuple[List[str], Dict[str, Any]]:
+        step = tick_counter["n"]
+        lines = [
+            f"[mock] Loaded TensorRT 10.16 FP16 engine: animevideov3 (batch=8, zero_disk=True)",
+            f"[mock] Dedup DIS plan: 18240/34560 unique frames (-47.2% savings)",
+            f"[mock] Chunk {4 + (step % 5)}/12: 41.2 fps | p010le Main10 | VRAM 6.0/12.0 GB",
+            f"[mock] Subtrans EP01 completed offline QA: pronoun_consistency=100% (0 CJK leaks)",
+        ][-max_lines:]
+        return lines, {"path": "mock://telemetry.log", "prefix_len": len(lines), "sig": "mock", "offset": step}
+
+    def _mock_incremental_logs(cursor: Optional[Dict[str, Any]]) -> tuple[List[str], Dict[str, Any]]:
+        step = tick_counter["n"]
+        prev_off = int((cursor or {}).get("offset") or 0)
+        if step <= prev_off:
+            return [], dict(cursor or {"path": "mock://telemetry.log", "prefix_len": 0, "sig": "mock", "offset": step})
+        line = f"[mock] SSE tick #{step}: chunk {4 + (step % 5)}/12 @ 41.{step % 6} fps | temp 62C"
+        return [line], {"path": "mock://telemetry.log", "prefix_len": 1, "sig": "mock", "offset": step, "reset": False}
+
+    telemetry_hub.read_pipeline_state = _mock_read_pipeline_state  # type: ignore[method-assign]
+    telemetry_hub.read_recent_logs_with_cursor = _mock_logs_with_cursor  # type: ignore[method-assign]
+    telemetry_hub._read_incremental_logs_from_cursor = _mock_incremental_logs  # type: ignore[method-assign]
+
+
 def create_app(
     workspace_root: Optional[Path] = None,
     gpu_query_fn: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -783,17 +948,22 @@ def create_app(
     frame_extract_fn: Optional[Callable[[Path, float, Path], None]] = None,
     allow_lan: bool = False,
     allow_lan_control: bool = False,
+    mock_mode: bool = False,
 ) -> FastAPI:
     """Khởi tạo FastAPI app gắn với thư mục gốc dự án (hỗ trợ cô lập hoàn toàn khi test)."""
     root = Path(workspace_root or Path(__file__).resolve().parent.parent).resolve()
+    is_mock = bool(mock_mode)
+    effective_gpu_query = gpu_query_fn if gpu_query_fn is not None else (_build_mock_gpu_query() if is_mock else None)
     fs_browser = SafeLocalFSBrowser(root)
     job_manager = JobManager(root, popen_factory=popen_factory)
     telemetry_hub = TelemetryHub(
         root,
-        gpu_query_fn=gpu_query_fn,
+        gpu_query_fn=effective_gpu_query,
         job_state_provider=job_manager.get_state,
         history_size=120,
     )
+    if is_mock:
+        _enable_mock_studio_state(job_manager, telemetry_hub)
     media_opener = open_media_fn or _default_open_media
     extractor = frame_extract_fn or _default_extract_frame
 
@@ -817,6 +987,7 @@ def create_app(
     app.state.telemetry_hub = telemetry_hub
     app.state.allow_lan = bool(allow_lan)
     app.state.allow_lan_control = bool(allow_lan_control)
+    app.state.mock_mode = is_mock
 
     def _apply_security_headers(resp: Any) -> Any:
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -1597,6 +1768,18 @@ def create_app(
                         })
             except Exception:
                 pass
+        elif is_mock:
+            cache_stats = {
+                "db_exists": True,
+                "mock_mode": True,
+                "total_cached_cues": 1420,
+                "today_cached_cues": 318,
+                "today_requests": [
+                    {"model": "gemini-3.5-flash-lite", "status": "ok", "requests": 14, "cues": 318, "tokens": 24800}
+                ],
+                "exhausted_keys": [],
+                "exhausted_models": [],
+            }
 
         # Đọc thống kê SQLite ở chế độ CHỈ ĐỌC (không bao giờ tạo/ghi vào DB production khi GET)
         cache_stats: Dict[str, Any] = {
@@ -1661,6 +1844,18 @@ def create_app(
                     conn.close()
             except Exception:
                 pass
+        elif is_mock:
+            cache_stats = {
+                "db_exists": True,
+                "mock_mode": True,
+                "total_cached_cues": 1420,
+                "today_cached_cues": 318,
+                "today_requests": [
+                    {"model": "gemini-3.5-flash-lite", "status": "ok", "requests": 14, "cues": 318, "tokens": 24800}
+                ],
+                "exhausted_keys": [],
+                "exhausted_models": [],
+            }
 
         # Danh sách glossaries/*.yaml
         glossaries_dir = root / "glossaries"
@@ -1693,7 +1888,12 @@ def create_app(
             "chain": chain,
             "cache": cache_stats,
             "glossaries": glossaries,
-            "pending_subs": pending_items,
+            "pending_subs": (
+                pending_items
+                if pending_items or not is_mock
+                else [{"episode": "[Demo] Anime_EP02 (1080p)", "status": "queued", "subs_quality": "high"}]
+            ),
+            "mock_mode": is_mock,
         }
 
     @app.put("/api/subtrans/api-keys")
@@ -1938,6 +2138,30 @@ def create_app(
                 "completed_at": str(adata.get("completed_at") or ""),
                 "sub_audit_md_path": sub_audit_md,
                 "cast_yaml_path": cast_yaml,
+            })
+
+        if is_mock and not audits:
+            audits.append({
+                "episode": "Demo_EP01_4K",
+                "audit_json_path": "",
+                "output_file": "out/Demo_EP01_4K.mkv",
+                "source_file": "[Demo] Anime_EP01 (1080p).mkv",
+                "status": "PASS",
+                "sanity_status": "PASS",
+                "model_id": "animevideov3",
+                "average_pipeline_fps": 41.2,
+                "ai_steady_fps": 41.2,
+                "source_frames": 34560,
+                "output_frames": 34560,
+                "frames_matched": True,
+                "audio_tracks_count": 2,
+                "subtitle_tracks_count": 2,
+                "fonts_count": 12,
+                "output_file_size_mb": 642.5,
+                "completed_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "sub_audit_md_path": "",
+                "cast_yaml_path": "",
+                "mock_mode": True,
             })
 
         return {
