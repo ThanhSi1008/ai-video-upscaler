@@ -11,7 +11,7 @@ import atexit
 import signal
 import shutil
 import tempfile
-from typing import Optional
+from typing import Any, Optional
 
 
 def _detect_mounted_ramdisk(min_free_mb: int) -> Optional[str]:
@@ -106,6 +106,7 @@ class RAMDisk:
         self.mount_path: Optional[str] = None
         self.is_ramdisk: bool = False
         self._cleaned_up: bool = False
+        self._prev_signal_handlers: dict[int, Any] = {}
 
     def __enter__(self) -> str:
         min_free = max(int(self.size_mb), 2048)
@@ -127,10 +128,18 @@ class RAMDisk:
         self.cleanup()
 
     def cleanup(self):
-        """Dọn dẹp thư mục đệm tạm"""
+        """Dọn dẹp thư mục đệm tạm và khôi phục signal handler trước đó."""
         if self._cleaned_up:
             return
         self._cleaned_up = True
+
+        for sig, prev_handler in list(self._prev_signal_handlers.items()):
+            try:
+                if prev_handler is not None:
+                    signal.signal(sig, prev_handler)
+            except (ValueError, OSError):
+                pass
+        self._prev_signal_handlers.clear()
 
         if self.mount_path and os.path.exists(self.mount_path):
             shutil.rmtree(self.mount_path, ignore_errors=True)
@@ -141,10 +150,14 @@ class RAMDisk:
 
         def _signal_handler(signum, frame):
             self.cleanup()
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt()
             sys.exit(128 + signum)
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
+                prev = signal.getsignal(sig)
+                self._prev_signal_handlers[sig] = prev
                 signal.signal(sig, _signal_handler)
             except (ValueError, OSError):
                 pass

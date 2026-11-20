@@ -21,6 +21,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from src.ffmpeg_ops import probe_video
 from src.dedup import scan_dedup_plan, load_or_create_plan
 from src.config import DEVICE_NAME
+from src.models_resolver import find_existing_4k_output_path
 
 
 def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -30,6 +31,8 @@ def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optio
     """
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     out_dir = output_dir or "out"
+    if str(out_dir).lower().endswith((".mkv", ".mp4")):
+        out_dir = os.path.dirname(out_dir) or "out"
     vid_dir = os.path.dirname(os.path.abspath(video_path))
 
     candidate_paths = [
@@ -76,6 +79,8 @@ def preflight_video_plan(
 
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     out_dir = output_dir or "out"
+    if str(out_dir).lower().endswith((".mkv", ".mp4")):
+        out_dir = os.path.dirname(out_dir) or "out"
     work_dir = os.path.join(out_dir, f".temp_{base_name}")
     os.makedirs(work_dir, exist_ok=True)
     plan_path = os.path.join(work_dir, "plan.json")
@@ -127,7 +132,56 @@ class BackgroundQueuePreflightManager:
         self.dedup_policy = dedup_policy
         self.thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._video_events: Dict[str, threading.Event] = {}
+        self._claimed_by_main: set[str] = set()
+        self._done_videos: set[str] = set()
+        self._current_video: Optional[str] = None
+        self._current_proc: Optional[subprocess.Popen] = None
         self.results: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _norm_key(video_path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(video_path))))
+
+    def mark_main_started(self, video_path: str) -> None:
+        """Đánh dấu luồng chính đã tiếp nhận tập video để luồng nền bỏ qua nếu chưa bắt đầu."""
+        vkey = self._norm_key(video_path)
+        with self._lock:
+            self._claimed_by_main.add(vkey)
+
+    def wait_for_video(self, video_path: str, timeout: float = 600.0) -> bool:
+        """
+        Đợi luồng preflight nền hoàn tất nếu nó đang xử lý đúng tập `video_path`;
+        ngược lại đánh dấu claimed và trả về ngay để luồng chính không tranh chấp `.temp_*`.
+        """
+        vkey = self._norm_key(video_path)
+        with self._lock:
+            self._claimed_by_main.add(vkey)
+            if (
+                vkey in self._done_videos
+                or self.thread is None
+                or not self.thread.is_alive()
+                or self._current_video != vkey
+            ):
+                return True
+            evt = self._video_events.setdefault(vkey, threading.Event())
+
+        finished = evt.wait(timeout=timeout)
+        if not finished:
+            with self._lock:
+                proc = self._current_proc if self._current_video == vkey else None
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        pass
+        return finished
 
     def start(self):
         """Khởi động luồng preflight nền (từ chối chạy nếu đang ở benchmark mode)"""
@@ -143,6 +197,12 @@ class BackgroundQueuePreflightManager:
         if not items_to_scan:
             return
 
+        with self._lock:
+            for item_vid in items_to_scan:
+                vkey = self._norm_key(item_vid)
+                if vkey not in self._video_events:
+                    self._video_events[vkey] = threading.Event()
+
         self.thread = threading.Thread(
             target=self._worker,
             args=(items_to_scan,),
@@ -152,62 +212,113 @@ class BackgroundQueuePreflightManager:
         self.thread.start()
 
     def _worker(self, items: List[str]):
-        for vid in items:
-            if self._stop_event.is_set():
-                break
+        try:
+            for vid in items:
+                if self._stop_event.is_set():
+                    break
 
-            # Kiểm tra xem đã có plan chưa
-            cached = find_cached_plan(vid, self.output_dir)
-            if cached:
-                self.results[vid] = cached
-                continue
+                vkey = self._norm_key(vid)
+                with self._lock:
+                    if vkey in self._claimed_by_main:
+                        self._done_videos.add(vkey)
+                        evt_skip = self._video_events.get(vkey)
+                        if evt_skip is not None:
+                            evt_skip.set()
+                        continue
+                    self._current_video = vkey
+                    evt = self._video_events.setdefault(vkey, threading.Event())
 
-            prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"
-            msg = f"⚡ [Background Preflight] Đang quét nền ({prio_desc}) cho: {os.path.basename(vid)}"
-            if self.logger:
-                self.logger.info(msg, to_console=True)
-            else:
-                print(msg)
+                try:
+                    # Kiểm tra xem đã có plan chưa
+                    cached = find_cached_plan(vid, self.output_dir)
+                    if cached:
+                        self.results[vid] = cached
+                        continue
 
-            try:
-                base_name = os.path.splitext(os.path.basename(vid))[0]
-                work_dir = os.path.join(self.output_dir, f".temp_{base_name}")
-                os.makedirs(work_dir, exist_ok=True)
-                plan_file = os.path.join(work_dir, "plan.json")
-
-                from src.dedup import build_preflight_subprocess_spec
-                cmd, popen_kwargs = build_preflight_subprocess_spec(
-                    vid, plan_file, self.segment_seconds, dedup_policy=self.dedup_policy
-                )
-                proc = subprocess.run(cmd, **popen_kwargs)
-                if proc.returncode == 0 and os.path.exists(plan_file):
-                    with open(plan_file, "r", encoding="utf-8") as f:
-                        plan_data = json.load(f)
-                    self.results[vid] = plan_data
-                    n_k = plan_data.get("total_kept_frames", 0)
-                    dedup_p = plan_data.get("dedup_ratio_percent", 0.0)
-                    msg_done = (
-                        f"📊 [Background Preflight] Đã quét xong '{os.path.basename(vid)}': "
-                        f"n_unique đo được = {n_k} frames (Dedup: {dedup_p:.1f}%)."
-                    )
+                    prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"
+                    msg = f"⚡ [Background Preflight] Đang quét nền ({prio_desc}) cho: {os.path.basename(vid)}"
                     if self.logger:
-                        self.logger.info(msg_done, to_console=True)
+                        self.logger.info(msg, to_console=True)
                     else:
-                        print(f"\n{msg_done}")
+                        print(msg)
 
-                    if self.on_plan_ready:
-                        try:
-                            self.on_plan_ready(vid, plan_data)
-                        except Exception as e_cb:
-                            pass
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Lỗi khi quét preflight nền cho {os.path.basename(vid)}: {e}")
+                    base_name = os.path.splitext(os.path.basename(vid))[0]
+                    work_dir = os.path.join(self.output_dir, f".temp_{base_name}")
+                    os.makedirs(work_dir, exist_ok=True)
+                    plan_file = os.path.join(work_dir, "plan.json")
+
+                    from src.dedup import build_preflight_subprocess_spec
+                    cmd, popen_kwargs = build_preflight_subprocess_spec(
+                        vid, plan_file, self.segment_seconds, dedup_policy=self.dedup_policy
+                    )
+                    proc = subprocess.Popen(cmd, **popen_kwargs)
+                    with self._lock:
+                        self._current_proc = proc
+
+                    while proc.poll() is None:
+                        if self._stop_event.is_set():
+                            try:
+                                proc.terminate()
+                                proc.wait(timeout=2.0)
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                    proc.wait(timeout=1.0)
+                                except Exception:
+                                    pass
+                            break
+                        time.sleep(0.2)
+
+                    if (not self._stop_event.is_set()) and proc.returncode == 0 and os.path.exists(plan_file):
+                        with open(plan_file, "r", encoding="utf-8") as f:
+                            plan_data = json.load(f)
+                        self.results[vid] = plan_data
+                        n_k = plan_data.get("total_kept_frames", 0)
+                        dedup_p = plan_data.get("dedup_ratio_percent", 0.0)
+                        msg_done = (
+                            f"📊 [Background Preflight] Đã quét xong '{os.path.basename(vid)}': "
+                            f"n_unique đo được = {n_k} frames (Dedup: {dedup_p:.1f}%)."
+                        )
+                        if self.logger:
+                            self.logger.info(msg_done, to_console=True)
+                        else:
+                            print(f"\n{msg_done}")
+
+                        if self.on_plan_ready:
+                            try:
+                                self.on_plan_ready(vid, plan_data)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"Lỗi khi quét preflight nền cho {os.path.basename(vid)}: {e}")
+                finally:
+                    with self._lock:
+                        self._current_proc = None
+                        self._current_video = None
+                        self._done_videos.add(vkey)
+                        evt.set()
+        finally:
+            with self._lock:
+                for evt_rem in self._video_events.values():
+                    evt_rem.set()
 
     def stop(self):
         self._stop_event.set()
+        with self._lock:
+            proc = self._current_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=5.0)
 
 
 def compute_overnight_schedule(
@@ -222,7 +333,8 @@ def compute_overnight_schedule(
     output_dir: Optional[str] = None,
     segment_seconds: int = 8,
     preflight_now: bool = False,
-    start_time: Optional[datetime] = None
+    start_time: Optional[datetime] = None,
+    subs_quality: str = "normal",
 ) -> Dict[str, Any]:
     """
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
@@ -284,10 +396,9 @@ def compute_overnight_schedule(
                 dedup_ratio = 40.0
             n_unique_source = "ước lượng thận trọng (n=4)"
 
-        # Kiểm tra nếu file 4K thành phẩm đã tồn tại
-        out_target_dir = output_dir or "out"
-        out_4k_path = os.path.join(out_target_dir, f"{base_name}_4K.mkv")
-        already_completed = os.path.exists(out_4k_path) and os.path.getsize(out_4k_path) > 1024 * 1024
+        # Kiểm tra nếu file 4K thành phẩm đã tồn tại (hỗ trợ cả _4K_animejanai.mkv, _4K.mkv và file -o tường minh)
+        existing_4k = find_existing_4k_output_path(vid, output_arg=output_dir)
+        already_completed = existing_4k is not None
 
         # 2. Tính ETA trung vị (thời gian kỳ vọng) và ETA P5 (+7% biên an toàn cho quyết định)
         if already_completed:
@@ -400,6 +511,7 @@ def compute_overnight_schedule(
         "skipped_count": sum(1 for ep in episodes_meta if (not ep["can_run"] and not ep.get("is_already_completed"))),
         "partial_count": sum(1 for ep in episodes_meta if ep.get("is_partial")),
         "total_episodes": len(episodes_meta),
+        "subs_quality": subs_quality,
         "episodes": episodes_meta
     }
 
@@ -536,14 +648,21 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
 
     lines.append("-" * 126)
     lines.append("Ghi chú: Cột 'Nguồn n_unique' phân định rõ giữa số đo thực tế từ plan.json và số ước lượng thận trọng (~60.0% kept, n=4).")
-    lines.append("         Quyết định hạn chót dựa trên P5 (1.62 fps) + overhead (video ~930s [n=2] + 300s phụ đề) + biên an toàn 7% ETA.")
+    lines.append(
+        f"         Quyết định hạn chót dựa trên P5 ({sched['fps_p5']:.2f} fps) + overhead "
+        f"(video ~{sched['video_overhead_seconds']:.0f}s + {sched['subtitles_overhead_seconds']:.0f}s phụ đề) "
+        f"+ biên an toàn {sched['eta_margin_pct']*100:.1f}% ETA."
+    )
     partial_note = f" (gồm {sched['partial_count']} tập chạy 1 phần)" if sched.get("partial_count") else ""
     already_note = f", {sched['already_completed_count']} tập đã có kết quả bỏ qua" if sched.get("already_completed_count") else ""
     lines.append(f"🎯 TỔNG KẾT: Duyệt thực thi {sched['accepted_count']}/{sched['total_episodes']} tập{partial_note}{already_note} "
                  f"| Tổng thời lượng chạy dự kiến: {sched['total_scheduled_formatted']}.")
 
     # Hiển thị cảnh báo hạn mức API Gemini nếu có
-    quota_info = sched.get("quota_info") or check_gemini_quota_for_queue(len(sched.get("episodes", [])))
+    quota_info = sched.get("quota_info") or check_gemini_quota_for_queue(
+        len(sched.get("episodes", [])),
+        subs_quality=sched.get("subs_quality", "normal"),
+    )
     if quota_info.get("warnings"):
         lines.append("-" * 126)
         lines.append("🔔 GIÁM SÁT HẠN MỨC SUBTITLES (GEMINI API - PACIFIC TIME):")

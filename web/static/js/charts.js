@@ -24,14 +24,31 @@ export class TelemetryChartsController {
       io: document.getElementById("chart-val-io"),
     };
 
+    this._rafId = 0;
+    this._pendingLiveData = null;
+
     if (typeof ResizeObserver === "function") {
-      this._ro = new ResizeObserver(() => this.redrawAll());
-      for (const c of Object.values(this.canvases)) {
-        if (c instanceof HTMLCanvasElement) {
-          this._ro.observe(c);
-        }
+      const gridEl =
+        document.querySelector(".charts-grid") ||
+        Object.values(this.canvases).find((c) => c instanceof HTMLCanvasElement);
+      if (gridEl) {
+        this._ro = new ResizeObserver(() => this.scheduleRedraw());
+        this._ro.observe(gridEl);
       }
     }
+  }
+
+  scheduleRedraw(liveData = null) {
+    if (liveData !== null) {
+      this._pendingLiveData = liveData;
+    }
+    if (this._rafId) return;
+    this._rafId = window.requestAnimationFrame(() => {
+      this._rafId = 0;
+      const ld = this._pendingLiveData;
+      this._pendingLiveData = null;
+      this.redrawAll(ld);
+    });
   }
 
   setSnapshot(historySamples, liveData) {
@@ -74,16 +91,56 @@ export class TelemetryChartsController {
   }
 
   _palette() {
+    if (window.matchMedia?.("(forced-colors: active)")?.matches) {
+      const bodyCs = getComputedStyle(document.body);
+      const readoutEl = this.readouts.gpu || document.querySelector(".chart-readout");
+      const readoutCs = readoutEl ? getComputedStyle(readoutEl) : bodyCs;
+      const mutedEl = document.querySelector(".muted-meta");
+      const mutedCs = mutedEl ? getComputedStyle(mutedEl) : bodyCs;
+      const cardEl = document.querySelector(".chart-card");
+      const cardCs = cardEl ? getComputedStyle(cardEl) : bodyCs;
+      const fg = bodyCs.color || "CanvasText";
+      const accent = readoutCs.color || "Highlight";
+      return {
+        accent,
+        success: fg,
+        warning: accent,
+        danger: fg,
+        muted: mutedCs.color || "GrayText",
+        grid: cardCs.borderTopColor || "ButtonBorder",
+        bg: cardCs.backgroundColor || "Canvas",
+      };
+    }
+
     const cs = getComputedStyle(document.documentElement);
-    const pick = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+    const metaContent = (
+      document.querySelector('meta[name="color-scheme"]')?.getAttribute("content") || ""
+    )
+      .trim()
+      .toLowerCase();
+    const prefersDark = Boolean(window.matchMedia?.("(prefers-color-scheme: dark)")?.matches);
+    const isDark = metaContent === "dark" || (metaContent !== "light" && prefersDark);
+    const suffix = isDark ? "dark" : "light";
+    const pick = (base, fallback) => {
+      const concrete = cs.getPropertyValue(`${base}-${suffix}`).trim();
+      if (concrete && !concrete.startsWith("light-dark(")) {
+        return concrete;
+      }
+      const raw = cs.getPropertyValue(base).trim();
+      if (raw && !raw.startsWith("light-dark(")) {
+        return raw;
+      }
+      return fallback;
+    };
+
     return {
-      accent: pick("--accent", "#38bdf8"),
-      success: pick("--success", "#34d399"),
-      warning: pick("--warning", "#fbbf24"),
-      danger: pick("--danger", "#f87171"),
-      muted: pick("--fg-muted", "#9fb0cc"),
-      grid: pick("--border-subtle", "#273759"),
-      bg: pick("--bg-elevated", "#18233c"),
+      accent: pick("--accent", isDark ? "#38bdf8" : "#0058b8"),
+      success: pick("--success", isDark ? "#34d399" : "#0f766e"),
+      warning: pick("--warning", isDark ? "#fbbf24" : "#b45309"),
+      danger: pick("--danger", isDark ? "#f87171" : "#b91c1c"),
+      muted: pick("--fg-muted", isDark ? "#9fb0cc" : "#475569"),
+      grid: pick("--border-subtle", isDark ? "#273759" : "#cbd5e1"),
+      bg: pick("--bg-elevated", isDark ? "#18233c" : "#eaf0f8"),
     };
   }
 

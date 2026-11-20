@@ -124,9 +124,12 @@ class SafeLocalFSBrowser:
         video_path: str | Path,
         override_model: Optional[str] = None,
         override_dedup: Optional[str] = None,
+        routing_tables: Optional[tuple[Dict[str, Any], str, List[Dict[str, Any]]]] = None,
     ) -> Dict[str, str]:
         """Phân giải model_id, model_name, dedup_policy và nguồn khớp cho một đường dẫn video."""
-        registry, default_id, shows_rules = self._load_routing_tables()
+        registry, default_id, shows_rules = (
+            routing_tables if routing_tables is not None else self._load_routing_tables()
+        )
         lower_to_key = {str(k).lower(): str(k) for k in registry.keys()}
 
         vid_str = str(video_path)
@@ -294,6 +297,7 @@ class SafeLocalFSBrowser:
         files: List[Dict[str, Any]] = []
         source_video_count = 0
         out_dir = self.workspace_root / "out"
+        routing_tables = self._load_routing_tables()
 
         try:
             dir_iter = list(os.scandir(cand))
@@ -332,7 +336,7 @@ class SafeLocalFSBrowser:
                         size_mb = 0.0
                         mtime = 0
 
-                    routing = self.resolve_routing_for_path(entry.path)
+                    routing = self.resolve_routing_for_path(entry.path, routing_tables=routing_tables)
                     already_done = False
                     if not is_4k_out and out_dir.is_dir():
                         for suffix in ("_4K.mkv", "_4K_animejanai.mkv"):
@@ -368,7 +372,7 @@ class SafeLocalFSBrowser:
             "parent_path": parent_path,
             "workspace_root": str(self.workspace_root),
             "source_video_count": source_video_count,
-            "folder_routing": self.resolve_routing_for_path(cand / "sample.mkv"),
+            "folder_routing": self.resolve_routing_for_path(cand / "sample.mkv", routing_tables=routing_tables),
             "entries": dirs + files,
         }
 

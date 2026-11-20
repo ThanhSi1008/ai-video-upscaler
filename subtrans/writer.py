@@ -22,14 +22,15 @@ CONJUNCTIONS = {"và", "nhưng", "thì", "mà", "là", "khi", "vì", "nếu", "�
 
 
 def format_timestamp_srt(ms: int) -> str:
-    """Formats milliseconds as HH:MM:SS,mmm."""
+    """Formats milliseconds as HH:MM:SS,mmm (clamped >= 0)."""
+    ms = max(0, int(round(ms)))
     total_seconds, milliseconds = divmod(ms, 1000)
     hours, rem = divmod(total_seconds, 3600)
     minutes, seconds = divmod(rem, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
-def _clean_single_dialogue_line(text: str) -> str:
+def _clean_single_dialogue_line(text: str, sound_cues: str = "drop") -> str:
     """Cleans a single dialogue line without linebreaks."""
     if not text:
         return ""
@@ -55,17 +56,18 @@ def _clean_single_dialogue_line(text: str) -> str:
     # 4. Strip music symbols
     text = re.sub(r"[♪♫♬♩#]", "", text)
 
-    # 5. Strip bracketed sound effects/descriptions: [cười], (tiếng nổ), [Sound], (laugh)
+    # 5. Strip bracketed sound effects/descriptions unless sound_cues == "translate".
     # Use strict word boundaries so parenthetical character names like (Clara), (Lala), (Tousetsu) are preserved.
-    text = re.sub(r"\[[^\]]*\]", "", text)
-    stripped = re.sub(
-        r"\([^\)]*(?<!\w)(?:tiếng\s+\w+|cười|khóc|thở\s+dài|hơi\s+thở|nhạc|âm\s+thanh|la\s+hét|gào\s+hét|laugh(?:ing|s)?|music|sigh(?:s|ing)?|gasp(?:s|ing)?|scream(?:s|ing)?)(?!\w)[^\)]*\)",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    ).strip()
-    if stripped:
-        text = stripped
+    if sound_cues != "translate":
+        text = re.sub(r"\[[^\]]*\]", "", text)
+        stripped = re.sub(
+            r"\([^\)]*(?<!\w)(?:tiếng\s+\w+|cười|khóc|thở\s+dài|hơi\s+thở|nhạc|âm\s+thanh|la\s+hét|gào\s+hét|laugh(?:ing|s)?|music|sigh(?:s|ing)?|gasp(?:s|ing)?|scream(?:s|ing)?)(?!\w)[^\)]*\)",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if stripped:
+            text = stripped
 
     # 6. Punctuation rules:
     # Replace unicode ellipsis '…' with three ASCII dots '...'
@@ -96,7 +98,7 @@ def _clean_single_dialogue_line(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
-def clean_and_normalize_vietnamese(text: str, preserve_dual: bool = False) -> str:
+def clean_and_normalize_vietnamese(text: str, preserve_dual: bool = False, sound_cues: str = "drop") -> str:
     """
     Cleans and normalizes Vietnamese subtitle text per ADDENDUM 6:
     - If preserve_dual is True and text contains dual lines (e.g. simultaneous speakers),
@@ -108,7 +110,7 @@ def clean_and_normalize_vietnamese(text: str, preserve_dual: bool = False) -> st
 
     if preserve_dual and ("\n" in text or r"\N" in text):
         raw_lines = [l.strip() for l in re.split(r"\\N|\r\n|\n", text) if l.strip()]
-        cleaned = [_clean_single_dialogue_line(l) for l in raw_lines]
+        cleaned = [_clean_single_dialogue_line(l, sound_cues=sound_cues) for l in raw_lines]
         cleaned = [c for c in cleaned if c]
         if len(cleaned) >= 2:
             return "\n".join(f"- {c.lstrip('-—– ')}" for c in cleaned[:2])
@@ -116,13 +118,14 @@ def clean_and_normalize_vietnamese(text: str, preserve_dual: bool = False) -> st
             return cleaned[0]
         return ""
 
-    return _clean_single_dialogue_line(text)
+    return _clean_single_dialogue_line(text, sound_cues=sound_cues)
 
 
 def optimize_cues_for_playback(
     cues: List[Cue],
     min_duration_ms: int = 1200,
     min_dual_duration_ms: int = 2200,
+    sound_cues: str = "drop",
 ) -> List[Cue]:
     """
     Tối ưu hóa các khung phụ đề hiển thị cho trải nghiệm xem phim hoàn hảo (IINA/mpv/VLC/TV):
@@ -156,14 +159,14 @@ def optimize_cues_for_playback(
             curr_text = (curr.en or curr.ja or "").strip()
             curr.used_en_fallback = True
 
-        clean_curr = clean_and_normalize_vietnamese(curr_text, preserve_dual=False)
+        clean_curr = clean_and_normalize_vietnamese(curr_text, preserve_dual=False, sound_cues=sound_cues)
 
         if not clean_curr:
             i += 1
             continue
 
         if i == n - 1:
-            curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True)
+            curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True, sound_cues=sound_cues)
             merged.append(curr)
             break
 
@@ -173,10 +176,10 @@ def optimize_cues_for_playback(
             next_text = (next_cue.en or next_cue.ja or "").strip()
             next_cue.used_en_fallback = True
 
-        clean_next = clean_and_normalize_vietnamese(next_text, preserve_dual=False)
+        clean_next = clean_and_normalize_vietnamese(next_text, preserve_dual=False, sound_cues=sound_cues)
 
         if not clean_next:
-            curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True)
+            curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True, sound_cues=sound_cues)
             merged.append(curr)
             i += 1
             continue
@@ -310,7 +313,7 @@ def optimize_cues_for_playback(
             i += 2
             continue
 
-        curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True)
+        curr.vi = clean_and_normalize_vietnamese(curr_text, preserve_dual=True, sound_cues=sound_cues)
         merged.append(curr)
         i += 1
 
@@ -376,7 +379,11 @@ def optimize_cues_for_playback(
                     c1.end = max(c1.end, c2.end)
                     deduped_merged.pop(k + 1)
                 else:
-                    c2.start = c1.end + 40
+                    # Cap forward shift on c2 so extended Dual Dialogue c1 cannot push c2 seconds out of audio sync
+                    max_shift_ms = 400
+                    target_c2_start = max(c1.start + 340, min(c1.end + 40, c2.start + max_shift_ms))
+                    c1.end = target_c2_start - 40
+                    c2.start = target_c2_start
                     c2.end = max(c2.end, c2.start + min_duration_ms)
                     k += 1
         else:
@@ -512,6 +519,7 @@ def write_srt_subtitles(
     optimize_playback: bool = False,
     smart_wrap: bool = False,
     max_line_chars: int = 72,
+    sound_cues: str = "drop",
 ) -> Path:
     """
     Writes cues to standard SRT format matching ReZERO_S04E19_Vietsub_Chuan.srt.
@@ -524,7 +532,7 @@ def write_srt_subtitles(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     blocks = []
     if optimize_playback:
-        processed_cues = optimize_cues_for_playback(cues)
+        processed_cues = optimize_cues_for_playback(cues, sound_cues=sound_cues)
         from subtrans.linter import auto_fix_cues
         processed_cues, _ = auto_fix_cues(processed_cues)
     else:
@@ -542,7 +550,7 @@ def write_srt_subtitles(
             raw_vi = (cue.en or cue.ja or "").strip()
             cue.used_en_fallback = True
 
-        clean_text = clean_and_normalize_vietnamese(raw_vi, preserve_dual=True)
+        clean_text = clean_and_normalize_vietnamese(raw_vi, preserve_dual=True, sound_cues=sound_cues)
         if not clean_text:
             clean_text = (cue.en or cue.ja or "").strip()
 
@@ -571,6 +579,7 @@ def write_subtitles(
     optimize_playback: bool = True,
     smart_wrap: bool = True,
     max_line_chars: int = 72,
+    sound_cues: str = "drop",
 ) -> Path:
     """
     Main subtitle writer entrypoint.
@@ -581,7 +590,7 @@ def write_subtitles(
     if not out_format or out_format not in ("ass", "srt"):
         out_format = "srt"
 
-    effective_wrap = wrap_chars or (line_max_chars if wrap_chars else None)
+    effective_wrap = wrap_chars if wrap_chars is not None else line_max_chars
 
     if out_format == "srt":
         if output_path.suffix.lower() != ".srt":
@@ -593,11 +602,12 @@ def write_subtitles(
             optimize_playback=optimize_playback,
             smart_wrap=smart_wrap,
             max_line_chars=max_line_chars,
+            sound_cues=sound_cues,
         )
 
     # ASS format fallback (preserves dialogue styles AND original typesetting/sign events)
     if optimize_playback:
-        processed_cues = optimize_cues_for_playback(cues)
+        processed_cues = optimize_cues_for_playback(cues, sound_cues=sound_cues)
         from subtrans.linter import auto_fix_cues
         processed_cues, _ = auto_fix_cues(processed_cues)
     else:
@@ -610,7 +620,7 @@ def write_subtitles(
         raw_vi = (cue.vi or "").strip()
         if not raw_vi or raw_vi in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]:
             raw_vi = cue.en or cue.ja or ""
-        clean_text = clean_and_normalize_vietnamese(raw_vi, preserve_dual=True)
+        clean_text = clean_and_normalize_vietnamese(raw_vi, preserve_dual=True, sound_cues=sound_cues)
         if effective_wrap and "\n" not in clean_text:
             clean_text = wrap_subtitle_line(clean_text, wrap_chars=effective_wrap)
         elif smart_wrap and "\n" not in clean_text and len(clean_text) > max_line_chars:

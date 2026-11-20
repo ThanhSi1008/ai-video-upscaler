@@ -217,7 +217,25 @@ def organize_output_artifacts(
         for ext in target_exts:
             if item.endswith(ext):
                 if base_name:
-                    if base_name in item or item.endswith(".cast.yaml"):
+                    safe_base = base_name.rstrip(". ")
+                    stem_no_ext = item[:-len(ext)]
+                    exact_prefixes = (
+                        f"{base_name}.",
+                        f"{base_name}_4K.",
+                        f"{base_name}_4K_animejanai.",
+                        f"{safe_base}.",
+                        f"{safe_base}_4K.",
+                        f"{safe_base}_4K_animejanai.",
+                    )
+                    exact_stems = {
+                        base_name,
+                        f"{base_name}_4K",
+                        f"{base_name}_4K_animejanai",
+                        safe_base,
+                        f"{safe_base}_4K",
+                        f"{safe_base}_4K_animejanai",
+                    }
+                    if item.startswith(exact_prefixes) or stem_no_ext in exact_stems:
                         is_target = True
                 else:
                     is_target = True

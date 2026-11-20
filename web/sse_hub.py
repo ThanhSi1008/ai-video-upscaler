@@ -239,10 +239,12 @@ class TelemetryHub:
         self._last_disk_time: float = 0.0
         self._last_read_bytes: int = 0
         self._last_write_bytes: int = 0
+        self._counter_lock = threading.Lock()
         self._prime_counters()
 
-        self._subscribers: set[asyncio.Queue[Dict[str, Any]]] = set()
+        self._subscribers: set[asyncio.Queue[Optional[Dict[str, Any]]]] = set()
         self._poll_task: Optional[asyncio.Task[None]] = None
+        self._shutting_down: bool = False
         self._history_lock = threading.Lock()
         self._last_log_cursor: Dict[str, Any] = {"path": "", "prefix_len": 0, "sig": "", "offset": 0}
         self._prime_log_cursor()
@@ -253,9 +255,10 @@ class TelemetryHub:
             psutil.cpu_percent(interval=None)
             io = psutil.disk_io_counters()
             if io is not None:
-                self._last_read_bytes = io.read_bytes
-                self._last_write_bytes = io.write_bytes
-                self._last_disk_time = time.perf_counter()
+                with self._counter_lock:
+                    self._last_read_bytes = io.read_bytes
+                    self._last_write_bytes = io.write_bytes
+                    self._last_disk_time = time.perf_counter()
         except Exception:
             pass
 
@@ -282,20 +285,22 @@ class TelemetryHub:
 
             now_perf = time.perf_counter()
             io = psutil.disk_io_counters()
-            if io is not None and self._last_disk_time > 0:
-                dt = now_perf - self._last_disk_time
-                if dt > 0.05:
-                    d_r = max(0, io.read_bytes - self._last_read_bytes)
-                    d_w = max(0, io.write_bytes - self._last_write_bytes)
-                    ssd_read_mb_s = round(d_r / (dt * 1024 * 1024), 2)
-                    ssd_write_mb_s = round(d_w / (dt * 1024 * 1024), 2)
-                    self._last_read_bytes = io.read_bytes
-                    self._last_write_bytes = io.write_bytes
-                    self._last_disk_time = now_perf
-            elif io is not None:
-                self._last_read_bytes = io.read_bytes
-                self._last_write_bytes = io.write_bytes
-                self._last_disk_time = now_perf
+            if io is not None:
+                with self._counter_lock:
+                    if self._last_disk_time > 0:
+                        dt = now_perf - self._last_disk_time
+                        if dt > 0.05:
+                            d_r = max(0, io.read_bytes - self._last_read_bytes)
+                            d_w = max(0, io.write_bytes - self._last_write_bytes)
+                            ssd_read_mb_s = round(d_r / (dt * 1024 * 1024), 2)
+                            ssd_write_mb_s = round(d_w / (dt * 1024 * 1024), 2)
+                            self._last_read_bytes = io.read_bytes
+                            self._last_write_bytes = io.write_bytes
+                            self._last_disk_time = now_perf
+                    else:
+                        self._last_read_bytes = io.read_bytes
+                        self._last_write_bytes = io.write_bytes
+                        self._last_disk_time = now_perf
         except Exception:
             pass
 
@@ -664,7 +669,6 @@ class TelemetryHub:
         if (
             job_state.get("status") in {"running", "pausing"}
             and active_job is not None
-            and active_job.get("job_type") in {"subtrans", "subs_pending"}
             and web_job_log.is_file()
         ):
             return web_job_log
@@ -864,19 +868,47 @@ class TelemetryHub:
             "log_cursor": log_cursor,
         }
 
+    def _poll_tick_sync(self) -> Dict[str, Any]:
+        """Thu thập 1 nhịp telemetry + trạng thái pipeline (chạy trong threadpool để không block asyncio loop)."""
+        telem = self.sample_telemetry(record_history=True)
+        pipe = self.read_pipeline_state()
+        return {
+            "telemetry": telem,
+            "pipeline": pipe,
+        }
+
+    async def shutdown(self) -> None:
+        """Ngắt sạch các luồng SSE đang mở và hủy vòng lặp thu thập telemetry khi đóng máy chủ."""
+        self._shutting_down = True
+        for q in list(self._subscribers):
+            try:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                q.put_nowait(None)
+            except Exception:
+                pass
+        task = self._poll_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._poll_task = None
+
     async def _broadcast_loop(self) -> None:
         try:
-            while self._subscribers:
+            while self._subscribers and not self._shutting_down:
                 await asyncio.sleep(1.0)
-                if not self._subscribers:
+                if not self._subscribers or self._shutting_down:
                     break
-                telem = self.sample_telemetry(record_history=True)
-                pipe = self.read_pipeline_state()
-                packet = {
-                    "telemetry": telem,
-                    "pipeline": pipe,
-                }
-                dead: List[asyncio.Queue[Dict[str, Any]]] = []
+                packet = await asyncio.to_thread(self._poll_tick_sync)
+                if self._shutting_down:
+                    break
+                dead: List[asyncio.Queue[Optional[Dict[str, Any]]]] = []
                 for q in list(self._subscribers):
                     try:
                         if q.full():
@@ -893,23 +925,29 @@ class TelemetryHub:
 
     async def stream_events(self, once: bool = False) -> AsyncIterator[str]:
         """Trình sinh Server-Sent Events chuẩn text/event-stream với con trỏ log riêng cho từng tab."""
-        snap = self.build_snapshot()
+        if self._shutting_down:
+            return
+        snap = await asyncio.to_thread(self.build_snapshot)
         sub_cursor: Dict[str, Any] = dict(
             snap.get("log_cursor") or {"path": "", "prefix_len": 0, "sig": "", "offset": 0}
         )
         yield f"event: snapshot\ndata: {json.dumps(snap, ensure_ascii=False)}\n\n"
-        if once:
+        if once or self._shutting_down:
             return
 
-        queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=8)
+        queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue(maxsize=8)
         self._subscribers.add(queue)
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._broadcast_loop())
 
         try:
-            while True:
+            while not self._shutting_down:
                 base_packet = await queue.get()
-                new_logs, sub_cursor = self._read_incremental_logs_from_cursor(sub_cursor)
+                if base_packet is None or self._shutting_down:
+                    break
+                new_logs, sub_cursor = await asyncio.to_thread(
+                    self._read_incremental_logs_from_cursor, sub_cursor
+                )
                 packet = {
                     "telemetry": base_packet["telemetry"],
                     "pipeline": base_packet["pipeline"],

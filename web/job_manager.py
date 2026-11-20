@@ -39,22 +39,74 @@ MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
 }
 
 
+_FRAME_PROBE_CACHE: Dict[tuple[str, int, int], int] = {}
+_FRAME_PROBE_CACHE_LOCK = threading.Lock()
+_FRAME_PROBE_CACHE_MAX = 2048
+
+
 def _probe_frames_lightweight(video_path: str) -> int:
-    """Đo nhanh tổng số frame video bằng PyAV in-process (fallback ước lượng theo dung lượng/mặc định)."""
+    """Đo nhanh tổng số frame video bằng PyAV in-process (cache theo abs_path, mtime_ns, size)."""
+    cache_key: Optional[tuple[str, int, int]] = None
+    try:
+        abs_p = os.path.abspath(video_path)
+        st = os.stat(abs_p)
+        cache_key = (os.path.normcase(abs_p), int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        cache_key = None
+
+    if cache_key is not None:
+        with _FRAME_PROBE_CACHE_LOCK:
+            cached = _FRAME_PROBE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    probed = 34000
     try:
         import av
         with av.open(video_path) as container:
             if container.streams.video:
                 vs = container.streams.video[0]
                 if vs.frames and vs.frames > 0:
-                    return int(vs.frames)
-                dur = float(container.duration / av.time_base) if container.duration else 0.0
-                fps = float(vs.average_rate) if vs.average_rate else 23.976
-                if dur > 0:
-                    return max(1, int(round(dur * fps)))
+                    probed = int(vs.frames)
+                else:
+                    dur = float(container.duration / av.time_base) if container.duration else 0.0
+                    fps = float(vs.average_rate) if vs.average_rate else 23.976
+                    if dur > 0:
+                        probed = max(1, int(round(dur * fps)))
     except Exception:
         pass
-    return 34000
+
+    if cache_key is not None:
+        with _FRAME_PROBE_CACHE_LOCK:
+            if len(_FRAME_PROBE_CACHE) >= _FRAME_PROBE_CACHE_MAX:
+                _FRAME_PROBE_CACHE.clear()
+            _FRAME_PROBE_CACHE[cache_key] = probed
+    return probed
+
+
+def _has_valid_upscaled_output(out_4k: Path) -> bool:
+    """Kiểm tra bản thành phẩm 4K tồn tại (>1 MiB) và không có biên bản kiểm định FAIL liền kề."""
+    try:
+        if not (out_4k.is_file() and out_4k.stat().st_size > 1024 * 1024):
+            return False
+    except OSError:
+        return False
+
+    audit_cands = [
+        out_4k.with_suffix(".audit.json"),
+        out_4k.parent / "audit" / f"{out_4k.stem}.audit.json",
+    ]
+    for ac in audit_cands:
+        if ac.is_file():
+            try:
+                adata = json.loads(ac.read_text(encoding="utf-8"))
+                if isinstance(adata, dict):
+                    status = str(adata.get("status") or "").strip().upper()
+                    if status == "FAIL":
+                        return False
+            except Exception:
+                pass
+    return True
 
 
 _VALID_SUBS_QUALITIES = {"normal", "fast", "high"}
@@ -221,6 +273,7 @@ class JobManager:
         use_tensorrt: bool = True,
         subs_after_upscale: bool = True,
         output_dir: Optional[str] = None,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """Dự báo chi tiết danh sách tập, model phân giải từ shows.yaml và thời gian hoàn thành theo --deadline."""
         videos = self.fs_browser.expand_inputs(inputs)
@@ -234,6 +287,7 @@ class JobManager:
             if deadline_dt <= now:
                 deadline_dt += timedelta(days=1)
 
+        routing_tables = self.fs_browser._load_routing_tables()
         out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         sub_overhead = 300.0 if subs_after_upscale else 0.0
         if zero_disk and use_tensorrt:
@@ -257,6 +311,7 @@ class JobManager:
                 vid,
                 override_model=model_override,
                 override_dedup=dedup_override,
+                routing_tables=routing_tables,
             )
             m_id = routing["model_id"]
             base_med_fps, base_p5_fps = MODEL_REFERENCE_FPS.get(m_id, (10.5, 8.5))
@@ -267,8 +322,27 @@ class JobManager:
                 base_med_fps *= 0.82
                 base_p5_fps *= 0.82
 
+            out_suffix = "_4K_animejanai.mkv" if m_id.startswith("animejanai-") else "_4K.mkv"
+            if explicit_out_file is not None and len(videos) == 1:
+                out_4k = explicit_out_file
+            else:
+                out_4k = out_base / f"{base_name}{out_suffix}"
+
+            already_done = (not force) and _has_valid_upscaled_output(out_4k)
+
             plan = _find_cached_plan(self.workspace_root, vid, str(out_base))
-            if plan:
+            if already_done:
+                if plan:
+                    total_f = int(plan.get("total_frames") or 0)
+                    n_unique = int(plan.get("total_kept_frames") or 0)
+                    dedup_pct = float(plan.get("dedup_ratio_percent") or 0.0)
+                    source_note = "đã có 4K (plan.json)"
+                else:
+                    total_f = 0
+                    n_unique = 0
+                    dedup_pct = 0.0
+                    source_note = "đã có 4K (bỏ qua probe)"
+            elif plan:
                 total_f = int(plan.get("total_frames") or 34000)
                 n_unique = int(plan.get("total_kept_frames") or int(total_f * 0.6))
                 dedup_pct = float(plan.get("dedup_ratio_percent") or 0.0)
@@ -280,13 +354,6 @@ class JobManager:
                 n_unique = max(1, int(round(total_f * keep_factor)))
                 dedup_pct = round((1.0 - keep_factor) * 100.0, 1)
                 source_note = "ước tính thận trọng"
-
-            out_suffix = "_4K_animejanai.mkv" if m_id.startswith("animejanai-") else "_4K.mkv"
-            if explicit_out_file is not None and len(videos) == 1:
-                out_4k = explicit_out_file
-            else:
-                out_4k = out_base / f"{base_name}{out_suffix}"
-            already_done = out_4k.is_file() and out_4k.stat().st_size > 1024 * 1024
 
             if already_done:
                 eta_med_s = 0.0
@@ -378,6 +445,35 @@ class JobManager:
                     f"GPU đang bận xử lý tiến trình khác (PID={lock_info['pid']}). "
                     f"Chỉ cho phép 1 tiến trình suy luận GPU hoạt động tại một thời điểm."
                 )
+            live_file = self.workspace_root / "logs" / "live_status.json"
+            if live_file.is_file():
+                try:
+                    ldata = json.loads(live_file.read_text(encoding="utf-8"))
+                    if isinstance(ldata, dict):
+                        live_pid = ldata.get("pid")
+                        live_stage = str(ldata.get("stage") or "").strip().lower()
+                        if (
+                            isinstance(live_pid, int)
+                            and live_pid > 0
+                            and live_stage in {
+                                "initializing",
+                                "probing",
+                                "preflight_dedup",
+                                "upscaling",
+                                "muxing",
+                                "auditing",
+                            }
+                        ):
+                            import psutil
+                            if psutil.pid_exists(live_pid):
+                                raise RuntimeError(
+                                    f"Đang có tiến trình Upscale CLI khác hoạt động ở giai đoạn '{live_stage}' (PID={live_pid}). "
+                                    f"Vui lòng chờ tiến trình đó kết thúc hoặc tạm dừng trước khi khởi chạy tác vụ GPU mới."
+                                )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
 
     def _ensure_ready_to_launch(self, requires_gpu: bool = True) -> None:
         with self._lock:

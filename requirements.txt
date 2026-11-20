@@ -7,6 +7,7 @@ pillow>=9.5.0
 psutil>=5.9.0
 pyyaml>=6.0.0
 numpy>=1.24.0
+av>=12.0.0
 requests>=2.31.0
 spandrel>=0.4.0
 safetensors>=0.4.0
@@ -33,6 +34,6 @@ ruff>=0.8.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 
-# Optional Hardware Acceleration (RTX 3060 Ampere TensorRT 10 FP16 & Triton)
-# Install via:
+# Active Default Zero-Disk GPU Acceleration (RTX 3060 Ampere TensorRT 10 FP16 & Triton P010LE)
+# Required for default --zero-disk TensorRT mode (use --no-tensorrt / --no-zero-disk to run PyTorch-only):
 #   pip install --extra-index-url https://pypi.nvidia.com onnx onnxscript tensorrt-cu12 triton-windows

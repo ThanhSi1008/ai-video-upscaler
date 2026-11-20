@@ -5,6 +5,7 @@ Tạo báo cáo tổng kết phiên chạy qua đêm từ log, telemetry CSV, au
 Chế độ CHỈ ĐỌC, không gọi GPU hay API.
 """
 
+import glob
 import os
 import re
 import csv
@@ -17,8 +18,13 @@ from typing import Dict, Any, List, Optional
 
 
 CHUNK_LOG_REGEX = re.compile(
-    r"\[CHUNK (\d+)/(\d+)\] Hoàn tất (\d+) frames \(AI (?:CUDA|GPU): ([\d\.]+)s @ ([\d\.]+) fps \| "
-    r"Steady: ([\d\.]+) fps, Peak RSS: ([\d\.]+) MB \| Encode: ([\d\.]+)s \| Tổng: ([\d\.]+)s \| File: (\S+) ([\d\.]+) MB\)"
+    r"\[CHUNK (?P<idx>\d+)/(?P<total>\d+)\] Hoàn tất (?P<frames>\d+) frames "
+    r"\(AI (?:CUDA|GPU): (?P<ai_time>[\d\.]+)s @ (?P<ai_fps>[\d\.]+) fps"
+    r"(?:\s*\|\s*(?:T0:\s*[\d\.]+s(?:,\s*)?)?"
+    r"(?:Steady:\s*(?P<steady_fps>[\d\.]+)\s*fps)?(?:,\s*)?"
+    r"(?:Peak RSS:\s*(?P<rss_mb>[\d\.]+)\s*MB)?)?"
+    r"\s*\|\s*Encode: (?P<enc_time>[\d\.]+)s \| Tổng: (?P<tot_time>[\d\.]+)s \| "
+    r"File: (?P<file>\S+) (?P<size>[\d\.]+) (?:MB|GB)\)"
 )
 
 
@@ -127,15 +133,15 @@ def parse_episode_chunks_log(log_path: str) -> Dict[str, Any]:
 
             m = CHUNK_LOG_REGEX.search(line)
             if m:
-                c_idx = int(m.group(1))
-                total_segs = int(m.group(2))
-                frames = int(m.group(3))
-                ai_time = float(m.group(4))
-                ai_fps = float(m.group(5))
-                steady_fps = float(m.group(6))
-                rss = float(m.group(7))
-                enc_time = float(m.group(8))
-                tot_time = float(m.group(9))
+                c_idx = int(m.group("idx"))
+                total_segs = int(m.group("total"))
+                frames = int(m.group("frames"))
+                ai_time = float(m.group("ai_time"))
+                ai_fps = float(m.group("ai_fps"))
+                steady_fps = float(m.group("steady_fps") or ai_fps)
+                rss = float(m.group("rss_mb") or 0.0)
+                enc_time = float(m.group("enc_time"))
+                tot_time = float(m.group("tot_time"))
                 chunks.append({
                     "idx": c_idx,
                     "frames": frames,
@@ -181,47 +187,96 @@ def parse_episode_chunks_log(log_path: str) -> Dict[str, Any]:
     }
 
 
-def query_subtrans_api_stats(db_path: str = "subtrans/.cache/translations.db") -> Dict[str, Any]:
-    """Truy vấn thống kê API Gemini từ SQLite cache."""
+def query_subtrans_api_stats(
+    db_path: str = "subtrans/.cache/translations.db",
+    start_utc: Optional[str] = None,
+    end_utc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Truy vấn thống kê API Gemini từ SQLite cache theo cửa sổ thời gian động."""
     if not os.path.exists(db_path):
         return {}
 
     con = sqlite3.connect(db_path)
-    cur = con.cursor()
+    try:
+        cur = con.cursor()
 
-    # Thống kê bản dịch theo model
-    cur.execute("SELECT model, count(*) FROM translations GROUP BY model")
-    cues_by_model = {row[0]: row[1] for row in cur.fetchall()}
+        # Thống kê bản dịch theo model
+        cur.execute("SELECT model, count(*) FROM translations GROUP BY model")
+        cues_by_model = {row[0]: row[1] for row in cur.fetchall()}
 
-    # Thống kê requests
-    cur.execute("""
-        SELECT model, status, error_type, count(*)
-        FROM api_requests
-        WHERE status != 'dry_run' AND created_at >= '2026-10-05 00:00:00' AND created_at <= '2026-10-05 08:00:00'
-        GROUP BY model, status, error_type
-    """)
-    req_rows = cur.fetchall()
+        # Tự động xác định cửa sổ thời gian mới nhất nếu không truyền start_utc / end_utc
+        eff_start = start_utc
+        eff_end = end_utc
+        if eff_start is None or eff_end is None:
+            cur.execute("SELECT MAX(created_at) FROM api_requests WHERE status != 'dry_run'")
+            row_max = cur.fetchone()
+            max_ts = row_max[0] if row_max else None
+            if max_ts:
+                try:
+                    dt_max = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
+                    if eff_end is None:
+                        eff_end = max_ts
+                    if eff_start is None:
+                        eff_start = (dt_max - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
 
-    model_summary = {}
-    for m, status, err_type, count in req_rows:
-        if m not in model_summary:
-            model_summary[m] = {"total": 0, "success": 0, "503": 0, "other_err": 0}
-        model_summary[m]["total"] += count
-        if status == "success":
-            model_summary[m]["success"] += count
-        elif "503" in status or err_type == "503_Unavailable":
-            model_summary[m]["503"] += count
+        if eff_start is not None and eff_end is not None:
+            cur.execute(
+                """
+                SELECT model, status, error_type, count(*)
+                FROM api_requests
+                WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
+                GROUP BY model, status, error_type
+                """,
+                (eff_start, eff_end),
+            )
         else:
-            model_summary[m]["other_err"] += count
+            cur.execute(
+                """
+                SELECT model, status, error_type, count(*)
+                FROM api_requests
+                WHERE status != 'dry_run'
+                GROUP BY model, status, error_type
+                """
+            )
+        req_rows = cur.fetchall()
 
-    # Thống kê theo PT Hour (chuyển đổi created_at UTC từ SQLite sang America/Los_Angeles)
-    pt_tz = ZoneInfo("America/Los_Angeles")
-    cur.execute("""
-        SELECT created_at, model, status, error_type
-        FROM api_requests
-        WHERE status != 'dry_run'
-    """)
-    pt_rows = cur.fetchall()
+        model_summary = {}
+        for m, status, err_type, count in req_rows:
+            if m not in model_summary:
+                model_summary[m] = {"total": 0, "success": 0, "503": 0, "other_err": 0}
+            model_summary[m]["total"] += count
+            if status == "success":
+                model_summary[m]["success"] += count
+            elif "503" in str(status) or err_type == "503_Unavailable":
+                model_summary[m]["503"] += count
+            else:
+                model_summary[m]["other_err"] += count
+
+        # Thống kê theo PT Hour (chuyển đổi created_at UTC từ SQLite sang America/Los_Angeles)
+        pt_tz = ZoneInfo("America/Los_Angeles")
+        if eff_start is not None and eff_end is not None:
+            cur.execute(
+                """
+                SELECT created_at, model, status, error_type
+                FROM api_requests
+                WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
+                """,
+                (eff_start, eff_end),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT created_at, model, status, error_type
+                FROM api_requests
+                WHERE status != 'dry_run'
+                """
+            )
+        pt_rows = cur.fetchall()
+    finally:
+        con.close()
+
     by_pt_hour = {}
     for created_at, m, status, err_type in pt_rows:
         try:
@@ -235,59 +290,149 @@ def query_subtrans_api_stats(db_path: str = "subtrans/.cache/translations.db") -
             by_pt_hour[h_str][m]["total"] += 1
             if status == "success":
                 by_pt_hour[h_str][m]["success"] += 1
-            elif "503" in status or err_type == "503_Unavailable":
+            elif "503" in str(status) or err_type == "503_Unavailable":
                 by_pt_hour[h_str][m]["503"] += 1
         except Exception:
             continue
 
-    con.close()
-
     return {
         "cues_by_model": cues_by_model,
         "model_summary": model_summary,
-        "by_pt_hour": by_pt_hour
+        "by_pt_hour": by_pt_hour,
     }
 
 
+def _inspect_episode_log_summary(log_path: str) -> Dict[str, Any]:
+    """Đọc tóm tắt siêu dữ liệu tập từ file log (tên tập, khung hình, trạng thái hoàn tất)."""
+    ep_name = os.path.basename(log_path)
+    total_frames = 0
+    n_unique = 0
+    status = "⏳ ĐANG XỬ LÝ / CHƯA HOÀN TẤT"
+    started_dt = None
+    ended_dt = None
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        m_vid = re.search(r"^# Video:\s*(.+)$", text, flags=re.MULTILINE)
+        if m_vid:
+            ep_name = m_vid.group(1).strip()
+        m_started = re.search(r"^# Started:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", text, flags=re.MULTILINE)
+        if m_started:
+            started_dt = datetime.strptime(m_started.group(1), "%Y-%m-%d %H:%M:%S")
+        m_dedup = re.search(r"Kế hoạch Deduplication:\s*Giữ\s*(\d+)/(\d+)", text)
+        if m_dedup:
+            n_unique = int(m_dedup.group(1))
+            total_frames = int(m_dedup.group(2))
+        ts_matches = re.findall(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", text, flags=re.MULTILINE)
+        if ts_matches:
+            if started_dt is None:
+                started_dt = datetime.strptime(ts_matches[0], "%Y-%m-%d %H:%M:%S")
+            ended_dt = datetime.strptime(ts_matches[-1], "%Y-%m-%d %H:%M:%S")
+        if "Mux Audit: PASS" in text or "HOÀN TẤT 4K" in text.upper() or "HOÀN TẤT THÀNH CÔNG" in text.upper():
+            status = "✅ HOÀN TẤT TRỌN VẸN (100%)"
+        elif "ALLOW-PARTIAL DEADLINE" in text or "GRACEFUL PAUSE" in text:
+            status = "⏸️ TẠM DỪNG SẠCH (--allow-partial / pause)"
+        elif "[ERROR]" in text:
+            status = "❌ LỖI TRONG QUÁ TRÌNH XỬ LÝ"
+    except Exception:
+        pass
+    actual_wall = (
+        max(0.0, (ended_dt - started_dt).total_seconds())
+        if (started_dt and ended_dt)
+        else 0.0
+    )
+    return {
+        "name": ep_name,
+        "log": log_path,
+        "status": status,
+        "total_frames": total_frames,
+        "n_unique": n_unique,
+        "started_dt": started_dt,
+        "ended_dt": ended_dt,
+        "wall_start": started_dt.strftime("%H:%M:%S") if started_dt else "N/A",
+        "wall_end": ended_dt.strftime("%H:%M:%S") if ended_dt else "N/A",
+        "actual_wall_sec": actual_wall,
+    }
+
+
+def _discover_session_logs(
+    logs_dir: str = "logs",
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Tìm tự động danh sách file log tập thuộc cửa sổ ca chạy (không hardcode ngày cố định)."""
+    if not os.path.isdir(logs_dir):
+        return []
+    candidates = [
+        p for p in sorted(glob.glob(os.path.join(logs_dir, "*.log")))
+        if os.path.basename(p).lower() != "latest.log" and not os.path.islink(p)
+    ]
+    if not candidates:
+        return []
+
+    parsed = [_inspect_episode_log_summary(p) for p in candidates]
+    if start_dt is not None and end_dt is not None:
+        win_start = start_dt - timedelta(minutes=5)
+        win_end = end_dt + timedelta(minutes=5)
+        selected = [
+            ep for ep in parsed
+            if ep["started_dt"] is not None and win_start <= ep["started_dt"] <= win_end
+        ]
+        return sorted(selected, key=lambda ep: ep["started_dt"] or datetime.min)
+
+    with_ts = [ep for ep in parsed if ep["started_dt"] is not None]
+    if not with_ts:
+        return []
+    latest_ts = max(ep["ended_dt"] or ep["started_dt"] for ep in with_ts)
+    cutoff = latest_ts - timedelta(hours=12)
+    selected = [ep for ep in with_ts if (ep["ended_dt"] or ep["started_dt"]) >= cutoff]
+    return sorted(selected, key=lambda ep: ep["started_dt"])
+
+
 def generate_night_report_text(session_name: str = "night1") -> str:
-    """Sinh toàn bộ nội dung báo cáo đêm dưới dạng Markdown văn bản."""
+    """Sinh toàn bộ nội dung báo cáo đêm dưới dạng Markdown văn bản theo dữ liệu log/CSV thực tế."""
     lines = []
     lines.append(f"# BÁO CÁO TỔNG KẾT CA CHẠY QUA ĐÊM ({session_name.upper()})")
     lines.append("")
 
-    # 1. Cửa sổ phiên chạy
+    # 1. Cửa sổ phiên chạy (ưu tiên đọc từ CSV telemetry của session; fallback từ log mới nhất)
     csv_file = f"logs/soak_telemetry_{session_name}.csv"
-    if session_name == "night1":
-        # Mốc thời gian từ log đêm 1: 00:25:59 -> 08:00:29
-        start_dt = datetime(2026, 10, 5, 0, 25, 59)
-        end_dt = datetime(2026, 10, 5, 8, 0, 29)
+    start_epoch: Optional[int] = None
+    end_epoch: Optional[int] = None
+    if os.path.exists(csv_file):
+        try:
+            with open(csv_file, "r", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+                if rows:
+                    start_epoch = int(rows[0]["epoch"])
+                    end_epoch = int(rows[-1]["epoch"])
+        except Exception:
+            pass
+
+    csv_start_dt = datetime.fromtimestamp(start_epoch) if start_epoch is not None else None
+    csv_end_dt = datetime.fromtimestamp(end_epoch) if end_epoch is not None else None
+    episodes_info = _discover_session_logs("logs", start_dt=csv_start_dt, end_dt=csv_end_dt)
+
+    if csv_start_dt is not None and csv_end_dt is not None:
+        start_dt = csv_start_dt
+        end_dt = csv_end_dt
+    elif episodes_info:
+        starts = [ep["started_dt"] for ep in episodes_info if ep["started_dt"] is not None]
+        ends = [ep["ended_dt"] or ep["started_dt"] for ep in episodes_info if (ep["ended_dt"] or ep["started_dt"]) is not None]
+        start_dt = min(starts) if starts else datetime.now()
+        end_dt = max(ends) if ends else start_dt
         start_epoch = int(start_dt.timestamp())
         end_epoch = int(end_dt.timestamp())
     else:
-        start_epoch = None
-        end_epoch = None
-        if os.path.exists(csv_file):
-            try:
-                with open(csv_file, "r", encoding="utf-8") as f:
-                    r = list(csv.DictReader(f))
-                    if r:
-                        start_epoch = int(r[0]["epoch"])
-                        end_epoch = int(r[-1]["epoch"])
-            except Exception:
-                pass
-        start_dt = datetime.fromtimestamp(start_epoch) if start_epoch else datetime.now()
-        end_dt = datetime.fromtimestamp(end_epoch) if end_epoch else datetime.now()
-        start_epoch = int(start_dt.timestamp())
-        end_epoch = int(end_dt.timestamp())
+        start_dt = datetime.now()
+        end_dt = start_dt
 
     window_sec = max(1.0, (end_dt - start_dt).total_seconds())
 
     lines.append("## 1. Thông Tin Phiên Chạy & Cửa Sổ Giám Sát")
-    lines.append(f"* **Thời điểm bắt đầu:** {start_dt.strftime('%Y-%m-%d %H:%M:%S')} +07:00")
-    lines.append(f"* **Thời điểm kết thúc ca:** {end_dt.strftime('%Y-%m-%d %H:%M:%S')} +07:00")
+    lines.append(f"* **Thời điểm bắt đầu:** {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"* **Thời điểm kết thúc ca:** {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"* **Tổng thời lượng ca:** {int(window_sec//3600)}h {int((window_sec%3600)//60)}m {int(window_sec%60)}s ({window_sec:,.1f}s)")
-    if session_name == "night1":
-        lines.append(f"* **Lưu ý cửa sổ đo:** Số liệu phần cứng bên dưới chỉ tính TRONG cửa sổ ca chạy (00:25:59 – 08:00:29). Các hoạt động sau 08:00 là ngoài ca.")
     lines.append("")
 
     # 2. Telemetry Hệ thống
@@ -300,7 +445,7 @@ def generate_night_report_text(session_name: str = "night1") -> str:
             lines.append(f"* **Dung lượng đọc SSD thực tế (ioreg):** **{telem['delta_read_gib']:.2f} GiB**")
         lines.append(f"* **Tăng trưởng Pageouts:** **+{telem['delta_pageouts']:,}** trang")
         lines.append(f"* **Bộ nhớ Swap:** Ban đầu **{telem['start_swap_mb']:.2f} MB** ➔ Kết thúc **{telem['end_swap_mb']:.2f} MB** (Tăng: **+{telem['delta_swap_mb']:.2f} MB**, Đỉnh: **{telem['peak_swap_mb']:.2f} MB**)")
-        lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))} (Hoàn toàn không nghẽn nhiệt)")
+        lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))}")
     else:
         lines.append(f"* Không nạp được telemetry từ {csv_file}")
     lines.append("")
@@ -309,69 +454,37 @@ def generate_night_report_text(session_name: str = "night1") -> str:
     lines.append("## 3. Trạng Thái & Hiệu Năng Từng Tập Video")
     lines.append("")
 
-    episodes_info = [
-        {
-            "name": "Tập 1: I Want to Love You Till Your Dying Day - 13",
-            "log": "logs/I.Want.to.Love.You.Till.Your.Dying.Day.S01E13.I.Miss.You.REPACK.1080p.CR.WEB-DL.JPN.AAC2.0.H.264_20261005_002600.log",
-            "status": "✅ HOÀN TẤT TRỌN VẸN (100%)",
-            "total_frames": 34046,
-            "n_unique": 15669,
-            "eta_med_sec": 10669.0, # 2:57:49
-            "eta_p5_sec": 11665.0,  # 3:14:25
-            "wall_start": "00:26:00",
-            "wall_end": "03:18:02",
-            "actual_wall_sec": 10322.0, # 2h 52m 02s
-        },
-        {
-            "name": "Tập 2: [SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84",
-            "log": "logs/[SubsPlease] Re Zero kara Hajimeru Isekai Seikatsu - 84 (1080p) [5188BBC4]_20261005_031804.log",
-            "status": "✅ HOÀN TẤT TRỌN VẸN (100%)",
-            "total_frames": 34276,
-            "n_unique": 20977,
-            "eta_med_sec": 13619.0, # 3:46:59
-            "eta_p5_sec": 14899.0,  # 4:08:19
-            "wall_start": "03:18:04",
-            "wall_end": "07:05:13",
-            "actual_wall_sec": 13629.0, # 3h 47m 09s
-        },
-        {
-            "name": "Tập 3: [SubsPlease] Tensei Shitara Slime Datta Ken S4 - 24",
-            "log": "logs/[SubsPlease] Tensei Shitara Slime Datta Ken S4 - 24 (1080p) [AA94BC1F]_20261005_070513.log",
-            "status": "⏸️ TẠM DỪNG SẠCH TẠI CHUNK 31/180 (--allow-partial)",
-            "total_frames": 34526,
-            "n_unique": 15730,
-            "eta_med_sec": 13709.0,
-            "eta_p5_sec": 14998.0,
-            "wall_start": "07:05:13",
-            "wall_end": "07:51:07",
-            "actual_wall_sec": 2754.0,  # 45m 54s
-        }
-    ]
-
-    for ep in episodes_info:
-        lines.append(f"### {ep['name']}")
-        lines.append(f"* **Trạng thái:** {ep['status']}")
-        lines.append(f"* **Thời gian thực tế:** {int(ep['actual_wall_sec']//3600)}h {int((ep['actual_wall_sec']%3600)//60)}m {int(ep['actual_wall_sec']%60)}s ({ep['wall_start']} ➔ {ep['wall_end']})")
-        lines.append(f"* **Đối chiếu ETA lập lịch:** ETA Trung vị: {int(ep['eta_med_sec']//3600)}h {int((ep['eta_med_sec']%3600)//60)}m | ETA P5 (+7%): {int(ep['eta_p5_sec']//3600)}h {int((ep['eta_p5_sec']%3600)//60)}m")
-
-        c_data = parse_episode_chunks_log(ep["log"])
-        if c_data:
-            lines.append(f"* **Số phân đoạn đã xử lý:** {c_data['chunks_completed']}/{c_data['total_chunks']}")
-            lines.append(f"* **Tốc độ AI:** Trung vị **{c_data['median_ai_fps']:.2f} fps** | P5 **{c_data['p5_ai_fps']:.2f} fps**")
-            lines.append(f"* **So sánh tốc độ giờ đầu vs giờ cuối:** Giờ đầu: **{c_data['first_hour_fps']:.2f} fps** ➔ Giờ cuối: **{c_data['last_hour_fps']:.2f} fps** (Hiệu năng GPU duy trì ổn định)")
-
-            # GPU Active Ratio = total_ai_time / episode_actual_wall_time
-            gpu_active_ratio = (c_data["total_ai_time_sec"] / ep["actual_wall_sec"]) * 100.0 if ep["actual_wall_sec"] > 0 else 0.0
-            lines.append(f"* **GPU Active Ratio:** **{gpu_active_ratio:.2f}%** (Tổng AI GPU: {c_data['total_ai_time_sec']:,.1f}s ÷ Thời gian thực tế: {ep['actual_wall_sec']:,.1f}s)")
-
-            lines.append("* **10 Phân đoạn chậm nhất (chờ RAM disk / cảnh hành động phức tạp):**")
-            for s in c_data["slowest_10"][:10]:
-                lines.append(f"  - Chunk {s['idx']:03d}: Tổng {s['tot_time']:.1f}s (AI: {s['ai_time']:.1f}s, Encode: {s['enc_time']:.1f}s, AI fps: {s['ai_fps']:.2f})")
+    if not episodes_info:
+        lines.append("* Không tìm thấy file log tập video nào trong cửa sổ phiên chạy.")
         lines.append("")
+    else:
+        for idx, ep in enumerate(episodes_info, 1):
+            lines.append(f"### Tập {idx}: {ep['name']}")
+            lines.append(f"* **Trạng thái:** {ep['status']}")
+            lines.append(
+                f"* **Thời gian thực tế:** {int(ep['actual_wall_sec']//3600)}h {int((ep['actual_wall_sec']%3600)//60)}m "
+                f"{int(ep['actual_wall_sec']%60)}s ({ep['wall_start']} ➔ {ep['wall_end']})"
+            )
+
+            c_data = parse_episode_chunks_log(ep["log"])
+            if c_data:
+                lines.append(f"* **Số phân đoạn đã xử lý:** {c_data['chunks_completed']}/{c_data['total_chunks']}")
+                lines.append(f"* **Tốc độ AI:** Trung vị **{c_data['median_ai_fps']:.2f} fps** | P5 **{c_data['p5_ai_fps']:.2f} fps**")
+                lines.append(f"* **So sánh tốc độ giờ đầu vs giờ cuối:** Giờ đầu: **{c_data['first_hour_fps']:.2f} fps** ➔ Giờ cuối: **{c_data['last_hour_fps']:.2f} fps**")
+
+                gpu_active_ratio = (c_data["total_ai_time_sec"] / ep["actual_wall_sec"]) * 100.0 if ep["actual_wall_sec"] > 0 else 0.0
+                lines.append(f"* **GPU Active Ratio:** **{gpu_active_ratio:.2f}%** (Tổng AI GPU: {c_data['total_ai_time_sec']:,.1f}s ÷ Thời gian thực tế: {ep['actual_wall_sec']:,.1f}s)")
+
+                lines.append("* **10 Phân đoạn chậm nhất:**")
+                for s in c_data["slowest_10"][:10]:
+                    lines.append(f"  - Chunk {s['idx']:03d}: Tổng {s['tot_time']:.1f}s (AI: {s['ai_time']:.1f}s, Encode: {s['enc_time']:.1f}s, AI fps: {s['ai_fps']:.2f})")
+            lines.append("")
 
     # 4. Thống kê phụ đề & API Gemini
     lines.append("## 4. Thống Kê Phụ Đề & Hạn Mức Gemini API")
-    api_stats = query_subtrans_api_stats()
+    start_utc_str = datetime.fromtimestamp(start_dt.timestamp(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc_str = datetime.fromtimestamp(end_dt.timestamp(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    api_stats = query_subtrans_api_stats(start_utc=start_utc_str, end_utc=end_utc_str) if (start_epoch is not None or episodes_info) else query_subtrans_api_stats()
     if api_stats:
         lines.append("### (a) Phân bổ câu thoại đã dịch theo Model:")
         for m, count in sorted(api_stats.get("cues_by_model", {}).items()):
@@ -395,14 +508,12 @@ def generate_night_report_text(session_name: str = "night1") -> str:
     lines.append("1. **Tiếp tục tập dở dang (Resume Checkpoint):**")
     lines.append("   - Chạy lệnh tiếp tục với thư mục đích `-o out/`:")
     lines.append("     ```powershell")
-    lines.append("     # Chạy qua batch launcher hoặc Python:")
     lines.append("     .\\upscale.bat \"<duong_dan_video.mkv>\" -o out\\")
     lines.append("     python upscale.py \"<duong_dan_video.mkv>\" -o out/")
     lines.append("     ```")
     lines.append("   - Hệ thống sẽ tự động phát hiện các chunks đã xong trong `.temp_...` và tiếp tục mà không làm mất dữ liệu.")
     lines.append("2. **Kiểm tra phụ đề tiếng Việt:**")
-    lines.append("   - File phụ đề ngoài `.vi.srt` đã được đặt chuẩn tên cạnh file MKV 4K.")
-    lines.append("   - Mọi trình phát (VLC, MPC-HC, PotPlayer, Windows Media Player) sẽ tự động nạp phụ đề tiếng Việt khi mở video.")
+    lines.append("   - File phụ đề ngoài `.vi.srt` được đặt chuẩn tên cạnh file MKV 4K để mọi trình phát tự động nạp.")
     lines.append("")
 
     return "\n".join(lines)

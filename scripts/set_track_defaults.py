@@ -13,13 +13,7 @@ import shutil
 import argparse
 import subprocess
 import time
-from typing import Dict, Any, List, Optional, Tuple
-
-if hasattr(sys.stdout, "reconfigure"):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+from typing import Any, Dict, List, Optional, Tuple
 
 # Default legacy constants for backward compatibility
 raw_dir = r"E:\Films\Raw_Sources"
@@ -287,16 +281,15 @@ def collect_files(targets: List[str], skip_patterns: List[str]) -> List[str]:
     return sorted(list(set(all_files)))
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    """Parse command line arguments for track configuration."""
+def _build_arg_parser(targets_default: Any = argparse.SUPPRESS) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Batch Track Configuration Utility for MKV Media"
     )
     parser.add_argument(
         "targets",
         nargs="*",
-        default=[r"E:\Films\Raw_Sources"],
-        help="Files or directories to process (default: E:\\Films\\Raw_Sources)",
+        default=targets_default,
+        help="Files or directories to process (requires explicit target, --dry-run, or --yes-default-target)",
     )
     parser.add_argument(
         "--audio-lang",
@@ -320,6 +313,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Simulate modifications without modifying files",
     )
     parser.add_argument(
+        "--yes-default-target",
+        action="store_true",
+        help="Explicitly allow processing the default E:\\Films\\Raw_Sources target when no targets are passed",
+    )
+    parser.add_argument(
         "--mkvmerge",
         default=None,
         help="Path to mkvmerge executable",
@@ -329,18 +327,39 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Path to mkvpropedit executable",
     )
-    return parser.parse_args(argv)
+    return parser
 
 
-def main(argv: Optional[List[str]] = None) -> None:
-    args = parse_args(argv)
-    mkvmerge_bin, mkvpropedit_bin = resolve_tools(args.mkvmerge, args.mkvpropedit)
-    skip_patterns = args.skip_pattern if args.skip_pattern is not None else ["Fate.Strange.Fake"]
-    audio_langs = [x.strip().lower() for x in args.audio_lang.split(",") if x.strip()]
-    sub_langs = [x.strip().lower() for x in args.sub_lang.split(",") if x.strip()]
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse command line arguments for track configuration."""
+    return _build_arg_parser(targets_default=[raw_dir]).parse_args(argv)
 
-    all_files = collect_files(args.targets, skip_patterns)
-    mode_tag = " [DRY-RUN SIMULATION]" if args.dry_run else ""
+
+def main(argv: Optional[List[str]] = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    raw_args = _build_arg_parser(targets_default=argparse.SUPPRESS).parse_args(argv)
+    has_explicit_target = hasattr(raw_args, "targets") and bool(raw_args.targets)
+    if not has_explicit_target and not raw_args.dry_run and not raw_args.yes_default_target:
+        print(
+            "Error: No target path provided. Pass explicit target path(s), --dry-run, or --yes-default-target "
+            f"to process default directory ({raw_dir}).",
+            file=sys.stderr,
+        )
+        return 2
+
+    targets = list(raw_args.targets) if has_explicit_target else [raw_dir]
+    mkvmerge_bin, mkvpropedit_bin = resolve_tools(raw_args.mkvmerge, raw_args.mkvpropedit)
+    skip_patterns = raw_args.skip_pattern if raw_args.skip_pattern is not None else ["Fate.Strange.Fake"]
+    audio_langs = [x.strip().lower() for x in raw_args.audio_lang.split(",") if x.strip()]
+    sub_langs = [x.strip().lower() for x in raw_args.sub_lang.split(",") if x.strip()]
+
+    all_files = collect_files(targets, skip_patterns)
+    mode_tag = " [DRY-RUN SIMULATION]" if raw_args.dry_run else ""
     print(f"Total completed MKV files to process{mode_tag}: {len(all_files)}")
     start_time = time.time()
 
@@ -360,12 +379,12 @@ def main(argv: Optional[List[str]] = None) -> None:
             mkvpropedit_bin=mkvpropedit_bin,
             audio_langs=audio_langs,
             sub_langs=sub_langs,
-            dry_run=args.dry_run,
+            dry_run=raw_args.dry_run,
         )
         if result["status"] in ("modified", "simulated"):
             modified_count += 1
             stats["modified"] += 1
-            prefix = "[DRY-RUN] " if args.dry_run else ""
+            prefix = "[DRY-RUN] " if raw_args.dry_run else ""
             print(f"{prefix}Applied changes to {fname}: {', '.join(result.get('changes', []))}")
         elif result["status"] == "unchanged":
             unchanged_count += 1
@@ -389,7 +408,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     print("==========================================")
     for folder, s in sorted(by_folder_stats.items()):
         print(f"  {folder}: {s['modified']} modified, {s['unchanged']} unchanged, {s['error']} errors")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

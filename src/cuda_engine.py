@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.config import REALESRGAN_BIN, MODELS_DIR
+from src.config import DEFAULT_BATCH_SIZE, REALESRGAN_BIN
 
 # -----------------------------------------------------------------------------
 # 1. Định nghĩa Kiến trúc Mạng Nơ-ron (SRVGGNetCompact)
@@ -685,6 +685,41 @@ class GPUPersistentWorker:
 
 _GLOBAL_GPU_WORKER: Optional[GPUPersistentWorker] = None
 
+def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
+    """Giải phóng bộ nhớ TRT runner, ring buffer và VRAM cache của worker cũ trước khi đổi worker."""
+    if worker is None:
+        return
+    runners = getattr(worker, "_trt_runners", None)
+    if isinstance(runners, dict):
+        for runner in runners.values():
+            for attr in ("_out_ring", "_batch_out_ring", "context", "engine", "runtime", "fallback_module"):
+                if hasattr(runner, attr):
+                    try:
+                        setattr(runner, attr, None)
+                    except Exception:
+                        pass
+        runners.clear()
+    for attr in ("_zero_disk_upscaler", "_zero_disk_wrapper"):
+        obj = getattr(worker, attr, None)
+        if obj is not None:
+            for ring_attr in ("host_in_pins", "host_out_pins", "gpu_in_ring", "gpu_nhwc_ring", "color_conv", "model"):
+                if hasattr(obj, ring_attr):
+                    try:
+                        setattr(obj, ring_attr, None)
+                    except Exception:
+                        pass
+            try:
+                delattr(worker, attr)
+            except Exception:
+                pass
+    worker.model = None
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def get_gpu_worker(
     model_id: str,
     weights_path: str,
@@ -704,6 +739,10 @@ def get_gpu_worker(
     else:
         req_dev_type = "cuda" if torch.cuda.is_available() else "cpu"
 
+    eff_batch = int(batch_size) if (batch_size is not None and int(batch_size) > 0) else (
+        1 if req_dev_type == "cpu" else DEFAULT_BATCH_SIZE
+    )
+
     existing_weights = getattr(_GLOBAL_GPU_WORKER, "weights_path", None) if _GLOBAL_GPU_WORKER is not None else None
     existing_dev = getattr(_GLOBAL_GPU_WORKER, "device", None) if _GLOBAL_GPU_WORKER is not None else None
     weights_mismatch = (
@@ -722,15 +761,19 @@ def get_gpu_worker(
         or weights_mismatch
         or device_mismatch
         or _GLOBAL_GPU_WORKER.precision != precision.lower()
-        or (batch_size is not None and _GLOBAL_GPU_WORKER.batch_size != batch_size)
+        or _GLOBAL_GPU_WORKER.batch_size != eff_batch
     ):
+        old_worker = _GLOBAL_GPU_WORKER
+        _GLOBAL_GPU_WORKER = None
+        _cleanup_gpu_worker(old_worker)
+        del old_worker
         _GLOBAL_GPU_WORKER = GPUPersistentWorker(
             model_id=model_id,
             weights_path=weights_path,
             precision=precision,
             max_chunks_before_restart=max_chunks_before_restart,
             device=device,
-            batch_size=batch_size,
+            batch_size=eff_batch,
             use_tensorrt=use_tensorrt,
         )
     else:
@@ -838,22 +881,22 @@ def upscale_frames_with_fallback(
                 weights_path=weights_path,
                 precision="fp32",
                 device=engine if engine in ["cuda", "cpu"] else None,
-                batch_size=batch_size
+                batch_size=batch_size,
+                use_tensorrt=False,
             )
             res = worker_fp32.upscale_directory(
                 input_dir=input_dir,
                 output_dir=output_dir,
                 fmt=fmt,
                 batch_size=batch_size,
-                logger=logger
+                logger=logger,
+                mid_chunk_callback=mid_chunk_callback,
             )
             worker_fp32.restart_if_needed(logger=logger)
             res["engine_used"] = f"{engine}_fp32_fallback"
             return res
 
-        # Fallback 2: Nếu có NCNN binary trên hệ thống thì fallback sang NCNN
-        from src.config import REALESRGAN_BIN
-        if os.path.exists(REALESRGAN_BIN):
+        if os.path.exists(REALESRGAN_BIN) or os.path.exists(REALESRGAN_BIN + ".exe"):
             if model_id == "animevideov3":
                 fallback_msg = "🔄 Chuyển sang NCNN Vulkan (-t 540 -j 1:2:2) cho RealESR-AnimeVideoV3..."
                 if logger:
@@ -873,7 +916,10 @@ def upscale_frames_with_fallback(
                 res["engine_used"] = "ncnn_fallback"
                 return res
 
-        raise RuntimeError(f"Lỗi suy luận và không có đường fallback khả dụng cho model '{model_id}': {e}")
+        raise RuntimeError(
+            f"Lỗi suy luận PyTorch {engine.upper()} cho model '{model_id}' "
+            f"(đã thử fallback FP32 nhưng không khả dụng): {e}"
+        )
 
 
 # Alias tiện ích

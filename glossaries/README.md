@@ -4,7 +4,7 @@ Thư mục lưu trữ các file thuật ngữ (glossary) dùng cho công cụ `s
 
 1. **`base.yaml`** (symlink trỏ tới `subtrans/glossary.yaml`):
    - Bảng thuật ngữ nền chung (Schema v2) áp dụng cho mọi bộ anime:
-     - 12 quy tắc dịch (`style_rules`): nguồn JA chuẩn, văn phong nói tự nhiên, không word-by-word, 42 ký tự/dòng.
+     - 13 quy tắc dịch (`style_rules`): nguồn JA chuẩn, văn phong nói tự nhiên, không word-by-word, smart-wrap > 72 ký tự.
      - Quy chuẩn đại từ xưng hô (`address_rules`): ngôi 1, ngôi 2, kính ngữ, quan hệ nhân vật.
      - 230+ thuật ngữ anime phổ biến: xưng hô, chức danh, trường học, romcom, isekai, shounen, võ thuật, tu tiên (xianxia), ẩm thực.
    - **Tự động kích hoạt làm lớp nền cho mọi lượt dịch.**

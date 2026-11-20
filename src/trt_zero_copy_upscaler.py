@@ -14,6 +14,7 @@ Kiến trúc suy luận Zero-Disk & Zero-Copy thế hệ mới:
    - Đẩy trực tiếp luồng byte p010le vào FFmpeg NVENC pipe (In-Memory Dedup Re-expansion, 0 byte file ảnh trên đĩa).
 """
 
+import collections
 import os
 import queue
 import subprocess
@@ -126,6 +127,20 @@ if _HAS_TRITON:
         b01 = tl.load(rgb_b + 2 * stride_rgb_c + y0 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
         b10 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
         b11 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
+
+        # Khử NaN (NaN == NaN là False theo IEEE-754) về 0.0 trước khi clamp [0.0, 1.0]
+        r00 = tl.where(r00 == r00, r00, 0.0)
+        r01 = tl.where(r01 == r01, r01, 0.0)
+        r10 = tl.where(r10 == r10, r10, 0.0)
+        r11 = tl.where(r11 == r11, r11, 0.0)
+        g00 = tl.where(g00 == g00, g00, 0.0)
+        g01 = tl.where(g01 == g01, g01, 0.0)
+        g10 = tl.where(g10 == g10, g10, 0.0)
+        g11 = tl.where(g11 == g11, g11, 0.0)
+        b00 = tl.where(b00 == b00, b00, 0.0)
+        b01 = tl.where(b01 == b01, b01, 0.0)
+        b10 = tl.where(b10 == b10, b10, 0.0)
+        b11 = tl.where(b11 == b11, b11, 0.0)
 
         # Clamp out-of-gamut SR model RGB overshoots (< 0.0 or > 1.0) in registers before signed BT.709 matrix
         # so Cb/Cr channels never cross-bleed on bright Sakuga highlights (matches PNG mode clamp(0.0, 1.0))
@@ -293,11 +308,8 @@ class GPUColorConverterP010LE:
         B, _, H, W = rgb_slice.shape
         # Clamp RGB overshoots/NaNs về miền hợp lệ [0.0, 1.0] trước phép nhân ma trận có dấu ITU-R BT.709
         # (khớp tuyệt đối với out_tensor.clamp(0.0, 1.0) của chế độ PNG và tránh rò rỉ sắc độ Cb/Cr vùng chói)
-        rgb_clamped = torch.clamp(
-            torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0),
-            0.0,
-            1.0,
-        )
+        out_fp16 = torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0)
+        rgb_clamped = out_fp16.clamp_(0.0, 1.0)
         r = rgb_clamped[:, 0]
         g = rgb_clamped[:, 1]
         b = rgb_clamped[:, 2]
@@ -444,6 +456,29 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
 # 3. DOUBLE-BUFFERED TRIPLE CUDA STREAMS ZERO-DISK PIPE UPSCALER
 # =============================================================================
 
+def _extract_proc_stderr(encoder_proc: Any) -> str:
+    """Đọc an toàn thông báo stderr từ daemon drain tail hoặc pipe stderr thô của FFmpeg."""
+    if encoder_proc is None:
+        return ""
+    try:
+        t_err = getattr(encoder_proc, "_stderr_thread", None)
+        if t_err is not None and t_err.is_alive():
+            t_err.join(timeout=0.3)
+        tail = getattr(encoder_proc, "_stderr_tail", None)
+        if tail is not None:
+            return "\n".join(list(tail)).strip()
+        stderr_obj = getattr(encoder_proc, "stderr", None)
+        if stderr_obj is not None:
+            raw_err = stderr_obj.read()
+            if isinstance(raw_err, bytes):
+                return raw_err.decode("utf-8", errors="replace").strip()
+            if isinstance(raw_err, str):
+                return raw_err.strip()
+    except Exception:
+        pass
+    return ""
+
+
 class _PipeDrainWorker:
     """
     Worker thread chuyên trách xả dữ liệu khung hình P010LE vào FFmpeg NVENC pipe nền.
@@ -451,22 +486,28 @@ class _PipeDrainWorker:
     """
     def __init__(self, encoder_proc: Any, write_fn: Any):
         self.encoder_proc = encoder_proc
+        self._pipe = getattr(encoder_proc, "stdin", None)
         self.write_fn = write_fn
         self.queue: queue.Queue = queue.Queue(maxsize=16)
         self.error: Optional[Exception] = None
+        self._aborted = False
+        self._closed = False
         self._thread = threading.Thread(target=self._run, name="PipeDrainWorker", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
         try:
-            while True:
-                item = self.queue.get()
+            while not self._aborted:
+                try:
+                    item = self.queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
                 if item is None:
                     self.queue.task_done()
                     break
                 buf_arr, repeats, done_evt = item
                 try:
-                    if buf_arr is not None and repeats > 0:
+                    if not self._aborted and buf_arr is not None and repeats > 0:
                         self.write_fn(self.encoder_proc, buf_arr, repeats)
                 finally:
                     if done_evt is not None:
@@ -475,8 +516,19 @@ class _PipeDrainWorker:
         except Exception as exc:
             self.error = exc
 
+    def check_error(self) -> None:
+        """Kiểm tra lỗi hoặc trạng thái dừng bất thường của luồng xả pipe."""
+        if self.error is not None:
+            raise self.error
+        if self._aborted:
+            raise RuntimeError("PipeDrainWorker đã bị hủy (aborted).")
+        if not self._closed and not self._thread.is_alive():
+            raise RuntimeError("PipeDrainWorker thread died unexpectedly")
+
     def submit(self, buf_arr: Optional[np.ndarray], repeats: int, done_evt: Optional[threading.Event] = None) -> None:
         while True:
+            if self._aborted:
+                raise RuntimeError("PipeDrainWorker đã bị hủy.")
             if self.error is not None:
                 raise self.error
             if not self._thread.is_alive():
@@ -488,11 +540,16 @@ class _PipeDrainWorker:
                 continue
 
     def close(self) -> None:
+        self._closed = True
         if self.error is not None:
+            if self._thread.is_alive():
+                self._thread.join(timeout=3.0)
             raise self.error
         if self._thread.is_alive():
             while self._thread.is_alive():
                 if self.error is not None:
+                    if self._thread.is_alive():
+                        self._thread.join(timeout=3.0)
                     raise self.error
                 try:
                     self.queue.put(None, timeout=0.1)
@@ -502,6 +559,60 @@ class _PipeDrainWorker:
             self._thread.join()
         if self.error is not None:
             raise self.error
+
+    def abort(self, encoder_proc: Any = None) -> None:
+        """Hủy khẩn cấp worker: đóng pipe, ngắt encoder nếu còn sống, giải phóng mọi event đang chờ."""
+        self._aborted = True
+        proc = encoder_proc if encoder_proc is not None else self.encoder_proc
+        pipe = self._pipe or getattr(proc, "stdin", None)
+        if pipe is not None:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+        if proc is not None:
+            poll_fn = getattr(proc, "poll", None)
+            rc = poll_fn() if callable(poll_fn) else None
+            if rc is None:
+                if hasattr(proc, "terminate"):
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                elif hasattr(proc, "kill"):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                wait_fn = getattr(proc, "wait", None)
+                if callable(wait_fn):
+                    try:
+                        wait_fn(timeout=1.0)
+                    except Exception:
+                        if hasattr(proc, "kill"):
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                _, _, done_evt = item
+                if done_evt is not None:
+                    done_evt.set()
+            try:
+                self.queue.task_done()
+            except ValueError:
+                pass
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=3.0)
 
 
 class DoubleBufferedPipeUpscaler:
@@ -678,9 +789,34 @@ class DoubleBufferedPipeUpscaler:
             "-tag:v", HEVC_TAG,
             output_mp4_path
         ]
-        # Dùng pipe unbuffered (bufsize=0) kèm thu stderr để tránh khóa trang MDL 64MB trên Windows
+        # Dùng pipe unbuffered (bufsize=0) kèm daemon drain stderr để tránh khóa trang MDL 64MB / deadlock 4KB stderr
         # và trích xuất chính xác thông báo lỗi NVENC nếu FFmpeg đóng pipe đột ngột.
-        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        if getattr(proc, "stderr", None) is not None:
+            stderr_tail: collections.deque[str] = collections.deque(maxlen=64)
+            proc._stderr_tail = stderr_tail
+
+            def _drain_stderr(stream=proc.stderr, tail=stderr_tail) -> None:
+                try:
+                    for raw_line in iter(stream.readline, b""):
+                        if isinstance(raw_line, (bytes, bytearray)):
+                            line = raw_line.decode("utf-8", errors="replace").rstrip()
+                        else:
+                            line = str(raw_line).rstrip()
+                        if line:
+                            tail.append(line)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            t_err = threading.Thread(target=_drain_stderr, name="NVENCStderrDrain", daemon=True)
+            proc._stderr_thread = t_err
+            t_err.start()
+        return proc
 
     @staticmethod
     def _write_frame_to_pipe(encoder_proc: Any, buf_arr: np.ndarray, repeats: int = 1) -> None:
@@ -701,23 +837,18 @@ class DoubleBufferedPipeUpscaler:
                     chunk = mv[offset : min(offset + write_step, total_len)]
                     written = encoder_proc.stdin.write(chunk)
                     if written is None or written <= 0:
-                        offset += len(chunk)
-                    else:
-                        offset += int(written)
+                        raise BrokenPipeError(
+                            f"FFmpeg NVENC pipe stdin.write() trả về {written!r} tại offset {offset}/{total_len}"
+                        )
+                    offset += int(written)
         except (BrokenPipeError, OSError) as pipe_err:
-            stderr_detail = ""
             rc = None
             try:
                 if hasattr(encoder_proc, "poll"):
                     rc = encoder_proc.poll()
-                if getattr(encoder_proc, "stderr", None) is not None:
-                    raw_err = encoder_proc.stderr.read()
-                    if isinstance(raw_err, bytes):
-                        stderr_detail = raw_err.decode("utf-8", errors="replace").strip()
-                    elif isinstance(raw_err, str):
-                        stderr_detail = raw_err.strip()
             except Exception:
                 pass
+            stderr_detail = _extract_proc_stderr(encoder_proc)
             detail_suffix = f" | FFmpeg stderr: {stderr_detail}" if stderr_detail else ""
             raise RuntimeError(
                 f"Không thể ghi khung hình vào FFmpeg NVENC pipe (rc={rc}, err={pipe_err}){detail_suffix}"
@@ -818,6 +949,7 @@ class DoubleBufferedPipeUpscaler:
                 slot_drain_events[slot_idx].clear()
                 drain_worker.submit(None, 0, done_evt=slot_drain_events[slot_idx])
 
+        ok = False
         try:
             if self.device.type == "cuda":
                 # Xây dựng danh sách batch slicing trên tập distinct_frames đã cô đặc
@@ -909,7 +1041,9 @@ class DoubleBufferedPipeUpscaler:
                         if record_micro and evt_trt_e is not None:
                             evt_trt_e.record(self.stream_compute)
                         if capture_first_rgb_small and batch_k == 0:
-                            u0 = upscaled_rgb[0:1].float().clamp(0.0, 1.0)
+                            u0 = torch.nan_to_num(
+                                upscaled_rgb[0:1].float(), nan=0.0, posinf=1.0, neginf=0.0
+                            ).clamp(0.0, 1.0)
                             oh, ow = int(u0.shape[2]), int(u0.shape[3])
                             if oh >= 270 and ow >= 480 and (oh % 270 == 0) and (ow % 480 == 0):
                                 u0 = F.avg_pool2d(u0, kernel_size=(oh // 270, ow // 480))
@@ -927,8 +1061,23 @@ class DoubleBufferedPipeUpscaler:
                         if record_micro and evt_tri_e is not None:
                             evt_tri_e.record(self.stream_compute)
 
-                    # 3. Chờ Compute xong, rút D2H về Pinned Memory (gắn record_stream để chống tái cấp phát sớm)
-                    slot_drain_events[slot].wait(timeout=10.0)
+                    # 3. Chờ _PipeDrainWorker xả xong slot cũ (kiểm tra lỗi worker/encoder mỗi 0.25s, tối đa 120s)
+                    drain_worker.check_error()
+                    wait_start = time.monotonic()
+                    while not slot_drain_events[slot].wait(timeout=0.25):
+                        drain_worker.check_error()
+                        poll_fn = getattr(encoder_proc, "poll", None)
+                        rc = poll_fn() if callable(poll_fn) else None
+                        if isinstance(rc, int):
+                            stderr_detail = _extract_proc_stderr(encoder_proc)
+                            suffix = f" | FFmpeg stderr: {stderr_detail}" if stderr_detail else ""
+                            raise RuntimeError(
+                                f"FFmpeg NVENC encoder thoát sớm khi chờ pipe drain (rc={rc}){suffix}"
+                            )
+                        if (time.monotonic() - wait_start) >= 120.0:
+                            raise RuntimeError(
+                                f"Quá thời gian chờ xả khung hình P010LE vào NVENC pipe (>120s) tại slot {slot}."
+                            )
                     self.stream_d2h.wait_stream(self.stream_compute)
                     with torch.cuda.stream(self.stream_d2h):
                         if record_micro and evt_d2h_s is not None:
@@ -1046,7 +1195,9 @@ class DoubleBufferedPipeUpscaler:
                     cpu_total_infer_ms += (time.perf_counter() - t_inf_s) * 1000.0
 
                     if capture_first_rgb_small and start_idx == 0:
-                        u0 = out_rgb[0:1].float().clamp(0.0, 1.0)
+                        u0 = torch.nan_to_num(
+                            out_rgb[0:1].float(), nan=0.0, posinf=1.0, neginf=0.0
+                        ).clamp(0.0, 1.0)
                         oh, ow = int(u0.shape[2]), int(u0.shape[3])
                         if oh >= 270 and ow >= 480 and (oh % 270 == 0) and (ow % 480 == 0):
                             u0 = F.avg_pool2d(u0, kernel_size=(oh // 270, ow // 480))
@@ -1084,8 +1235,14 @@ class DoubleBufferedPipeUpscaler:
                         "avg_triton_ms": round(cpu_total_conv_ms / n_b, 2),
                         "avg_d2h_ms": 0.0,
                     }
+            ok = True
         finally:
-            drain_worker.close()
+            if ok:
+                drain_worker.close()
+            else:
+                for evt in slot_drain_events:
+                    evt.set()
+                drain_worker.abort(encoder_proc)
 
         return total_frames_written
 

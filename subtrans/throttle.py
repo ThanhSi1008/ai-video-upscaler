@@ -174,17 +174,37 @@ class RateLimiter:
             self.max_rpm = 5
         self.interval = 60.0
         self.timestamps = deque()
+        self.cooldown_until: float = 0.0
+
+    def record_cooldown(self, wait_seconds: float) -> None:
+        """Records a per-key cooldown timestamp after hitting 429 PerMinute."""
+        if wait_seconds and wait_seconds > 0:
+            self.cooldown_until = max(self.cooldown_until, time.monotonic() + float(wait_seconds))
+
+    def clear_cooldown(self) -> None:
+        """Clears active cooldown once wait has been honored."""
+        self.cooldown_until = 0.0
 
     def available_slots(self) -> int:
         """Trả về số slot RPM còn trống ngay tức thì trong cửa sổ trượt 60s."""
         now = time.monotonic()
+        if now < self.cooldown_until:
+            return 0
         while self.timestamps and (now - self.timestamps[0]) > self.interval:
             self.timestamps.popleft()
         return max(0, self.max_rpm - len(self.timestamps))
 
     def wait_if_needed(self):
-        """Blocks until a request slot is available in the sliding 60s window."""
+        """Blocks until any active cooldown expires and a request slot is available in the 60s window."""
         now = time.monotonic()
+        if now < self.cooldown_until:
+            cd_wait = self.cooldown_until - now
+            if cd_wait > 0:
+                logger.info(f"Key cooldown active. Waiting {cd_wait:.1f}s...")
+                time.sleep(cd_wait)
+            self.cooldown_until = 0.0
+            now = time.monotonic()
+
         # Remove timestamps older than 60s
         while self.timestamps and (now - self.timestamps[0]) > self.interval:
             self.timestamps.popleft()
@@ -212,6 +232,7 @@ def call_with_retry(
     cache: Optional[TranslationCache] = None,
     key_id: str = "",
     all_key_ids: Optional[list] = None,
+    raise_on_per_minute: bool = False,
 ) -> Any:
     """
     Executes a callable with rate limiting and intelligent 429 handling.
@@ -322,27 +343,33 @@ def call_with_retry(
                             reason=f"429 PerDay: {quota_id}",
                         )
 
-                    # Log request lỗi vào DB
-                    cache.log_request(
-                        model=model_name,
-                        backend="gemini",
-                        cues_count=0,
-                        status="exhausted_429_perday",
-                        error_type="429_PerDay",
-                        quota_id=quota_id or "",
-                        quota_value=quota_value or "",
-                        key_id=key_id,
-                    )
+                    # Log request lỗi vào DB nếu inner callable chưa log
+                    if not getattr(e, "_logged_api_request", False):
+                        cache.log_request(
+                            model=model_name,
+                            backend="gemini",
+                            cues_count=0,
+                            status="exhausted_429_perday",
+                            error_type="429_PerDay",
+                            quota_id=quota_id or "",
+                            quota_value=quota_value or "",
+                            key_id=key_id,
+                        )
 
                     # Ném DailyQuotaExhaustedError ngay lập tức, không thử lại, không pause!
-                    raise DailyQuotaExhaustedError(
+                    dqe = DailyQuotaExhaustedError(
                         model=model_name,
                         quota_id=quota_id or "",
                         quota_value=quota_value or "",
                         reset_pt_str=pt_str,
                         reset_vn_str=vn_str,
                         details=getattr(e, "details", None)
-                    ) from e
+                    )
+                    try:
+                        setattr(dqe, "_logged_api_request", True)
+                    except Exception:
+                        pass
+                    raise dqe from e
 
                 # Phân loại 2: Lỗi PerMinute (Rate Limit RPM)
                 is_per_minute = (
@@ -352,7 +379,15 @@ def call_with_retry(
                     (retry_delay is not None and retry_delay > 0)
                 )
 
-                if is_per_minute or attempt < max_retries:
+                if is_per_minute and raise_on_per_minute:
+                    raise MinuteRateLimitError(
+                        model=model_name,
+                        quota_id=quota_id or "",
+                        quota_value=quota_value or "",
+                        retry_delay=float(retry_delay) if (retry_delay and retry_delay > 0) else 10.0,
+                    ) from e
+
+                if attempt < max_retries:
                     wait_sec = retry_delay if (retry_delay and retry_delay > 0) else min(base_delay * (2 ** attempt) + random.uniform(0.5, 1.5), max_delay)
                     logger.warning(
                         f"⏳ [429 PER-MINUTE] Model '{model_name}' chạm giới hạn tốc độ/phút (quotaId='{quota_id}', quotaValue='{quota_value}'). "

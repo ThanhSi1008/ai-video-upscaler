@@ -166,7 +166,7 @@ def is_gpu_lock_held_by_other() -> int | None:
 
 
 def acquire_gpu_lock() -> None:
-    """Tạo file khóa đánh dấu giai đoạn upscale GPU đang hoạt động (tự động thu hồi stale lock nếu PID cũ đã chết)."""
+    """Tạo file khóa nguyên tử đánh dấu giai đoạn upscale GPU đang hoạt động (tự động thu hồi stale lock nếu PID cũ đã chết)."""
     global _GPU_LOCK_OWNED
     other_pid = is_gpu_lock_held_by_other()
     if other_pid is not None:
@@ -174,12 +174,32 @@ def acquire_gpu_lock() -> None:
             f"GPU đang bận bởi tiến trình khác đang hoạt động (PID={other_pid}, lock: {GPU_LOCK_FILE}). "
             f"Chỉ cho phép duy nhất 1 tiến trình suy luận GPU tại một thời điểm."
         )
+    lock_dir = os.path.dirname(os.path.abspath(GPU_LOCK_FILE))
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    tmp_lock = f"{GPU_LOCK_FILE}.{os.getpid()}.tmp"
+    my_pid = os.getpid()
     try:
-        with open(GPU_LOCK_FILE, "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()}\n")
+        with open(tmp_lock, "w", encoding="utf-8") as f:
+            f.write(f"{my_pid}\n")
+        os.replace(tmp_lock, GPU_LOCK_FILE)
+        # Xác minh lại chủ sở hữu khóa để chặn cửa sổ đua TOCTOU khi 2 tiến trình cùng khởi tạo
+        with open(GPU_LOCK_FILE, "r", encoding="utf-8") as vf:
+            holder_raw = vf.read().strip()
+        holder_pid = int(holder_raw.splitlines()[0].strip()) if holder_raw else None
+        if holder_pid != my_pid:
+            raise RuntimeError(
+                f"GPU đang bận bởi tiến trình khác đang hoạt động (PID={holder_pid}, lock: {GPU_LOCK_FILE}). "
+                f"Chỉ cho phép duy nhất 1 tiến trình suy luận GPU tại một thời điểm."
+            )
         _GPU_LOCK_OWNED = True
     except Exception:
-        pass
+        if os.path.exists(tmp_lock):
+            try:
+                os.remove(tmp_lock)
+            except OSError:
+                pass
+        raise
 
 
 def release_gpu_lock() -> None:

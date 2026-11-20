@@ -1945,4 +1945,369 @@ def test_review_regression_fixes_and_edge_cases(tmp_path: Path, monkeypatch):
         assert ".text-error" in client.get("/static/styles.css").text
 
 
+def test_external_output_dir_discovery_preview_source_resolution_and_audits_auth(tmp_path: Path):
+    """Verify external -o directory discovery across candidates/audits, .preview_clip_* skip + VIDEO_EXTENSIONS
+    source resolution, /api/audits/detail authorization order (400 vs 200 vs 403), and pending_subs.json priority.
+    """
+    import shutil
+
+    root = _seed_workspace(tmp_path / "ext_out_ws")
+    shutil.rmtree(root / "out")
+
+    ext_out = tmp_path / "External_Upscaled_4K"
+    (ext_out / "audit").mkdir(parents=True)
+    (ext_out / "cast").mkdir(parents=True)
+    raw_dir = tmp_path / "Raw_Sources" / "FateZero"
+    raw_dir.mkdir(parents=True)
+
+    src_ep10 = raw_dir / "FateZero - S01E10 - Rin's Adventure.mov"
+    src_ep11 = raw_dir / "FateZero - S01E11 - The Grail Dialogue.mkv"
+    src_ep10.write_bytes(b"\x00" * 2048)
+    src_ep11.write_bytes(b"\x00" * 2048)
+
+    up_ep10_prev = ext_out / "FateZero - S01E10 - Rin's Adventure_preview_10s_4K.mkv"
+    up_ep11 = ext_out / "FateZero - S01E11 - The Grail Dialogue_4K.mkv"
+    up_ep10_prev.write_bytes(b"\x00" * 4096)
+    up_ep11.write_bytes(b"\x00" * 4096)
+
+    # Ep10 preview audit recorded deleted .preview_clip_* as source_file (no original_source_file)
+    audit_ep10 = ext_out / "FateZero - S01E10 - Rin's Adventure_preview_10s_4K.audit.json"
+    audit_ep10.write_text(
+        json.dumps(
+            {
+                "output_file": str(up_ep10_prev),
+                "source_file": str(ext_out / ".preview_clip_FateZero - S01E10 - Rin's Adventure.mkv"),
+                "status": "PASS",
+                "output_sanity": {"status": "PASS"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Ep11 audit points to real raw_dir and has sibling .audit.md and .cast.yaml
+    audit_ep11 = ext_out / "FateZero - S01E11 - The Grail Dialogue_4K.audit.json"
+    audit_ep11.write_text(
+        json.dumps(
+            {
+                "output_file": str(up_ep11),
+                "source_file": str(src_ep11),
+                "status": "PASS",
+                "output_sanity": {"status": "PASS"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit_ep11_md = ext_out / "audit" / "FateZero - S01E11 - The Grail Dialogue.vi.audit.md"
+    audit_ep11_md.write_text("# External Subtrans PASS\n", encoding="utf-8")
+    cast_ep11 = ext_out / "cast" / "FateZero - S01E11 - The Grail Dialogue.cast.yaml"
+    cast_ep11.write_text("characters: []\n", encoding="utf-8")
+
+    # Test original_source_file preference in a query-param extra output dir
+    extra_out = tmp_path / "Query_Out_4K"
+    extra_out.mkdir(parents=True)
+    up_orig = extra_out / "Ep12_preview_10s_4K.mkv"
+    src_orig = raw_dir / "Ep12.ts"
+    up_orig.write_bytes(b"\x00" * 4096)
+    src_orig.write_bytes(b"\x00" * 2048)
+    (extra_out / "Ep12_preview_10s_4K.audit.json").write_text(
+        json.dumps(
+            {
+                "output_file": str(up_orig),
+                "source_file": str(extra_out / ".preview_clip_Ep12.mkv"),
+                "original_source_file": str(src_orig),
+                "status": "PASS",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Register ext_out via logs/live_status.json output_path
+    (root / "logs" / "live_status.json").write_text(
+        json.dumps({"pid": 999999, "stage": "completed", "output_path": str(up_ep11)}),
+        encoding="utf-8",
+    )
+
+    # pending_subs.json at root takes priority over stale out/pending_subs.json
+    (root / "pending_subs.json").write_text(
+        json.dumps([{"video": "root_priority.mkv"}]), encoding="utf-8"
+    )
+    (root / "out").mkdir(exist_ok=True)
+    (root / "out" / "pending_subs.json").write_text(
+        json.dumps([{"video": "stale_out_item.mkv"}]), encoding="utf-8"
+    )
+    shutil.rmtree(root / "out")
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        # 1. /api/preview/candidates scans ext_out even without root/out, skips .preview_clip_*, resolves .mov across raw_dir
+        r_cands = client.get("/api/preview/candidates")
+        assert r_cands.status_code == 200
+        cands = r_cands.json()["candidates"]
+        ep10_item = next(c for c in cands if "S01E10" in c["upscaled_path"])
+        assert ep10_item["is_preview"] is True
+        assert Path(ep10_item["source_path"]).resolve() == src_ep10.resolve()
+
+        # Optional output_dir query param discovers extra_out & honors original_source_file
+        r_q_cands = client.get("/api/preview/candidates", params={"output_dir": str(extra_out)})
+        assert r_q_cands.status_code == 200
+        ep12_item = next(c for c in r_q_cands.json()["candidates"] if "Ep12" in c["upscaled_path"])
+        assert Path(ep12_item["source_path"]).resolve() == src_orig.resolve()
+
+        # 2. /api/audits discovers external -o audits + audit.md + cast.yaml, skips .preview_clip_* in source_file
+        r_aud = client.get("/api/audits")
+        assert r_aud.status_code == 200
+        auds = r_aud.json()["audits"]
+        aud10 = next(a for a in auds if "S01E10" in a["episode"])
+        assert aud10["source_file"] == ""
+        aud11 = next(a for a in auds if "S01E11" in a["episode"])
+        assert Path(aud11["sub_audit_md_path"]).resolve() == audit_ep11_md.resolve()
+        assert Path(aud11["cast_yaml_path"]).resolve() == cast_ep11.resolve()
+
+        # Optional output_dir query param also prefers original_source_file in /api/audits
+        r_q_aud = client.get("/api/audits", params={"output_dir": str(extra_out)})
+        assert r_q_aud.status_code == 200
+        aud12 = next(a for a in r_q_aud.json()["audits"] if "Ep12" in a["episode"])
+        assert Path(aud12["source_file"]).resolve() == src_orig.resolve()
+
+        # 3. /api/audits/detail allows external known output_dir files (200), validates suffix FIRST (400), rejects outside (403)
+        assert client.get("/api/audits/detail", params={"path": str(audit_ep11)}).status_code == 200
+        assert client.get("/api/audits/detail", params={"path": str(audit_ep11_md)}).status_code == 200
+        assert client.get("/api/audits/detail", params={"path": str(cast_ep11)}).status_code == 200
+
+        outside_secret = root.parent / "outside_secret.txt"
+        outside_secret.write_text("secret", encoding="utf-8")
+        assert client.get("/api/audits/detail", params={"path": str(outside_secret)}).status_code == 400
+
+        outside_audit = root.parent / "outside.audit.json"
+        outside_audit.write_text("{}", encoding="utf-8")
+        assert client.get("/api/audits/detail", params={"path": str(outside_audit)}).status_code == 403
+
+        # 4. /api/subtrans/overview checks root/pending_subs.json before out/pending_subs.json
+        r_ov = client.get("/api/subtrans/overview")
+        assert r_ov.status_code == 200
+        assert r_ov.json()["pending_subs"] == [{"video": "root_priority.mkv"}]
+
+
+def test_lan_readonly_default_vs_lan_control_and_cli_flag(tmp_path: Path):
+    """Verify --lan defaults to read-only monitoring for non-loopback peers while preserving local loopback
+    control, and --lan-control enables remote mutations.
+    """
+    parser = web_gui.build_parser()
+    lan_only_args = parser.parse_args(["--lan"])
+    assert lan_only_args.lan is True
+    assert lan_only_args.lan_control is False
+    lan_ctrl_args = parser.parse_args(["--lan", "--lan-control"])
+    assert lan_ctrl_args.lan_control is True
+
+    root = _seed_workspace(tmp_path / "lan_ro_ws")
+    ep1 = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    audit_json = root / "out" / "Fate_Ep22_4K.audit.json"
+    audit_json.write_text(json.dumps({"status": "PASS"}), encoding="utf-8")
+
+    # Default --lan (allow_lan=True, allow_lan_control=False)
+    app_ro = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=81000, running=False),
+        allow_lan=True,
+        allow_lan_control=False,
+    )
+    lan_headers = {"Host": "192.168.1.42:8765", "Origin": "http://192.168.1.42:8765"}
+    local_headers = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
+
+    with TestClient(app_ro) as client_lan:
+        # Monitoring GETs allowed from LAN
+        assert client_lan.get("/", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/status", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/logs/recent", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/preview/candidates", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/config/models-and-shows", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/subtrans/overview", headers=lan_headers).status_code == 200
+        assert client_lan.get("/api/audits", headers=lan_headers).status_code == 200
+        assert (
+            client_lan.get("/api/audits/detail", params={"path": str(audit_json)}, headers=lan_headers).status_code
+            == 200
+        )
+
+        # FS browse, mutating, spawn, and key-edit routes rejected with 403 for LAN peer
+        assert client_lan.get("/api/fs/browse", headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/queue/preview-schedule", json={"inputs": [str(ep1)]}, headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/start", json={"inputs": [str(ep1)], "dry_run": True}, headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/preview", json={"video_path": str(ep1)}, headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/subtrans", json={"input_path": str(ep1), "dry_run": True}, headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/subs-pending", json={"dry_run": True}, headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/pause-graceful", headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/clear-pause", headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/jobs/abort", headers=lan_headers).status_code == 403
+        assert client_lan.post("/api/open-media", json={"path": str(ep1)}, headers=lan_headers).status_code == 403
+        assert client_lan.put("/api/config/shows", json={"yaml_content": "shows: []\n"}, headers=lan_headers).status_code == 403
+        assert client_lan.put("/api/subtrans/api-keys", json={"key_1": "x"}, headers=lan_headers).status_code == 403
+
+        # Loopback client on the same server retains full control
+        assert client_lan.get("/api/fs/browse", headers=local_headers).status_code == 200
+        assert client_lan.post("/api/jobs/start", json={"inputs": [str(ep1)], "dry_run": True}, headers=local_headers).status_code == 200
+
+    # Also verify non-loopback client socket IP even with local Host header cannot bypass --lan read-only
+    with TestClient(app_ro, client=("192.168.1.99", 54321)) as remote_client:
+        assert remote_client.get("/api/status", headers=lan_headers).status_code == 200
+        assert remote_client.get("/api/fs/browse", headers=lan_headers).status_code == 403
+        assert remote_client.post("/api/jobs/abort", headers=lan_headers).status_code == 403
+
+    # --lan --lan-control enables full LAN control
+    app_ctrl = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=81001, running=False),
+        allow_lan=True,
+        allow_lan_control=True,
+    )
+    with TestClient(app_ctrl, client=("192.168.1.99", 54321)) as ctrl_client:
+        assert ctrl_client.get("/api/fs/browse", headers=lan_headers).status_code == 200
+        assert ctrl_client.post("/api/jobs/start", json={"inputs": [str(ep1)], "dry_run": True}, headers=lan_headers).status_code == 200
+
+
+def test_telemetry_shutdown_log_pinning_live_pid_conflict_and_schedule_optimizations(
+    tmp_path: Path, monkeypatch
+):
+    """Verify TelemetryHub.shutdown() cleanly breaks SSE subscribers, active Web jobs pin logs/web_job.log,
+    alive live_status.json PIDs block conflicting GPU launches, and compute_schedule_preview respects FAIL
+    audits, already_done probe skip, and force=True.
+    """
+    import asyncio
+    import time
+    import web.job_manager as jm_mod
+    from web.job_manager import JobManager
+    from web.sse_hub import TelemetryHub
+
+    root = _seed_workspace(tmp_path / "sse_pin_ws")
+
+    # 1. Active Web upscale job pins deterministically to logs/web_job.log even if RunLogger log is newer
+    web_log = root / "logs" / "web_job.log"
+    run_log = root / "logs" / "Ep01_20261118.log"
+    latest_log = root / "logs" / "latest.log"
+    web_log.write_text("# Web Studio Job\n[INFO] Running\n", encoding="utf-8")
+    run_log.write_text("[CHUNK 01/04] RunLogger line\n", encoding="utf-8")
+    latest_log.write_text("[CHUNK 01/04] Latest line\n", encoding="utf-8")
+    now_t = time.time()
+    os.utime(web_log, (now_t - 5, now_t - 5))
+    os.utime(run_log, (now_t + 10, now_t + 10))
+    os.utime(latest_log, (now_t + 10, now_t + 10))
+    (root / "logs" / "live_status.json").write_text(
+        json.dumps({"pid": 999999, "stage": "upscaling", "log_file": run_log.name}),
+        encoding="utf-8",
+    )
+
+    state_box: Dict[str, Any] = {
+        "status": "running",
+        "active_job": {"job_id": "j1", "job_type": "upscale", "status": "running", "pid": 60001},
+        "history": [],
+    }
+    hub = TelemetryHub(root, gpu_query_fn=_idle_gpu_metrics, job_state_provider=lambda: state_box)
+    assert hub._select_active_log_file() == web_log.resolve() or hub._select_active_log_file() == web_log
+
+    # 2. TelemetryHub.shutdown() breaks active stream_events() subscribers cleanly
+    async def _check_shutdown() -> None:
+        gen = hub.stream_events()
+        snap_ev = await anext(gen)
+        assert "event: snapshot" in snap_ev
+        tick_waiter = asyncio.create_task(anext(gen))
+        await asyncio.sleep(0.05)
+        assert hub._poll_task is not None and not hub._poll_task.done()
+        assert len(hub._subscribers) == 1
+        await hub.shutdown()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(tick_waiter, timeout=2.0)
+        assert hub._poll_task is None
+        assert hub._shutting_down is True
+
+    asyncio.run(_check_shutdown())
+
+    # 3. live_status.json alive PID in pre-GPU stage blocks new GPU launch even without .gpu_active.lock
+    ep1 = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    (root / "logs" / "live_status.json").write_text(
+        json.dumps({"pid": os.getpid(), "stage": "preflight_dedup"}),
+        encoding="utf-8",
+    )
+    jm = JobManager(root, popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=73000, running=False))
+    with pytest.raises(RuntimeError, match="preflight_dedup"):
+        jm.start_upscale_job({"inputs": [str(ep1)], "dry_run": False})
+    with pytest.raises(RuntimeError, match="preflight_dedup"):
+        jm.start_preview_job({"video_path": str(ep1)})
+    # dry_run does not require GPU lock
+    dry_job = jm.start_upscale_job({"inputs": [str(ep1)], "dry_run": True})
+    assert dry_job["status"] == "running"
+    jm.abort_job()
+
+    # 4. compute_schedule_preview: already_done skips PyAV probe, FAIL audit resets already_done, force=True overrides
+    out_4k = root / "out" / f"{ep1.stem}_4K.mkv"
+    out_4k.write_bytes(b"\x00" * (1024 * 1024 + 4096))
+    probe_calls: List[str] = []
+
+    def spy_probe(path_str: str) -> int:
+        probe_calls.append(path_str)
+        return 12345
+
+    monkeypatch.setattr(jm_mod, "_probe_frames_lightweight", spy_probe)
+    sched_done = jm.compute_schedule_preview(inputs=[str(ep1)], force=False)
+    assert sched_done["episodes"][0]["already_done"] is True
+    assert probe_calls == []
+
+    # Sibling FAIL audit -> NOT already_done, probes & schedules
+    (root / "out" / f"{ep1.stem}_4K.audit.json").write_text(
+        json.dumps({"status": "FAIL"}), encoding="utf-8"
+    )
+    sched_fail = jm.compute_schedule_preview(inputs=[str(ep1)], force=False)
+    assert sched_fail["episodes"][0]["already_done"] is False
+    assert sched_fail["episodes"][0]["can_run"] is True
+    assert len(probe_calls) == 1
+
+    # Restore PASS audit and verify force=True overrides already_done
+    (root / "out" / f"{ep1.stem}_4K.audit.json").write_text(
+        json.dumps({"status": "PASS"}), encoding="utf-8"
+    )
+    sched_forced = jm.compute_schedule_preview(inputs=[str(ep1)], force=True)
+    assert sched_forced["episodes"][0]["already_done"] is False
+    assert sched_forced["episodes"][0]["can_run"] is True
+
+
+def test_frontend_a11y_mobile_and_perf_guards(studio_env):
+    """Verify A11y, mobile reflow, and rAF performance fixes remain intact in served static assets."""
+    client: TestClient = studio_env["client"]
+    html = client.get("/").text
+    css = client.get("/static/styles.css").text
+    ui_js = client.get("/static/js/ui.js").text
+    charts_js = client.get("/static/js/charts.js").text
+    compare_js = client.get("/static/js/compare_stage.js").text
+    panels_js = client.get("/static/js/panels.js").text
+    app_js = client.get("/static/js/app.js").text
+
+    assert 'id="models-catalog-heading" class="section-heading" tabindex="-1"' in html
+    assert 'id="fs-btn-drives" class="btn btn-secondary" autofocus' in html
+    assert html.count('autocomplete="off"') >= 3
+    assert 'id="shows-yaml-error"' in html
+    assert 'aria-describedby="opt-deadline-error"' in html
+
+    assert "flex-wrap: balance" not in css
+    assert "touch-action: pan-y;" in css
+    assert "touch-action: none;" not in css
+    assert "@media (min-width: 860px)" in css
+    assert "@media (max-width: 680px)" in css
+    assert "z-index: 3;" in css
+    assert ':root:has(> head > meta[name="color-scheme"][content])' in css
+    assert "accent-color: var(--accent);" in css
+    assert "flex: 1 1 8.5rem;" in css
+
+    assert "hidingFocusedPanel" in ui_js
+    assert "requestAnimationFrame" in charts_js
+    assert "${base}-${suffix}" in charts_js and "forced-colors: active" in charts_js and "light-dark(" in charts_js
+    assert "scheduleRender" in compare_js
+    assert 'hasAttribute("hidden")' in compare_js
+    assert "aria-busy" in panels_js
+    assert "checkValidity()" in panels_js
+    assert 'addEventListener("blur"' in panels_js
+    assert "setShowsYamlError" in panels_js
+    assert "REFRESH_TTL_MS" in panels_js
+    assert "requestAnimationFrame" in app_js
+
+
 

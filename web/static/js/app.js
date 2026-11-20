@@ -100,6 +100,13 @@ function bootstrapStudio() {
   const tabsCtrl = initTabs((activeTabId) => {
     if (activeTabId === "tab-monitor") {
       charts.redrawAll();
+      if (logPre && logAutoscroll instanceof HTMLInputElement && logAutoscroll.checked) {
+        window.requestAnimationFrame(() => {
+          logPre.scrollTop = logPre.scrollHeight;
+        });
+      }
+    } else if (activeTabId === "tab-queue") {
+      queueCtrl?.onTabActivated();
     } else if (activeTabId === "tab-compare") {
       compareCtrl?.redraw();
     } else if (activeTabId === "tab-subtrans") {
@@ -188,7 +195,9 @@ function bootstrapStudio() {
           : "Chưa có nhật ký tiến trình.";
 
     if (logAutoscroll instanceof HTMLInputElement && logAutoscroll.checked) {
-      logPre.scrollTop = logPre.scrollHeight;
+      window.requestAnimationFrame(() => {
+        logPre.scrollTop = logPre.scrollHeight;
+      });
     }
   };
 
@@ -280,7 +289,7 @@ function bootstrapStudio() {
           : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
       showToast(toastMsg, "success", 6500);
       compareCtrl?.refreshCandidates();
-      subtransCtrl?.refreshAll();
+      subtransCtrl?.refreshAll({ force: true });
       modelsCtrl?.refresh();
     }
     lastEffectiveStage = stage;
@@ -494,6 +503,14 @@ function bootstrapStudio() {
             })
           );
         } else {
+          const activeLabel = activeChunk >= 0 ? `, đang xử lý phân đoạn #${activeChunk + 1}` : "";
+          const pendingCount = Math.max(0, totChunks - doneSet.size - (activeChunk >= 0 ? 1 : 0));
+          chunkHeatmap.append(
+            el("p", {
+              className: "visually-hidden",
+              textContent: `Tổng ${totChunks} phân đoạn 8s: ${doneSet.size} hoàn tất${activeLabel}, ${pendingCount} chờ xử lý.`,
+            })
+          );
           for (let idx = 0; idx < totChunks; idx++) {
             const isDone = stage === "completed" || doneSet.has(idx);
             const isActive = !isDone && idx === activeChunk;
@@ -511,6 +528,7 @@ function bootstrapStudio() {
                   className: "chunk-cell",
                   dataset: { status },
                   title: tip,
+                  "aria-hidden": "true",
                 },
                 [
                   el("span", { "aria-hidden": "true", textContent: symbol }),

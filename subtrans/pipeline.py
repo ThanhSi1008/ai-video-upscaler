@@ -68,10 +68,18 @@ class TranslationPipeline:
         auto_align_whisper_to_en: Optional[bool] = None,
         smart_wrap: bool = True,
         explicit_caching: Optional[bool] = None,
+        subs_upgrade: bool = False,
     ):
         self.cfg = load_config(config_path)
         self.models_cfg = load_models_config()
         self.local_only = local_only or (self.cfg.get("privacy", {}).get("mode") == "local_only")
+        if self.local_only:
+            raise RuntimeError(
+                "Local Ollama/TranslateGemma backend was removed in favor of 100% Cloud Gemini API. "
+                "Run without local_only/--local and configure GEMINI_API_KEY."
+            )
+        self.model_override = model_override
+        self.subs_upgrade = bool(subs_upgrade)
         self.on_quota = on_quota
         self.enable_review = enable_review
         self.enable_cascade = enable_cascade
@@ -94,7 +102,7 @@ class TranslationPipeline:
             self.auto_align_whisper_to_en = auto_align_whisper_to_en
 
         # Chuỗi model: Nạp từ models.yaml, tuyệt đối không dùng model preview
-        # A6: Lite làm model chính theo mặc định. Cờ --subs-quality high đảo thứ tự (Flash trước, Lite sau).
+        # A6: Lite làm model chính theo mặc định. Cờ --subs-quality high hoặc --subs-upgrade đảo thứ tự (Flash trước, Lite sau).
         raw_chain = self.models_cfg.get("chain", [
             "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"
         ])
@@ -102,7 +110,9 @@ class TranslationPipeline:
         lite_models = [m for m in gemini_chain if "lite" in m.lower()]
         flash_models = [m for m in gemini_chain if "lite" not in m.lower()]
 
-        if self.subs_quality == "high":
+        if (self.subs_quality == "high" or self.subs_upgrade) and model_override is None:
+            ordered_chain = flash_models + lite_models
+        elif self.subs_quality == "high":
             ordered_chain = flash_models + lite_models
         else:
             ordered_chain = lite_models + flash_models
@@ -188,10 +198,14 @@ class TranslationPipeline:
                     self.gemini_backend = self.gemini_backends[first_avail]
                     self.gemini_model = first_avail
                 else:
-                    self.local_only = True
+                    raise RuntimeError(
+                        "Could not initialize any Cloud Gemini backend. Local Ollama/TranslateGemma fallback was removed."
+                    )
             else:
-                console.print("[yellow]⚠️  GEMINI_API_KEY not found in environment. Running in local-only mode.[/yellow]")
-                self.local_only = True
+                raise RuntimeError(
+                    "GEMINI_API_KEY not found in environment. Local Ollama/TranslateGemma fallback was removed; "
+                    "configure GEMINI_API_KEY or pass --dry-run."
+                )
 
     def run(
         self,
@@ -209,6 +223,19 @@ class TranslationPipeline:
         """Executes translation pipeline."""
         start_time = time.monotonic()
         GeminiTranslator.reset_session_rotation_events()
+        effective_subs_upgrade = bool(subs_upgrade or getattr(self, "subs_upgrade", False))
+        if (
+            effective_subs_upgrade
+            and getattr(self, "model_override", None) is None
+            and not getattr(self, "candidate_gemini_models", None)
+        ):
+            all_cands = [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
+            flash_first = [m for m in all_cands if "lite" not in m.lower()] + [m for m in all_cands if "lite" in m.lower()]
+            if flash_first:
+                self.gemini_model = flash_first[0]
+                self.fallback_models = flash_first[1:]
+                if self.gemini_backends and self.gemini_model in self.gemini_backends:
+                    self.gemini_backend = self.gemini_backends[self.gemini_model]
         self._init_primary_backend()
 
         # Kiểm tra tự động phát hiện lệch thời gian (--auto-offset, hỗ trợ cả Piecewise 2-Segment)
@@ -217,11 +244,11 @@ class TranslationPipeline:
         det_offset = 0
         piecewise_ja_offsets = None
         if en_path:
-            det_offset, can_apply, reason_str, off_stats = detect_auto_offset(str(ja_path), str(en_path))
             if sub_offset_ms != 0:
-                offset_reason = f"Đo được {det_offset}ms, nhưng ưu tiên cờ thủ công --sub-offset-ms={sub_offset_ms}ms"
+                offset_reason = f"Ưu tiên cờ thủ công --sub-offset-ms={sub_offset_ms}ms (bỏ qua detect_auto_offset)"
                 console.print(f"  • [cyan]Auto-offset:[/cyan] {offset_reason}.")
             elif auto_offset:
+                det_offset, can_apply, reason_str, off_stats = detect_auto_offset(str(ja_path), str(en_path))
                 if can_apply:
                     sub_offset_ms = det_offset
                     auto_offset_applied = True
@@ -232,8 +259,8 @@ class TranslationPipeline:
                     offset_reason = f"Không áp dụng ({reason_str})"
                     console.print(f"  • [yellow]Auto-offset KHÔNG ÁP DỤNG:[/yellow] {reason_str}")
             else:
-                offset_reason = f"Cờ --auto-offset tắt (Đo được: {det_offset}ms, {reason_str})"
-                logger.debug(f"Auto-offset scan (flag OFF): {det_offset}ms (can_apply={can_apply}: {reason_str})")
+                offset_reason = "Cờ --auto-offset tắt (bỏ qua detect_auto_offset)"
+                logger.debug("Auto-offset scan skipped (--auto-offset disabled)")
         elif sub_offset_ms != 0:
             offset_reason = f"Áp dụng cờ thủ công --sub-offset-ms={sub_offset_ms}ms"
         else:
@@ -244,7 +271,7 @@ class TranslationPipeline:
         if en_path:
             console.print(f"  • Reference (EN): [cyan]{en_path}[/cyan] (Offset: {en_offset_ms}ms)")
         console.print(f"  • Mode: [bold]100% Cloud API: Gemini ({self.gemini_model})[/bold]")
-        if subs_upgrade:
+        if effective_subs_upgrade:
             console.print("[bold yellow]⚡ Cờ --subs-upgrade được kích hoạt: Bỏ qua cache các câu Lite để nâng cấp dịch bằng model cao hơn.[/bold yellow]")
 
         base_name = output_basename or re.sub(r"\.(ja|en|vi|jpn|eng|vie)$", "", ja_path.stem, flags=re.IGNORECASE)
@@ -522,6 +549,12 @@ class TranslationPipeline:
                 pass
 
         stage_start_time = time.monotonic()
+        stage_deadline = stage_start_time + float(self.stage_watchdog_seconds)
+        for _backend_obj in self.gemini_backends.values():
+            try:
+                _backend_obj.stage_deadline = stage_deadline
+            except Exception:
+                pass
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -592,7 +625,7 @@ class TranslationPipeline:
                 ]
                 for c_item, ck_item in cue_keys:
                     cue_cache_keys_by_id[c_item.id] = ck_item
-                if subs_upgrade and is_lower_model:
+                if effective_subs_upgrade and is_lower_model:
                     cached_map = {}
                 elif use_batch_cache:
                     cached_map = self.cache.get_cues_batch([ck for _, ck in cue_keys])
@@ -771,11 +804,30 @@ class TranslationPipeline:
         # Optional Smart Cloud Cascade Repair Pass (100% Cloud API)
         t_srev = time.monotonic()
         if getattr(self, "enable_cascade", True) and not self.local_only and self.gemini_backends:
-            repair_backend = (
-                self.gemini_backends.get("gemini-3.8-flash")
-                or self.gemini_backends.get("gemini-3.7-flash")
-                or next(iter(self.gemini_backends.values()), None)
+            def _is_model_exhausted(m_name: str) -> bool:
+                try:
+                    return self.cache.is_model_exhausted(m_name) is True
+                except Exception:
+                    return False
+
+            _cascade_flash_order = (
+                "gemini-3.8-flash",
+                "gemini-3.7-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
             )
+            _any_flash_registered = any(m in self.gemini_backends for m in _cascade_flash_order)
+            repair_backend = None
+            for _cm in _cascade_flash_order:
+                _cand = self.gemini_backends.get(_cm)
+                if _cand is not None and not _is_model_exhausted(_cm):
+                    repair_backend = _cand
+                    break
+            if repair_backend is None and not _any_flash_registered:
+                for _cm, _cand in self.gemini_backends.items():
+                    if "lite" not in _cm.lower() and not _is_model_exhausted(_cm):
+                        repair_backend = _cand
+                        break
             if repair_backend:
                 from subtrans.cascade import run_cascade_repair_pass
                 from subtrans.linter import auto_fix_cues
@@ -883,7 +935,11 @@ class TranslationPipeline:
                     per_cue_violations.extend(lint_cue(c_item, glossary=glossary))
                 if per_cue_violations and episode_kb is not None:
                     learned_count = episode_kb.learn_from_linter_violations(
-                        per_cue_violations, cues, series=self.series, episode=base_name
+                        per_cue_violations,
+                        cues,
+                        series=self.series,
+                        episode=base_name,
+                        glossary=glossary,
                     )
                     if learned_count > 0:
                         console.print(
@@ -901,10 +957,13 @@ class TranslationPipeline:
                 output_format=out_ext,
                 wrap_chars=self.wrap_chars,
                 smart_wrap=self.smart_wrap,
+                sound_cues=sound_cues,
             )
 
         # Kiểm định Linter V1 trên chuỗi cue đã tối ưu hóa hiển thị thực tế (sau Dual Dialogue & Zero-Overlap)
-        playback_audited_cues, post_fixes = auto_fix_cues(optimize_cues_for_playback(cues))
+        playback_audited_cues, post_fixes = auto_fix_cues(
+            optimize_cues_for_playback(cues, sound_cues=sound_cues)
+        )
         lint_violations = lint_subtitles(playback_audited_cues, glossary=glossary)
         total_fixes = fixes_count + post_fixes
         stats["lint_errors_count"] = sum(1 for v in lint_violations if v.severity == "ERROR")

@@ -67,7 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lan",
         action="store_true",
-        help="Mở lắng nghe trên toàn mạng nội bộ (0.0.0.0) để theo dõi từ điện thoại cùng Wi-Fi.",
+        help="Mở lắng nghe trên toàn mạng nội bộ (0.0.0.0) để theo dõi chỉ-đọc từ điện thoại cùng Wi-Fi.",
+    )
+    parser.add_argument(
+        "--lan-control",
+        action="store_true",
+        help="Cho phép máy khác trong mạng LAN điều khiển tác vụ, duyệt tệp và sửa cấu hình (cần bật cùng --lan).",
     )
     parser.add_argument(
         "--no-browser",
@@ -96,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     normalized_bind = bind_host.strip().strip("[]").lower()
     is_loopback_bind = normalized_bind in {"localhost", "127.0.0.1", "::1"} or normalized_bind.startswith("127.")
     allow_lan = bool(args.lan or not is_loopback_bind)
+    allow_lan_control = bool(args.lan_control)
     local_url = f"http://127.0.0.1:{args.port}"
 
     print("=" * 72)
@@ -103,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 72)
     print(f"  • Địa chỉ máy trạm : {local_url}")
     if args.lan or bind_host == "0.0.0.0":
-        print(f"  • Địa chỉ mạng LAN : http://{_detect_lan_ip()}:{args.port}")
+        lan_mode_note = "Điều khiển đầy đủ (--lan-control)" if allow_lan_control else "Chỉ-đọc an toàn (mặc định; thêm --lan-control để điều khiển)"
+        print(f"  • Địa chỉ mạng LAN : http://{_detect_lan_ip()}:{args.port} [{lan_mode_note}]")
     print(f"  • Thư mục dự án    : {ROOT_DIR}")
     print("  • Nhấn Ctrl+C để đóng máy chủ Web (các tiến trình CLI độc lập không bị ảnh hưởng).")
     print("=" * 72)
@@ -118,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
 
         threading.Thread(target=_open_later, name="WebGuiOpenBrowser", daemon=True).start()
 
-    app = create_app(workspace_root=ROOT_DIR, allow_lan=allow_lan)
+    app = create_app(
+        workspace_root=ROOT_DIR,
+        allow_lan=allow_lan,
+        allow_lan_control=allow_lan_control,
+    )
     uvicorn.run(app, host=bind_host, port=args.port, log_level=args.log_level)
     return 0
 

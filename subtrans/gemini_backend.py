@@ -12,7 +12,9 @@ Adheres strictly to ADDENDUM 6 specifications:
 import os
 import re
 import json
+import hashlib
 import logging
+import threading
 from typing import List, Dict, Any, Optional, Tuple, Union, Literal
 from pydantic import BaseModel, field_validator
 from google import genai
@@ -269,6 +271,29 @@ STATIC_ANIME_TRANSLATION_HANDBOOK = (
 )
 
 
+_EPISODE_PROMPT_CACHE: Dict[Tuple[str, str, bool, bool], str] = {}
+_EPISODE_PROMPT_CACHE_LOCK = threading.Lock()
+
+
+def _compute_prompt_cache_hashes(glossary: Optional[Glossary]) -> Tuple[str, str]:
+    """Computes (glossary_hash, cast_hash) for caching static episode system prompts."""
+    if not glossary:
+        return "", ""
+    glossary_payload = {
+        "style_rules": list(glossary.style_rules or ()),
+        "address_rules": glossary.address_rules.model_dump() if glossary.address_rules else None,
+        "terms": [t.model_dump() for t in (glossary.terms or ())],
+    }
+    cast_payload = [c.model_dump() for c in (glossary.characters or ())]
+    g_hash = hashlib.sha256(
+        json.dumps(glossary_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+    c_hash = hashlib.sha256(
+        json.dumps(cast_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+    return g_hash, c_hash
+
+
 def build_episode_system_prompt(
     glossary: Optional[Glossary] = None,
     gloss_skill_names: bool = False,
@@ -282,6 +307,13 @@ def build_episode_system_prompt(
     3. Quy tắc xưng hô tổng quát (address_rules: principle, first_person, second_person, relations).
     4. Bảng quan hệ nhân vật cố định của tập (<episode_cast>) & thuật ngữ cố định.
     """
+    g_hash, c_hash = _compute_prompt_cache_hashes(glossary)
+    cache_key = (g_hash, c_hash, bool(gloss_skill_names), bool(en_only_source))
+    with _EPISODE_PROMPT_CACHE_LOCK:
+        cached = _EPISODE_PROMPT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
     blocks: List[str] = [SYSTEM_INSTRUCTION, STATIC_ANIME_TRANSLATION_HANDBOOK]
 
     if gloss_skill_names:
@@ -363,7 +395,13 @@ def build_episode_system_prompt(
             blocks.append("<series_glossary_terms>\n" + "\n".join(term_lines) + "\n</series_glossary_terms>")
 
     blocks.append("Output must be a valid JSON array matching the provided schema.")
-    return "\n\n".join(blocks)
+    prompt_out = "\n\n".join(blocks)
+    with _EPISODE_PROMPT_CACHE_LOCK:
+        if len(_EPISODE_PROMPT_CACHE) >= 64:
+            oldest_key = next(iter(_EPISODE_PROMPT_CACHE))
+            _EPISODE_PROMPT_CACHE.pop(oldest_key, None)
+        _EPISODE_PROMPT_CACHE[cache_key] = prompt_out
+    return prompt_out
 
 
 def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> Dict[str, Any]:
@@ -591,6 +629,7 @@ class GeminiTranslator(BaseTranslator):
         self.kb = kb
         self._explicit_cache_names: Dict[Tuple[str, str, str], str] = {}
         self._explicit_cache_disabled: set = set()
+        self.stage_deadline: Optional[float] = None
         self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
 
         # Client-side rate limiting theo khóa (A4: Lite <= 12 RPM, Flash <= 4 RPM)
@@ -765,7 +804,7 @@ class GeminiTranslator(BaseTranslator):
 
         import time
         import random
-        from subtrans.throttle import parse_429_details, DailyQuotaExhaustedError
+        from subtrans.throttle import parse_429_details, DailyQuotaExhaustedError, QuotaExhaustedError
         from subtrans.cache import get_next_pt_reset
 
         config_kwargs = {
@@ -802,8 +841,14 @@ class GeminiTranslator(BaseTranslator):
 
         max_transient_retries = 3
         transient_attempt = 0
+        max_rpm_retries = max(4, len(self.api_keys) * 2)
+        rpm_attempt = 0
+        stage_deadline = getattr(self, "stage_deadline", None)
 
         while True:
+            if stage_deadline is not None and time.monotonic() >= stage_deadline:
+                raise QuotaExhaustedError(f"Stage deadline reached before API call on '{self.model}'.")
+
             curr_kid = self.key_ids[self.current_key_idx] if self.key_ids else "none"
             if curr_kid in self.rate_limiters:
                 self.rate_limiters[curr_kid].wait_if_needed()
@@ -881,8 +926,19 @@ class GeminiTranslator(BaseTranslator):
                                 reset_vn_str=next_vn.strftime("%H:%M %d/%m VN"),
                             )
                     else:
-                        # (b) 429 PerMinute -> nếu bật round_robin và có key khác còn slot trống thì sang key rảnh ngay,
-                        # còn khi tắt round_robin thì chờ retryDelay và giữ nguyên khóa hiện tại.
+                        # (b) 429 PerMinute -> chặn trên số lần thử lại và tôn trọng stage_deadline;
+                        # ghi cooldown lên khóa hiện tại TRƯỚC KHI xoay khóa.
+                        if rpm_attempt >= max_rpm_retries or (stage_deadline is not None and time.monotonic() >= stage_deadline):
+                            raise QuotaExhaustedError(
+                                f"429 PerMinute retry limit ({max_rpm_retries}) or stage deadline exceeded on '{self.model}': {e}"
+                            ) from e
+                        rpm_attempt += 1
+
+                        wait_sec = float(retry_delay) if (retry_delay and retry_delay > 0) else 10.0
+                        curr_limiter = self.rate_limiters.get(curr_kid)
+                        if curr_limiter is not None:
+                            curr_limiter.record_cooldown(wait_sec)
+
                         if getattr(self, "round_robin", False) and len(self.api_keys) > 1:
                             prev_idx = self.current_key_idx
                             if self.select_next_round_robin_key(reason=f"429 PerMinute ({quota_id})") and self.current_key_idx != prev_idx:
@@ -890,19 +946,36 @@ class GeminiTranslator(BaseTranslator):
                                 limiter = self.rate_limiters.get(next_kid)
                                 if not limiter or limiter.available_slots() > 0:
                                     continue
-                        wait_sec = float(retry_delay) if retry_delay else 10.0
+
+                        if stage_deadline is not None and (time.monotonic() + wait_sec) > stage_deadline:
+                            raise QuotaExhaustedError(
+                                f"429 PerMinute wait ({wait_sec:.1f}s) would exceed stage deadline on '{self.model}': {e}"
+                            ) from e
                         logging.getLogger("subtrans.gemini").warning(
-                            f"⏳ [429 PER-MINUTE] Model '{self.model}' trên key {curr_kid} cần chờ {wait_sec:.1f}s..."
+                            f"⏳ [429 PER-MINUTE] Model '{self.model}' trên key {curr_kid} cần chờ {wait_sec:.1f}s "
+                            f"(Lần {rpm_attempt}/{max_rpm_retries})..."
                         )
                         time.sleep(wait_sec)
+                        active_kid = self.key_ids[self.current_key_idx] if self.key_ids else "none"
+                        if active_kid in self.rate_limiters:
+                            self.rate_limiters[active_kid].clear_cooldown()
                         continue
 
-                # (c) 503 unavailable hoặc (d) network/timeout
-                is_transient = any(k in err_str for k in ["503", "unavailable", "timeout", "timed out", "connection", "remoteendclosed", "deadline"])
+                # (c) 500/502/503/504 unavailable hoặc (d) network/timeout
+                is_transient = any(
+                    k in err_str
+                    for k in [
+                        "500", "502", "503", "504",
+                        "internal", "unavailable", "high demand", "bad gateway", "gateway timeout",
+                        "timeout", "timed out", "connection", "remoteendclosed", "deadline",
+                    ]
+                )
                 if is_transient:
                     if transient_attempt < max_transient_retries:
                         transient_attempt += 1
                         backoff = (2 ** transient_attempt) + random.uniform(0.5, 1.5)
+                        if stage_deadline is not None and (time.monotonic() + backoff) > stage_deadline:
+                            raise
                         logging.getLogger("subtrans.gemini").warning(
                             f"⚠️ [TRANSIENT {err_str[:30]}] Thử lại ({transient_attempt}/{max_transient_retries}) sau {backoff:.1f}s trên cùng khóa {curr_kid}..."
                         )
@@ -1078,8 +1151,16 @@ class GeminiTranslator(BaseTranslator):
                 return [it["vi"] for it in items]
             logger.warning(f"Batch validation failed on attempt 1 ({err_msg}).")
         except Exception as e:
+            from subtrans.throttle import QuotaExhaustedError
             err_str = str(e).lower()
-            if any(k in err_str for k in ["503", "429", "timeout", "timed out", "quota", "resource_exhausted", "unavailable", "500", "502", "504", "deadline"]):
+            if isinstance(e, QuotaExhaustedError) or any(
+                k in err_str
+                for k in [
+                    "503", "429", "timeout", "timed out", "quota", "resource_exhausted",
+                    "unavailable", "500", "502", "504", "internal", "high demand",
+                    "bad gateway", "gateway timeout", "deadline",
+                ]
+            ):
                 raise
             logger.warning(f"API call failed on attempt 1 ({e}).")
 

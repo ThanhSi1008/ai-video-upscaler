@@ -24,12 +24,12 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from subtrans.config import load_config, get_gemini_api_key
+from subtrans.config import get_gemini_api_key, load_models_config
 from subtrans.pipeline import TranslationPipeline
 
 app = typer.Typer(
     name="subtrans",
-    help="Local-first CLI tool for translating anime subtitles (Japanese + English) into Vietnamese.",
+    help="CLI tool for translating anime subtitles (Japanese + English) into Vietnamese via Cloud Gemini API.",
     add_completion=False,
 )
 console = Console(force_terminal=True, legacy_windows=False)
@@ -37,7 +37,7 @@ console = Console(force_terminal=True, legacy_windows=False)
 
 @app.command()
 def check():
-    """Verifies environment, API keys, dependencies, and Ollama status."""
+    """Verifies environment, API keys, and dependencies."""
     console.print("\n[bold cyan]🔍 Inspecting subtrans Environment[/bold cyan]\n")
     table = Table(title="Component Health Check")
     table.add_column("Component", style="cyan")
@@ -82,20 +82,27 @@ def check():
 
 @app.command()
 def models():
-    """Lists available Gemini models, verifying configured models."""
+    """Lists configured active Gemini model chain from models.yaml and verifies availability."""
     console.print("\n[bold cyan]📋 Subtrans Translation Models Status[/bold cyan]\n")
 
-    cfg = load_config()
-    gemini_cfg = cfg.get("gemini", {})
-    configured_primary = gemini_cfg.get("model", "gemini-3.5-flash-lite")
-    configured_high = gemini_cfg.get("high_quality_model", "gemini-3.8-flash")
-    configured_fallbacks = gemini_cfg.get("fallback_models", ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"])
-    configured_lite = gemini_cfg.get("lite_model", "gemini-3.5-flash-lite")
+    models_cfg = load_models_config()
+    raw_chain = models_cfg.get("chain", [
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ])
+    active_chain = [m for m in raw_chain if m and m != "local"]
+    models_meta = models_cfg.get("models", {})
+    configured_primary = active_chain[0] if active_chain else "gemini-3.5-flash-lite"
+    configured_fallbacks = active_chain[1:]
 
+    console.print(f"[bold]Active Fallback Chain (subtrans/models.yaml):[/bold] {' -> '.join(active_chain)}")
 
-    # 2. Gemini Models
+    # Gemini Models API check
     api_key = get_gemini_api_key()
-    console.print("[bold]Configured Gemini Models Status (Google GenAI):[/bold]")
+    console.print("\n[bold]Configured Gemini Models Status (Google GenAI):[/bold]")
     available_api_models = set()
     if api_key:
         try:
@@ -106,28 +113,26 @@ def models():
                 available_api_models.add(raw_name)
 
             # Check Primary
+            prim_meta = models_meta.get(configured_primary, {})
+            prim_rpd = prim_meta.get("rpd", "?")
             if configured_primary in available_api_models:
-                console.print(f"  • Primary: [bold green]AVAILABLE[/bold green] - [cyan]{configured_primary}[/cyan]")
+                console.print(f"  • Primary: [bold green]AVAILABLE[/bold green] - [cyan]{configured_primary}[/cyan] (RPD: {prim_rpd})")
             else:
                 console.print(f"  • Primary: [bold red]MISSING (404/NOT FOUND)[/bold red] - [yellow]{configured_primary}[/yellow] ⚠️ Check deprecations!")
 
             # Check Fallbacks
             for fb in configured_fallbacks:
+                fb_meta = models_meta.get(fb, {})
+                fb_rpd = fb_meta.get("rpd", "?")
                 if fb in available_api_models:
-                    console.print(f"  • Fallback: [bold green]AVAILABLE[/bold green] - [cyan]{fb}[/cyan]")
+                    console.print(f"  • Fallback: [bold green]AVAILABLE[/bold green] - [cyan]{fb}[/cyan] (RPD: {fb_rpd})")
                 else:
                     console.print(f"  • Fallback: [bold red]MISSING[/bold red] - [yellow]{fb}[/yellow]")
-
-            # Check Lite
-            if configured_lite in available_api_models:
-                console.print(f"  • Lite: [bold green]AVAILABLE[/bold green] - [cyan]{configured_lite}[/cyan]")
-            else:
-                console.print(f"  • Lite: [bold red]MISSING[/bold red] - [yellow]{configured_lite}[/yellow]")
 
             # Other active flash/pro models on this key
             other_models = sorted([
                 m for m in available_api_models
-                if ("flash" in m or "pro" in m) and m not in {configured_primary, configured_lite, *configured_fallbacks}
+                if ("flash" in m or "pro" in m) and m not in set(active_chain)
             ])
             if other_models:
                 console.print("\n[bold dim]Other active Flash/Pro models on your API key:[/bold dim]")
@@ -152,20 +157,21 @@ def run(
     en_offset_ms: int = typer.Option(0, "--en-offset-ms", help="Offset applied to English timing in milliseconds"),
     sub_offset_ms: int = typer.Option(0, "--sub-offset-ms", help="Offset applied to Japanese/Output subtitle timing in milliseconds (e.g. -11154)"),
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Path to glossary YAML/JSON file"),
-    local_only: bool = typer.Option(False, "--local", "-l", help="Force 100% local translation using Ollama"),
+    local_only: bool = typer.Option(False, "--local", "-l", help="[Removed] Local Ollama/TranslateGemma backend is no longer supported"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
     allow_latest_alias: bool = typer.Option(False, "--allow-latest-alias", help="Allow using mutable model alias like gemini-flash-latest"),
     on_quota: str = typer.Option("stop", "--on-quota", help="Action when Gemini quota exhausted ('stop')"),
-    review: bool = typer.Option(False, "--review", "-r", help="Run local post-editing review pass using gemma3:12b"),
+    review: bool = typer.Option(False, "--review", "-r", help="Enable optional post-edit review pass"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Limit translation to first N dialogue cues"),
     out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
     format_: str = typer.Option("srt", "--format", "-f", help="Output format ('srt' or 'ass')"),
-    wrap: Optional[int] = typer.Option(None, "--wrap", "-w", help="Wrap lines exceeding N characters into at most 2 lines (default: single line)"),
+    wrap: Optional[int] = typer.Option(None, "--wrap", "-w", help="Wrap lines exceeding N characters into at most 2 lines (default: smart-wrap > 72 chars)"),
     gloss_skill_names: bool = typer.Option(False, "--gloss-skill-names", help="Append English skill/attack name in parentheses"),
     require_approved_cast: bool = typer.Option(False, "--require-approved-cast", help="Pause to inspect Stage A cast sheet before continuing"),
     review_file: bool = typer.Option(False, "--review-file", help="Generate out/<name>.review.srt containing uncertain lines"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
     subs_quality: str = typer.Option("normal", "--subs-quality", help="Chất lượng dịch: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"),
+    subs_upgrade: bool = typer.Option(False, "--subs-upgrade", help="Ưu tiên model Flash trước và bỏ qua cache Lite để nâng cấp bản dịch"),
     auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
     no_rag: bool = typer.Option(False, "--no-rag", help="Tắt truy hồi RAG few-shot và error bank"),
     no_cascade: bool = typer.Option(False, "--no-cascade", help="Tắt phân hệ Smart Cloud Cascade Repair pass (Stage P2)"),
@@ -178,10 +184,15 @@ def run(
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
-    cfg = load_config()
+    if local_only:
+        console.print(
+            "\n[bold red]❌ Lỗi: Chế độ dịch cục bộ (--local / Ollama / TranslateGemma) đã bị loại bỏ; "
+            "Subtrans hiện chỉ sử dụng 100% Cloud Gemini API.[/bold red]"
+        )
+        raise typer.Exit(code=1)
 
     pipeline = TranslationPipeline(
-        local_only=local_only,
+        local_only=False,
         model_override=model,
         allow_latest_alias=allow_latest_alias,
         on_quota=on_quota,
@@ -199,6 +210,7 @@ def run(
         dry_run=dry_run,
         batch_size=batch_size,
         subs_quality=subs_quality,
+        subs_upgrade=subs_upgrade,
         cache_db_path=cache_db,
         auto_align_whisper_to_en=auto_align_en,
         explicit_caching=explicit_cache,
@@ -211,6 +223,7 @@ def run(
             glossary_path=glossary,
             en_offset_ms=en_offset_ms,
             sub_offset_ms=sub_offset_ms,
+            subs_upgrade=subs_upgrade,
             auto_offset=auto_offset,
             video_path=video,
         )
@@ -259,12 +272,19 @@ def batch(
     en_dir: Optional[Path] = typer.Option(None, "--en-dir", help="Directory containing matching English subtitles"),
     out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Glossary file"),
-    local_only: bool = typer.Option(False, "--local", "-l", help="Force local mode"),
+    local_only: bool = typer.Option(False, "--local", "-l", help="[Removed] Local Ollama/TranslateGemma backend is no longer supported"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm mà không gọi API"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto confirm consent"),
 ):
     """Batch translates all Japanese subtitle files in a directory."""
+    if local_only:
+        console.print(
+            "\n[bold red]❌ Lỗi: Chế độ dịch cục bộ (--local / Ollama / TranslateGemma) đã bị loại bỏ; "
+            "Subtrans hiện chỉ sử dụng 100% Cloud Gemini API.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
     sub_files = sorted([f for f in input_dir.iterdir() if f.suffix.lower() in (".ass", ".srt")])
     if not sub_files:
         console.print(f"[yellow]No .ass or .srt files found in {input_dir}[/yellow]")

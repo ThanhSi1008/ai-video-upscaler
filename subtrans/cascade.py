@@ -237,7 +237,8 @@ def accept_or_reject_repaired_cue(
 
     base = (cue.draft_vi or cue.vi or "").strip()
     if clean_fixed == base:
-        return True, "accepted_identical", []
+        base_violations = lint_cue(cue.model_copy(update={"vi": clean_fixed}), glossary=glossary)
+        return True, "accepted_identical", base_violations
 
     orig = {_ident(v): v for v in lint_cue(cue.model_copy(update={"vi": base}), glossary=glossary)}
     new = {_ident(v): v for v in lint_cue(cue.model_copy(update={"vi": clean_fixed}), glossary=glossary)}
@@ -489,9 +490,15 @@ def run_cascade_repair_pass(
         )
 
         try:
+            import time as _time
             from google.genai import types
             from subtrans.cache import execute_and_log_api_request
-            from subtrans.throttle import call_with_retry, DailyQuotaExhaustedError
+            from subtrans.throttle import (
+                call_with_retry,
+                DailyQuotaExhaustedError,
+                MinuteRateLimitError,
+                QuotaExhaustedError,
+            )
 
             config_kwargs: Dict[str, Any] = {
                 "system_instruction": build_repair_system_prompt(glossary),
@@ -510,6 +517,8 @@ def run_cascade_repair_pass(
             api_keys_list = getattr(repair_translator, "api_keys", []) or []
             repair_cache = getattr(repair_translator, "cache", None)
             rate_limiters = getattr(repair_translator, "rate_limiters", {}) or {}
+            rpm_attempts = 0
+            max_rpm_attempts = max(4, len(api_keys_list) * 2)
 
             while True:
                 curr_kid = (
@@ -531,23 +540,13 @@ def run_cascade_repair_pass(
                 if curr_kid in rate_limiters:
                     rate_limiters[curr_kid].wait_if_needed()
 
-                def _send():
-                    return call_with_retry(
-                        fn=lambda: repair_translator.client.models.generate_content(
+                def _single_cascade_call():
+                    return execute_and_log_api_request(
+                        lambda: repair_translator.client.models.generate_content(
                             model=repair_translator.model,
                             contents=prompt_str,
                             config=types.GenerateContentConfig(**config_kwargs),
                         ),
-                        model_name=repair_translator.model,
-                        max_retries=2,
-                        cache=repair_cache,
-                        key_id=curr_kid,
-                        all_key_ids=getattr(repair_translator, "key_ids", None),
-                    )
-
-                try:
-                    response = execute_and_log_api_request(
-                        _send,
                         model=repair_translator.model,
                         backend="gemini",
                         cues_count=len(chunk_cues),
@@ -555,9 +554,50 @@ def run_cascade_repair_pass(
                         cache=repair_cache,
                         key_id=curr_kid,
                     )
+
+                try:
+                    response = call_with_retry(
+                        fn=_single_cascade_call,
+                        model_name=repair_translator.model,
+                        max_retries=2,
+                        cache=repair_cache,
+                        key_id=curr_kid,
+                        all_key_ids=getattr(repair_translator, "key_ids", None),
+                        raise_on_per_minute=(len(api_keys_list) > 1),
+                    )
                     if getattr(repair_translator, "round_robin", False) and len(api_keys_list) > 1:
                         repair_translator.select_next_round_robin_key(reason="Cascade repair round-robin")
                     break
+                except MinuteRateLimitError as mre:
+                    if rpm_attempts >= max_rpm_attempts:
+                        raise QuotaExhaustedError(
+                            f"Cascade 429 PerMinute retry limit ({max_rpm_attempts}) exceeded on '{repair_translator.model}'"
+                        ) from mre
+                    rpm_attempts += 1
+                    wait_sec = min(float(mre.retry_delay or 10.0), 60.0)
+                    if curr_kid in rate_limiters:
+                        rate_limiters[curr_kid].record_cooldown(wait_sec)
+                    prev_idx = getattr(repair_translator, "current_key_idx", 0)
+                    if (
+                        len(api_keys_list) > 1
+                        and hasattr(repair_translator, "select_next_round_robin_key")
+                        and repair_translator.select_next_round_robin_key(reason=f"Cascade 429 PerMinute ({mre.quota_id})")
+                        and getattr(repair_translator, "current_key_idx", 0) != prev_idx
+                    ):
+                        next_kid = repair_translator.key_ids[repair_translator.current_key_idx]
+                        next_limiter = rate_limiters.get(next_kid)
+                        if not next_limiter or next_limiter.available_slots() > 0:
+                            continue
+                    logger.warning(f"⏳ [CASCADE 429 PER-MINUTE] Waiting {wait_sec:.1f}s before retrying...")
+                    _time.sleep(wait_sec)
+                    active_kid = (
+                        repair_translator.key_ids[repair_translator.current_key_idx]
+                        if getattr(repair_translator, "key_ids", None)
+                        else "none"
+                    )
+                    if active_kid in rate_limiters:
+                        rate_limiters[active_kid].clear_cooldown()
+                    continue
                 except DailyQuotaExhaustedError as dqe:
                     if len(api_keys_list) > 1 and repair_cache:
                         repair_cache.mark_key_model_exhausted(
@@ -596,7 +636,9 @@ def run_cascade_repair_pass(
                     cue.metadata_disagreement = disagreement
 
                     # Re-lint Accept / Reject Gate
-                    accepted, reason_code, _ = accept_or_reject_repaired_cue(cue, fixed_vi, glossary=glossary)
+                    accepted, reason_code, repaired_violations = accept_or_reject_repaired_cue(
+                        cue, fixed_vi, glossary=glossary
+                    )
                     cue.repair_reason_code = reason_code
 
                     if accepted:
@@ -609,9 +651,16 @@ def run_cascade_repair_pass(
                             cue.is_digit_mismatch = True
 
                         cue.vi = fixed_vi
+                        has_remaining_errors = any(
+                            getattr(v, "severity", "") == "ERROR" for v in (repaired_violations or [])
+                        )
                         if reason_code == "accepted_digit_mismatch" or hallucinated_digits:
                             cue.uncertain = True
                             cue.uncertain_reason = "digit_mismatch"
+                        elif reason_code == "accepted_identical" and has_remaining_errors:
+                            cue.uncertain = True
+                            if not cue.uncertain_reason or cue.uncertain_reason == "none":
+                                cue.uncertain_reason = "lint_error"
                         else:
                             cue.uncertain = False
                             cue.uncertain_reason = "repaired"

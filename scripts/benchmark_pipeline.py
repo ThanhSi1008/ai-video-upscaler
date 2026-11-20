@@ -69,7 +69,7 @@ def run_benchmark(
     output_dir: str | Path = "out/benchmarks",
     label: str = "benchmark",
     engine: str = "cuda",
-    zero_disk: bool = False,
+    zero_disk: bool = True,
     no_tensorrt: bool = False,
     model: str = "animevideov3",
     batch_size: int = 8,
@@ -407,9 +407,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--zero-disk",
+        dest="zero_disk",
         action="store_true",
-        default=False,
-        help="Enable 3-stage overlapped Zero-Disk pipe",
+        default=True,
+        help="Enable 3-stage overlapped Zero-Disk pipe (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-zero-disk",
+        dest="zero_disk",
+        action="store_false",
+        help="Disable Zero-Disk pipe and write intermediate PNG frames to disk",
     )
     parser.add_argument(
         "--no-tensorrt",

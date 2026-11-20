@@ -48,12 +48,16 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const btnCalc = document.getElementById("btn-calc-schedule");
   const btnPreview10s = document.getElementById("btn-run-preview-10s");
   const summaryPill = document.getElementById("schedule-summary-pill");
+  const scheduleTable = document.getElementById("schedule-table");
+  const panelQueue = document.getElementById("panel-queue");
   const tbody = document.getElementById("schedule-tbody");
 
   const optModel = document.getElementById("opt-model");
   const optDedup = document.getElementById("opt-dedup");
   const optBatch = document.getElementById("opt-batch-size");
+  const optBatchError = document.getElementById("opt-batch-size-error");
   const optDeadline = document.getElementById("opt-deadline");
+  const optDeadlineError = document.getElementById("opt-deadline-error");
   const optOutDir = document.getElementById("opt-output-dir");
   const optSubsQuality = document.getElementById("opt-subs-quality");
   const optZeroDisk = document.getElementById("opt-zero-disk");
@@ -67,6 +71,44 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   let queueInputs = [];
   let calcTimer = null;
+  let hasComputedInitial = false;
+  let scheduleDirty = false;
+  let scheduleSeq = 0;
+
+  const setFieldError = (inputEl, errorEl, msg) => {
+    if (msg) {
+      inputEl?.setAttribute("aria-invalid", "true");
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+      }
+    } else {
+      inputEl?.removeAttribute("aria-invalid");
+      if (errorEl) {
+        errorEl.textContent = "";
+        errorEl.hidden = true;
+      }
+    }
+  };
+
+  const validateDeadlineInput = () => {
+    if (!(optDeadline instanceof HTMLInputElement)) return true;
+    const val = optDeadline.value.trim();
+    if (!val) {
+      setFieldError(optDeadline, optDeadlineError, null);
+      return true;
+    }
+    if (!optDeadline.checkValidity()) {
+      setFieldError(
+        optDeadline,
+        optDeadlineError,
+        "Định dạng giờ hạn chót phải là HH:MM (00:00 đến 23:59, ví dụ 07:00)."
+      );
+      return false;
+    }
+    setFieldError(optDeadline, optDeadlineError, null);
+    return true;
+  };
 
   try {
     const saved = JSON.parse(localStorage.getItem(QUEUE_STORAGE_KEY) || "[]");
@@ -156,6 +198,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   };
 
   const computeScheduleNow = async () => {
+    hasComputedInitial = true;
+    scheduleDirty = false;
     if (queueInputs.length === 0) {
       if (summaryPill) {
         summaryPill.textContent = "Chọn tập phim để xem dự báo tự động theo shows.yaml";
@@ -163,6 +207,19 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       renderEmptySchedule("Chưa có dữ liệu dự báo. Hãy thêm ít nhất 1 file hoặc thư mục ở mục 1.");
       return;
     }
+
+    if (!validateDeadlineInput()) {
+      if (summaryPill) {
+        summaryPill.textContent = "Định dạng hạn chót không hợp lệ (cần HH:MM, ví dụ 07:00).";
+      }
+      return;
+    }
+
+    const reqId = ++scheduleSeq;
+    if (summaryPill) {
+      summaryPill.textContent = "Đang tính toán lịch…";
+    }
+    scheduleTable?.setAttribute("aria-busy", "true");
 
     try {
       const payload = {
@@ -175,12 +232,14 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
         subs_after_upscale: Boolean(optSubsAfter?.checked ?? true),
         output_dir: optOutDir?.value.trim() || null,
+        force: Boolean(optForce?.checked),
       };
 
       const data = await apiFetch("/api/queue/preview-schedule", {
         method: "POST",
         body: payload,
       });
+      if (reqId !== scheduleSeq) return;
 
       if (summaryPill) {
         const dlText = data.deadline_str ? ` • Deadline ${data.deadline_str}` : "";
@@ -221,10 +280,15 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         tbody.append(tr);
       }
     } catch (err) {
+      if (reqId !== scheduleSeq) return;
       if (summaryPill) {
         summaryPill.textContent = `Lỗi dự báo lịch trình: ${err.message}`;
       }
       renderEmptySchedule(`Không thể tính dự báo: ${err.message}`);
+    } finally {
+      if (reqId === scheduleSeq) {
+        scheduleTable?.removeAttribute("aria-busy");
+      }
     }
   };
 
@@ -271,6 +335,17 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   btnCalc?.addEventListener("click", computeScheduleNow);
 
+  optDeadline?.addEventListener("input", () => {
+    const val = optDeadline.value.trim();
+    if (!val || optDeadline.checkValidity()) {
+      setFieldError(optDeadline, optDeadlineError, null);
+    }
+  });
+  optDeadline?.addEventListener("blur", () => {
+    validateDeadlineInput();
+  });
+  optBatch?.addEventListener("input", () => setFieldError(optBatch, optBatchError, null));
+
   for (const ctrl of [
     optModel,
     optDedup,
@@ -280,6 +355,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     optTensorrt,
     optAllowPartial,
     optSubsAfter,
+    optForce,
   ]) {
     ctrl?.addEventListener("change", schedulePreviewDebounced);
   }
@@ -323,12 +399,17 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     const rawBatch = optBatch?.value.trim() ?? "";
     const batchVal = rawBatch === "" ? 8 : Number(rawBatch);
     if (!Number.isFinite(batchVal) || !Number.isInteger(batchVal) || batchVal < 1 || batchVal > 32) {
-      optBatch?.setAttribute("aria-invalid", "true");
+      setFieldError(optBatch, optBatchError, "Batch Size phải là số nguyên từ 1 đến 32.");
       optBatch?.focus();
       showToast("Batch Size phải là số nguyên từ 1 đến 32.", "warn");
       return;
     }
-    optBatch?.removeAttribute("aria-invalid");
+    setFieldError(optBatch, optBatchError, null);
+    if (!validateDeadlineInput()) {
+      optDeadline?.focus();
+      showToast("Định dạng giờ hạn chót phải là HH:MM (ví dụ 07:00).", "warn");
+      return;
+    }
     const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
     if (submitBtn) submitBtn.disabled = true;
     try {
@@ -368,12 +449,23 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   });
 
   renderInputsList();
-  if (queueInputs.length > 0) {
-    computeScheduleNow();
+  if (queueInputs.length > 0 && summaryPill) {
+    summaryPill.textContent = `Đã khôi phục ${queueInputs.length} mục đã chọn — mở tab Hàng đợi để tính lịch trình.`;
   }
 
   return {
-    refreshSchedule: computeScheduleNow,
+    onTabActivated() {
+      if (queueInputs.length > 0 && (!hasComputedInitial || scheduleDirty)) {
+        computeScheduleNow();
+      }
+    },
+    refreshSchedule() {
+      if (panelQueue && panelQueue.hasAttribute("hidden")) {
+        scheduleDirty = true;
+        return;
+      }
+      computeScheduleNow();
+    },
     focusWithPath(pathStr) {
       if (pathStr) {
         addInputs([pathStr]);
@@ -391,12 +483,14 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
   const btnRefresh = document.getElementById("btn-refresh-models");
   const testInput = document.getElementById("test-match-input");
   const btnTestMatch = document.getElementById("btn-test-match");
+  const testMatchCard = document.getElementById("test-match-result");
   const resModel = document.getElementById("match-res-model");
   const resDedup = document.getElementById("match-res-dedup");
   const resSource = document.getElementById("match-res-source");
   const resFps = document.getElementById("match-res-fps");
 
   const editor = document.getElementById("shows-yaml-editor");
+  const showsErrorEl = document.getElementById("shows-yaml-error");
   const btnReloadShows = document.getElementById("btn-reload-shows");
   const btnSaveShows = document.getElementById("btn-save-shows");
 
@@ -405,8 +499,31 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
 
   let editorDirty = false;
 
+  const setShowsYamlError = (errMsg) => {
+    if (errMsg) {
+      editor?.setAttribute("aria-invalid", "true");
+      if (showsErrorEl) {
+        showsErrorEl.textContent = errMsg;
+        showsErrorEl.hidden = false;
+      }
+      testMatchCard?.setAttribute("data-state", "error");
+      if (resModel) resModel.textContent = "Lỗi shows.yaml";
+      if (resDedup) resDedup.textContent = "—";
+      if (resSource) resSource.textContent = errMsg;
+      if (resFps) resFps.textContent = "—";
+    } else {
+      editor?.removeAttribute("aria-invalid");
+      if (showsErrorEl) {
+        showsErrorEl.textContent = "";
+        showsErrorEl.hidden = true;
+      }
+      testMatchCard?.removeAttribute("data-state");
+    }
+  };
+
   editor?.addEventListener("input", () => {
     editorDirty = true;
+    setShowsYamlError(null);
   });
 
   const runTestMatch = async () => {
@@ -420,11 +537,13 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
           yaml_content: editor ? editor.value : null,
         },
       });
+      setShowsYamlError(null);
       if (resModel) resModel.textContent = `${res.model_id} (${res.model_name})`;
       if (resDedup) resDedup.textContent = res.dedup_policy;
       if (resSource) resSource.textContent = res.resolution_source;
       if (resFps) resFps.textContent = `~${res.ref_median_fps} fps (RTX 3060 TensorRT FP16)`;
     } catch (err) {
+      setShowsYamlError(err.message);
       showToast(err.message, "error");
     }
   };
@@ -536,6 +655,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
       if (editor && (forceOverwriteEditor || !editorDirty)) {
         editor.value = data.shows_yaml || "shows: []\n";
         editorDirty = false;
+        setShowsYamlError(null);
       }
 
       await runTestMatch();
@@ -571,10 +691,13 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
         body: { yaml_content: editor.value },
       });
       editorDirty = false;
+      setShowsYamlError(null);
       showToast(`Đã lưu shows.yaml hợp lệ (${res.rules_count} quy tắc).`, "success");
       await runTestMatch();
       onShowsUpdated?.();
     } catch (err) {
+      setShowsYamlError(err.message);
+      editor.focus();
       showToast(err.message, "error");
     }
   });
@@ -592,10 +715,12 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
 export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLaunched }) {
   const subForm = document.getElementById("subtrans-form");
   const subInputPath = document.getElementById("sub-input-path");
+  const subInputError = document.getElementById("sub-input-error");
   const btnBrowseSub = document.getElementById("btn-browse-sub-input");
   const subQuality = document.getElementById("sub-quality-select");
   const subGlossary = document.getElementById("sub-glossary-select");
   const subOffset = document.getElementById("sub-offset-input");
+  const subOffsetError = document.getElementById("sub-offset-error");
   const subOutDir = document.getElementById("sub-output-dir");
   const subAutoAlign = document.getElementById("sub-auto-align");
   const subPreferWhisper = document.getElementById("sub-prefer-whisper");
@@ -670,13 +795,16 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       chip.append(el("span", { className: cls, textContent: label }));
       if (s.configured && s.source !== "env") {
         chip.append(
-          el("button", {
-            type: "button",
-            className: "btn-ghost btn-xs",
-            textContent: "✕ Xóa",
-            "aria-label": `Xóa khóa Gemini API Khe ${s.slot}`,
-            onClick: () => clearKeySlot(s.slot),
-          })
+          el(
+            "button",
+            {
+              type: "button",
+              className: "btn-ghost btn-xs",
+              "aria-label": `Xóa khóa Gemini API Khe ${s.slot}`,
+              onClick: () => clearKeySlot(s.slot),
+            },
+            [el("span", { "aria-hidden": "true", textContent: "✕ " }), "Xóa"]
+          )
         );
       } else if (s.configured && s.source === "env") {
         chip.append(
@@ -865,43 +993,55 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         ].filter((d) => Boolean(d.path));
 
         const actionBtns = el("div", { className: "button-cluster" }, [
-          el("button", {
-            type: "button",
-            className: "btn btn-secondary",
-            textContent: "📄 Biên bản",
-            onClick: () => openAuditDocument(a.episode, docs, a.audit_json_path),
-          }),
+          el(
+            "button",
+            {
+              type: "button",
+              className: "btn btn-secondary",
+              "aria-label": `Biên bản kiểm định ${a.episode}`,
+              onClick: () => openAuditDocument(a.episode, docs, a.audit_json_path),
+            },
+            [el("span", { "aria-hidden": "true", textContent: "📄 " }), "Biên bản"]
+          ),
         ]);
 
         if (a.source_file && a.output_file) {
           actionBtns.append(
-            el("button", {
-              type: "button",
-              className: "btn btn-ghost",
-              textContent: "🔍 Soi 4K",
-              onClick: () => compareCtrl?.openPair(a.source_file, a.output_file),
-            })
+            el(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-ghost",
+                "aria-label": `Soi 4K ${a.episode}`,
+                onClick: () => compareCtrl?.openPair(a.source_file, a.output_file),
+              },
+              [el("span", { "aria-hidden": "true", textContent: "🔍 " }), "Soi 4K"]
+            )
           );
         }
 
         if (a.output_file) {
           actionBtns.append(
-            el("button", {
-              type: "button",
-              className: "btn btn-ghost",
-              textContent: "🎬 Phát",
-              onClick: async () => {
-                try {
-                  const res = await apiFetch("/api/open-media", {
-                    method: "POST",
-                    body: { path: a.output_file, prefer_mpv: true },
-                  });
-                  showToast(`Đã mở trình phát (${res.launcher}).`, "success", 2800);
-                } catch (err) {
-                  showToast(err.message, "error");
-                }
+            el(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-ghost",
+                "aria-label": `Phát ${a.episode}`,
+                onClick: async () => {
+                  try {
+                    const res = await apiFetch("/api/open-media", {
+                      method: "POST",
+                      body: { path: a.output_file, prefer_mpv: true },
+                    });
+                    showToast(`Đã mở trình phát (${res.launcher}).`, "success", 2800);
+                  } catch (err) {
+                    showToast(err.message, "error");
+                  }
+                },
               },
-            })
+              [el("span", { "aria-hidden": "true", textContent: "🎬 " }), "Phát"]
+            )
           );
         }
 
@@ -947,6 +1087,25 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   };
 
+  const setSubFieldError = (inputEl, errorEl, msg) => {
+    if (msg) {
+      inputEl?.setAttribute("aria-invalid", "true");
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+      }
+    } else {
+      inputEl?.removeAttribute("aria-invalid");
+      if (errorEl) {
+        errorEl.textContent = "";
+        errorEl.hidden = true;
+      }
+    }
+  };
+
+  subInputPath?.addEventListener("input", () => setSubFieldError(subInputPath, subInputError, null));
+  subOffset?.addEventListener("input", () => setSubFieldError(subOffset, subOffsetError, null));
+
   btnBrowseSub?.addEventListener("click", async () => {
     const picked = await openFsPicker({
       title: "Chọn Video (.mkv/.mp4) hoặc Phụ đề rời (.srt/.ass)",
@@ -957,6 +1116,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     });
     if (picked.length > 0 && subInputPath) {
       subInputPath.value = picked[0];
+      setSubFieldError(subInputPath, subInputError, null);
     }
   });
 
@@ -964,21 +1124,21 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     ev.preventDefault();
     const target = subInputPath?.value.trim() || "";
     if (!target) {
-      subInputPath?.setAttribute("aria-invalid", "true");
+      setSubFieldError(subInputPath, subInputError, "Vui lòng chọn tệp video hoặc phụ đề cần dịch.");
       subInputPath?.focus();
       showToast("Vui lòng chọn tệp video hoặc phụ đề cần dịch.", "warn");
       return;
     }
-    subInputPath?.removeAttribute("aria-invalid");
+    setSubFieldError(subInputPath, subInputError, null);
     const rawOffset = subOffset?.value.trim() ?? "";
     const offsetMs = rawOffset === "" ? 0 : Number(rawOffset);
     if (!Number.isFinite(offsetMs) || !Number.isInteger(offsetMs)) {
-      subOffset?.setAttribute("aria-invalid", "true");
+      setSubFieldError(subOffset, subOffsetError, "Sub Offset (ms) phải là số nguyên hợp lệ.");
       subOffset?.focus();
       showToast("Sub Offset (ms) phải là số nguyên hợp lệ.", "warn");
       return;
     }
-    subOffset?.removeAttribute("aria-invalid");
+    setSubFieldError(subOffset, subOffsetError, null);
     const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
     if (submitBtn) submitBtn.disabled = true;
     try {
@@ -1079,18 +1239,29 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   });
 
+  const REFRESH_TTL_MS = 5000;
+  let lastRefreshMs = 0;
+
   btnRefreshSubtrans?.addEventListener("click", () => {
+    lastRefreshMs = Date.now();
     loadSubtransOverview().then(() => showToast("Đã cập nhật thống kê Subtrans.", "info", 2600));
   });
   btnRefreshAudits?.addEventListener("click", () => {
+    lastRefreshMs = Date.now();
     loadAudits().then(() => showToast("Đã làm mới Kho Kiểm định.", "info", 2600));
   });
 
+  lastRefreshMs = Date.now();
   loadSubtransOverview();
   loadAudits();
 
   return {
-    refreshAll() {
+    refreshAll({ force = false } = {}) {
+      const nowMs = Date.now();
+      if (!force && nowMs - lastRefreshMs < REFRESH_TTL_MS) {
+        return;
+      }
+      lastRefreshMs = nowMs;
       loadSubtransOverview();
       loadAudits();
     },

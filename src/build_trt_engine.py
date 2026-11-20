@@ -10,6 +10,8 @@ Biên dịch và quản lý TensorRT 10.x / 8.x FP16 Engine & Triton Compiler ch
 - Hỗ trợ fallback sang Triton torch.compile hoặc PyTorch channels_last FP16 khi cần thiết.
 """
 
+import hashlib
+import json
 import os
 import sys
 import inspect
@@ -183,10 +185,14 @@ def get_trt_engine_path(
     model_id: str = "realesr-animevideov3",
     max_batch: int = 8,
     input_hw: Tuple[int, int] = (1080, 1920),
+    cache_dir: Optional[str] = None,
+    weights_sha256: Optional[str] = None,
 ) -> str:
-    """Tạo đường dẫn file .engine duy nhất gắn liền với model_id, độ phân giải, GPU, TRT version và batch_size."""
-    cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "trt_engines")
-    os.makedirs(cache_dir, exist_ok=True)
+    """Tạo đường dẫn file .engine duy nhất gắn liền với model_id, độ phân giải, GPU, TRT version, batch_size (và sha256 nếu truyền)."""
+    resolved_cache_dir = cache_dir or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "trt_engines"
+    )
+    os.makedirs(resolved_cache_dir, exist_ok=True)
     device_tag = "cuda"
     if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(0).replace(" ", "_").replace("/", "_")
@@ -200,10 +206,83 @@ def get_trt_engine_path(
             pass
     in_h, in_w = int(input_hw[0]), int(input_hw[1])
     safe_model = str(model_id).replace(" ", "_").replace("/", "_")
-    return os.path.join(
-        cache_dir,
-        f"{safe_model}_{device_tag}_{trt_ver}_{in_h}x{in_w}_b1-{max_batch}.engine",
-    )
+    if weights_sha256:
+        sha_tag = str(weights_sha256).strip().lower()[:8]
+        fname = f"{safe_model}_{sha_tag}_{device_tag}_{trt_ver}_{in_h}x{in_w}_b1-{max_batch}.engine"
+    else:
+        fname = f"{safe_model}_{device_tag}_{trt_ver}_{in_h}x{in_w}_b1-{max_batch}.engine"
+    return os.path.join(resolved_cache_dir, fname)
+
+
+def _compute_file_sha256(file_path: str) -> str:
+    """Tính mã băm SHA-256 hex cho file engine/trọng số."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def write_trt_engine_sha256_sidecar(
+    engine_path: str,
+    weights_sha256: Optional[str] = None,
+) -> str:
+    """Ghi nguyên tử file sidecar <engine_path>.sha256 lưu chữ ký toàn vẹn của engine (và weights nếu có)."""
+    sidecar_path = f"{engine_path}.sha256"
+    engine_digest = _compute_file_sha256(engine_path)
+    payload = {
+        "engine_sha256": engine_digest,
+        "weights_sha256": str(weights_sha256 or "").strip().lower(),
+    }
+    tmp_sidecar = f"{sidecar_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_sidecar, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp_sidecar, sidecar_path)
+    finally:
+        if os.path.exists(tmp_sidecar):
+            try:
+                os.remove(tmp_sidecar)
+            except OSError:
+                pass
+    return sidecar_path
+
+
+def verify_trt_engine_sha256_sidecar(
+    engine_path: str,
+    expected_weights_sha256: Optional[str] = None,
+) -> bool:
+    """
+    Xác thực tính toàn vẹn file .engine qua sidecar <engine_path>.sha256 (nếu có).
+    Trả về False nếu file engine rỗng/thiếu, sidecar hỏng hoặc mã băm engine/weights không khớp.
+    Nếu file .engine tồn tại hợp lệ từ trước khi có sidecar (chưa có .sha256), trả về True để tương thích ngược.
+    """
+    if not os.path.exists(engine_path) or os.path.getsize(engine_path) == 0:
+        return False
+    sidecar_path = f"{engine_path}.sha256"
+    if not os.path.exists(sidecar_path):
+        return True
+    try:
+        raw = open(sidecar_path, "r", encoding="utf-8").read().strip()
+        if not raw:
+            return False
+        if raw.startswith("{"):
+            data = json.loads(raw)
+            rec_eng = str(data.get("engine_sha256") or "").strip().lower()
+            rec_weights = str(data.get("weights_sha256") or "").strip().lower()
+        else:
+            rec_eng = raw.split()[0].strip().lower()
+            rec_weights = ""
+        if not rec_eng:
+            return False
+        if _compute_file_sha256(engine_path) != rec_eng:
+            return False
+        if expected_weights_sha256 and rec_weights:
+            if rec_weights != str(expected_weights_sha256).strip().lower():
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def export_model_to_onnx(
@@ -293,6 +372,7 @@ def build_tensorrt_engine(
     max_batch: int = 8,
     input_hw: Tuple[int, int] = (1080, 1920),
     workspace_gb: int = 2,
+    weights_sha256: Optional[str] = None,
 ) -> Optional[str]:
     """
     Biên dịch file ONNX sang TensorRT FP16 serialized engine (tương thích TensorRT 8.x & 10.x).
@@ -363,6 +443,7 @@ def build_tensorrt_engine(
         with open(tmp_engine, "wb") as f:
             f.write(serialized_engine)
         os.replace(tmp_engine, engine_path)
+        write_trt_engine_sha256_sidecar(engine_path, weights_sha256=weights_sha256)
 
         if timing_cache is not None and hasattr(config, "get_timing_cache"):
             try:
@@ -370,12 +451,26 @@ def build_tensorrt_engine(
                 if updated_tc is not None:
                     tc_bytes = updated_tc.serialize()
                     if tc_bytes:
-                        with open(timing_cache_path, "wb") as tf:
-                            tf.write(tc_bytes)
+                        tmp_tc = f"{timing_cache_path}.tmp.{os.getpid()}"
+                        try:
+                            with open(tmp_tc, "wb") as tf:
+                                tf.write(tc_bytes)
+                            os.replace(tmp_tc, timing_cache_path)
+                        finally:
+                            if os.path.exists(tmp_tc):
+                                try:
+                                    os.remove(tmp_tc)
+                                except OSError:
+                                    pass
             except Exception:
                 pass
         return engine_path
     finally:
+        if os.path.exists(tmp_engine):
+            try:
+                os.remove(tmp_engine)
+            except OSError:
+                pass
         del config, network, parser, builder
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -438,10 +533,20 @@ class TRTRuntimeEngineWrapper:
     def _acquire_output_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
         """
         Tái sử dụng vòng đệm đôi (2-slot ping-pong VRAM ring) cho tensor đầu ra 4K,
-        khử ~2.100 lần cấp phát động torch.empty mỗi tập mà vẫn đảm bảo 2 lần gọi liên tiếp không ghi đè nhau.
+        ưu tiên tái dùng lát cắt từ _batch_out_ring nếu đã cấp phát để tiết kiệm ~199 MB VRAM.
         """
         alloc_b = max(int(B), self.max_batch)
         target_tail = (int(C), int(out_h), int(out_w))
+        if (
+            len(self._batch_out_ring) == 2
+            and self._batch_out_ring[0].shape[0] >= alloc_b
+            and self._batch_out_ring[0].shape[1:] == target_tail
+            and self._batch_out_ring[0].dtype == self.out_torch_dtype
+            and self._batch_out_ring[0].device == self.device
+        ):
+            slot_buf = self._batch_out_ring[self._batch_ring_idx]
+            self._batch_ring_idx ^= 1
+            return slot_buf[:B]
         if (
             len(self._out_ring) != 2
             or self._out_ring[0].shape[0] < alloc_b
@@ -470,6 +575,9 @@ class TRTRuntimeEngineWrapper:
             or self._batch_out_ring[0].dtype != self.out_torch_dtype
             or self._batch_out_ring[0].device != self.device
         ):
+            if self._out_ring:
+                self._out_ring = []
+                self._last_out_ptr = None
             self._batch_out_ring = [
                 torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
                 for _ in range(2)
@@ -547,6 +655,7 @@ def get_hybrid_engine_or_wrapper(
     model_id: str = "realesr-animevideov3",
     input_hw: Tuple[int, int] = (1080, 1920),
     scale: float = 2.0,
+    weights_sha256: Optional[str] = None,
 ) -> Any:
     """
     Khởi tạo engine suy luận nhanh nhất theo môi trường phần cứng:
@@ -590,7 +699,16 @@ def get_hybrid_engine_or_wrapper(
         if engine_path not in _FAILED_TRT_ENGINES:
             onnx_path = engine_path.replace(".engine", ".onnx")
             try:
-                if not os.path.exists(engine_path) or os.path.getsize(engine_path) == 0:
+                needs_build = (
+                    not os.path.exists(engine_path)
+                    or os.path.getsize(engine_path) == 0
+                    or not verify_trt_engine_sha256_sidecar(engine_path, expected_weights_sha256=weights_sha256)
+                )
+                if needs_build:
+                    if os.path.exists(engine_path) and os.path.exists(f"{engine_path}.sha256"):
+                        print(
+                            f"⚠️ [TensorRT FP16 Compiler] Engine '{os.path.basename(engine_path)}' không khớp SHA-256 sidecar, đang biên dịch lại..."
+                        )
                     print(
                         f"\n⚡ [TensorRT FP16 Compiler] Đang biên dịch nhân Tensor Core tối ưu lần đầu cho "
                         f"'{model_id}' ({input_hw[1]}x{input_hw[0]}, profile batch 1..{trt_max_batch})..."
@@ -608,6 +726,7 @@ def get_hybrid_engine_or_wrapper(
                         engine_path,
                         max_batch=trt_max_batch,
                         input_hw=input_hw,
+                        weights_sha256=weights_sha256,
                     )
                     if not built:
                         _FAILED_TRT_ENGINES.add(engine_path)
@@ -627,6 +746,11 @@ def get_hybrid_engine_or_wrapper(
                         scale=int(round(scale)),
                         fallback_module=wrapper,
                     )
+                    if not os.path.exists(f"{engine_path}.sha256"):
+                        try:
+                            write_trt_engine_sha256_sidecar(engine_path, weights_sha256=weights_sha256)
+                        except OSError:
+                            pass
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     return trt_runner

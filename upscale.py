@@ -50,9 +50,15 @@ from src.config import (
 )
 from src.pending_queue import load_pending_subs, remove_pending_sub
 from src.pipeline import run_upscale_pipeline, FailedResumableError
+from src.config import is_gpu_lock_held_by_other
+from src.logger import is_graceful_pause_requested, clear_graceful_pause, was_graceful_paused
 from src.ffmpeg_ops import probe_video
 from src.dedup import spawn_background_preflight
-from src.models_resolver import list_models_formatted
+from src.models_resolver import (
+    list_models_formatted,
+    resolve_expected_4k_output_path,
+    find_existing_4k_output_path,
+)
 from src.cleanup import (
     cleanup_checkpoint_dir,
     cleanup_subtitle_extracts,
@@ -71,7 +77,9 @@ def check_deadline_and_eta(
     video_overhead: float = 420.0,
     subtitles_overhead: float = 300.0,
     eta_margin_pct: float = 0.07,
-    allow_partial: bool = False
+    allow_partial: bool = False,
+    output_dir: Optional[str] = None,
+    reserved_seconds: float = 0.0,
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
@@ -89,15 +97,26 @@ def check_deadline_and_eta(
         print(f"⚠️ Định dạng deadline không hợp lệ '{deadline_str}' (cần HH:MM): {e}")
         return True, False, None
 
+    if reserved_seconds and reserved_seconds > 0:
+        deadline_dt = deadline_dt - timedelta(seconds=float(reserved_seconds))
+
     seconds_left = (deadline_dt - now).total_seconds()
 
-    # Đọc số frame độc nhất từ plan.json nếu có
+    # Đọc số frame độc nhất từ plan.json nếu có (ưu tiên thư mục output -o nếu được truyền)
     base_name = os.path.splitext(os.path.basename(video_path))[0]
-    candidate_plans = [
+    out_root = output_dir or "out"
+    if out_root.lower().endswith((".mkv", ".mp4")) or os.path.isfile(out_root):
+        out_root = os.path.dirname(os.path.abspath(out_root)) or "out"
+    candidate_plans = []
+    for p in (
         os.path.splitext(video_path)[0] + ".plan.json",
+        os.path.join(out_root, f"{base_name}.plan.json"),
+        os.path.join(out_root, f".temp_{base_name}", "plan.json"),
         f"out/{base_name}.plan.json",
-        f"out/.temp_{base_name}/plan.json"
-    ]
+        f"out/.temp_{base_name}/plan.json",
+    ):
+        if p not in candidate_plans:
+            candidate_plans.append(p)
     n_unique = None
     is_measured = False
     for p in candidate_plans:
@@ -506,8 +525,10 @@ def _resolve_sub_output_dir_and_target_4k(
     default_dir: str,
     base_vid_name: str,
     explicit_target_4k: Optional[str] = None,
+    input_path: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Tuple[Path, str]:
-    """Chuẩn hóa thư mục xuất phụ đề và đường dẫn container 4K đích kể cả khi -o là file .mkv cụ thể."""
+    """Chuẩn hóa thư mục xuất phụ đề và đường dẫn container 4K đích kể cả khi -o là file .mkv cụ thể hoặc _4K_animejanai.mkv."""
     resolved_dir = Path(default_dir)
     candidate_4k = None
 
@@ -527,7 +548,23 @@ def _resolve_sub_output_dir_and_target_4k(
             resolved_dir = Path(abs_out)
 
     if not candidate_4k:
-        candidate_4k = os.path.join(str(resolved_dir), f"{base_vid_name}_4K.mkv")
+        ref_input = input_path or os.path.join(str(resolved_dir), f"{base_vid_name}.mkv")
+        existing = find_existing_4k_output_path(
+            ref_input, output_arg=str(resolved_dir), model_id=model_id
+        )
+        if existing:
+            candidate_4k = existing
+        else:
+            expected = resolve_expected_4k_output_path(
+                ref_input, output_arg=str(resolved_dir), model_id=model_id
+            )
+            stem_dir = os.path.dirname(expected)
+            alt_names = [f"{base_vid_name}_4K_animejanai.mkv", f"{base_vid_name}_4K.mkv"]
+            found_small = next(
+                (os.path.join(stem_dir, n) for n in alt_names if os.path.isfile(os.path.join(stem_dir, n))),
+                None,
+            )
+            candidate_4k = found_small or expected
 
     return resolved_dir, candidate_4k
 
@@ -634,6 +671,9 @@ def main():
             label = os.path.basename(it.get("video_path") or it.get("base_name") or it.get("ja_path") or "unknown")
             print(f"  • {label} (Tỷ lệ thật: {it.get('real_rate', 0)*100:.1f}%, uncertain: {it.get('uncertain_rate', 0)*100:.1f}%)")
 
+        glossary_arg = getattr(args, "glossary", None)
+        glossary_path_obj = Path(os.path.expanduser(str(glossary_arg).strip())) if glossary_arg else None
+        is_dry_run = bool(getattr(args, "dry_run", False))
         from subtrans.pipeline import TranslationPipeline
         for it in pending_items:
             vid_p = it.get("video_path")
@@ -646,6 +686,7 @@ def main():
                 ja_s, en_s = find_or_extract_subtitles(
                     vid_p,
                     prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
+                    dry_run=is_dry_run,
                 )
                 if ja_s == en_s:
                     en_s = None
@@ -662,6 +703,8 @@ def main():
                 continue
 
             if not ja_s or not os.path.exists(ja_s):
+                if is_dry_run:
+                    print(f"🔍 [DRY RUN] Bỏ qua trích xuất ffmpeg/Whisper cho '{os.path.basename(vid_p or base_vid)}'.")
                 continue
 
             out_d, target_4k = _resolve_sub_output_dir_and_target_4k(
@@ -669,6 +712,8 @@ def main():
                 str(default_out_d),
                 base_vid,
                 getattr(args, "target_4k", None),
+                input_path=vid_p,
+                model_id=getattr(args, "model", None),
             )
             out_basename = base_name_rec if base_name_rec else (
                 os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else f"{base_vid}_4K"
@@ -677,7 +722,7 @@ def main():
                 local_only=False,
                 output_dir=out_d,
                 output_format="srt",
-                dry_run=getattr(args, "dry_run", False),
+                dry_run=is_dry_run,
                 require_approved_cast=False,
                 allow_latest_alias=False,
                 subs_quality=getattr(args, "subs_quality", "normal"),
@@ -688,16 +733,17 @@ def main():
                 ja_path=Path(ja_s),
                 en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
                 output_basename=out_basename,
-                subs_upgrade=True,
+                glossary_path=glossary_path_obj,
+                subs_upgrade=bool(getattr(args, "subs_upgrade", False)),
                 sub_offset_ms=args.sub_offset_ms,
                 auto_offset=pending_auto_offset,
                 sound_cues=args.sound_cues,
                 video_path=Path(vid_p) if vid_p else None,
             )
             srt_p = res.get('subtitle_path') or res.get('output_path')
-            if vid_p:
+            if vid_p and not is_dry_run:
                 cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(vid_p)), base_vid)
-            if not getattr(args, "dry_run", False) and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
+            if not is_dry_run and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
                 remove_pending_sub(base_name_rec or vid_p or out_basename)
                 if os.path.exists(target_4k) and not getattr(args, "no_embed", False):
                     from src.ffmpeg_ops import embed_subtitle_track
@@ -738,6 +784,7 @@ def main():
         multi_mode = len(subs_targets) > 1
         sub_failures = 0
 
+        is_sub_dry_run = bool(getattr(args, "dry_run", False))
         for idx_sub, target_subs_vid in enumerate(subs_targets, start=1):
             print(f"\n{'='*75}")
             prefix_label = f"[{idx_sub}/{len(subs_targets)}] " if multi_mode else ""
@@ -746,8 +793,12 @@ def main():
             ja_sub, en_sub = find_or_extract_subtitles(
                 target_subs_vid,
                 prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
+                dry_run=is_sub_dry_run,
             )
             if not ja_sub:
+                if is_sub_dry_run:
+                    print(f"🔍 [DRY RUN] Mô phỏng dịch phụ đề cho '{os.path.basename(target_subs_vid)}' (bỏ qua trích xuất ffmpeg/Whisper & ghi file).")
+                    continue
                 print(f"❌ Không tìm thấy hoặc không thể trích xuất phụ đề tiếng Nhật cho '{os.path.basename(target_subs_vid)}'.")
                 sub_failures += 1
                 if not multi_mode:
@@ -770,14 +821,16 @@ def main():
                 vid_dir,
                 base_vid_name,
                 explicit_t4k,
+                input_path=target_subs_vid,
+                model_id=getattr(args, "model", None),
             )
-            if not getattr(args, "dry_run", False):
+            if not is_sub_dry_run:
                 os.makedirs(sub_out_dir, exist_ok=True)
             sub_pipeline = TranslationPipeline(
                 local_only=False,
                 output_dir=sub_out_dir,
                 output_format="srt",
-                dry_run=getattr(args, "dry_run", False),
+                dry_run=is_sub_dry_run,
                 require_approved_cast=False,
                 allow_latest_alias=False,
                 subs_quality=getattr(args, "subs_quality", "normal"),
@@ -798,9 +851,8 @@ def main():
             srt_path = res.get('subtitle_path') or res.get('output_path')
             print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
 
-            if getattr(args, "dry_run", False):
-                cleanup_subtitle_extracts(vid_dir, base_vid_name)
-                print("🔍 [DRY RUN] Bỏ qua bước nhúng MKV và ghi đè phụ đề cạnh video gốc.")
+            if is_sub_dry_run:
+                print("🔍 [DRY RUN] Bỏ qua bước nhúng MKV, dọn file và ghi đè phụ đề cạnh video gốc.")
                 continue
 
             # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
@@ -885,7 +937,7 @@ def main():
     else:
         fps_median = 1.35
         fps_p5 = 1.25
-    subtitles_overhead = 300.0
+    subtitles_overhead = 300.0 if args.subs_after_upscale else 0.0
 
     if args.benchmark_mode:
         os.environ["BENCHMARK_MODE"] = "1"
@@ -905,12 +957,19 @@ def main():
             allow_partial=args.allow_partial,
             output_dir=args.output,
             segment_seconds=args.segment,
-            preflight_now=False
+            preflight_now=False,
+            subs_quality=args.subs_quality,
         )
         print(format_schedule_decision_table(sched))
         sys.exit(0)
 
+    # Dọn cờ dừng êm mồ côi từ phiên bị tắt đột ngột trước đó nếu không có GPU worker nào đang giữ khóa
+    if is_graceful_pause_requested() and is_gpu_lock_held_by_other() is None:
+        clear_graceful_pause()
+        print("🧹 [CLEANUP] Đã dọn cờ dừng êm mồ côi (.graceful_pause.flag) trước phiên chạy mới.")
+
     # 2. Phiên chạy thật: Lập lịch và in bảng quyết định ngay đầu phiên (nếu không ở benchmark mode)
+    bg_preflight = None
     if not args.benchmark_mode:
         from src.scheduler import compute_overnight_schedule, format_schedule_decision_table, BackgroundQueuePreflightManager
         sched = compute_overnight_schedule(
@@ -923,12 +982,12 @@ def main():
             allow_partial=args.allow_partial,
             output_dir=args.output,
             segment_seconds=args.segment,
-            preflight_now=False
+            preflight_now=False,
+            subs_quality=args.subs_quality,
         )
         print(format_schedule_decision_table(sched))
 
         # Kích hoạt preflight nền cho toàn bộ các tập tiếp theo trong hàng đợi (nice -n 10)
-        bg_preflight = None
         if len(videos) > 1 and not args.no_dedup:
             def _on_bg_plan_ready(scanned_vid, pdata):
                 try:
@@ -942,11 +1001,12 @@ def main():
                         allow_partial=args.allow_partial,
                         output_dir=args.output,
                         segment_seconds=args.segment,
-                        preflight_now=False
+                        preflight_now=False,
+                        subs_quality=args.subs_quality,
                     )
                     print(f"\n🔄 [BẢNG LẬP LỊCH CẬP NHẬT] Đã nạp số đo n_unique thật cho '{os.path.basename(scanned_vid)}':")
                     print(format_schedule_decision_table(updated_sched))
-                except Exception as e_bg:
+                except Exception:
                     pass
 
             bg_preflight = BackgroundQueuePreflightManager(
@@ -971,130 +1031,43 @@ def main():
         and len(videos) > 1
     )
 
-    for idx, vid in enumerate(videos):
-        print(f"\n{'='*75}")
-        print(f"▶ [{idx+1}/{len(videos)}] Bắt đầu xử lý: {os.path.basename(vid)}")
-        print(f"{'='*75}")
+    try:
+        for idx, vid in enumerate(videos):
+            print(f"\n{'='*75}")
+            print(f"▶ [{idx+1}/{len(videos)}] Bắt đầu xử lý: {os.path.basename(vid)}")
+            print(f"{'='*75}")
 
-        # Kiểm tra deadline nếu có (A6)
-        deadline_dt = None
-        if args.deadline:
-            can_finish, is_partial, raw_deadline_dt = check_deadline_and_eta(
-                vid,
-                args.deadline,
-                fps_median=fps_median,
-                fps_p5=fps_p5,
-                video_overhead=video_overhead,
-                subtitles_overhead=subtitles_overhead,
-                eta_margin_pct=0.07,
-                allow_partial=args.allow_partial
+            if bg_preflight is not None:
+                bg_preflight.mark_main_started(vid)
+                bg_preflight.wait_for_video(vid, timeout=600.0)
+
+            already_done_path = (
+                None
+                if (args.force or args.preview)
+                else find_existing_4k_output_path(vid, output_arg=args.output, model_id=args.model)
             )
-            if not can_finish:
-                print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
-                unfinished_videos[vid] = f"Bỏ qua do chạm hạn chót {args.deadline}"
-                break
 
-            # (a) Dành thời gian cho giai đoạn phụ đề của các tập đã xong:
-            # Trừ đi thời gian phụ đề cần thiết cho các tập đã hoàn tất trước đó trong queue
-            subs_reserved_sec = (len(completed_videos) * subtitles_overhead) if args.subs_after_upscale else 0.0
-            deadline_dt = (raw_deadline_dt - timedelta(seconds=subs_reserved_sec)) if raw_deadline_dt else None
-
-        try:
-            out_file = run_upscale_pipeline(
-                input_path=vid,
-                output_path=args.output,
-                model=args.model,
-                engine=args.engine,
-                precision=args.precision,
-                force=args.force,
-                bitrate=args.bitrate,
-                segment_time=args.segment,
-                fmt=args.format,
-                use_ramdisk=not args.no_ramdisk,
-                resume=not args.no_resume,
-                anti_sleep=not args.no_anti_sleep,
-                preview_seconds=args.preview,
-                dedup=not args.no_dedup,
-                allow_partial=args.allow_partial,
-                deadline_dt=deadline_dt,
-                keep_temp=args.keep_temp,
-                dedup_policy=args.dedup_policy,
-                batch_size=args.batch_size,
-                zero_disk=getattr(args, "zero_disk", True),
-                use_tensorrt=not getattr(args, "no_tensorrt", False),
-            )
-            # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
-            if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
-                completed_videos.append((vid, out_file))
-                if vid in unfinished_videos:
-                    del unfinished_videos[vid]
-                if vid in failed_resumable_videos:
-                    del failed_resumable_videos[vid]
-                if can_overlap_async_subs and idx < len(videos) - 1:
-                    bg_sub_cmd = _build_stage_b_sub_cmd(args, videos, vid, out_file)
-                    print(f"\n⚡ [ASYNC-SUBS] Khởi chạy nền dịch phụ đề Cloud Gemini cho '{os.path.basename(vid)}' song song tập kế tiếp...")
-                    try:
-                        bg_proc = subprocess.Popen(bg_sub_cmd)
-                        async_sub_procs.append((vid, out_file, bg_proc, datetime.now()))
-                    except Exception as bg_err:
-                        print(f"⚠️ [ASYNC-SUBS] Không thể chạy nền cho '{os.path.basename(vid)}' ({bg_err}), sẽ chạy ở Stage B cuối hàng đợi.")
-            else:
-                from src.logger import was_graceful_paused
-                if was_graceful_paused():
-                    unfinished_videos[vid] = "Dừng êm theo yêu cầu người dùng (bảo toàn checkpoint)"
-                    print(f"\n⏸️ [GRACEFUL PAUSE] Tập '{os.path.basename(vid)}' đã dừng êm và giữ nguyên checkpoint. Tạm ngưng hàng đợi.")
+            # Kiểm tra deadline nếu có (A6), bỏ qua nếu tập đã hoàn tất từ trước
+            deadline_dt = None
+            if args.deadline and not already_done_path:
+                subs_reserved_sec = (len(completed_videos) * subtitles_overhead) if args.subs_after_upscale else 0.0
+                can_finish, is_partial, deadline_dt = check_deadline_and_eta(
+                    vid,
+                    args.deadline,
+                    fps_median=fps_median,
+                    fps_p5=fps_p5,
+                    video_overhead=video_overhead,
+                    subtitles_overhead=subtitles_overhead,
+                    eta_margin_pct=0.07,
+                    allow_partial=args.allow_partial,
+                    output_dir=args.output,
+                    reserved_seconds=subs_reserved_sec,
+                )
+                if not can_finish:
+                    print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
+                    unfinished_videos[vid] = f"Bỏ qua do chạm hạn chót {args.deadline}"
                     break
-                unfinished_videos[vid] = "Dừng sạch ranh giới phân đoạn theo --allow-partial"
-                print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
 
-            # Cập nhật fps từ audit.json nếu có
-            audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
-            if audit_path and not os.path.exists(audit_path):
-                alt_audit = os.path.join(os.path.dirname(out_file), "audit", os.path.basename(audit_path))
-                if os.path.exists(alt_audit):
-                    audit_path = alt_audit
-            if audit_path and os.path.exists(audit_path):
-                try:
-                    with open(audit_path, "r", encoding="utf-8") as f:
-                        adata = json.load(f)
-                    measured_fps = adata.get("ai_steady_fps")
-                    if measured_fps and measured_fps > 0:
-                        fps_median = float(measured_fps)
-                except Exception:
-                    pass
-
-        except FailedResumableError as fre:
-            print(f"\n⚠️ [FAILED-RESUMABLE] Tập '{os.path.basename(vid)}' dừng do ENOSPC tại chunk {fre.chunk_idx + 1}. Đánh dấu để thử lại cuối hàng đợi.")
-            failed_resumable_videos[vid] = (fre.up_segs_dir, fre.chunk_idx)
-            unfinished_videos[vid] = f"Dừng ở chunk {fre.chunk_idx + 1} do ENOSPC (failed-resumable)"
-            if len(videos) > 1:
-                print("Chuyển sang tập tiếp theo trong hàng đợi...\n")
-                continue
-            else:
-                pass
-        except KeyboardInterrupt:
-            print("\n\n⚠️ Đã tạm dừng quá trình theo yêu cầu (Ctrl+C).")
-            print("🛡️  RAM Disk và các file đệm đã được tự động giải phóng an toàn.")
-            print("💡 Lần sau khi chạy lại cùng video này, hệ thống sẽ tự động tiếp tục từ phân đoạn đang dở!\n")
-            sys.exit(130)
-        except Exception as e:
-            print(f"\n❌ Đã xảy ra lỗi khi xử lý tập '{vid}': {e}\n")
-            unfinished_videos[vid] = f"Lỗi: {e}"
-            if len(videos) > 1:
-                print("Chuyển sang tập tiếp theo trong hàng đợi...\n")
-                continue
-            else:
-                sys.exit(1)
-
-    # -------------------------------------------------------------------------
-    # TỰ ĐỘNG THỬ LẠI CÁC TẬP FAILED-RESUMABLE MỘT LẦN Ở CUỐI HÀNG ĐỢI
-    # -------------------------------------------------------------------------
-    if failed_resumable_videos:
-        print(f"\n{'='*75}")
-        print(f"🔄 [RETRY PASS] TỰ ĐỘNG THỬ LẠI {len(failed_resumable_videos)} TẬP FAILED-RESUMABLE MỘT LẦN")
-        print(f"{'='*75}")
-        for vid, (up_dir, last_c_idx) in list(failed_resumable_videos.items()):
-            print(f"▶ Thử lại: {os.path.basename(vid)} (tiếp tục từ phân đoạn {last_c_idx + 1})...")
             try:
                 out_file = run_upscale_pipeline(
                     input_path=vid,
@@ -1102,7 +1075,6 @@ def main():
                     model=args.model,
                     engine=args.engine,
                     precision=args.precision,
-                    batch_size=args.batch_size,
                     force=args.force,
                     bitrate=args.bitrate,
                     segment_time=args.segment,
@@ -1113,21 +1085,121 @@ def main():
                     preview_seconds=args.preview,
                     dedup=not args.no_dedup,
                     allow_partial=args.allow_partial,
-                    deadline_dt=None,
+                    deadline_dt=deadline_dt,
                     keep_temp=args.keep_temp,
                     dedup_policy=args.dedup_policy,
+                    batch_size=args.batch_size,
                     zero_disk=getattr(args, "zero_disk", True),
                     use_tensorrt=not getattr(args, "no_tensorrt", False),
                 )
+                # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))
-                    del failed_resumable_videos[vid]
                     if vid in unfinished_videos:
                         del unfinished_videos[vid]
-                    print(f"✅ Thử lại thành công: '{os.path.basename(vid)}' đã hoàn tất 4K!")
-            except Exception as retry_err:
-                print(f"❌ Thử lại vẫn thất bại cho '{os.path.basename(vid)}': {retry_err}")
-                unfinished_videos[vid] = f"Thử lại thất bại (chunk {last_c_idx + 1}): {retry_err}"
+                    if vid in failed_resumable_videos:
+                        del failed_resumable_videos[vid]
+                    if can_overlap_async_subs and idx < len(videos) - 1:
+                        bg_sub_cmd = _build_stage_b_sub_cmd(args, videos, vid, out_file)
+                        print(f"\n⚡ [ASYNC-SUBS] Khởi chạy nền dịch phụ đề Cloud Gemini cho '{os.path.basename(vid)}' song song tập kế tiếp...")
+                        try:
+                            bg_sub_env = {**os.environ, "UPSCALER_FORCE_WHISPER_CPU": "1"}
+                            bg_proc = subprocess.Popen(bg_sub_cmd, env=bg_sub_env)
+                            async_sub_procs.append((vid, out_file, bg_proc, datetime.now()))
+                        except Exception as bg_err:
+                            print(f"⚠️ [ASYNC-SUBS] Không thể chạy nền cho '{os.path.basename(vid)}' ({bg_err}), sẽ chạy ở Stage B cuối hàng đợi.")
+                else:
+                    if was_graceful_paused():
+                        unfinished_videos[vid] = "Dừng êm theo yêu cầu người dùng (bảo toàn checkpoint)"
+                        print(f"\n⏸️ [GRACEFUL PAUSE] Tập '{os.path.basename(vid)}' đã dừng êm và giữ nguyên checkpoint. Tạm ngưng hàng đợi.")
+                        break
+                    unfinished_videos[vid] = "Dừng sạch ranh giới phân đoạn theo --allow-partial"
+                    print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
+
+                # Cập nhật fps từ audit.json nếu có
+                audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
+                if audit_path and not os.path.exists(audit_path):
+                    alt_audit = os.path.join(os.path.dirname(out_file), "audit", os.path.basename(audit_path))
+                    if os.path.exists(alt_audit):
+                        audit_path = alt_audit
+                if audit_path and os.path.exists(audit_path):
+                    try:
+                        with open(audit_path, "r", encoding="utf-8") as f:
+                            adata = json.load(f)
+                        measured_fps = adata.get("ai_steady_fps")
+                        if measured_fps and measured_fps > 0:
+                            fps_median = float(measured_fps)
+                    except Exception:
+                        pass
+
+            except FailedResumableError as fre:
+                print(f"\n⚠️ [FAILED-RESUMABLE] Tập '{os.path.basename(vid)}' dừng do ENOSPC tại chunk {fre.chunk_idx + 1}. Đánh dấu để thử lại cuối hàng đợi.")
+                failed_resumable_videos[vid] = (fre.up_segs_dir, fre.chunk_idx)
+                unfinished_videos[vid] = f"Dừng ở chunk {fre.chunk_idx + 1} do ENOSPC (failed-resumable)"
+                if len(videos) > 1:
+                    print("Chuyển sang tập tiếp theo trong hàng đợi...\n")
+                    continue
+                else:
+                    pass
+            except KeyboardInterrupt:
+                print("\n\n⚠️ Đã tạm dừng quá trình theo yêu cầu (Ctrl+C).")
+                print("🛡️  RAM Disk và các file đệm đã được tự động giải phóng an toàn.")
+                print("💡 Lần sau khi chạy lại cùng video này, hệ thống sẽ tự động tiếp tục từ phân đoạn đang dở!\n")
+                sys.exit(130)
+            except Exception as e:
+                print(f"\n❌ Đã xảy ra lỗi khi xử lý tập '{vid}': {e}\n")
+                unfinished_videos[vid] = f"Lỗi: {e}"
+                if len(videos) > 1:
+                    print("Chuyển sang tập tiếp theo trong hàng đợi...\n")
+                    continue
+                else:
+                    sys.exit(1)
+
+        # -------------------------------------------------------------------------
+        # TỰ ĐỘNG THỬ LẠI CÁC TẬP FAILED-RESUMABLE MỘT LẦN Ở CUỐI HÀNG ĐỢI
+        # -------------------------------------------------------------------------
+        if failed_resumable_videos:
+            print(f"\n{'='*75}")
+            print(f"🔄 [RETRY PASS] TỰ ĐỘNG THỬ LẠI {len(failed_resumable_videos)} TẬP FAILED-RESUMABLE MỘT LẦN")
+            print(f"{'='*75}")
+            for vid, (up_dir, last_c_idx) in list(failed_resumable_videos.items()):
+                print(f"▶ Thử lại: {os.path.basename(vid)} (tiếp tục từ phân đoạn {last_c_idx + 1})...")
+                try:
+                    out_file = run_upscale_pipeline(
+                        input_path=vid,
+                        output_path=args.output,
+                        model=args.model,
+                        engine=args.engine,
+                        precision=args.precision,
+                        batch_size=args.batch_size,
+                        force=args.force,
+                        bitrate=args.bitrate,
+                        segment_time=args.segment,
+                        fmt=args.format,
+                        use_ramdisk=not args.no_ramdisk,
+                        resume=not args.no_resume,
+                        anti_sleep=not args.no_anti_sleep,
+                        preview_seconds=args.preview,
+                        dedup=not args.no_dedup,
+                        allow_partial=args.allow_partial,
+                        deadline_dt=None,
+                        keep_temp=args.keep_temp,
+                        dedup_policy=args.dedup_policy,
+                        zero_disk=getattr(args, "zero_disk", True),
+                        use_tensorrt=not getattr(args, "no_tensorrt", False),
+                    )
+                    if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
+                        completed_videos.append((vid, out_file))
+                        del failed_resumable_videos[vid]
+                        if vid in unfinished_videos:
+                            del unfinished_videos[vid]
+                        print(f"✅ Thử lại thành công: '{os.path.basename(vid)}' đã hoàn tất 4K!")
+                except Exception as retry_err:
+                    print(f"❌ Thử lại vẫn thất bại cho '{os.path.basename(vid)}': {retry_err}")
+                    unfinished_videos[vid] = f"Thử lại thất bại (chunk {last_c_idx + 1}): {retry_err}"
+    finally:
+        if bg_preflight is not None:
+            bg_preflight.stop()
 
     # -------------------------------------------------------------------------
     # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY CHO CÁC TẬP ĐÃ HOÀN TẤT)
@@ -1218,6 +1290,30 @@ def main():
             print(f"[{u_idx+1:02d}] | {os.path.basename(u_vid)[:45]:<45} | {reason}")
         print(f"{'='*75}")
         print(f"⚠️ Có {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất. Hàng đợi kết thúc với trạng thái CHƯA XONG.\n")
+        _live_status_path = os.path.join("logs", "live_status.json")
+        if os.path.isfile(_live_status_path):
+            try:
+                is_paused_exit = was_graceful_paused() or any(
+                    "allow-partial" in unfinished_videos.get(u, "").lower()
+                    or "dừng êm" in unfinished_videos.get(u, "").lower()
+                    or "hạn chót" in unfinished_videos.get(u, "").lower()
+                    for u in unfinished_list
+                )
+                target_stage = "paused" if is_paused_exit else "error"
+                with open(_live_status_path, "r", encoding="utf-8") as _rf:
+                    _cur = json.load(_rf)
+                if isinstance(_cur, dict):
+                    _cur["stage"] = target_stage
+                    _cur["stage_detail"] = (
+                        f"Hàng đợi kết thúc với {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất "
+                        f"({unfinished_videos.get(unfinished_list[0], 'Chưa hoàn tất')})."
+                    )
+                    _tmp = f"{_live_status_path}.{os.getpid()}.tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _wf:
+                        json.dump(_cur, _wf, ensure_ascii=False, indent=2)
+                    os.replace(_tmp, _live_status_path)
+            except Exception:
+                pass
         sys.exit(1)
 
     print("\n🎉 Toàn bộ công việc trong hàng đợi đã hoàn tất thành công!")

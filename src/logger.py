@@ -398,7 +398,13 @@ class RunLogger:
         resumed_set = set(self._live_state.get("resumed_chunks") or [])
         completed_total = len(set(self._chunk_map.keys()) | resumed_set)
         remaining_chunks = max(0, int(total_chunks) - completed_total)
-        eta_sec = round(remaining_chunks * float(total_chunk_time), 1) if total_chunk_time > 0 else None
+        recent_times = [
+            float(self._chunk_map[k]["total_time_s"])
+            for k in sorted(self._chunk_map.keys())[-8:]
+            if float(self._chunk_map[k].get("total_time_s") or 0.0) > 0.0
+        ]
+        avg_chunk_time = (sum(recent_times) / len(recent_times)) if recent_times else float(total_chunk_time)
+        eta_sec = round(remaining_chunks * avg_chunk_time, 1) if avg_chunk_time > 0 else None
 
         self._live_state["total_chunks"] = int(total_chunks)
         self._live_state["completed_chunks"] = completed_total

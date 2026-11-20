@@ -414,14 +414,48 @@ export function initTabs(onTabChange) {
   const panels = Array.from(panelsStack.querySelectorAll('[role="tabpanel"]'));
   const hasNativeFocusGroup = Object.hasOwn(HTMLElement.prototype, "focusGroup");
   const supportsUntilFound = "onbeforematch" in HTMLElement.prototype;
+  let initialized = false;
 
   const panelForTab = (tab) =>
     panels.find((p) => p.getAttribute("aria-labelledby") === tab.id) || null;
   const tabForPanel = (panel) =>
     tabs.find((t) => t.id === panel.getAttribute("aria-labelledby")) || null;
 
-  const selectTab = (selectedTab, { focusTab = false } = {}) => {
+  const scrollTabIntoView = (tab) => {
+    try {
+      tab.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+        container: "nearest",
+      });
+    } catch {
+      tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  };
+
+  const selectTab = (selectedTab, { focusTab = false, fromBeforeMatch = false } = {}) => {
     if (!selectedTab) return;
+    const targetPanel = panelForTab(selectedTab);
+    const alreadySelected =
+      initialized &&
+      selectedTab.getAttribute("aria-selected") === "true" &&
+      targetPanel &&
+      !targetPanel.hasAttribute("hidden");
+    if (alreadySelected) {
+      if (focusTab) {
+        selectedTab.focus();
+      }
+      scrollTabIntoView(selectedTab);
+      return;
+    }
+
+    const activeEl = document.activeElement;
+    const hidingFocusedPanel =
+      !focusTab &&
+      !fromBeforeMatch &&
+      activeEl instanceof Node &&
+      panels.some((p) => p !== targetPanel && p.contains(activeEl));
+
     for (const tab of tabs) {
       const isSelected = tab === selectedTab;
       tab.setAttribute("aria-selected", String(isSelected));
@@ -442,20 +476,20 @@ export function initTabs(onTabChange) {
       }
     }
 
-    try {
-      selectedTab.scrollIntoView({
-        block: "nearest",
-        inline: "nearest",
-        container: "nearest",
-      });
-    } catch {
-      selectedTab.scrollIntoView({ block: "nearest", inline: "nearest" });
-    }
+    scrollTabIntoView(selectedTab);
 
     if (focusTab) {
       selectedTab.focus();
+    } else if (hidingFocusedPanel) {
+      const targetHeading = targetPanel?.querySelector('h2[tabindex="-1"], [tabindex="-1"]');
+      if (targetHeading instanceof HTMLElement) {
+        targetHeading.focus();
+      } else {
+        selectedTab.focus();
+      }
     }
-    if (typeof onTabChange === "function") {
+
+    if (initialized && typeof onTabChange === "function") {
       onTabChange(selectedTab.id);
     }
   };
@@ -464,6 +498,7 @@ export function initTabs(onTabChange) {
   const currentSelected =
     tabs.find((t) => t.getAttribute("aria-selected") === "true") || tabs[0];
   selectTab(currentSelected, { focusTab: false });
+  initialized = true;
 
   for (const tab of tabs) {
     tab.addEventListener("click", () => selectTab(tab, { focusTab: false }));
@@ -505,7 +540,7 @@ export function initTabs(onTabChange) {
     if (!matchedPanel) return;
     const ownerTab = tabForPanel(matchedPanel);
     if (ownerTab) {
-      selectTab(ownerTab, { focusTab: false });
+      selectTab(ownerTab, { focusTab: false, fromBeforeMatch: true });
     }
   });
 

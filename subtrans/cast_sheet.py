@@ -9,7 +9,9 @@ and speaker-to-listener pronoun consistency.
 
 import json
 import logging
+import os
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
 from collections import Counter
@@ -27,9 +29,39 @@ from subtrans.gemini_backend import (
 )
 from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters
 from subtrans.cache import execute_and_log_api_request, TranslationCache, compute_key_id
-from subtrans.throttle import call_with_retry, DailyQuotaExhaustedError, RateLimiter
+from subtrans.throttle import (
+    call_with_retry,
+    DailyQuotaExhaustedError,
+    MinuteRateLimitError,
+    QuotaExhaustedError,
+    RateLimiter,
+)
 
 logger = logging.getLogger("subtrans.cast_sheet")
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Atomically writes raw bytes via same-directory temp file + os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
+    """Atomically writes YAML payload via same-directory temp file + os.replace."""
+    dumped = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+    _atomic_write_bytes(path, dumped.encode("utf-8"))
 
 
 class CastSpeaksToItem(BaseModel):
@@ -285,10 +317,10 @@ def load_or_generate_series_cast_sheet(
                             f"✅ Cast sheet của bộ '{series_name}' ({len(characters)} nhân vật) đã sẵn sàng. "
                             f"Không có nhân vật mới -> Tái sử dụng (0 requests API)."
                         )
-                        # Ghi bản sao cho tập hiện tại nếu cần
+                        # Ghi bản sao nguyên tử cho tập hiện tại nếu cần
                         if episode_cast_path and not episode_cast_path.exists():
                             try:
-                                episode_cast_path.write_bytes(series_cast_file.read_bytes())
+                                _atomic_write_bytes(episode_cast_path, series_cast_file.read_bytes())
                             except Exception:
                                 pass
                         return Glossary(characters=characters)
@@ -311,29 +343,21 @@ def load_or_generate_series_cast_sheet(
             ]),
         ]
         cast_glossary = Glossary(characters=mock_chars)
-        series_cast_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(series_cast_file, "w", encoding="utf-8") as f:
-            yaml.safe_dump(
+        _atomic_write_yaml(
+            series_cast_file,
+            {
+                "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Series Cast Sheet (Dry-Run)"},
+                "characters": [c.model_dump(exclude_none=True) for c in mock_chars],
+            },
+        )
+        if episode_cast_path:
+            _atomic_write_yaml(
+                episode_cast_path,
                 {
-                    "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Series Cast Sheet (Dry-Run)"},
+                    "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Episode Cast Sheet (Dry-Run)"},
                     "characters": [c.model_dump(exclude_none=True) for c in mock_chars],
                 },
-                f,
-                allow_unicode=True,
-                sort_keys=False,
             )
-        if episode_cast_path:
-            episode_cast_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(episode_cast_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(
-                    {
-                        "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Episode Cast Sheet (Dry-Run)"},
-                        "characters": [c.model_dump(exclude_none=True) for c in mock_chars],
-                    },
-                    f,
-                    allow_unicode=True,
-                    sort_keys=False,
-                )
         return cast_glossary
 
     # 3. Tạo mới qua Gemini API
@@ -347,7 +371,7 @@ def load_or_generate_series_cast_sheet(
     )
     if res_glossary and episode_cast_path and series_cast_file.exists():
         try:
-            episode_cast_path.write_bytes(series_cast_file.read_bytes())
+            _atomic_write_bytes(episode_cast_path, series_cast_file.read_bytes())
         except Exception:
             pass
     return res_glossary
@@ -411,6 +435,7 @@ def generate_cast_sheet(
     last_err: Optional[Exception] = None
     for model_name in candidate_models:
         rpm_limit = 12 if "lite" in model_name.lower() else 4
+        rate_limiters = {kid: RateLimiter(max_rpm=rpm_limit) for kid in key_ids}
         cfg_args: Dict[str, Any] = {
             "response_mime_type": "application/json",
             "response_schema": CastSheetResponse,
@@ -422,58 +447,81 @@ def generate_cast_sheet(
         if thinking_cfg:
             cfg_args["thinking_config"] = thinking_cfg
 
-        for key_idx, kid in enumerate(key_ids):
-            if has_real_cache and len(keys) > 1 and cache.is_key_model_exhausted(kid, model_name):
-                continue
+        # Vòng 1: xoay ngay sang key khác nếu gặp 429 PerMinute; vòng 2 (nếu cần): đợi cooldown của key
+        max_rounds = 2 if len(key_ids) > 1 else 1
+        for round_idx in range(max_rounds):
+            should_try_next_model = False
+            for key_idx, kid in enumerate(key_ids):
+                if has_real_cache and len(keys) > 1 and cache.is_key_model_exhausted(kid, model_name):
+                    continue
 
-            limiter = RateLimiter(max_rpm=rpm_limit)
-            limiter.wait_if_needed()
-            client = clients[key_idx]
+                limiter = rate_limiters[kid]
+                client = clients[key_idx]
+                rotate_on_rpm = len(key_ids) > 1 and round_idx == 0
 
-            try:
-                def _send():
-                    return call_with_retry(
-                        fn=lambda: client.models.generate_content(
+                try:
+                    def _single_api_call():
+                        return execute_and_log_api_request(
+                            lambda: client.models.generate_content(
+                                model=model_name,
+                                contents=prompt,
+                                config=types.GenerateContentConfig(**cfg_args),
+                            ),
                             model=model_name,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(**cfg_args),
-                        ),
+                            backend="gemini",
+                            cues_count=0,
+                            request_type="cast_sheet",
+                            cache=cache,
+                            key_id=kid,
+                        )
+
+                    res = call_with_retry(
+                        fn=_single_api_call,
+                        rate_limiter=limiter,
                         model_name=model_name,
                         max_retries=2,
                         cache=cache if has_real_cache else None,
                         key_id=kid,
                         all_key_ids=key_ids,
+                        raise_on_per_minute=rotate_on_rpm,
                     )
-
-                res = execute_and_log_api_request(
-                    _send,
-                    model=model_name,
-                    backend="gemini",
-                    cues_count=0,
-                    request_type="cast_sheet",
-                    cache=cache,
-                    key_id=kid,
-                )
-                raw_text = extract_genai_response_text(res)
-                if raw_text:
+                    raw_text = extract_genai_response_text(res)
+                    if raw_text:
+                        break
+                except MinuteRateLimitError as mre:
+                    last_err = mre
+                    limiter.record_cooldown(mre.retry_delay)
+                    logger.warning(
+                        f"Stage A Cast Sheet key '{kid}' hit 429 PerMinute on '{model_name}'; rotating to next key..."
+                    )
+                    continue
+                except DailyQuotaExhaustedError as dqe:
+                    last_err = dqe
+                    if has_real_cache:
+                        cache.mark_key_model_exhausted(
+                            key_id=kid,
+                            model=model_name,
+                            quota_id=dqe.quota_id or "PerDay",
+                            quota_value=dqe.quota_value or "",
+                            reason=f"Stage A 429 PerDay: {dqe.quota_id}",
+                        )
+                    logger.warning(
+                        f"Stage A Cast Sheet key '{kid}' hit daily quota on '{model_name}'; rotating key/model..."
+                    )
+                    continue
+                except QuotaExhaustedError as qe:
+                    last_err = qe
+                    logger.warning(
+                        f"Stage A Cast Sheet key '{kid}' exhausted RPM retries on '{model_name}'; trying next key..."
+                    )
+                    continue
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Stage A Cast Sheet attempt with '{model_name}' (key={kid}) failed: {e}. Trying fallback...")
+                    should_try_next_model = True
                     break
-            except DailyQuotaExhaustedError as dqe:
-                last_err = dqe
-                if has_real_cache:
-                    cache.mark_key_model_exhausted(
-                        key_id=kid,
-                        model=model_name,
-                        quota_id=dqe.quota_id or "PerDay",
-                        quota_value=dqe.quota_value or "",
-                        reason=f"Stage A 429 PerDay: {dqe.quota_id}",
-                    )
-                logger.warning(
-                    f"Stage A Cast Sheet key '{kid}' hit daily quota on '{model_name}'; rotating key/model..."
-                )
-                continue
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Stage A Cast Sheet attempt with '{model_name}' (key={kid}) failed: {e}. Trying fallback...")
+
+            if raw_text or should_try_next_model:
                 break
 
         if raw_text:
@@ -511,18 +559,14 @@ def generate_cast_sheet(
 
         cast_glossary = Glossary(characters=characters)
 
-        # Persist to YAML
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                {
-                    "meta": {"schema": 2, "description": "Auto-generated Series Cast Sheet"},
-                    "characters": [c.model_dump(exclude_none=True) for c in characters],
-                },
-                f,
-                allow_unicode=True,
-                sort_keys=False,
-            )
+        # Persist to YAML atomically
+        _atomic_write_yaml(
+            output_path,
+            {
+                "meta": {"schema": 2, "description": "Auto-generated Series Cast Sheet"},
+                "characters": [c.model_dump(exclude_none=True) for c in characters],
+            },
+        )
 
         return cast_glossary
 

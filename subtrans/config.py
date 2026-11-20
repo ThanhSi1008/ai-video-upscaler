@@ -5,6 +5,7 @@ Configuration loader and validator for subtrans.
 """
 
 import os
+import threading
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -27,6 +28,26 @@ if (
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 MODELS_CONFIG_PATH = Path(__file__).parent / "models.yaml"
+_DEFAULT_RUNTIME_QUOTA_PATH = Path(__file__).parent / ".cache" / "models_runtime_quota.yaml"
+RUNTIME_QUOTA_PATH = _DEFAULT_RUNTIME_QUOTA_PATH
+
+
+def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
+    """Writes YAML atomically via a same-directory temp file and os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def load_config(custom_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -45,20 +66,57 @@ def save_config(cfg: Dict[str, Any], custom_path: Optional[Path] = None):
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
 
+def _parse_positive_int(value: Any) -> Optional[int]:
+    """Parses value as an int only if it is strictly > 0; returns None otherwise."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def load_models_config(custom_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Loads models and rate limits configuration from models.yaml."""
+    """Loads models and rate limits configuration from models.yaml, overlaying untracked runtime quota metadata."""
     path = custom_path or MODELS_CONFIG_PATH
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f) or {}
+
+    if custom_path is None and not os.environ.get("PYTEST_CURRENT_TEST") and RUNTIME_QUOTA_PATH.exists():
+        try:
+            with open(RUNTIME_QUOTA_PATH, "r", encoding="utf-8") as rf:
+                rt_cfg = yaml.safe_load(rf) or {}
+            rt_models = rt_cfg.get("models")
+            if isinstance(rt_models, dict) and isinstance(cfg.get("models"), dict):
+                for m_name, m_meta in rt_models.items():
+                    if not isinstance(m_meta, dict) or m_name not in cfg["models"]:
+                        continue
+                    target_meta = cfg["models"][m_name]
+                    if not isinstance(target_meta, dict):
+                        continue
+                    rpd_val = _parse_positive_int(m_meta.get("rpd"))
+                    if rpd_val is not None:
+                        target_meta["rpd"] = rpd_val
+                        if m_meta.get("rpd_source"):
+                            target_meta["rpd_source"] = m_meta["rpd_source"]
+                    rpm_val = _parse_positive_int(m_meta.get("rpm"))
+                    if rpm_val is not None:
+                        target_meta["rpm"] = rpm_val
+                        if m_meta.get("rpm_source"):
+                            target_meta["rpm_source"] = m_meta["rpm_source"]
+        except Exception:
+            pass
+
+    return cfg
 
 
 def save_models_config(cfg: Dict[str, Any], custom_path: Optional[Path] = None):
-    """Saves models configuration back to models.yaml."""
+    """Saves models configuration back to YAML atomically."""
     path = custom_path or MODELS_CONFIG_PATH
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    _atomic_write_yaml(path, cfg)
 
 
 def update_model_quota_in_yaml(
@@ -69,38 +127,49 @@ def update_model_quota_in_yaml(
     custom_path: Optional[Path] = None,
 ):
     """
-    Cập nhật tự động hạn mức quotaValue vào models.yaml khi nhận được lỗi 429 thực tế.
-    Không ghi bẩn file models.yaml gốc khi chạy kiểm thử pytest hoặc với model giả lập 'unit-test-model'.
+    Cập nhật hạn mức quotaValue quan sát được khi gặp lỗi 429 thực tế:
+    - Khi custom_path được truyền tường minh: ghi nguyên tử vào custom_path.
+    - Khi custom_path is None: ghi vào file untracked subtrans/.cache/models_runtime_quota.yaml
+      (không làm bẩn git status của subtrans/models.yaml).
+    - Bỏ qua giá trị <= 0 hoặc rỗng để không phá cấu hình hạn mức gốc.
     """
-    if custom_path is None and (
-        os.environ.get("PYTEST_CURRENT_TEST") or model_name == "unit-test-model"
+    parsed_val = _parse_positive_int(quota_value)
+    if parsed_val is None:
+        return
+    if (
+        custom_path is None
+        and RUNTIME_QUOTA_PATH == _DEFAULT_RUNTIME_QUOTA_PATH
+        and (os.environ.get("PYTEST_CURRENT_TEST") or model_name == "unit-test-model")
     ):
         return
     try:
-        cfg = load_models_config(custom_path)
-        if "models" not in cfg:
+        target_path = custom_path if custom_path is not None else RUNTIME_QUOTA_PATH
+        if custom_path is not None:
+            cfg = load_models_config(custom_path)
+        elif target_path.exists():
+            with open(target_path, "r", encoding="utf-8") as rf:
+                cfg = yaml.safe_load(rf) or {}
+        else:
+            cfg = {}
+
+        if "models" not in cfg or not isinstance(cfg["models"], dict):
             cfg["models"] = {}
-        if model_name not in cfg["models"]:
+        if model_name not in cfg["models"] or not isinstance(cfg["models"][model_name], dict):
             cfg["models"][model_name] = {}
 
         src_label = rpd_source if (not quota_id or quota_id in rpd_source) else f"{rpd_source} ({quota_id})"
-        if "perday" in quota_id.lower() or "requestsperday" in quota_id.lower() or "daily" in quota_id.lower():
-            try:
-                cfg["models"][model_name]["rpd"] = int(quota_value)
-            except Exception:
-                cfg["models"][model_name]["rpd"] = quota_value
+        qid_lower = (quota_id or "").lower()
+        if "perday" in qid_lower or "requestsperday" in qid_lower or "daily" in qid_lower:
+            cfg["models"][model_name]["rpd"] = parsed_val
             cfg["models"][model_name]["rpd_source"] = src_label
-        elif "perminute" in quota_id.lower() or "requestsperminute" in quota_id.lower() or "rpm" in quota_id.lower():
-            try:
-                cfg["models"][model_name]["rpm"] = int(quota_value)
-            except Exception:
-                cfg["models"][model_name]["rpm"] = quota_value
+        elif "perminute" in qid_lower or "requestsperminute" in qid_lower or "rpm" in qid_lower:
+            cfg["models"][model_name]["rpm"] = parsed_val
             cfg["models"][model_name]["rpm_source"] = src_label
 
-        save_models_config(cfg, custom_path)
+        _atomic_write_yaml(target_path, cfg)
     except Exception as e:
         import logging
-        logging.getLogger("subtrans.config").warning(f"Could not update quota in models.yaml for {model_name}: {e}")
+        logging.getLogger("subtrans.config").warning(f"Could not update runtime quota metadata for {model_name}: {e}")
 
 
 def get_gemini_api_keys() -> list[str]:

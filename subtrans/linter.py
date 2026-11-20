@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Literal
 
 from subtrans.models import Cue, Glossary
-from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters
+from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters, tokenize_ja_morphemes
 from subtrans.eval.metrics import (
     calculate_cps,
     detect_cjk_leakage,
@@ -73,7 +73,6 @@ VOCATIVE_MAPPINGS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"玲琳"), "Reirin"),
     (re.compile(r"慧月"), "Keigetsu"),
     (re.compile(r"(?<![\u30A0-\u30FFー])ウルシ(?![\u30A0-\u30FFー])"), "Urushi"),
-    (re.compile(r"師匠"), "Sư phụ"),
 ]
 
 _PURE_KATAKANA_RE = re.compile(r"^[\u30A0-\u30FFー]+$")
@@ -106,6 +105,39 @@ def _expand_romaji_variants(display_name: str, aliases: Optional[List[str]] = No
         if isinstance(al, str) and al.strip():
             forms.append(al.strip())
     return list(dict.fromkeys(forms))
+
+
+def _find_glossary_term_spans(
+    ja_clean: str,
+    t_ja_clean: str,
+    morpheme_spans: Optional[List[Tuple[int, int, str]]],
+) -> List[Tuple[int, int]]:
+    """Finds character spans in ja_clean matching t_ja_clean; uses MeCab token boundaries for <= 2 char terms."""
+    if len(t_ja_clean) <= 2:
+        if morpheme_spans:
+            spans: List[Tuple[int, int]] = []
+            n_tok = len(morpheme_spans)
+            for i in range(n_tok):
+                acc = ""
+                s_pos = morpheme_spans[i][0]
+                for j in range(i, n_tok):
+                    acc += morpheme_spans[j][2]
+                    if len(acc) > len(t_ja_clean):
+                        break
+                    if acc == t_ja_clean:
+                        e_pos = morpheme_spans[j][1]
+                        if ja_clean[s_pos:e_pos] == t_ja_clean:
+                            spans.append((s_pos, e_pos))
+                        break
+            return spans
+        # Fallback when fugashi is unavailable: anchor Kanji/Katakana boundaries
+        if _PURE_KATAKANA_RE.match(t_ja_clean):
+            pat = r"(?<![\u30A0-\u30FFー])" + re.escape(t_ja_clean) + r"(?![\u30A0-\u30FFー])"
+        else:
+            pat = r"(?<![\u3400-\u4DBF\u4E00-\u9FFF])" + re.escape(t_ja_clean) + r"(?![\u3400-\u4DBF\u4E00-\u9FFF])"
+        return [(m.start(), m.end()) for m in re.finditer(pat, ja_clean)]
+
+    return [(m.start(), m.end()) for m in re.finditer(re.escape(t_ja_clean), ja_clean)]
 
 
 @dataclass
@@ -260,30 +292,59 @@ def lint_cue(
                 )
             )
 
-    # 7. Glossary Canonical Term Compliance (furigana-transparent, multi-char CJK terms)
+
+    # 7. Glossary Canonical Term Compliance (furigana-transparent, MeCab-boundary safe for short terms)
     if glossary and glossary.terms and has_cjk_characters(ja_clean):
+        morphemes = tokenize_ja_morphemes(ja_clean)
+        morpheme_spans: Optional[List[Tuple[int, int, str]]] = None
+        if morphemes:
+            morpheme_spans = []
+            cursor = 0
+            for surf, _pos1, _pos2 in morphemes:
+                pos = ja_clean.find(surf, cursor)
+                if pos >= 0:
+                    morpheme_spans.append((pos, pos + len(surf), surf))
+                    cursor = pos + len(surf)
+
+        candidate_terms = []
         for term in glossary.terms:
+            if (getattr(term, "genre", None) or "").strip().lower() == "common":
+                continue
             t_ja_clean = strip_ja_furigana(term.ja or "").strip()
             if len(t_ja_clean) < 2:
                 continue
-            if t_ja_clean in ja_clean or (term.ja and term.ja in ja_text):
-                valid_forms = [normalize_nfc(term.vi).strip().lower()] + [
-                    normalize_nfc(a).strip().lower() for a in (term.alt or []) if a
-                ]
-                valid_forms = [vf for vf in valid_forms if vf]
-                if valid_forms and not any(vf in norm_text_lower for vf in valid_forms):
-                    violations.append(
-                        LintViolation(
-                            rule_id=RULE_GLOSSARY_TERM,
-                            severity="WARNING",
-                            cue_id=cue.id,
-                            message=(
-                                f"Cue {cue.id} contains glossary term '{term.ja}' "
-                                f"but expected translation '{term.vi}' was not found."
-                            ),
-                            suggestion=f"Use glossary term '{term.vi}'.",
-                        )
+            candidate_terms.append((len(t_ja_clean), t_ja_clean, term))
+        candidate_terms.sort(key=lambda item: item[0], reverse=True)
+
+        claimed_spans: List[Tuple[int, int]] = []
+        for _tlen, t_ja_clean, term in candidate_terms:
+            raw_spans = _find_glossary_term_spans(ja_clean, t_ja_clean, morpheme_spans)
+            uncovered_spans = [
+                (s, e)
+                for s, e in raw_spans
+                if not any(cs <= s and e <= ce for cs, ce in claimed_spans)
+            ]
+            matched = bool(uncovered_spans) or (not raw_spans and bool(term.ja and term.ja in ja_text and len(t_ja_clean) > 2))
+            if not matched:
+                continue
+            claimed_spans.extend(uncovered_spans)
+            valid_forms = [normalize_nfc(term.vi).strip().lower()] + [
+                normalize_nfc(a).strip().lower() for a in (term.alt or []) if a
+            ]
+            valid_forms = [vf for vf in valid_forms if vf]
+            if valid_forms and not any(vf in norm_text_lower for vf in valid_forms):
+                violations.append(
+                    LintViolation(
+                        rule_id=RULE_GLOSSARY_TERM,
+                        severity="WARNING",
+                        cue_id=cue.id,
+                        message=(
+                            f"Cue {cue.id} contains glossary term '{term.ja}' "
+                            f"but expected translation '{term.vi}' was not found."
+                        ),
+                        suggestion=f"Use glossary term '{term.vi}'.",
                     )
+                )
 
     # 8. Speaker -> Addressee Pronoun Consistency Check (when explicit CoT p1/p2 is present)
     p1_val = normalize_nfc(getattr(cue, "p1", None) or "").strip().lower()

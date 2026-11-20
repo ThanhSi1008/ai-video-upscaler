@@ -11,6 +11,7 @@ web/app.py
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 import hashlib
 import ipaddress
@@ -23,7 +24,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 import urllib.parse
 import yaml
 
@@ -87,6 +88,7 @@ class SchedulePreviewRequest(BaseModel):
     use_tensorrt: bool = True
     subs_after_upscale: bool = True
     output_dir: Optional[str] = None
+    force: bool = False
 
     @field_validator("inputs")
     @classmethod
@@ -511,6 +513,185 @@ _CSP_HEADER_VALUE = (
 _SINGLE_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
+def _is_loopback_ip(raw_host: str) -> bool:
+    h = (raw_host or "").strip().strip("[]")
+    if "%" in h:
+        h = h.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return bool(mapped is not None and mapped.is_loopback)
+
+
+def _is_loopback_request(client_host: str, host_name: str) -> bool:
+    if client_host == "testclient":
+        return (
+            host_name in {"testserver", "localhost"}
+            or host_name.endswith(".localhost")
+            or _is_loopback_ip(host_name)
+        )
+    return _is_loopback_ip(client_host)
+
+
+def _resolve_dir_from_raw(
+    root: Path,
+    raw_val: Optional[str],
+    strict_secret: bool = False,
+) -> Optional[Path]:
+    if not raw_val or not str(raw_val).strip():
+        return None
+    cleaned = str(raw_val).strip()
+    _validate_no_nul_str(cleaned, "output_dir")
+    p = Path(os.path.expanduser(cleaned))
+    if not p.is_absolute():
+        p = root / p
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return None
+    if is_secret_filename(resolved.name):
+        if strict_secret:
+            raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
+        return None
+    if resolved.suffix.lower() in VIDEO_EXTENSIONS:
+        return resolved.parent
+    return resolved
+
+
+def _read_live_status_dict(root: Path) -> Dict[str, Any]:
+    live_file = root / "logs" / "live_status.json"
+    if not live_file.is_file():
+        return {}
+    try:
+        parsed = json.loads(live_file.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _collect_known_output_dirs(
+    root: Path,
+    job_manager: JobManager,
+    extra_dir: Optional[str] = None,
+) -> List[Path]:
+    """Gom và khử trùng lặp mọi thư mục xuất (-o) hiện hữu từ out/, live_status.json, JobManager và query param."""
+    candidates: List[Path] = []
+    if extra_dir is not None and str(extra_dir).strip():
+        resolved_extra = _resolve_dir_from_raw(root, extra_dir, strict_secret=True)
+        if resolved_extra is not None:
+            candidates.append(resolved_extra)
+
+    candidates.append(root / "out")
+
+    live_data = _read_live_status_dict(root)
+    if live_data.get("output_path"):
+        d_live = _resolve_dir_from_raw(root, str(live_data.get("output_path")))
+        if d_live is not None:
+            candidates.append(d_live)
+
+    try:
+        job_state = job_manager.get_state()
+    except Exception:
+        job_state = {}
+    job_records: List[Dict[str, Any]] = []
+    if isinstance(job_state.get("active_job"), dict):
+        job_records.append(job_state["active_job"])
+    for hj in job_state.get("history") or []:
+        if isinstance(hj, dict):
+            job_records.append(hj)
+    for job in job_records:
+        opts = job.get("options") if isinstance(job.get("options"), dict) else {}
+        for opt_key in ("output_dir", "output_path"):
+            raw_opt = opts.get(opt_key)
+            if raw_opt:
+                try:
+                    d_job = _resolve_dir_from_raw(root, str(raw_opt))
+                except ValueError:
+                    d_job = None
+                if d_job is not None:
+                    candidates.append(d_job)
+
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+            if not resolved.is_dir():
+                continue
+            norm = os.path.normcase(str(resolved))
+        except OSError:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(resolved)
+    return unique
+
+
+def _collect_known_source_dirs(
+    root: Path,
+    out_dirs: Sequence[Path],
+    job_manager: JobManager,
+) -> List[Path]:
+    """Gom các thư mục video nguồn đã biết từ workspace, out_dirs, live_status.json và hàng đợi JobManager."""
+    candidates: List[Path] = [root, *out_dirs]
+
+    live_data = _read_live_status_dict(root)
+    if live_data.get("input_path"):
+        raw_in = str(live_data.get("input_path")).strip()
+        if raw_in and ".preview_clip_" not in raw_in and "\x00" not in raw_in:
+            p_in = Path(os.path.expanduser(raw_in))
+            if not p_in.is_absolute():
+                p_in = root / p_in
+            try:
+                rp_in = p_in.resolve()
+                candidates.append(rp_in if rp_in.is_dir() else rp_in.parent)
+            except OSError:
+                pass
+
+    try:
+        job_state = job_manager.get_state()
+    except Exception:
+        job_state = {}
+    job_records: List[Dict[str, Any]] = []
+    if isinstance(job_state.get("active_job"), dict):
+        job_records.append(job_state["active_job"])
+    for hj in job_state.get("history") or []:
+        if isinstance(hj, dict):
+            job_records.append(hj)
+    for job in job_records:
+        for qi in job.get("queue_items") or []:
+            raw_qi = str(qi or "").strip()
+            if not raw_qi or "\x00" in raw_qi or ".preview_clip_" in raw_qi:
+                continue
+            p_qi = Path(os.path.expanduser(raw_qi))
+            if not p_qi.is_absolute():
+                p_qi = root / p_qi
+            try:
+                rp_qi = p_qi.resolve()
+                candidates.append(rp_qi if rp_qi.is_dir() else rp_qi.parent)
+            except OSError:
+                pass
+
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+            if not resolved.is_dir():
+                continue
+            norm = os.path.normcase(str(resolved))
+        except OSError:
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(resolved)
+    return unique
+
+
 def _parse_host_header(raw_host: Optional[str]) -> tuple[str, Optional[int], bool]:
     if not raw_host:
         return "", None, False
@@ -601,6 +782,7 @@ def create_app(
     open_media_fn: Optional[Callable[[Path, bool], str]] = None,
     frame_extract_fn: Optional[Callable[[Path, float, Path], None]] = None,
     allow_lan: bool = False,
+    allow_lan_control: bool = False,
 ) -> FastAPI:
     """Khởi tạo FastAPI app gắn với thư mục gốc dự án (hỗ trợ cô lập hoàn toàn khi test)."""
     root = Path(workspace_root or Path(__file__).resolve().parent.parent).resolve()
@@ -615,16 +797,26 @@ def create_app(
     media_opener = open_media_fn or _default_open_media
     extractor = frame_extract_fn or _default_extract_frame
 
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            await telemetry_hub.shutdown()
+
     app = FastAPI(
         title="AI Video Upscaler & Subtrans Studio",
         version="1.0.0",
         docs_url="/api/docs",
         redoc_url=None,
+        lifespan=_lifespan,
     )
     app.state.workspace_root = root
     app.state.fs_browser = fs_browser
     app.state.job_manager = job_manager
     app.state.telemetry_hub = telemetry_hub
+    app.state.allow_lan = bool(allow_lan)
+    app.state.allow_lan_control = bool(allow_lan_control)
 
     def _apply_security_headers(resp: Any) -> Any:
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -681,6 +873,25 @@ def create_app(
                     JSONResponse(
                         status_code=400,
                         content={"detail": "Tham số truy vấn không được chứa ký tự NUL (\\x00)."},
+                    )
+                )
+        is_loopback = _is_loopback_request(client_host, host_name)
+        if allow_lan and not allow_lan_control and not is_loopback:
+            req_path = request.url.path or ""
+            if (
+                request.method not in {"GET", "HEAD", "OPTIONS"}
+                or req_path == "/api/fs/browse"
+                or req_path.startswith("/api/fs/")
+            ):
+                return _apply_security_headers(
+                    JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": (
+                                "Chế độ --lan mặc định chỉ cho phép theo dõi (read-only). "
+                                "Khởi chạy máy chủ với --lan-control để cho phép điều khiển từ mạng LAN."
+                            )
+                        },
                     )
                 )
         response = await call_next(request)
@@ -764,6 +975,7 @@ def create_app(
                 use_tensorrt=req.use_tensorrt,
                 subs_after_upscale=req.subs_after_upscale,
                 output_dir=req.output_dir,
+                force=req.force,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -878,62 +1090,122 @@ def create_app(
     # 3. PREVIEW 1080p vs 4K SPLIT-COMPARE
     # -----------------------------------------------------------------
     @app.get("/api/preview/candidates")
-    def api_preview_candidates() -> Dict[str, Any]:
-        out_dir = root / "out"
+    def api_preview_candidates(output_dir: Optional[str] = Query(default=None)) -> Dict[str, Any]:
+        try:
+            out_dirs = _collect_known_output_dirs(root, job_manager, extra_dir=output_dir)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         pairs: List[Dict[str, Any]] = []
-        if not out_dir.is_dir():
+        if not out_dirs:
             return {"candidates": pairs}
 
-        # Lập bản đồ từ audit.json để biết chính xác source_file & output_file gốc
+        default_out = (root / "out").resolve()
+        out_dir_set = {os.path.normcase(str(d.resolve())) for d in out_dirs}
+        known_source_dirs = _collect_known_source_dirs(root, out_dirs, job_manager)
+        seen_src_dirs = {os.path.normcase(str(d.resolve())) for d in known_source_dirs}
+
+        def _register_source_dir(cand_dir: Path) -> None:
+            try:
+                rp = cand_dir.resolve()
+                if not rp.is_dir():
+                    return
+                norm = os.path.normcase(str(rp))
+            except OSError:
+                return
+            if norm not in seen_src_dirs:
+                seen_src_dirs.add(norm)
+                known_source_dirs.append(rp)
+
+        # Lập bản đồ từ audit.json để biết chính xác source_file & output_file gốc across all out_dirs
         audit_source_map: Dict[str, str] = {}
         audited_outputs: Dict[str, Path] = {}
-        for audit_dir in _iter_out_search_dirs(out_dir):
-            for af in audit_dir.glob("*.audit.json"):
-                try:
-                    adata = json.loads(af.read_text(encoding="utf-8"))
-                    out_f = str(adata.get("output_file") or "")
-                    src_f = str(adata.get("source_file") or "")
-                    if out_f:
-                        out_p = Path(out_f)
-                        if not out_p.is_absolute():
-                            out_p = (root / out_p).resolve()
-                        else:
-                            out_p = out_p.resolve()
-                        if out_p.is_file() and out_p.suffix.lower() in VIDEO_EXTENSIONS:
-                            norm_out = os.path.normcase(str(out_p))
-                            audited_outputs[norm_out] = out_p
-                            if src_f and Path(src_f).is_file():
-                                audit_source_map[norm_out] = src_f
-                    if src_f and Path(src_f).is_file():
-                        audit_source_map[af.name[:-len(".audit.json")].lower()] = src_f
-                except Exception:
-                    pass
+        for base_out in out_dirs:
+            for audit_dir in _iter_out_search_dirs(base_out):
+                for af in audit_dir.glob("*.audit.json"):
+                    try:
+                        adata = json.loads(af.read_text(encoding="utf-8"))
+                        if not isinstance(adata, dict):
+                            continue
+                        out_f = str(adata.get("output_file") or "").strip()
+                        raw_orig = str(adata.get("original_source_file") or "").strip()
+                        raw_src = str(adata.get("source_file") or "").strip()
+
+                        valid_src_str = ""
+                        for raw_cand in (raw_orig, raw_src):
+                            if not raw_cand or ".preview_clip_" in raw_cand:
+                                continue
+                            src_p = Path(os.path.expanduser(raw_cand))
+                            if not src_p.is_absolute():
+                                src_p = (root / src_p).resolve()
+                            else:
+                                src_p = src_p.resolve()
+                            if src_p.parent.is_dir():
+                                _register_source_dir(src_p.parent)
+                            if src_p.is_file():
+                                valid_src_str = str(src_p)
+                                break
+
+                        if out_f:
+                            out_p = Path(os.path.expanduser(out_f))
+                            if not out_p.is_absolute():
+                                out_p = (root / out_p).resolve()
+                            else:
+                                out_p = out_p.resolve()
+                            if out_p.is_file() and out_p.suffix.lower() in VIDEO_EXTENSIONS:
+                                norm_out = os.path.normcase(str(out_p))
+                                audited_outputs[norm_out] = out_p
+                                if valid_src_str:
+                                    audit_source_map[norm_out] = valid_src_str
+                        if valid_src_str:
+                            audit_source_map[af.name[:-len(".audit.json")].lower()] = valid_src_str
+                    except Exception:
+                        pass
 
         candidate_map: Dict[str, Path] = dict(audited_outputs)
-        scan_video_dirs = [d for d in _iter_out_search_dirs(out_dir) if d.name.lower() != "audit"]
-        for vdir in scan_video_dirs:
+        for base_out in out_dirs:
+            scan_video_dirs = [
+                d for d in _iter_out_search_dirs(base_out) if d.name.lower() not in {"audit", "cast"}
+            ]
+            for vdir in scan_video_dirs:
+                try:
+                    for p in vdir.iterdir():
+                        if (
+                            p.is_file()
+                            and p.suffix.lower() in VIDEO_EXTENSIONS
+                            and not p.name.startswith(".")
+                            and ("_4k" in p.stem.lower())
+                        ):
+                            rp = p.resolve()
+                            candidate_map[os.path.normcase(str(rp))] = rp
+                except OSError:
+                    continue
+
+        def _safe_mtime(p: Path) -> float:
             try:
-                for p in vdir.iterdir():
-                    if (
-                        p.is_file()
-                        and p.suffix.lower() in VIDEO_EXTENSIONS
-                        and not p.name.startswith(".")
-                        and ("_4k" in p.stem.lower())
-                    ):
-                        rp = p.resolve()
-                        candidate_map[os.path.normcase(str(rp))] = rp
+                return p.stat().st_mtime
             except OSError:
-                continue
+                return 0.0
 
         upscaled_files = sorted(
             candidate_map.values(),
-            key=lambda p: p.stat().st_mtime,
+            key=_safe_mtime,
             reverse=True,
         )
 
+        ext_order = [".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"]
+        all_exts = [*ext_order, *(e for e in sorted(VIDEO_EXTENSIONS) if e not in ext_order)]
+
         for up_file in upscaled_files[:40]:
+            try:
+                up_st = up_file.stat()
+            except OSError:
+                continue
             stem = up_file.stem
-            norm_up = os.path.normcase(str(up_file.resolve()))
+            up_resolved = up_file.resolve()
+            norm_up = os.path.normcase(str(up_resolved))
             src_path = audit_source_map.get(norm_up) or audit_source_map.get(stem.lower()) or ""
 
             # Đoán tên file gốc nếu là bản preview (vd: Ep01_preview_10s_4K -> Ep01)
@@ -946,29 +1218,37 @@ def create_app(
                 else re.sub(r"_4K(?:_animejanai)?$", "", stem, flags=re.IGNORECASE)
             )
 
-            if (not src_path or ".preview_clip_" in src_path) and raw_base:
-                for search_base in (root, out_dir, up_file.parent):
-                    for ext in (".mkv", ".mp4", ".webm", ".avi"):
+            if (not src_path or ".preview_clip_" in src_path or not Path(src_path).is_file()) and raw_base:
+                src_path = ""
+                ep_search_dirs: List[Path] = list(known_source_dirs)
+                parent_norm = os.path.normcase(str(up_resolved.parent))
+                if parent_norm not in seen_src_dirs:
+                    ep_search_dirs.append(up_resolved.parent)
+                for search_base in ep_search_dirs:
+                    for ext in all_exts:
                         cand_src = search_base / f"{raw_base}{ext}"
-                        if cand_src.is_file() and cand_src.resolve() != up_file.resolve():
+                        if cand_src.is_file() and cand_src.resolve() != up_resolved:
                             src_path = str(cand_src.resolve())
                             break
-                    if src_path and ".preview_clip_" not in src_path:
+                    if src_path:
                         break
 
-            rel_label = (
-                f"{up_file.parent.name}/{up_file.name}"
-                if up_file.parent.resolve() != out_dir.resolve()
-                else up_file.name
-            )
+            up_parent = up_resolved.parent
+            if up_parent == default_out:
+                rel_label = up_file.name
+            elif os.path.normcase(str(up_parent)) in out_dir_set:
+                rel_label = f"{up_parent.name}/{up_file.name}"
+            else:
+                rel_label = f"{up_parent.name}/{up_file.name}"
+
             pairs.append({
                 "name": rel_label,
-                "upscaled_path": str(up_file.resolve()),
+                "upscaled_path": str(up_resolved),
                 "source_path": src_path if (src_path and Path(src_path).is_file()) else "",
                 "is_preview": is_preview_clip,
                 "preview_seconds": preview_seconds,
-                "size_mb": round(up_file.stat().st_size / (1024 * 1024), 2),
-                "mtime": datetime.fromtimestamp(up_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "size_mb": round(up_st.st_size / (1024 * 1024), 2),
+                "mtime": datetime.fromtimestamp(up_st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
             })
 
         return {"candidates": pairs}
@@ -1082,7 +1362,10 @@ def create_app(
 
         models_list: List[Dict[str, Any]] = []
         if models_file.is_file():
-            raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
+            try:
+                raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                raw_m = {}
             reg = raw_m.get("models", {}) or {}
             for m_id, info in reg.items():
                 if not isinstance(info, dict):
@@ -1163,8 +1446,11 @@ def create_app(
         models_file = root / "models" / "models.yaml"
         valid_models: set[str] = set()
         if models_file.is_file():
-            raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
-            valid_models = {str(k).lower() for k in (raw_m.get("models") or {}).keys()}
+            try:
+                raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
+                valid_models = {str(k).lower() for k in (raw_m.get("models") or {}).keys()}
+            except yaml.YAMLError:
+                valid_models = set()
 
         validated: List[Dict[str, Any]] = []
         for idx, item in enumerate(rules, start=1):
@@ -1203,8 +1489,11 @@ def create_app(
             reg: Dict[str, Any] = {}
             default_id = "animevideov3"
             if models_file.is_file():
-                raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
-                reg = raw_m.get("models") or {}
+                try:
+                    raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
+                    reg = raw_m.get("models") or {}
+                except yaml.YAMLError:
+                    reg = {}
                 for k, v in reg.items():
                     if isinstance(v, dict) and v.get("default"):
                         default_id = str(k)
@@ -1380,9 +1669,9 @@ def create_app(
             for gf in sorted(glossaries_dir.glob("*.yaml")):
                 glossaries.append({"name": gf.name, "path": str(gf.resolve())})
 
-        # Danh sách pending_subs.json
+        # Danh sách pending_subs.json (ưu tiên tệp gốc của workspace trước out/)
         pending_items: List[Dict[str, Any]] = []
-        for p_cand in (root / "out" / "pending_subs.json", root / "pending_subs.json"):
+        for p_cand in (root / "pending_subs.json", root / "out" / "pending_subs.json"):
             if p_cand.is_file():
                 try:
                     p_raw = json.loads(p_cand.read_text(encoding="utf-8"))
@@ -1455,27 +1744,49 @@ def create_app(
         }
 
     @app.get("/api/audits")
-    def api_list_audits() -> Dict[str, Any]:
-        out_dir = root / "out"
+    def api_list_audits(output_dir: Optional[str] = Query(default=None)) -> Dict[str, Any]:
+        try:
+            out_dirs = _collect_known_output_dirs(root, job_manager, extra_dir=output_dir)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         audits: List[Dict[str, Any]] = []
-        discovered_files: List[Path] = []
-        seen_keys: set[str] = set()
+        discovered_entries: List[tuple[Path, Path]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        seen_paths: set[str] = set()
 
-        for search_dir in _iter_out_search_dirs(out_dir):
-            for af in search_dir.glob("*.audit.json"):
-                dedup_key = (
-                    af.name.lower()
-                    if search_dir.resolve() in {out_dir.resolve(), (out_dir / "audit").resolve()}
-                    else f"{search_dir.name.lower()}/{af.name.lower()}"
-                )
-                if dedup_key in seen_keys:
-                    continue
-                seen_keys.add(dedup_key)
-                discovered_files.append(af)
+        for base_out in out_dirs:
+            norm_base = os.path.normcase(str(base_out.resolve()))
+            base_audit_res = (base_out / "audit").resolve()
+            for search_dir in _iter_out_search_dirs(base_out):
+                search_res = search_dir.resolve()
+                for af in search_dir.glob("*.audit.json"):
+                    try:
+                        norm_af = os.path.normcase(str(af.resolve()))
+                    except OSError:
+                        continue
+                    sub_key = (
+                        af.name.lower()
+                        if search_res in {base_out.resolve(), base_audit_res}
+                        else f"{search_dir.name.lower()}/{af.name.lower()}"
+                    )
+                    if norm_af in seen_paths or (norm_base, sub_key) in seen_keys:
+                        continue
+                    seen_paths.add(norm_af)
+                    seen_keys.add((norm_base, sub_key))
+                    discovered_entries.append((af, base_out))
 
-        discovered_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        def _safe_audit_mtime(pair: tuple[Path, Path]) -> float:
+            try:
+                return pair[0].stat().st_mtime
+            except OSError:
+                return 0.0
 
-        for af in discovered_files[:60]:
+        discovered_entries.sort(key=_safe_audit_mtime, reverse=True)
+
+        for af, base_out in discovered_entries[:60]:
             try:
                 st = af.stat()
                 mtime_val = st.st_mtime
@@ -1545,10 +1856,20 @@ def create_app(
 
             sub_audit_md = ""
             cast_yaml = ""
-            doc_dirs = [af.parent, out_dir, out_dir / "audit", out_dir / "cast"]
-            for doc_dir in doc_dirs:
-                if not doc_dir.is_dir():
+            raw_doc_dirs = [af.parent, base_out, base_out / "audit", base_out / "cast"]
+            doc_dirs: List[Path] = []
+            seen_doc_dirs: set[str] = set()
+            for dd in raw_doc_dirs:
+                try:
+                    dd_res = dd.resolve()
+                    norm_dd = os.path.normcase(str(dd_res))
+                except OSError:
                     continue
+                if norm_dd not in seen_doc_dirs and dd_res.is_dir():
+                    seen_doc_dirs.add(norm_dd)
+                    doc_dirs.append(dd_res)
+
+            for doc_dir in doc_dirs:
                 for cand_stem in (stem_4k, stem_src, f"{stem_src}.vi", f"{stem_4k}.vi"):
                     md_p = doc_dir / f"{cand_stem}.audit.md"
                     if not sub_audit_md and md_p.is_file():
@@ -1585,15 +1906,23 @@ def create_app(
 
             episode_label = (
                 f"{af.parent.name}/{stem_4k}"
-                if af.parent.resolve() not in {out_dir.resolve(), (out_dir / "audit").resolve()}
+                if af.parent.resolve() not in {base_out.resolve(), (base_out / "audit").resolve()}
                 else stem_4k
             )
+
+            raw_orig_src = str(adata.get("original_source_file") or "").strip()
+            raw_audit_src = str(adata.get("source_file") or "").strip()
+            resolved_audit_src = ""
+            for src_cand in (raw_orig_src, raw_audit_src):
+                if src_cand and ".preview_clip_" not in src_cand:
+                    resolved_audit_src = src_cand
+                    break
 
             audits.append({
                 "episode": episode_label,
                 "audit_json_path": str(af.resolve()),
                 "output_file": str(adata.get("output_file") or ""),
-                "source_file": str(adata.get("source_file") or ""),
+                "source_file": resolved_audit_src,
                 "status": str(adata.get("status") or mux_info.get("status") or "UNKNOWN"),
                 "sanity_status": str(sanity_info.get("status") or "N/A"),
                 "model_id": str(adata.get("model_id") or ""),
@@ -1613,7 +1942,7 @@ def create_app(
 
         return {
             "audits": audits,
-            "checkpoints": telemetry_hub.read_pipeline_state().get("checkpoints", []),
+            "checkpoints": scan_temp_checkpoints(root, extra_dirs=out_dirs),
         }
 
     @app.get("/api/audits/detail")
@@ -1626,12 +1955,6 @@ def create_app(
         else:
             cand = cand.resolve()
 
-        # Chỉ cho phép đọc các báo cáo kiểm định nằm bên trong workspace_root
-        try:
-            cand.relative_to(root)
-        except ValueError as exc:
-            raise HTTPException(status_code=403, detail="Chỉ cho phép xem báo cáo kiểm định thuộc dự án.") from exc
-
         low_name = cand.name.lower()
         if not (
             low_name.endswith(".audit.json")
@@ -1639,6 +1962,23 @@ def create_app(
             or low_name.endswith(".cast.yaml")
         ):
             raise HTTPException(status_code=400, detail="Loại tệp báo cáo không hợp lệ.")
+
+        # Cho phép đọc biên bản trong workspace_root hoặc bất kỳ thư mục xuất (-o) đã biết
+        allowed_roots = [root, *_collect_known_output_dirs(root, job_manager)]
+        is_allowed = False
+        for ar in allowed_roots:
+            try:
+                cand.relative_to(ar)
+                is_allowed = True
+                break
+            except ValueError:
+                continue
+        if not is_allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="Chỉ cho phép xem báo cáo kiểm định thuộc dự án hoặc thư mục xuất đã cấu hình.",
+            )
+
         if not cand.is_file():
             raise HTTPException(status_code=404, detail="Không tìm thấy tệp báo cáo kiểm định.")
 

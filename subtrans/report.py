@@ -143,8 +143,11 @@ def generate_qa_report(
 
     model_counts = stats.get("model_counts", {})
     total_diag = max(1, len(dialogue_cues))
-    local_cue_count = sum(cnt for mod, cnt in model_counts.items() if "local" in mod.lower() or "translategemma" in mod.lower() or "ollama" in mod.lower())
-    local_pct = (local_cue_count / total_diag) * 100.0
+    untranslated_cue_count = sum(
+        cnt for mod, cnt in model_counts.items()
+        if str(mod).lower() in ("untranslated", "none")
+    )
+    untranslated_pct = (untranslated_cue_count / total_diag) * 100.0
 
     if model_counts:
         lines.extend([
@@ -157,11 +160,11 @@ def generate_qa_report(
             lines.append(f"| `{mod}` | {cnt} | {cnt/total_diag*100:.1f}% |")
         lines.append("")
 
-        if local_pct > 30.0:
+        if untranslated_pct > 30.0:
             lines.extend([
                 "> [!WARNING]",
-                f"> **CẢNH BÁO QUOTA HẠN MỨC**: Số lượng câu thoại do mô hình cục bộ (Local Ollama) dịch chiếm **{local_pct:.1f}%** (> 30% tổng số câu thoại).",
-                "> Cần kiểm tra lại các câu thoại do mô hình cục bộ sinh ra để đảm bảo không bị lỗi xưng hô hoặc hiểu sai ngữ cảnh!",
+                f"> **CẢNH BÁO QUOTA HẠN MỨC**: Số lượng câu thoại chưa thể dịch cloud (`[Chưa dịch]`) chiếm **{untranslated_pct:.1f}%** (> 30% tổng số câu thoại).",
+                "> Cần chạy lại sau khi reset quota PT để hoàn thiện các câu thoại còn thiếu!",
                 ""
             ])
 
@@ -190,36 +193,54 @@ def generate_qa_report(
         "",
     ])
 
+    def _safe_int(val: Any, default: int = 0) -> int:
+        if isinstance(val, bool) or val is None:
+            return default
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str):
+            try:
+                return int(val.strip())
+            except ValueError:
+                return default
+        return default
+
     # Section: Implicit Context Caching & Token Telemetry (PT)
     token_telemetry = stats.get("token_telemetry_pt", {})
     if not token_telemetry and cache is not None and hasattr(cache, "get_token_telemetry_today_pt"):
         token_telemetry = cache.get_token_telemetry_today_pt()
-    if token_telemetry:
-        lines.extend([
-            "### ⚡ Hiệu Suất Gemini Implicit Context Caching & Token (Hôm Nay PT)",
-            "",
-            "| Model | Input Tokens | Cached Input Tokens | Cache Hit Rate (%) | Output Tokens | Thinking Tokens |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- |",
-        ])
-        for t_mod, t_vals in token_telemetry.items():
-            p_tok = int(t_vals.get("prompt_tokens", 0))
-            c_tok = int(t_vals.get("cached_tokens", 0))
-            o_tok = int(t_vals.get("candidates_tokens", 0))
-            th_tok = int(t_vals.get("thinking_tokens", 0))
-            hit_pct = (c_tok / p_tok * 100.0) if p_tok > 0 else 0.0
-            lines.append(f"| `{t_mod}` | {p_tok:,} | {c_tok:,} | **{hit_pct:.1f}%** | {o_tok:,} | {th_tok:,} |")
-        lines.append("")
+    if isinstance(token_telemetry, dict) and token_telemetry:
+        valid_tok_rows = [
+            (t_mod, t_vals)
+            for t_mod, t_vals in token_telemetry.items()
+            if isinstance(t_vals, dict)
+        ]
+        if valid_tok_rows:
+            lines.extend([
+                "### ⚡ Hiệu Suất Gemini Implicit Context Caching & Token (Hôm Nay PT)",
+                "",
+                "| Model | Input Tokens | Cached Input Tokens | Cache Hit Rate (%) | Output Tokens | Thinking Tokens |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- |",
+            ])
+            for t_mod, t_vals in valid_tok_rows:
+                p_tok = _safe_int(t_vals.get("prompt_tokens", 0))
+                c_tok = _safe_int(t_vals.get("cached_tokens", 0))
+                o_tok = _safe_int(t_vals.get("candidates_tokens", 0))
+                th_tok = _safe_int(t_vals.get("thinking_tokens", 0))
+                hit_pct = (c_tok / p_tok * 100.0) if p_tok > 0 else 0.0
+                lines.append(f"| `{t_mod}` | {p_tok:,} | {c_tok:,} | **{hit_pct:.1f}%** | {o_tok:,} | {th_tok:,} |")
+            lines.append("")
 
     # Section: Pacific Time Quota & Usage
-    pt_cues = stats.get("pacific_time_cues", {})
-    pt_reqs = stats.get("pacific_time_requests", {})
+    raw_pt_reqs = stats.get("pacific_time_requests", {})
+    pt_reqs = raw_pt_reqs if isinstance(raw_pt_reqs, dict) else {}
     from subtrans.config import load_models_config
     from subtrans.cache import get_next_pt_reset, get_now_pt, TranslationCache
     models_cfg = load_models_config()
     configured_models = models_cfg.get("models", {})
     next_pt, next_vn = get_next_pt_reset()
     now_pt = get_now_pt()
-    cache_inst = cache if isinstance(cache, TranslationCache) else TranslationCache()
+    cache_inst = cache if (cache is not None and hasattr(cache, "is_model_exhausted")) else TranslationCache()
 
     lines.extend([
         f"### Hạn Mức Gemini API Theo Ngày Thái Bình Dương (Pacific Time - PT)",
@@ -231,14 +252,18 @@ def generate_qa_report(
         "| :--- | :--- | :--- | :--- | :--- | :--- |",
     ])
 
-    # Hiển thị tất cả model trong chuỗi models.yaml
-    tracked_models = list(configured_models.keys())
+    # Hiển thị tất cả model theo thứ tự active chain trong models.yaml
+    active_chain = [m for m in models_cfg.get("chain", []) if m and m != "local"]
+    tracked_models = list(dict.fromkeys([*active_chain, *[m for m in configured_models.keys() if m != "local"]]))
     for mod in tracked_models:
-        r_cnt = pt_reqs.get(mod, 0)
+        r_cnt = _safe_int(pt_reqs.get(mod, 0))
         mod_info = configured_models.get(mod, {})
         rpd_val = mod_info.get("rpd", "chưa biết")
         rpd_source = mod_info.get("rpd_source", "chưa xác minh")
-        is_exhausted = cache_inst.is_model_exhausted(mod)
+        try:
+            is_exhausted = cache_inst.is_model_exhausted(mod) is True
+        except Exception:
+            is_exhausted = False
 
         rem_str = "—"
         if isinstance(rpd_val, int):
@@ -250,20 +275,27 @@ def generate_qa_report(
                 st = "🟢 Khả dụng"
         else:
             rem_str = str(rpd_val)
-            st = "🟢 Không giới hạn (Local)"
+            st = "🟡 Chưa xác định RPD"
 
         lines.append(f"| `{mod}` | {r_cnt} | {rpd_val} | {rem_str} | {rpd_source} | {st} |")
     lines.append("")
 
-    # Cảnh báo nếu model chính sắp hết
-    primary_m = "gemini-3.8-flash"
-    primary_reqs_used = pt_reqs.get(primary_m, 0)
-    primary_rpd = configured_models.get(primary_m, {}).get("rpd", 20)
+    # Cảnh báo nếu model chính của lượt chạy sắp hết
+    provenance_primary = (stats.get("provenance") or {}).get("primary_model")
+    primary_m = provenance_primary or (active_chain[0] if active_chain else "gemini-3.5-flash-lite")
+    if primary_m in active_chain:
+        _p_idx = active_chain.index(primary_m)
+        fallback_target = active_chain[_p_idx + 1] if _p_idx + 1 < len(active_chain) else "dừng an toàn [Chưa dịch]"
+    else:
+        fallback_target = next((m for m in active_chain if m != primary_m), "dừng an toàn [Chưa dịch]")
+
+    primary_reqs_used = _safe_int(pt_reqs.get(primary_m, 0))
+    primary_rpd = configured_models.get(primary_m, {}).get("rpd")
     if isinstance(primary_rpd, int) and (primary_rpd - primary_reqs_used) < 5:
         lines.extend([
             "> [!WARNING]",
             f"> **CẢNH BÁO HẠN MỨC GẦN HẾT**: Model `{primary_m}` chỉ còn **{max(0, primary_rpd - primary_reqs_used)} requests** trong ngày PT.",
-            f"> Tập tiếp theo nếu thiếu hạn mức sẽ tự động kích hoạt chuyển sang `{models_cfg.get('chain', [])[1]}`.",
+            f"> Tập tiếp theo nếu thiếu hạn mức sẽ tự động kích hoạt chuyển sang `{fallback_target}`.",
             ""
         ])
 
@@ -316,24 +348,24 @@ def generate_qa_report(
         "",
     ])
 
-    # Section: Cues generated by Local or Lite models (B4)
-    local_or_lite_cues = [
+    # Section: Cues generated by Flash-Lite models (B4)
+    lite_cues = [
         c for c in dialogue_cues
-        if any(tag in (getattr(c, "model_used", "") or "").lower() for tag in ["local", "translategemma", "ollama", "lite", "flash-lite"])
+        if any(tag in (getattr(c, "model_used", "") or "").lower() for tag in ["lite", "flash-lite"])
     ]
-    if local_or_lite_cues:
+    if lite_cues:
         lines.extend([
-            f"### 📋 Danh sách câu thoại do Local / Lite sinh ra ({len(local_or_lite_cues)} cues)",
+            f"### 📋 Danh sách câu thoại do Flash-Lite sinh ra ({len(lite_cues)} cues)",
             "",
             "| ID | Time | Model | Japanese | Vietnamese |",
             "| :--- | :--- | :--- | :--- | :--- |",
         ])
-        for c in local_or_lite_cues[:50]: # Hiển thị tối đa 50 cues tiêu biểu
+        for c in lite_cues[:50]:  # Hiển thị tối đa 50 cues tiêu biểu
             t_str = format_timestamp(c.start)
             mod_str = getattr(c, 'model_used', 'N/A')
             lines.append(f"| {c.id} | {t_str} | `{mod_str}` | {c.ja} | {c.vi} |")
-        if len(local_or_lite_cues) > 50:
-            lines.append(f"*... và {len(local_or_lite_cues) - 50} câu khác.*")
+        if len(lite_cues) > 50:
+            lines.append(f"*... và {len(lite_cues) - 50} câu khác.*")
         lines.append("")
 
     lines.extend([

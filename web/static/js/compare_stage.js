@@ -41,15 +41,39 @@ export function initCompareStage({ selectTabById } = {}) {
   const placeholder = document.getElementById("compare-placeholder");
   const metaCaption = document.getElementById("compare-meta-caption");
 
+  const tsErrorEl = document.getElementById("compare-ts-error");
+  const offsetErrorEl = document.getElementById("compare-offset-error");
+
   let candidatesCache = [];
   let srcImg = null;
   let upImg = null;
   let wipePct = 50;
   let pointerPos = null;
   let draggingSplit = false;
+  let renderRafId = 0;
   let imageBounds = { x: 0, y: 0, w: 0, h: 0 };
 
+  const setFieldError = (inputEl, errorEl, msg) => {
+    if (msg) {
+      inputEl?.setAttribute("aria-invalid", "true");
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+      }
+    } else {
+      inputEl?.removeAttribute("aria-invalid");
+      if (errorEl) {
+        errorEl.textContent = "";
+        errorEl.hidden = true;
+      }
+    }
+  };
+
   const renderCanvas = () => {
+    const comparePanel = document.getElementById("panel-compare");
+    if (comparePanel && comparePanel.hasAttribute("hidden")) {
+      return;
+    }
     if (!(canvas instanceof HTMLCanvasElement) || !srcImg || !upImg) return;
     const rect = canvas.getBoundingClientRect();
     const cssW = Math.max(320, Math.floor(rect.width || 1280));
@@ -259,7 +283,15 @@ export function initCompareStage({ selectTabById } = {}) {
     ctx.restore();
   };
 
-  const setWipe = (pct) => {
+  const scheduleRender = () => {
+    if (renderRafId) return;
+    renderRafId = window.requestAnimationFrame(() => {
+      renderRafId = 0;
+      renderCanvas();
+    });
+  };
+
+  const setWipe = (pct, { coalesce = false } = {}) => {
     wipePct = Math.max(0, Math.min(100, Number(pct)));
     if (wipeRange instanceof HTMLInputElement) {
       wipeRange.value = String(Math.round(wipePct));
@@ -268,7 +300,11 @@ export function initCompareStage({ selectTabById } = {}) {
       wipeLabel.textContent = `${Math.round(wipePct)}%`;
     }
     stage?.style.setProperty("--wipe-pct", `${wipePct}%`);
-    renderCanvas();
+    if (coalesce) {
+      scheduleRender();
+    } else {
+      renderCanvas();
+    }
   };
 
   const loadCandidates = async () => {
@@ -315,26 +351,22 @@ export function initCompareStage({ selectTabById } = {}) {
     const rawTs = tsInput?.value.trim() ?? "";
     const tsSec = rawTs === "" ? 2.0 : Number(rawTs);
     if (!Number.isFinite(tsSec) || tsSec < 0) {
-      if (tsInput) {
-        tsInput.setAttribute("aria-invalid", "true");
-        tsInput.focus();
-      }
+      setFieldError(tsInput, tsErrorEl, "Mốc thời gian phải là số giây hợp lệ (>= 0).");
+      tsInput?.focus();
       showToast("Mốc thời gian phải là số giây hợp lệ (>= 0).", "warn");
       return;
     }
-    tsInput?.removeAttribute("aria-invalid");
+    setFieldError(tsInput, tsErrorEl, null);
 
     const rawOffset = offsetInput?.value.trim() || "";
     const offsetVal = rawOffset === "" ? null : Number(rawOffset);
     if (offsetVal !== null && !Number.isFinite(offsetVal)) {
-      if (offsetInput) {
-        offsetInput.setAttribute("aria-invalid", "true");
-        offsetInput.focus();
-      }
+      setFieldError(offsetInput, offsetErrorEl, "Độ lệch gốc phải là số giây hữu hạn hợp lệ.");
+      offsetInput?.focus();
       showToast("Độ lệch gốc (offset) phải là số giây hữu hạn hợp lệ.", "warn");
       return;
     }
-    offsetInput?.removeAttribute("aria-invalid");
+    setFieldError(offsetInput, offsetErrorEl, null);
 
     if (btnExtract instanceof HTMLButtonElement) {
       btnExtract.disabled = true;
@@ -442,6 +474,9 @@ export function initCompareStage({ selectTabById } = {}) {
     }
   });
 
+  tsInput?.addEventListener("input", () => setFieldError(tsInput, tsErrorEl, null));
+  offsetInput?.addEventListener("input", () => setFieldError(offsetInput, offsetErrorEl, null));
+
   btnExtract?.addEventListener("click", extractAndCompare);
   wipeRange?.addEventListener("input", () => setWipe(wipeRange.value));
   loupeToggle?.addEventListener("change", renderCanvas);
@@ -457,9 +492,9 @@ export function initCompareStage({ selectTabById } = {}) {
       if (draggingSplit && rect.width > 0) {
         const effW = imageBounds.w > 0 ? imageBounds.w : rect.width;
         const effX = imageBounds.w > 0 ? x - imageBounds.x : x;
-        setWipe((effX / Math.max(1, effW)) * 100);
+        setWipe((effX / Math.max(1, effW)) * 100, { coalesce: true });
       } else {
-        renderCanvas();
+        scheduleRender();
       }
     };
 
@@ -487,18 +522,18 @@ export function initCompareStage({ selectTabById } = {}) {
       } catch {
         // Ignore if pointer was not captured
       }
-      renderCanvas();
+      scheduleRender();
     };
     stage.addEventListener("pointerup", endDrag);
     stage.addEventListener("pointercancel", endDrag);
     stage.addEventListener("pointerleave", () => {
       draggingSplit = false;
       pointerPos = null;
-      renderCanvas();
+      scheduleRender();
     });
 
     if (typeof ResizeObserver === "function") {
-      new ResizeObserver(() => renderCanvas()).observe(stage);
+      new ResizeObserver(() => scheduleRender()).observe(stage);
     }
   }
 

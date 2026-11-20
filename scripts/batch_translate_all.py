@@ -15,8 +15,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-sys.stdout.reconfigure(encoding='utf-8')
-
 PROJECT_ROOT = Path(r"E:\ai-video-upscaler")
 PYTHON_BIN = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 UPSCALE_PY = PROJECT_ROOT / "upscale.py"
@@ -145,6 +143,7 @@ def prefetch_episode_stage_a(
     output_dir: Path = SUB_OUT_DIR,
     subs_quality: str = "normal",
     dry_run: bool = False,
+    skip_if_series_cast_missing: bool = False,
 ) -> dict:
     """
     Chuẩn bị trước (gối đầu nền) phụ đề text & bảng nhân vật Stage A Cast Sheet cho tập kế tiếp `N+1`
@@ -153,19 +152,37 @@ def prefetch_episode_stage_a(
     - Ghi sẵn `<base_name>.cast.yaml` vào `output_dir` để khi `upscale.py --subs-only` khởi chạy ở tập `N+1`,
       Stage A lập tức đọc từ đĩa trong ~0ms mà không mất thời gian chờ mạng.
     """
+    vid_dir = os.path.dirname(os.path.abspath(fpath))
+    base_name = os.path.splitext(os.path.basename(fpath))[0]
+    extracted_used = False
+    cleanup_fn = None
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
+        from src.cleanup import cleanup_subtitle_extracts
         from src.subtitles import find_or_extract_subtitles
-        from subtrans.cast_sheet import load_or_generate_series_cast_sheet
+        from subtrans.cache import TranslationCache
+        from subtrans.cast_sheet import (
+            extract_series_name,
+            get_series_cast_path,
+            load_or_generate_series_cast_sheet,
+        )
         from subtrans.config import load_config, load_models_config
         from subtrans.parser import parse_and_align_subtitles
 
-        base_name = os.path.splitext(os.path.basename(fpath))[0]
+        cleanup_fn = cleanup_subtitle_extracts
         audit_cast = output_dir / "audit" / f"{base_name}.cast.yaml"
         direct_cast = output_dir / f"{base_name}.cast.yaml"
         if audit_cast.exists() or direct_cast.exists():
             return {"status": "ALREADY_READY", "episode": base_name}
 
+        if skip_if_series_cast_missing:
+            series_name = extract_series_name(base_name)
+            series_cast = get_series_cast_path(series_name, output_dir)
+            audit_series_cast = output_dir / "audit" / series_cast.name
+            if not series_cast.exists() and not audit_series_cast.exists():
+                return {"status": "SKIPPED_WAIT_SERIES_CAST", "episode": base_name}
+
+        extracted_used = True
         ja_sub, en_sub = find_or_extract_subtitles(fpath, prefer_whisper_when_no_ja=False)
         if not ja_sub:
             return {"status": "SKIPPED_NO_TEXT_SUB", "episode": base_name}
@@ -191,6 +208,7 @@ def prefetch_episode_stage_a(
         timeout_ms = int(cfg.get("gemini", {}).get("request_timeout_ms", 45000))
 
         output_dir.mkdir(parents=True, exist_ok=True)
+        cache_inst = TranslationCache()
         cast_glossary = load_or_generate_series_cast_sheet(
             cues=cues,
             source_name=base_name,
@@ -200,11 +218,18 @@ def prefetch_episode_stage_a(
             fallback_models=fallbacks,
             timeout_ms=timeout_ms,
             dry_run=dry_run,
+            cache=cache_inst,
         )
         chars_n = len(cast_glossary.characters) if (cast_glossary and cast_glossary.characters) else 0
         return {"status": "PREFETCHED", "episode": base_name, "characters": chars_n}
     except Exception as e:
         return {"status": "ERROR", "episode": os.path.basename(fpath), "error": str(e)}
+    finally:
+        if extracted_used and cleanup_fn is not None:
+            try:
+                cleanup_fn(vid_dir, base_name)
+            except Exception:
+                pass
 
 
 class StageAPrefetchWorker:
@@ -235,10 +260,22 @@ class StageAPrefetchWorker:
             same_folder = os.path.dirname(os.path.abspath(current_fpath)) == os.path.dirname(os.path.abspath(next_fpath))
 
         def _task():
-            if same_folder and same_series_headstart_sec > 0:
-                # Nhường tập N tạo <series>.cast.yaml trước nếu cùng thư mục series để không gọi trùng Stage A
-                if self._cancel_event.wait(timeout=same_series_headstart_sec):
+            if same_folder:
+                if same_series_headstart_sec > 0:
+                    # Nhường tập N tạo <series>.cast.yaml trước nếu cùng thư mục series để không gọi trùng Stage A
+                    if self._cancel_event.wait(timeout=same_series_headstart_sec):
+                        return {"status": "CANCELLED"}
+                if self._cancel_event.is_set():
                     return {"status": "CANCELLED"}
+                sys.path.insert(0, str(PROJECT_ROOT))
+                from subtrans.cast_sheet import extract_series_name, get_series_cast_path
+
+                next_base = os.path.splitext(os.path.basename(next_fpath))[0]
+                series_name = extract_series_name(next_base)
+                series_cast = get_series_cast_path(series_name, output_dir)
+                audit_series_cast = output_dir / "audit" / series_cast.name
+                if not series_cast.exists() and not audit_series_cast.exists():
+                    return {"status": "SKIPPED_WAIT_SERIES_CAST", "episode": next_base}
             if self._cancel_event.is_set():
                 return {"status": "CANCELLED"}
             return self._prefetch_fn(next_fpath, output_dir=output_dir, subs_quality=subs_quality)
@@ -248,11 +285,22 @@ class StageAPrefetchWorker:
         return fut
 
     def wait_if_inflight(self, fpath: str, timeout: float = 20.0) -> Optional[dict]:
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
         fut = self._futures.pop(fpath, None)
         if fut is None:
             return None
         try:
             return fut.result(timeout=timeout)
+        except (TimeoutError, FuturesTimeoutError):
+            if fut.cancel():
+                return None
+            # Không nuốt TimeoutError khi worker thread vẫn đang chạy/ghi file:
+            # đợi luồng kết thúc hẳn để tránh race với run_translation_for_file.
+            try:
+                return fut.result()
+            except Exception:
+                return None
         except Exception:
             return None
 
@@ -262,6 +310,23 @@ class StageAPrefetchWorker:
             for fut in self._futures.values():
                 fut.cancel()
         self._executor.shutdown(wait=not cancel)
+
+
+def _has_external_vi_output(fpath: str, out_dir: Path, started_at: float) -> bool:
+    base_name = os.path.splitext(os.path.basename(fpath))[0]
+    vid_dir = Path(os.path.abspath(fpath)).parent
+    candidates = [
+        vid_dir / f"{base_name}.vi.srt",
+        out_dir / f"{base_name}.vi.srt",
+        out_dir / f"{base_name}.srt",
+    ]
+    for cand in candidates:
+        try:
+            if cand.exists() and cand.stat().st_size > 0 and cand.stat().st_mtime >= (started_at - 1.0):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def run_translation_for_file(
@@ -285,14 +350,15 @@ def run_translation_for_file(
         cmd.append("--no-embed")
     if prefer_whisper:
         cmd.append("--prefer-whisper")
-    
+
     last_err = ""
     for attempt in range(1, max_retries + 1):
         t0 = time.time()
         res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
         elapsed = time.time() - t0
         combined_out = f"{res.stdout or ''}\n{res.stderr or ''}"
-        
+        low_out = combined_out.lower()
+
         if res.returncode == 0 and (no_embed or has_vietnamese_sub(fpath)):
             return {
                 "status": "SUCCESS",
@@ -316,12 +382,26 @@ def run_translation_for_file(
                 "attempt": attempt,
                 "error": "Phụ đề xuất ở chế độ .partial.srt (đã lưu vào pending_subs.json, không retry lãng phí quota).",
             }
-            
+
+        translation_done = (
+            "không thể nhúng phụ đề vào container" in low_out
+            or "file phụ đề ngoài vẫn sẵn sàng" in low_out
+            or "hoàn tất dịch phụ đề độc lập" in low_out
+            or _has_external_vi_output(fpath, SUB_OUT_DIR, t0)
+        )
+        if res.returncode == 0 and translation_done:
+            return {
+                "status": "EMBED_FAILED",
+                "duration_seconds": round(elapsed, 1),
+                "attempt": attempt,
+                "error": "Dịch phụ đề đã hoàn tất (file ngoài sẵn sàng) nhưng bước nhúng/audit MKV trả về lỗi — không retry dịch lại.",
+            }
+
         last_err = res.stderr[-500:] if res.stderr else res.stdout[-500:]
         print(f"⚠️ [ATTEMPT {attempt}/{max_retries} FAILED] {os.path.basename(fpath)}: {last_err.strip()[-200:]}", flush=True)
         if attempt < max_retries:
             time.sleep(10 * attempt)
-            
+
     return {
         "status": "FAILED",
         "duration_seconds": 0,
@@ -342,6 +422,17 @@ def build_cli_parser():
 
 
 def main(argv=None):
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     args = build_cli_parser().parse_args(argv)
     print("=" * 80, flush=True)
     print("🎬 TRI-SUB AI BATCH TRANSLATOR - SEQUENTIAL RUNNER", flush=True)
@@ -442,6 +533,9 @@ def main(argv=None):
             elif res["status"] == "PARTIAL_PENDING":
                 state["failed"] += 1
                 print(f"[{idx}/{len(queue)}] ⏸️ TẠM LƯU PARTIAL: {fname} ({res.get('error')})", flush=True)
+            elif res["status"] == "EMBED_FAILED":
+                state["failed"] += 1
+                print(f"[{idx}/{len(queue)}] ⚠️ DỊCH XONG NHƯNG LỖI NHÚNG MKV: {fname} ({res.get('error')})", flush=True)
             else:
                 state["failed"] += 1
                 print(f"[{idx}/{len(queue)}] ❌ THẤT BẠI: {fname} (Lỗi: {res.get('error')})", flush=True)

@@ -950,8 +950,8 @@ def test_t4_scenario_6_high_concurrency_sqlite_rag_windows_locks(tmp_path: Path)
     assert len(errors) == 0, f"Concurrent database errors encountered: {errors}"
 
     # Close and ensure files are immediately deletable on Windows
-    del cache
-    del kb
+    cache = None
+    kb = None
 
     os.remove(cache_db)
     os.remove(rag_db)

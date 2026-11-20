@@ -380,7 +380,7 @@ def snap_whisper_cues_to_en(
                 if dist < min_dist:
                     min_dist = dist
 
-            if min_dist > 2500 or len(c.ja) <= 6 or bool(SOUND_KEYWORDS_REGEX.search(c.ja)):
+            if min_dist > 2500 or (len(c.ja) <= 6 and min_dist > 600) or bool(SOUND_KEYWORDS_REGEX.search(c.ja)):
                 c.is_dropped_sound = True
                 c.is_skipped = True
                 c.backend_used = "dropped_sound"
@@ -456,15 +456,30 @@ def parse_and_align_subtitles(
         split_ms = int(piecewise_ja_offsets[0].get("until_ms", 0))
         off_before = int(piecewise_ja_offsets[0].get("offset_ms", 0))
         off_after = int(piecewise_ja_offsets[1].get("offset_ms", 0))
+        kept_events = []
         for ev in ja_ssa.events:
             shift_val = off_before if ev.start < split_ms else off_after
-            ev.start = max(0, ev.start + shift_val)
-            ev.end = max(ev.start + 1, ev.end + shift_val)
+            new_start = int(ev.start) + shift_val
+            new_end = int(ev.end) + shift_val
+            if new_end <= 0:
+                continue
+            ev.start = max(0, new_start)
+            ev.end = max(ev.start + 50, new_end)
+            kept_events.append(ev)
+        ja_ssa.events = kept_events
         logger.info(
             f"Đã dịch chuyển Piecewise 2-Segment phụ đề tiếng Nhật: <{split_ms}ms ({off_before}ms), >={split_ms}ms ({off_after}ms)."
         )
     elif ja_offset_ms != 0:
         ja_ssa.shift(ms=ja_offset_ms)
+        kept_events = []
+        for ev in ja_ssa.events:
+            if int(ev.end) <= 0:
+                continue
+            ev.start = max(0, int(ev.start))
+            ev.end = max(ev.start + 50, int(ev.end))
+            kept_events.append(ev)
+        ja_ssa.events = kept_events
         logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
     ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
     ja_ssa.events = split_multi_speaker_cc_events(ja_ssa.events)
@@ -481,9 +496,14 @@ def parse_and_align_subtitles(
             clean_en = clean_subtitle_text(event.text)
             if not clean_en:
                 continue
-            # Apply manual offset to EN start and end times
-            en_start = event.start + en_offset_ms
-            en_end = event.end + en_offset_ms
+            # Apply manual offset to EN start and end times (drop shifted <= 0, clamp partial overlap)
+            en_start = int(event.start) + en_offset_ms
+            en_end = int(event.end) + en_offset_ms
+            if en_offset_ms != 0:
+                if en_end <= 0:
+                    continue
+                en_start = max(0, en_start)
+                en_end = max(en_start + 50, en_end)
             dur = max(1, en_end - en_start)
             en_cues.append({
                 "id": idx,
@@ -586,13 +606,17 @@ def parse_and_align_subtitles(
         )
         cues.append(cue)
 
-    # Sắp xếp danh sách cue tuần tự theo start time tăng dần (bảo toàn trọn vẹn thời lượng âm thanh gốc)
+    # Sắp xếp danh sách cue tuần tự theo start time tăng dần (xử lý triệt để >=3 cue trùng start hoặc bị xen bởi skipped cue)
     cues.sort(key=lambda c: (c.start, c.end, c.id))
-    for i in range(len(cues) - 1):
-        if not cues[i].is_skipped and not cues[i + 1].is_skipped:
-            if cues[i].start == cues[i + 1].start:
-                cues[i + 1].start += 10
-                cues[i + 1].end = max(cues[i + 1].end, cues[i + 1].start + 300)
+    last_active_start: Optional[int] = None
+    for c in cues:
+        if c.is_skipped:
+            continue
+        if last_active_start is not None and c.start <= last_active_start:
+            c.start = last_active_start + 10
+            c.end = max(c.end, c.start + 300)
+        last_active_start = c.start
+    cues.sort(key=lambda c: (c.start, c.end, c.id))
 
     # Tự động ghim mốc thời gian Whisper theo track phụ đề EN phòng thu (Auto-Align Subtitle Timestamps)
     if auto_align_whisper_to_en and is_whisper and en_ssa and en_cues:

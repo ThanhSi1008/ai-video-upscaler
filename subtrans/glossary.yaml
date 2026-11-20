@@ -10,7 +10,7 @@
 #  - `vi` la cach dich mac dinh; `alt` la cac cach hop le khac tuy ngu canh;
 #    `note` giai thich khi nao dung cai nao. `genre` de loc bang --genres.
 #  - Ten nhan vat, ky nang, dia danh RIENG cua tung bo: dat o `characters`
-#    hoac trong file glossary.<ten-bo>.yaml (dung `subtrans glossary-seed`
+#    hoac trong file glossary.<ten-bo>.yaml (dung `subtrans rag seed`
 #    de lay danh sach ung vien, sau do tu duyet).
 # =====================================================================
 

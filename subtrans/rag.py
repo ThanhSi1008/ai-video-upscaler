@@ -14,6 +14,7 @@ import sqlite3
 import hashlib
 import logging
 import contextlib
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
 import pysubs2
@@ -226,14 +227,22 @@ class KnowledgeBase:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or KNOWLEDGE_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._error_bank_cache: Dict[Optional[str], List[Tuple[str, str, str, str, str]]] = {}
+        self._error_bank_lock = threading.Lock()
         self._init_db()
 
+    def _invalidate_error_bank_cache(self) -> None:
+        with self._error_bank_lock:
+            self._error_bank_cache.clear()
+
     @contextlib.contextmanager
-    def _connect(self):
+    def _connect(self, immediate: bool = False):
         conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=10000")
         try:
             with conn:
+                if immediate:
+                    conn.execute("BEGIN IMMEDIATE")
                 yield conn
         finally:
             conn.close()
@@ -252,6 +261,7 @@ class KnowledgeBase:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+        with self._connect(immediate=True) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS gold_units (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,6 +344,55 @@ class KnowledgeBase:
                     ))
             conn.commit()
 
+    def _insert_gold_unit_conn(
+        self,
+        conn: sqlite3.Connection,
+        ja_text: str,
+        vi_text: str,
+        en_text: Optional[str] = None,
+        series: Optional[str] = None,
+        episode: Optional[str] = None,
+        speaker: Optional[str] = None,
+        addressee: Optional[str] = None,
+        status: str = "reviewed",
+        lang_pair: str = "ja-vi",
+    ) -> bool:
+        ja_norm = normalize_nfc(ja_text).strip()
+        vi_norm = normalize_nfc(vi_text).strip()
+        if not ja_norm or not vi_norm:
+            return False
+
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM gold_units WHERE ja_text = ? AND vi_text = ? AND series IS ?",
+            (ja_norm, vi_norm, series),
+        )
+        if cursor.fetchone():
+            return False
+
+        ngram_str = _generate_ngram_string(ja_norm)
+        cursor.execute("""
+            INSERT INTO gold_units (series, episode, ja_text, ja_ngram, en_text, vi_text, speaker, addressee, status, lang_pair)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            series,
+            episode,
+            ja_norm,
+            ngram_str,
+            normalize_nfc(en_text).strip() if en_text else None,
+            vi_norm,
+            speaker,
+            addressee,
+            status,
+            lang_pair,
+        ))
+        new_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT OR REPLACE INTO gold_units_fts(rowid, ja_ngram) VALUES (?, ?)",
+            (new_id, ngram_str),
+        )
+        return True
+
     def add_gold_unit(
         self,
         ja_text: str,
@@ -356,38 +415,22 @@ class KnowledgeBase:
         if not ja_norm or not vi_norm:
             return False
 
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id FROM gold_units WHERE ja_text = ? AND vi_text = ? AND series IS ?",
-                (ja_norm, vi_norm, series),
+        with self._connect(immediate=True) as conn:
+            inserted = self._insert_gold_unit_conn(
+                conn,
+                ja_text=ja_norm,
+                vi_text=vi_norm,
+                en_text=en_text,
+                series=series,
+                episode=episode,
+                speaker=speaker,
+                addressee=addressee,
+                status=status,
+                lang_pair=lang_pair,
             )
-            if cursor.fetchone():
-                return False
-
-            ngram_str = _generate_ngram_string(ja_norm)
-            cursor.execute("""
-                INSERT INTO gold_units (series, episode, ja_text, ja_ngram, en_text, vi_text, speaker, addressee, status, lang_pair)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                series,
-                episode,
-                ja_norm,
-                ngram_str,
-                normalize_nfc(en_text).strip() if en_text else None,
-                vi_norm,
-                speaker,
-                addressee,
-                status,
-                lang_pair,
-            ))
-            new_id = cursor.lastrowid
-            cursor.execute(
-                "INSERT OR REPLACE INTO gold_units_fts(rowid, ja_ngram) VALUES (?, ?)",
-                (new_id, ngram_str),
-            )
-            conn.commit()
-            return True
+            if inserted:
+                conn.commit()
+            return inserted
 
     def import_subtitles_triplet(
         self,
@@ -412,56 +455,61 @@ class KnowledgeBase:
 
         imported_count = 0
         ep_name = episode or ja_path.stem
+        norm_series = series.lower()
 
-        for ja_evt in ja_ssa:
-            if ja_evt.is_comment:
-                continue
-            ja_text = re.sub(r"\{[^\}]*\}", "", ja_evt.text).replace(r"\N", " ").strip()
-            if not ja_text:
-                continue
-
-            # Find matching VI event by highest overlap
-            best_vi_match = None
-            best_vi_overlap = 0
-            for vi_evt in vi_ssa:
-                if vi_evt.is_comment:
+        with self._connect(immediate=True) as conn:
+            for ja_evt in ja_ssa:
+                if ja_evt.is_comment:
                     continue
-                overlap = max(0, min(ja_evt.end, vi_evt.end) - max(ja_evt.start, vi_evt.start))
-                if overlap > best_vi_overlap:
-                    best_vi_overlap = overlap
-                    best_vi_match = vi_evt
+                ja_text = re.sub(r"\{[^\}]*\}", "", ja_evt.text).replace(r"\N", " ").strip()
+                if not ja_text:
+                    continue
 
-            if not best_vi_match or best_vi_overlap < 300:
-                continue
-
-            vi_text = re.sub(r"\{[^\}]*\}", "", best_vi_match.text).replace(r"\N", " ").strip()
-            if not vi_text:
-                continue
-
-            # Optional EN match
-            en_text = None
-            if en_ssa:
-                best_en_match = None
-                best_en_overlap = 0
-                for en_evt in en_ssa:
-                    if en_evt.is_comment:
+                # Find matching VI event by highest overlap
+                best_vi_match = None
+                best_vi_overlap = 0
+                for vi_evt in vi_ssa:
+                    if vi_evt.is_comment:
                         continue
-                    overlap = max(0, min(ja_evt.end, en_evt.end) - max(ja_evt.start, en_evt.start))
-                    if overlap > best_en_overlap:
-                        best_en_overlap = overlap
-                        best_en_match = en_evt
-                if best_en_match and best_en_overlap >= 300:
-                    en_text = re.sub(r"\{[^\}]*\}", "", best_en_match.text).replace(r"\N", " ").strip()
+                    overlap = max(0, min(ja_evt.end, vi_evt.end) - max(ja_evt.start, vi_evt.start))
+                    if overlap > best_vi_overlap:
+                        best_vi_overlap = overlap
+                        best_vi_match = vi_evt
 
-            if self.add_gold_unit(
-                ja_text=ja_text,
-                vi_text=vi_text,
-                en_text=en_text,
-                series=series.lower(),
-                episode=ep_name,
-                status=status,
-            ):
-                imported_count += 1
+                if not best_vi_match or best_vi_overlap < 300:
+                    continue
+
+                vi_text = re.sub(r"\{[^\}]*\}", "", best_vi_match.text).replace(r"\N", " ").strip()
+                if not vi_text:
+                    continue
+
+                # Optional EN match
+                en_text = None
+                if en_ssa:
+                    best_en_match = None
+                    best_en_overlap = 0
+                    for en_evt in en_ssa:
+                        if en_evt.is_comment:
+                            continue
+                        overlap = max(0, min(ja_evt.end, en_evt.end) - max(ja_evt.start, en_evt.start))
+                        if overlap > best_en_overlap:
+                            best_en_overlap = overlap
+                            best_en_match = en_evt
+                    if best_en_match and best_en_overlap >= 300:
+                        en_text = re.sub(r"\{[^\}]*\}", "", best_en_match.text).replace(r"\N", " ").strip()
+
+                if self._insert_gold_unit_conn(
+                    conn,
+                    ja_text=ja_text,
+                    vi_text=vi_text,
+                    en_text=en_text,
+                    series=norm_series,
+                    episode=ep_name,
+                    status=status,
+                ):
+                    imported_count += 1
+            if imported_count:
+                conn.commit()
 
         logger.info(f"Imported {imported_count} gold units from {ja_path.name}")
         return imported_count
@@ -480,19 +528,23 @@ class KnowledgeBase:
     def seed_default_gold_exemplars(self) -> int:
         """Nạp kho câu mẫu chuẩn `BUILTIN_GOLD_EXEMPLARS` vào bảng `gold_units` (idempotent)."""
         inserted = 0
-        for ex in BUILTIN_GOLD_EXEMPLARS:
-            ok = self.add_gold_unit(
-                ja_text=str(ex.get("ja") or ""),
-                vi_text=str(ex.get("vi") or ""),
-                en_text=ex.get("en"),
-                series=ex.get("series"),
-                episode="__builtin_seed__",
-                speaker=ex.get("speaker"),
-                addressee=ex.get("addressee"),
-                status="gold",
-            )
-            if ok:
-                inserted += 1
+        with self._connect(immediate=True) as conn:
+            for ex in BUILTIN_GOLD_EXEMPLARS:
+                ok = self._insert_gold_unit_conn(
+                    conn,
+                    ja_text=str(ex.get("ja") or ""),
+                    vi_text=str(ex.get("vi") or ""),
+                    en_text=ex.get("en"),
+                    series=ex.get("series"),
+                    episode="__builtin_seed__",
+                    speaker=ex.get("speaker"),
+                    addressee=ex.get("addressee"),
+                    status="gold",
+                )
+                if ok:
+                    inserted += 1
+            if inserted:
+                conn.commit()
         return inserted
 
     def retrieve_few_shots(
@@ -517,7 +569,7 @@ class KnowledgeBase:
         # Extract Japanese keywords (Kanji >= 2 chars, Katakana >= 2 chars; furigana-transparent)
         batch_ja = " ".join(strip_ja_furigana(c.ja or "") for c in cues)
         keywords = set(re.findall(r"[\u3400-\u4DBF\u4E00-\u9FFF]{2,}|[\u30A0-\u30FF]{2,}", batch_ja))
-        if not keywords:
+        if not keywords and not fallback_builtin:
             return []
 
         batch_speakers = {
@@ -538,36 +590,36 @@ class KnowledgeBase:
         query_bigrams: List[str] = []
         for kw in keywords:
             query_bigrams.extend(self._extract_bigrams(kw))
-        if not query_bigrams:
+        if not query_bigrams and not fallback_builtin:
             return []
 
-        # Fetch candidate gold/reviewed/silver units (never 'draft') via FTS5 MATCH
-        clean_tokens = [tok.replace('"', '""') for tok in set(query_bigrams) if tok]
-        match_expr = " OR ".join(f'"{tok}"' for tok in clean_tokens)
-        if not match_expr:
-            return []
-
-        candidate_limit = max(50, max_examples * 10)
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            query = """
-                SELECT g.id, g.ja_text, g.en_text, g.vi_text, g.series, g.episode, g.speaker, g.addressee, g.status
-                FROM gold_units_fts f
-                JOIN gold_units g ON g.id = f.rowid
-                WHERE gold_units_fts MATCH ?
-                  AND g.status IN ('reviewed', 'gold', 'silver')
-            """
-            params: List[Any] = [match_expr]
-            if series:
-                query += " AND (g.series = ? OR g.series IS NULL)"
-                params.append(series.lower())
-            if exclude_episode:
-                query += " AND (g.episode != ? OR g.episode IS NULL)"
-                params.append(exclude_episode)
-            query += " ORDER BY f.rank LIMIT ?"
-            params.append(candidate_limit)
-            cursor.execute(query, params)
-            candidates = cursor.fetchall()
+        candidates = []
+        if query_bigrams:
+            # Fetch candidate gold/reviewed/silver units (never 'draft') via FTS5 MATCH
+            clean_tokens = [tok.replace('"', '""') for tok in set(query_bigrams) if tok]
+            match_expr = " OR ".join(f'"{tok}"' for tok in clean_tokens)
+            if match_expr:
+                candidate_limit = max(50, max_examples * 10)
+                with self._connect() as conn:
+                    cursor = conn.cursor()
+                    query = """
+                        SELECT g.id, g.ja_text, g.en_text, g.vi_text, g.series, g.episode, g.speaker, g.addressee, g.status
+                        FROM gold_units_fts f
+                        JOIN gold_units g ON g.id = f.rowid
+                        WHERE gold_units_fts MATCH ?
+                          AND g.status IN ('reviewed', 'gold', 'silver')
+                    """
+                    params: List[Any] = [match_expr]
+                    if series:
+                        query += " AND (g.series = ? OR g.series IS NULL)"
+                        params.append(series.lower())
+                    if exclude_episode:
+                        query += " AND (g.episode != ? OR g.episode IS NULL)"
+                        params.append(exclude_episode)
+                    query += " ORDER BY f.rank LIMIT ?"
+                    params.append(candidate_limit)
+                    cursor.execute(query, params)
+                    candidates = cursor.fetchall()
 
         if fallback_builtin and len(candidates) < max_examples:
             seen_ja = {row[1] for row in candidates}
@@ -631,17 +683,18 @@ class KnowledgeBase:
                 tf[bg] = tf.get(bg, 0) + 1
 
             score = 0.0
-            for qb in unique_q_bigrams:
-                if qb in tf:
-                    n_q = df[qb]
-                    idf = math.log(1.0 + (N - n_q + 0.5) / (n_q + 0.5))
-                    term_tf = tf[qb]
-                    num = term_tf * (k1 + 1.0)
-                    den = term_tf + k1 * (1.0 - b + b * (dl / max(1.0, avgdl)))
-                    score += idf * (num / den)
-
-            if score <= 0.0:
-                continue
+            if query_bigrams:
+                for qb in unique_q_bigrams:
+                    if qb in tf:
+                        n_q = df[qb]
+                        idf = math.log(1.0 + (N - n_q + 0.5) / (n_q + 0.5))
+                        term_tf = tf[qb]
+                        num = term_tf * (k1 + 1.0)
+                        den = term_tf + k1 * (1.0 - b + b * (dl / max(1.0, avgdl)))
+                        score += idf * (num / den)
+            elif fallback_builtin and ep_val == "__builtin_seed__":
+                # Hiragana/EN-only fallback: prioritize series-matching built-in exemplars
+                score += 0.15 if (series and s_val == series.lower()) else 0.06
 
             # Exact multi-char term match bonus
             c_ja = doc_clean_ja[cid]
@@ -656,6 +709,9 @@ class KnowledgeBase:
                 score += 0.60
             elif c_spk and c_spk in batch_speakers:
                 score += 0.25
+
+            if score <= 0.0:
+                continue
 
             # Prefer human gold / reviewed over auto-curated silver
             tier_weight = 1.20 if st_val == "gold" else (1.05 if st_val == "reviewed" else 0.90)
@@ -773,7 +829,7 @@ class KnowledgeBase:
         )
 
         # 2. Add rule to error_bank
-        with self._connect() as conn:
+        with self._connect(immediate=True) as conn:
             conn.execute("""
                 INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -786,6 +842,7 @@ class KnowledgeBase:
                 series.lower() if series else None,
             ))
             conn.commit()
+        self._invalidate_error_bank_cache()
 
         logger.info(f"💡 [LEARN] Đã nạp phản hồi sửa lỗi vào Error Bank và Gold Units: '{corr_norm}'")
         return {
@@ -797,6 +854,38 @@ class KnowledgeBase:
             "series": series,
             "episode": episode,
         }
+
+    def _insert_error_pattern_conn(
+        self,
+        conn: sqlite3.Connection,
+        category: str,
+        ja_pattern: str,
+        bad_pattern: str,
+        good_pattern: str,
+        explanation: str,
+        series: Optional[str] = None,
+    ) -> bool:
+        ja_norm = normalize_nfc(ja_pattern).strip()
+        bad_norm = normalize_nfc(bad_pattern).strip()
+        good_norm = normalize_nfc(good_pattern).strip()
+        series_norm = series.lower().strip() if series else None
+
+        if not ja_norm or not bad_norm:
+            return False
+
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM error_bank
+            WHERE category = ? AND ja_pattern = ? AND bad_pattern = ? AND (series = ? OR (series IS NULL AND ? IS NULL))
+        """, (category, ja_norm, bad_norm, series_norm, series_norm))
+        if cursor.fetchone():
+            return False
+
+        conn.execute("""
+            INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (category, ja_norm, bad_norm, good_norm, explanation, series_norm))
+        return True
 
     def add_error_pattern(
         self,
@@ -813,27 +902,24 @@ class KnowledgeBase:
         """
         ja_norm = normalize_nfc(ja_pattern).strip()
         bad_norm = normalize_nfc(bad_pattern).strip()
-        good_norm = normalize_nfc(good_pattern).strip()
-        series_norm = series.lower().strip() if series else None
-
         if not ja_norm or not bad_norm:
             return False
 
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id FROM error_bank
-                WHERE category = ? AND ja_pattern = ? AND bad_pattern = ? AND (series = ? OR (series IS NULL AND ? IS NULL))
-            """, (category, ja_norm, bad_norm, series_norm, series_norm))
-            if cursor.fetchone():
-                return False
-
-            conn.execute("""
-                INSERT INTO error_bank (category, ja_pattern, bad_pattern, good_pattern, explanation, series)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (category, ja_norm, bad_norm, good_norm, explanation, series_norm))
-            conn.commit()
-            return True
+        with self._connect(immediate=True) as conn:
+            inserted = self._insert_error_pattern_conn(
+                conn,
+                category=category,
+                ja_pattern=ja_norm,
+                bad_pattern=bad_norm,
+                good_pattern=good_pattern,
+                explanation=explanation,
+                series=series,
+            )
+            if inserted:
+                conn.commit()
+        if inserted:
+            self._invalidate_error_bank_cache()
+        return inserted
 
     def learn_from_linter_violations(
         self,
@@ -841,6 +927,7 @@ class KnowledgeBase:
         cues: List[Cue],
         series: Optional[str] = None,
         episode: Optional[str] = None,
+        glossary: Optional[Any] = None,
     ) -> int:
         """
         Extracts and stores error patterns from linter violations into error_bank.
@@ -848,100 +935,142 @@ class KnowledgeBase:
         - RULE_BANNED_TERM: banned translationese/calques
         - RULE_CJK_LEAK: leftover Japanese/Chinese characters
         - RULE_ROMAJI_MISSING: missing character Romaji name when called in vocative
+        - RULE_GLOSSARY_TERM: missing canonical glossary translation
         Returns count of newly learned patterns.
         """
         if not violations or not cues:
             return 0
 
+        _known_banned_ja = {
+            "thế giới quan": "世界観",
+            "pháp lạp": "フラン",
+            "ô lỗ thi": "ウルシ",
+            "linh lâm": "玲琳",
+            "huệ nguyệt": "慧月",
+            "tuệ nguyệt": "慧月",
+            "a mạn đạt": "アマンダ",
+            "khắc lâm mỗ đặc": "クリムト",
+        }
+        _known_vocative_ja = {
+            "fran": "フラン",
+            "jean": "ジャン",
+            "nell": "ネル",
+            "reirin": "玲琳",
+            "keigetsu": "慧月",
+            "urushi": "ウルシ",
+            "stephane": "ステファン",
+            "fel": "フェル",
+        }
+        if glossary and getattr(glossary, "characters", None):
+            for ch in glossary.characters:
+                c_vi = (getattr(ch, "name_vi", "") or "").strip().lower()
+                c_ja = strip_ja_furigana(getattr(ch, "name_ja", "") or "").strip()
+                if c_vi and c_ja:
+                    _known_vocative_ja.setdefault(c_vi, c_ja)
+
         cue_map = {c.id: c for c in cues}
         learned_count = 0
 
-        for v in violations:
-            cue = cue_map.get(getattr(v, "cue_id", -1))
-            if not cue or not cue.ja or not cue.vi:
-                continue
-            if getattr(cue, "used_en_fallback", False) or cue.vi.strip() in (
-                "[Chưa dịch]",
-                "(Chưa dịch)",
-                "[Untranslated]",
-                "[DRY-RUN]",
-            ):
-                continue
+        with self._connect(immediate=True) as conn:
+            for v in violations:
+                cue = cue_map.get(getattr(v, "cue_id", -1))
+                if not cue or not cue.ja or not cue.vi:
+                    continue
+                if getattr(cue, "used_en_fallback", False) or cue.vi.strip() in (
+                    "[Chưa dịch]",
+                    "(Chưa dịch)",
+                    "[Untranslated]",
+                    "[DRY-RUN]",
+                ):
+                    continue
 
-            rule_id = getattr(v, "rule_id", "")
-            ja_text = cue.ja.strip()
-            vi_text = cue.vi.strip()
+                rule_id = getattr(v, "rule_id", "")
+                ja_text = cue.ja.strip()
+                ja_clean = strip_ja_furigana(ja_text)
+                vi_text = cue.vi.strip()
 
-            # Guard against error_bank self-poisoning: skip non-deterministic WARNING rules on uncertain drafts
-            if rule_id == "LINT_GLOSSARY_TERM" and getattr(cue, "uncertain", False):
-                continue
+                # Guard against error_bank self-poisoning: skip non-deterministic WARNING rules on uncertain drafts
+                if rule_id == "LINT_GLOSSARY_TERM" and getattr(cue, "uncertain", False):
+                    continue
 
-            if rule_id == "LINT_BANNED_TERM":
-                match = re.search(r"['\"]([^'\"]+)['\"]", getattr(v, "message", ""))
-                bad_word = match.group(1) if match else ""
-                suggestion = getattr(v, "suggestion", "")
-                match_sugg = re.search(r"['\"]([^'\"]+)['\"]", suggestion)
-                good_word = match_sugg.group(1) if match_sugg else suggestion
+                if rule_id == "LINT_BANNED_TERM":
+                    match = re.search(r"['\"]([^'\"]+)['\"]", getattr(v, "message", ""))
+                    bad_word = match.group(1) if match else ""
+                    suggestion = getattr(v, "suggestion", "")
+                    match_sugg = re.search(r"['\"]([^'\"]+)['\"]", suggestion)
+                    good_word = match_sugg.group(1) if match_sugg else suggestion
 
-                if bad_word:
-                    if self.add_error_pattern(
-                        category="banned_calque",
-                        ja_pattern=re.escape(ja_text[:30]),
-                        bad_pattern=bad_word,
-                        good_pattern=good_word or "Không dùng từ cấm",
-                        explanation=f"Tránh dùng cụm '{bad_word}', nên dùng '{good_word}'.",
-                        series=series,
-                    ):
-                        learned_count += 1
+                    if bad_word:
+                        mapped_ja = _known_banned_ja.get(bad_word.lower())
+                        ja_pat_src = mapped_ja if (mapped_ja and mapped_ja in ja_clean) else ja_clean[:30]
+                        if self._insert_error_pattern_conn(
+                            conn,
+                            category="banned_calque",
+                            ja_pattern=re.escape(ja_pat_src),
+                            bad_pattern=bad_word,
+                            good_pattern=good_word or "Không dùng từ cấm",
+                            explanation=f"Tránh dùng cụm '{bad_word}', nên dùng '{good_word}'.",
+                            series=series,
+                        ):
+                            learned_count += 1
 
-            elif rule_id == "LINT_CJK_LEAK":
-                from subtrans.eval.metrics import detect_cjk_leakage
-                leaks = detect_cjk_leakage(vi_text)
-                if leaks:
-                    leak_chars = "".join(set(leaks))
-                    if self.add_error_pattern(
-                        category="cjk_leak",
-                        ja_pattern=re.escape(ja_text[:30]),
-                        bad_pattern=re.escape(leak_chars),
-                        good_pattern="[Dịch hoàn toàn sang tiếng Việt]",
-                        explanation=f"Bản dịch sót ký tự CJK '{leak_chars}'. Dịch hoàn toàn sang tiếng Việt.",
-                        series=series,
-                    ):
-                        learned_count += 1
+                elif rule_id == "LINT_CJK_LEAK":
+                    from subtrans.eval.metrics import detect_cjk_leakage
+                    leaks = detect_cjk_leakage(vi_text)
+                    if leaks:
+                        leak_chars = "".join(dict.fromkeys(leaks))
+                        ja_pat_src = leak_chars if leak_chars in ja_clean else ja_clean[:30]
+                        if self._insert_error_pattern_conn(
+                            conn,
+                            category="cjk_leak",
+                            ja_pattern=re.escape(ja_pat_src),
+                            bad_pattern=re.escape(leak_chars),
+                            good_pattern="[Dịch hoàn toàn sang tiếng Việt]",
+                            explanation=f"Bản dịch sót ký tự CJK '{leak_chars}'. Dịch hoàn toàn sang tiếng Việt.",
+                            series=series,
+                        ):
+                            learned_count += 1
 
-            elif rule_id == "LINT_ROMAJI_MISSING":
-                match = re.search(r"called '([^']+)'", getattr(v, "message", ""))
-                char_name = match.group(1) if match else ""
-                if char_name:
-                    ja_clean = strip_ja_furigana(ja_text)
-                    if self.add_error_pattern(
-                        category="vocative_name",
-                        ja_pattern=re.escape(ja_clean[:30]),
-                        bad_pattern=r"\b(anh|em|cậu|cô|mày|hắn|nó)\b",
-                        good_pattern=char_name,
-                        explanation=f"Khi câu tiếng Nhật gọi đích danh '{char_name}', bắt buộc giữ tên Romaji '{char_name}'.",
-                        series=series,
-                    ):
-                        learned_count += 1
+                elif rule_id == "LINT_ROMAJI_MISSING":
+                    match = re.search(r"called '([^']+)'", getattr(v, "message", ""))
+                    char_name = match.group(1) if match else ""
+                    if char_name:
+                        mapped_ja = _known_vocative_ja.get(char_name.lower())
+                        ja_pat_src = mapped_ja if (mapped_ja and mapped_ja in ja_clean) else ja_clean[:30]
+                        if self._insert_error_pattern_conn(
+                            conn,
+                            category="vocative_name",
+                            ja_pattern=re.escape(ja_pat_src),
+                            bad_pattern=r"\b(anh|em|cậu|cô|mày|hắn|nó)\b",
+                            good_pattern=char_name,
+                            explanation=f"Khi câu tiếng Nhật gọi đích danh '{char_name}', bắt buộc giữ tên Romaji '{char_name}'.",
+                            series=series,
+                        ):
+                            learned_count += 1
 
-            elif rule_id == "LINT_GLOSSARY_TERM":
-                m_term = re.search(
-                    r"glossary term '([^']+)' but expected translation '([^']+)'",
-                    getattr(v, "message", ""),
-                )
-                if m_term:
-                    term_ja, term_vi = m_term.group(1), m_term.group(2)
-                    if self.add_error_pattern(
-                        category="glossary_term",
-                        ja_pattern=re.escape(strip_ja_furigana(term_ja)),
-                        bad_pattern=re.escape(vi_text[:40]),
-                        good_pattern=term_vi,
-                        explanation=f"Thuật ngữ '{term_ja}' bắt buộc dịch chuẩn theo Glossary là '{term_vi}'.",
-                        series=series,
-                    ):
-                        learned_count += 1
+                elif rule_id == "LINT_GLOSSARY_TERM":
+                    m_term = re.search(
+                        r"glossary term '([^']+)' but expected translation '([^']+)'",
+                        getattr(v, "message", ""),
+                    )
+                    if m_term:
+                        term_ja, term_vi = m_term.group(1), m_term.group(2)
+                        term_ja_clean = strip_ja_furigana(term_ja)
+                        if self._insert_error_pattern_conn(
+                            conn,
+                            category="glossary_term",
+                            ja_pattern=re.escape(term_ja_clean),
+                            bad_pattern=f"Thiếu thuật ngữ '{term_vi}'",
+                            good_pattern=term_vi,
+                            explanation=f"Thuật ngữ '{term_ja}' bắt buộc dịch chuẩn theo Glossary là '{term_vi}'.",
+                            series=series,
+                        ):
+                            learned_count += 1
+            if learned_count:
+                conn.commit()
 
         if learned_count:
+            self._invalidate_error_bank_cache()
             logger.info(f"🧠 [RAG LEARN] Đã tự động nạp {learned_count} bẫy lỗi từ linter vào error_bank (series={series})")
         return learned_count
 
@@ -1011,28 +1140,37 @@ class KnowledgeBase:
         batch_ja_raw = " ".join(c.ja or "" for c in cues)
         batch_ja_clean = " ".join(strip_ja_furigana(c.ja or "") for c in cues)
         cautions: List[Dict[str, str]] = []
+        series_key = series.lower() if series else None
 
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            query = "SELECT category, ja_pattern, bad_pattern, good_pattern, explanation FROM error_bank"
-            params = []
-            if series:
-                query += " WHERE series = ? OR series IS NULL"
-                params.append(series.lower())
-            cursor.execute(query, params)
-            for cat, ja_pat, bad_pat, good_pat, expl in cursor.fetchall():
-                try:
-                    if re.search(ja_pat, batch_ja_clean) or re.search(ja_pat, batch_ja_raw):
-                        cautions.append({
-                            "category": cat,
-                            "rule": expl,
-                            "avoid": bad_pat,
-                            "prefer": good_pat,
-                        })
-                except re.error:
-                    pass
-                if len(cautions) >= max_cautions:
-                    break
+        with self._error_bank_lock:
+            rows = self._error_bank_cache.get(series_key)
+
+        if rows is None:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                query = "SELECT category, ja_pattern, bad_pattern, good_pattern, explanation FROM error_bank"
+                params: List[Any] = []
+                if series_key:
+                    query += " WHERE series = ? OR series IS NULL"
+                    params.append(series_key)
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+            with self._error_bank_lock:
+                self._error_bank_cache[series_key] = rows
+
+        for cat, ja_pat, bad_pat, good_pat, expl in rows:
+            try:
+                if re.search(ja_pat, batch_ja_clean) or re.search(ja_pat, batch_ja_raw):
+                    cautions.append({
+                        "category": cat,
+                        "rule": expl,
+                        "avoid": bad_pat,
+                        "prefer": good_pat,
+                    })
+            except re.error:
+                pass
+            if len(cautions) >= max_cautions:
+                break
 
         return cautions[:max_cautions]
 

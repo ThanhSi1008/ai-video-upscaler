@@ -10,14 +10,16 @@ không gắn nhãn nhân vật.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 import logging
 import math
 from pathlib import Path
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 from subtrans.models import Cue
 
@@ -31,6 +33,21 @@ MAX_TURN_GAP_MS = 3000
 
 # 12 dải tần quasi-Mel bao phủ vùng cộng hưởng thanh quản & formant F1-F3 (90 Hz -> 3700 Hz)
 _BAND_EDGES_HZ = (90, 160, 240, 340, 460, 600, 780, 1000, 1300, 1700, 2200, 2850, 3700)
+
+
+@lru_cache(maxsize=8)
+def _get_dsp_constants(sample_rate: int) -> Tuple[np.ndarray, Tuple[np.ndarray, ...]]:
+    """Caches Hann window and 12 quasi-Mel frequency band masks per sample rate."""
+    hann = np.hanning(WIN_SAMPLES).astype(np.float32)
+    hann.setflags(write=False)
+    freqs = np.fft.rfftfreq(WIN_SAMPLES, d=1.0 / float(sample_rate))
+    masks = []
+    for b_idx in range(len(_BAND_EDGES_HZ) - 1):
+        f_lo, f_hi = _BAND_EDGES_HZ[b_idx], _BAND_EDGES_HZ[b_idx + 1]
+        m = (freqs >= f_lo) & (freqs < f_hi)
+        m.setflags(write=False)
+        masks.append(m)
+    return hann, tuple(masks)
 
 
 @dataclass(frozen=True)
@@ -56,18 +73,14 @@ def compute_voice_signature(
     if pcm_f32.size < max(WIN_SAMPLES + HOP_SAMPLES, min_samples):
         return None
 
-    # Chia khung trượt 32ms, bước nhảy 16ms bằng stride_tricks không sao chép bộ nhớ thừa
-    n_frames = 1 + (pcm_f32.size - WIN_SAMPLES) // HOP_SAMPLES
+    # Chia khung trượt 32ms, bước nhảy 16ms bằng sliding_window_view không sao chép bộ nhớ thừa
+    frames_view = sliding_window_view(pcm_f32, WIN_SAMPLES)[::HOP_SAMPLES]
+    n_frames = frames_view.shape[0]
     if n_frames < 5:
         return None
 
-    idx = (
-        np.arange(WIN_SAMPLES, dtype=np.int32)[None, :]
-        + np.arange(n_frames, dtype=np.int32)[:, None] * HOP_SAMPLES
-    )
-    frames = pcm_f32[idx].astype(np.float32, copy=False)
-
-    # Khử DC offset từng khung và lọc các khung có năng lượng thoại thực sự
+    # Khử DC offset từng khung (tạo mảng float32 1 lần duy nhất) và lọc khung thoại thực sự
+    frames = frames_view.astype(np.float32, copy=False)
     frames = frames - np.mean(frames, axis=1, keepdims=True)
     rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
     p85 = float(np.percentile(rms, 85))
@@ -78,19 +91,16 @@ def compute_voice_signature(
         return None
 
     active_frames = frames[active_mask]
-    hann = np.hanning(WIN_SAMPLES).astype(np.float32)
+    hann, band_masks = _get_dsp_constants(sample_rate)
 
     # 1. Phổ Formant / Timbre (Pre-emphasis 0.95 + RFFT + 12 dải tần log-energy + CMS)
     pre = np.empty_like(active_frames)
     pre[:, 0] = active_frames[:, 0]
     pre[:, 1:] = active_frames[:, 1:] - 0.95 * active_frames[:, :-1]
     spec_power = np.abs(np.fft.rfft(pre * hann[None, :], n=WIN_SAMPLES)) ** 2
-    freqs = np.fft.rfftfreq(WIN_SAMPLES, d=1.0 / float(sample_rate))
 
-    band_energies = np.zeros(len(_BAND_EDGES_HZ) - 1, dtype=np.float32)
-    for b_idx in range(len(_BAND_EDGES_HZ) - 1):
-        f_lo, f_hi = _BAND_EDGES_HZ[b_idx], _BAND_EDGES_HZ[b_idx + 1]
-        b_mask = (freqs >= f_lo) & (freqs < f_hi)
+    band_energies = np.zeros(len(band_masks), dtype=np.float32)
+    for b_idx, b_mask in enumerate(band_masks):
         if np.any(b_mask):
             band_energies[b_idx] = float(np.mean(np.log(np.mean(spec_power[:, b_mask], axis=1) + 1e-10)))
 
@@ -230,17 +240,19 @@ def _extract_center_dialogue_pcm_in_memory(
 
     chosen_stream_map = "0:a:0"
     channels = 2
+    effective_timeout = int(timeout_sec)
     try:
         probe_cmd = [
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=index,channels:stream_tags=language,title",
+            "-show_entries", "stream=index,channels:stream_tags=language,title:format=duration",
             "-select_streams", "a",
             "-of", "json",
             str(media_path),
         ]
         pr = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         if pr.returncode == 0 and pr.stdout:
-            streams = json.loads(pr.stdout).get("streams", [])
+            probe_data = json.loads(pr.stdout)
+            streams = probe_data.get("streams", [])
             chosen = None
             for s in streams:
                 lang = (s.get("tags", {}).get("language") or "").lower()
@@ -253,6 +265,12 @@ def _extract_center_dialogue_pcm_in_memory(
             if chosen is not None:
                 chosen_stream_map = f"0:{chosen['index']}"
                 channels = int(chosen.get("channels", 2) or 2)
+            try:
+                dur_sec = float((probe_data.get("format") or {}).get("duration") or 0.0)
+                if dur_sec > 0:
+                    effective_timeout = min(600, max(effective_timeout, int(math.ceil(dur_sec / 20.0)) + 30))
+            except (TypeError, ValueError):
+                pass
     except Exception as e:
         logger.debug(f"Audio diarization ffprobe skipped: {e}")
 
@@ -274,7 +292,7 @@ def _extract_center_dialogue_pcm_in_memory(
         "pipe:1",
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
+        res = subprocess.run(cmd, capture_output=True, timeout=effective_timeout)
         if res.returncode != 0 or not res.stdout or len(res.stdout) < sample_rate * 2:
             return None
         usable_bytes = (len(res.stdout) // 2) * 2

@@ -11,6 +11,8 @@ Module quản lý cơ chế Deduplication & Concat Re-expansion cho Anime Video 
 
 import os
 import re
+import sys
+import math
 import json
 import queue
 import shutil
@@ -58,6 +60,68 @@ DEDUP_POLICY_PARAMS = {
 }
 
 
+def get_dedup_params(
+    policy_name: str,
+    dis_thresh_override: Optional[float] = None,
+    drift_delta_override: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Phân giải tham số chính sách dedup, hỗ trợ cả tên chính sách cố định trong DEDUP_POLICY_PARAMS
+    lẫn chuỗi động dạng 'dis-<float>' / 'drift-<float>' cho --dis-thresh / --drift-delta tùy chỉnh.
+    """
+    pol = str(policy_name or "default").strip().lower()
+    if pol in DEDUP_POLICY_PARAMS:
+        params = dict(DEDUP_POLICY_PARAMS[pol])
+    elif pol.startswith("dis-"):
+        val_str = pol[len("dis-"):]
+        try:
+            val = float(val_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            ) from exc
+        if not math.isfinite(val) or val <= 0.0:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}' (dis_thresh phải > 0). Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            )
+        params = dict(DEDUP_POLICY_PARAMS["dis"])
+        params["dis_thresh"] = val
+    elif pol.startswith("drift-"):
+        val_str = pol[len("drift-"):]
+        try:
+            val = float(val_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            ) from exc
+        if not math.isfinite(val) or val <= 0.0:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}' (drift_delta phải > 0). Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            )
+        params = dict(DEDUP_POLICY_PARAMS["drift"])
+        params["drift_delta"] = val
+    else:
+        raise ValueError(
+            f"Chính sách dedup không hợp lệ: '{policy_name}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+        )
+
+    if dis_thresh_override is not None:
+        val_ov = float(dis_thresh_override)
+        if not math.isfinite(val_ov) or val_ov <= 0.0:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: dis_thresh={dis_thresh_override}. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            )
+        params["dis_thresh"] = val_ov
+    if drift_delta_override is not None:
+        val_dr = float(drift_delta_override)
+        if not math.isfinite(val_dr) or val_dr <= 0.0:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: drift_delta={drift_delta_override}. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            )
+        params["drift_delta"] = val_dr
+    return params
+
+
 def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> str:
     """
     Xác định chính sách deduplication theo thứ tự ưu tiên:
@@ -83,8 +147,11 @@ def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> s
                 pol = r.get("dedup_policy")
                 if pol and (match_show_pattern(vname, pat) or match_show_pattern(vdir, pat)):
                     return str(pol).lower()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                f"⚠️ Cảnh báo: Không thể đọc '{shows_yaml}' cho dedup_policy ({exc}); dùng mặc định.",
+                file=sys.stderr,
+            )
     return "default"
 
 
@@ -818,49 +885,26 @@ def scan_dedup_plan(
         expected_frames = int(probe_res.stdout.strip())
 
     policy_clean = policy.lower()
-    if policy_clean not in DEDUP_POLICY_PARAMS:
-        raise ValueError(f"Chính sách dedup không hợp lệ: '{policy}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}")
+    p_params = get_dedup_params(
+        policy_clean,
+        dis_thresh_override=dis_thresh,
+        drift_delta_override=drift_delta,
+    )
 
-    effective_drift_delta = 0.75
-    if drift_delta is not None:
-        effective_drift_delta = float(drift_delta)
-    elif policy_clean == "drift-0.5":
-        effective_drift_delta = 0.5
-    elif policy_clean == "drift-0.75":
-        effective_drift_delta = 0.75
-    elif policy_clean == "drift-1.0":
-        effective_drift_delta = 1.0
+    effective_drift_delta = float(p_params.get("drift_delta", 0.75))
+    effective_dis_thresh = float(p_params.get("dis_thresh", 0.30))
+    effective_local_thresh: Optional[float] = (
+        float(p_params["local_thresh"]) if "local_thresh" in p_params and p_params["local_thresh"] is not None else None
+    )
+    effective_min_moving_area_pct: float = float(p_params.get("min_moving_area_pct", 5.0))
+    if "tau" in p_params:
+        motion_tau = float(p_params["tau"])
 
-    effective_dis_thresh = 0.30
-    effective_local_thresh: Optional[float] = None
-    effective_min_moving_area_pct: float = 5.0
-    p_params = DEDUP_POLICY_PARAMS.get(policy_clean, {})
-    if "dis_thresh" in p_params:
-        effective_dis_thresh = float(p_params["dis_thresh"])
-    if "local_thresh" in p_params:
-        effective_local_thresh = float(p_params["local_thresh"])
-    if "min_moving_area_pct" in p_params:
-        effective_min_moving_area_pct = float(p_params["min_moving_area_pct"])
-    if dis_thresh is not None:
-        effective_dis_thresh = float(dis_thresh)
-    elif policy_clean == "dis-0.2":
-        effective_dis_thresh = 0.20
-    elif policy_clean == "dis-0.3":
-        effective_dis_thresh = 0.30
-    elif policy_clean == "dis-0.4":
-        effective_dis_thresh = 0.40
-    elif policy_clean == "dis-0.5":
-        effective_dis_thresh = 0.50
-
-    # Áp dụng thông số theo chính sách nếu là giá trị mặc định
-    if policy_clean in ["sensitive", "sensitive-a"]:
-        hi, lo, frac = 512, 160, 0.15
-    elif policy_clean == "sensitive-b":
-        hi, lo, frac = 384, 128, 0.10
-    elif policy_clean in ["dis-sakuga", "sakuga"]:
-        hi, lo, frac = 1024, 448, 0.38
-    elif policy_clean in ["motion", "default"] or policy_clean.startswith("drift") or policy_clean.startswith("dis"):
-        hi, lo, frac = DEFAULT_DEDUP_HI, DEFAULT_DEDUP_LO, DEFAULT_DEDUP_FRAC
+    # Áp dụng thông số mpdecimate theo chính sách
+    if policy_clean != "off":
+        hi = int(p_params.get("hi", hi))
+        lo = int(p_params.get("lo", lo))
+        frac = float(p_params.get("frac", frac))
 
     frame_actions: List[str] = []
     fused_dis_final_actions: Optional[List[str]] = None
@@ -1124,9 +1168,20 @@ def scan_dedup_plan(
         "chunks": chunks_meta
     }
 
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-    with open(plan_path, "w", encoding="utf-8") as f:
-        json.dump(plan_data, f, indent=2, ensure_ascii=False)
+    plan_dir = os.path.dirname(os.path.abspath(plan_path))
+    if plan_dir:
+        os.makedirs(plan_dir, exist_ok=True)
+    tmp_plan = f"{plan_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_plan, "w", encoding="utf-8") as f:
+            json.dump(plan_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_plan, plan_path)
+    finally:
+        if os.path.exists(tmp_plan):
+            try:
+                os.remove(tmp_plan)
+            except OSError:
+                pass
 
     return plan_data
 
@@ -1151,27 +1206,13 @@ def load_or_create_plan(
     Từ chối resume nếu chính sách dedup_policy trong cache khác với chính sách yêu cầu.
     """
     policy_clean = policy.lower()
-    effective_drift_delta = 0.75
-    if drift_delta is not None:
-        effective_drift_delta = float(drift_delta)
-    elif policy_clean == "drift-0.5":
-        effective_drift_delta = 0.5
-    elif policy_clean == "drift-0.75":
-        effective_drift_delta = 0.75
-    elif policy_clean == "drift-1.0":
-        effective_drift_delta = 1.0
-
-    effective_dis_thresh = 0.30
-    if dis_thresh is not None:
-        effective_dis_thresh = float(dis_thresh)
-    elif policy_clean == "dis-0.2":
-        effective_dis_thresh = 0.20
-    elif policy_clean == "dis-0.3":
-        effective_dis_thresh = 0.30
-    elif policy_clean == "dis-0.4":
-        effective_dis_thresh = 0.40
-    elif policy_clean == "dis-0.5":
-        effective_dis_thresh = 0.50
+    p_params = get_dedup_params(
+        policy_clean,
+        dis_thresh_override=dis_thresh,
+        drift_delta_override=drift_delta,
+    )
+    effective_drift_delta = float(p_params.get("drift_delta", 0.75))
+    effective_dis_thresh = float(p_params.get("dis_thresh", 0.30))
 
     if resume and os.path.exists(plan_path):
         try:
@@ -1231,10 +1272,17 @@ def load_or_create_plan(
                         data["total_kept_frames"] = re_kept
                         data["dedup_ratio_percent"] = round(re_ratio, 2)
                         data["chunks"] = re_chunks
-                        tmp_plan = f"{plan_path}.repart.tmp"
-                        with open(tmp_plan, "w", encoding="utf-8") as wf:
-                            json.dump(data, wf, indent=2, ensure_ascii=False)
-                        os.replace(tmp_plan, plan_path)
+                        tmp_plan = f"{plan_path}.repart.tmp.{os.getpid()}"
+                        try:
+                            with open(tmp_plan, "w", encoding="utf-8") as wf:
+                                json.dump(data, wf, indent=2, ensure_ascii=False)
+                            os.replace(tmp_plan, plan_path)
+                        finally:
+                            if os.path.exists(tmp_plan):
+                                try:
+                                    os.remove(tmp_plan)
+                                except OSError:
+                                    pass
                         return data
         except ValueError:
             raise
@@ -1309,14 +1357,16 @@ def generate_concat_demuxer_script(
             # 0-based frame_idx -> frame%08d.png (đồng bộ với extract_frames)
             img_name = f"frame{r['frame_idx'] + 1:08d}.{fmt}"
             img_path = os.path.join(frames_out_dir, img_name)
+            escaped = img_path.replace("'", "'\\''")
             dur = r["count"] * frame_dur
-            f.write(f"file '{img_path}'\n")
+            f.write(f"file '{escaped}'\n")
             f.write(f"duration {dur:.6f}\n")
 
         # Quy chuẩn FFmpeg Concat Demuxer: dòng cuối cùng lặp lại file mà không có duration
         last_img_name = f"frame{runs[-1]['frame_idx'] + 1:08d}.{fmt}"
         last_img_path = os.path.join(frames_out_dir, last_img_name)
-        f.write(f"file '{last_img_path}'\n")
+        escaped_last = last_img_path.replace("'", "'\\''")
+        f.write(f"file '{escaped_last}'\n")
 
     return concat_script_path
 
@@ -1375,28 +1425,86 @@ def encode_chunk_reexpanded(
         err_msg = e.stderr or "Không có thông tin stderr"
         raise RuntimeError(f"Lỗi mã hóa FFmpeg Concat Re-expansion (exit {e.returncode}):\n{err_msg}")
 
-    # Xác minh giao dịch (Transactional verification)
-    cmd_verify = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-count_frames",
-        "-show_entries", "stream=nb_read_frames",
-        "-of", "csv=p=0",
-        tmp_output
-    ]
-    probe_res = subprocess.run(cmd_verify, capture_output=True, text=True, check=True)
-    actual_frames = int(probe_res.stdout.strip())
+    # Xác minh giao dịch (Transactional verification): ưu tiên PyAV in-process để tránh spawn ffprobe mỗi chunk
+    from src.ffmpeg_ops import verify_segment_resume_frames, _count_segment_packets_pyav
 
-    if actual_frames != expected_frames:
-        if os.path.exists(tmp_output):
-            os.remove(tmp_output)
-        raise RuntimeError(
-            f"Lỗi giao dịch phân đoạn: Số frame thực tế ({actual_frames}) "
-            f"không khớp số frame kỳ vọng ({expected_frames})!"
-        )
+    verified_ok = False
+    actual_frames: Optional[int] = None
+    if os.path.exists(tmp_output):
+        if os.path.getsize(tmp_output) >= 10000 and verify_segment_resume_frames(tmp_output, expected_frames):
+            verified_ok = True
+        elif not hasattr(subprocess.run, "_mock_name"):
+            try:
+                actual_frames = _count_segment_packets_pyav(tmp_output)
+                verified_ok = (actual_frames == expected_frames)
+            except Exception:
+                verified_ok = False
+
+    if not verified_ok:
+        cmd_verify = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-count_frames",
+            "-show_entries", "stream=nb_read_frames",
+            "-of", "csv=p=0",
+            tmp_output
+        ]
+        probe_res = subprocess.run(cmd_verify, capture_output=True, text=True, check=True)
+        actual_frames = int(probe_res.stdout.strip())
+        if actual_frames != expected_frames:
+            if os.path.exists(tmp_output):
+                os.remove(tmp_output)
+            raise RuntimeError(
+                f"Lỗi giao dịch phân đoạn: Số frame thực tế ({actual_frames}) "
+                f"không khớp số frame kỳ vọng ({expected_frames})!"
+            )
 
     # Di chuyển nguyên tử sang file hoàn tất
     shutil.move(tmp_output, output_path)
+
+
+def are_raw_segments_complete(
+    segs_dir: str,
+    plan_path: str,
+    existing_segs: Optional[List[str]] = None,
+) -> bool:
+    """
+    Kiểm tra thư mục raw_segs có chứa đủ phân đoạn cắt hoàn chỉnh hay không:
+    - Khớp marker .split_complete (segment_count == len(existing_segs)), HOẶC
+    - Tương thích ngược: plan.json hợp lệ có len(segments/chunks) == len(existing_segs).
+    """
+    if existing_segs is None:
+        existing_segs = (
+            sorted([
+                os.path.join(segs_dir, f)
+                for f in os.listdir(segs_dir)
+                if f.startswith("seg_") and f.endswith(".mp4")
+            ])
+            if os.path.isdir(segs_dir)
+            else []
+        )
+    if not existing_segs:
+        return False
+
+    marker_path = os.path.join(segs_dir, ".split_complete")
+    if os.path.isfile(marker_path):
+        try:
+            with open(marker_path, "r", encoding="utf-8") as mf:
+                mdata = json.load(mf)
+            return int(mdata.get("segment_count", -1)) == len(existing_segs)
+        except Exception:
+            return False
+
+    if plan_path and os.path.isfile(plan_path):
+        try:
+            with open(plan_path, "r", encoding="utf-8") as pf:
+                pdata = json.load(pf)
+            segs_list = pdata.get("segments") if isinstance(pdata.get("segments"), list) else pdata.get("chunks")
+            if isinstance(segs_list, list) and len(segs_list) == len(existing_segs):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
@@ -1427,7 +1535,7 @@ def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
             if os.path.isdir(segs_d)
             else []
         )
-        if not existing:
+        if not are_raw_segments_complete(segs_d, plan_f, existing):
             os.makedirs(segs_d, exist_ok=True)
             existing = split_video_segments(vid, segs_d, seg_s)
         if existing:

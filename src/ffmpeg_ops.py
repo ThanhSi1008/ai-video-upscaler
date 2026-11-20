@@ -9,6 +9,7 @@ Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
 - Ghép nối phân đoạn và Muxing bảo toàn 100% dữ liệu gốc
 """
 
+import collections
 import os
 import sys
 import json
@@ -206,8 +207,17 @@ def split_video_segments(input_path: str, segs_dir: str, segment_time: int) -> L
     """
     Phân đoạn video thành các block nhỏ mà không giải mã lại (Lossless Stream Copy).
     Tốc độ cực nhanh (vài giây), không tiêu tốn GPU / CPU.
+    Ghi sentinel .split_complete nguyên tử sau khi cắt thành công toàn bộ phân đoạn.
     """
     os.makedirs(segs_dir, exist_ok=True)
+    marker_path = os.path.join(segs_dir, ".split_complete")
+    for fname in os.listdir(segs_dir):
+        if (fname.startswith("seg_") and fname.endswith(".mp4")) or fname == ".split_complete" or fname.startswith(".split_complete.tmp"):
+            try:
+                os.remove(os.path.join(segs_dir, fname))
+            except OSError:
+                pass
+
     seg_pattern = os.path.join(segs_dir, "seg_%04d.mp4")
 
     seg_cmd = [
@@ -221,11 +231,31 @@ def split_video_segments(input_path: str, segs_dir: str, segment_time: int) -> L
         seg_pattern
     ]
     subprocess.run(seg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return sorted([
+    segs = sorted([
         os.path.join(segs_dir, f)
         for f in os.listdir(segs_dir)
         if f.startswith("seg_") and f.endswith(".mp4")
     ])
+    tmp_marker = f"{marker_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_marker, "w", encoding="utf-8") as mf:
+            json.dump(
+                {
+                    "segment_count": len(segs),
+                    "segment_time": int(segment_time),
+                    "source_file": os.path.basename(input_path),
+                },
+                mf,
+                ensure_ascii=False,
+            )
+        os.replace(tmp_marker, marker_path)
+    finally:
+        if os.path.exists(tmp_marker):
+            try:
+                os.remove(tmp_marker)
+            except OSError:
+                pass
+    return segs
 
 
 def _count_segment_packets_ffprobe(p: str) -> int:
@@ -444,7 +474,8 @@ def _recover_open_gop_leading_frames(
 ) -> List[Any]:
     """
     Khôi phục chính xác từng pixel các khung hình Open-GOP RASL dẫn đầu từ file video nguồn gốc
-    bằng cách giải mã cửa sổ ngắn quanh ranh giới GOP và đối khớp điểm neo CRA keyframe (np.array_equal).
+    bằng bộ đệm trượt (sliding ring buffer kích thước n_discard + 1, ~30 MB thay vì 2.36 GB)
+    và dừng giải mã ngay khi đối khớp điểm neo CRA keyframe (np.array_equal).
     Nếu không có file nguồn (môi trường test cô lập), lấp an toàn bằng cra_anchor_frame để bảo toàn tổng frame.
     """
     import numpy as np
@@ -455,13 +486,15 @@ def _recover_open_gop_leading_frames(
         return [cra_anchor_frame.copy() for _ in range(n_discard)]
 
     frame_bytes = int(width) * int(height) * 3
-    seek_sec = max(0.0, float(chunk_start_sec or 0.0) - 12.0)
-    win_dur = 14.0
-    max_win_frames = 380
-    win_arr = np.empty((max_win_frames, int(height), int(width), 3), dtype=np.uint8)
-    mv = memoryview(win_arr).cast("B")
-    total_cap = max_win_frames * frame_bytes
-    read_step = 1048576
+    seek_sec = max(0.0, float(chunk_start_sec or 0.0) - 15.0)
+    win_dur = 18.0
+    max_win_frames = 600
+    ring: collections.deque = collections.deque(maxlen=n_discard + 1)
+    frame_buf = bytearray(frame_bytes)
+    mv = memoryview(frame_buf)
+    mid_y = int(height) // 2
+    anchor_strip = cra_anchor_frame[mid_y, ::16]
+    matched_leading: Optional[List[Any]] = None
 
     cmd = [
         "ffmpeg", "-v", "error",
@@ -474,29 +507,51 @@ def _recover_open_gop_leading_frames(
         "-pix_fmt", "rgb24",
         "pipe:1",
     ]
-    offset = 0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
     try:
         if proc.stdout is not None:
-            while offset < total_cap:
-                end_pos = min(offset + read_step, total_cap)
-                n_read = proc.stdout.readinto(mv[offset:end_pos])
-                if not n_read:
+            frames_seen = 0
+            while frames_seen < max_win_frames:
+                got = 0
+                while got < frame_bytes:
+                    n_read = proc.stdout.readinto(mv[got:frame_bytes])
+                    if not n_read:
+                        break
+                    got += n_read
+                if got < frame_bytes:
                     break
-                offset += n_read
-            while proc.stdout.read(65536):
+                frames_seen += 1
+                curr_frame = np.frombuffer(frame_buf, dtype=np.uint8).reshape((int(height), int(width), 3)).copy()
+                if len(ring) >= n_discard:
+                    if (
+                        np.array_equal(curr_frame[mid_y, ::16], anchor_strip)
+                        and np.array_equal(curr_frame, cra_anchor_frame)
+                    ):
+                        prev_list = list(ring)
+                        matched_leading = [f.copy() for f in prev_list[-n_discard:]]
+                        break
+                ring.append(curr_frame)
+            try:
+                proc.stdout.close()
+            except Exception:
                 pass
-            proc.stdout.close()
     finally:
-        proc.wait()
+        if matched_leading is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
 
-    n_decoded = offset // frame_bytes
-    if n_decoded > n_discard:
-        mid_y = int(height) // 2
-        anchor_strip = cra_anchor_frame[mid_y, ::16]
-        for k in range(n_discard, n_decoded):
-            if np.array_equal(win_arr[k, mid_y, ::16], anchor_strip) and np.array_equal(win_arr[k], cra_anchor_frame):
-                return [win_arr[k - n_discard + j].copy() for j in range(n_discard)]
+    if matched_leading is not None:
+        return matched_leading
 
     return [cra_anchor_frame.copy() for _ in range(n_discard)]
 
@@ -968,7 +1023,7 @@ def embed_subtitle_track(
 
         # Kiểm định an toàn bằng verify_mux_integrity trước khi thay thế file 4K
         from src.mux_audit import verify_mux_integrity
-        audit = verify_mux_integrity(ref_source, tmp_out)
+        audit = verify_mux_integrity(ref_source, tmp_out, allow_added_vie_sub=True)
         if audit.get("status") == "PASS":
             shutil.move(tmp_out, mkv_path)
             return True

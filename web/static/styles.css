@@ -104,18 +104,6 @@
     --scrollbar-track: light-dark(var(--scroll-track-light), var(--scroll-track-dark));
   }
 
-  @media (forced-colors: active) {
-    --bg-canvas: Canvas;
-    --bg-surface: Canvas;
-    --bg-elevated: Canvas;
-    --fg-primary: CanvasText;
-    --fg-muted: GrayText;
-    --border-subtle: ButtonBorder;
-    --border-strong: CanvasText;
-    --accent: Highlight;
-    --accent-fg: HighlightText;
-  }
-
   color-scheme: light dark;
   accent-color: var(--accent);
   scrollbar-width: thin;
@@ -164,6 +152,43 @@
   --danger: var(--danger-light);
   --scrollbar-thumb: var(--scroll-thumb-light);
   --scrollbar-track: var(--scroll-track-light);
+}
+
+/* Placed after :root:has(...) so Windows High Contrast overrides any saved Light/Dark theme */
+@media (forced-colors: active) {
+  :root,
+  :root:has(> head > meta[name="color-scheme"][content]) {
+    --bg-canvas: Canvas;
+    --bg-surface: Canvas;
+    --bg-elevated: Canvas;
+    --bg-console: Canvas;
+    --fg-primary: CanvasText;
+    --fg-muted: GrayText;
+    --border-subtle: ButtonBorder;
+    --border-strong: CanvasText;
+    --accent: Highlight;
+    --accent-fg: HighlightText;
+    --success: Highlight;
+    --warning: Highlight;
+    --danger: Mark;
+  }
+
+  .log-console {
+    accent-color: var(--accent);
+  }
+
+  .log-console,
+  .compare-stage,
+  .compare-placeholder {
+    forced-color-adjust: auto;
+    background-color: Canvas;
+    color: CanvasText;
+    border-color: ButtonBorder;
+  }
+
+  [role="tab"][aria-selected="true"]::after {
+    border-block-end-color: Highlight;
+  }
 }
 
 @supports not (scrollbar-color: auto) {
@@ -274,7 +299,6 @@ textarea.code-textarea {
   margin-inline-start: auto;
   display: flex;
   flex-wrap: wrap;
-  flex-wrap: balance;
   align-items: safe center;
   gap: 0.55rem;
 }
@@ -336,6 +360,8 @@ textarea.code-textarea {
   display: flex;
   flex-wrap: nowrap;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
   scrollbar-width: none;
   scroll-snap-type: inline proximity;
   scroll-padding-inline: 2.5rem;
@@ -354,13 +380,26 @@ textarea.code-textarea {
   --fade-dir: right;
   --fade-start-pos: 0;
   --fade-end-pos: 100%;
-  mask:
-    linear-gradient(black, black) no-clip subtract,
-    linear-gradient(to var(--fade-dir), black, transparent) var(--fade-start-pos) 0 / var(--fade-start) 100% no-repeat no-clip,
-    linear-gradient(to var(--fade-dir), transparent, black) var(--fade-end-pos) 0 / var(--fade-end) 100% no-repeat no-clip;
+  mask-image:
+    linear-gradient(black, black),
+    linear-gradient(to var(--fade-dir), black, transparent),
+    linear-gradient(to var(--fade-dir), transparent, black);
+  mask-position: 0 0, var(--fade-start-pos) 0, var(--fade-end-pos) 0;
+  mask-size: 100% 100%, var(--fade-start) 100%, var(--fade-end) 100%;
+  mask-repeat: no-repeat;
+  mask-composite: subtract;
   animation: reveal-fade-start linear both, hide-fade-end linear both;
   animation-timeline: scroll(self inline);
   animation-range: 0 var(--fade-size), calc(100% - var(--fade-size)) 100%;
+}
+
+@supports (mask-clip: no-clip) {
+  .scroller {
+    mask:
+      linear-gradient(black, black) no-clip subtract,
+      linear-gradient(to var(--fade-dir), black, transparent) var(--fade-start-pos) 0 / var(--fade-start) 100% no-repeat no-clip,
+      linear-gradient(to var(--fade-dir), transparent, black) var(--fade-end-pos) 0 / var(--fade-end) 100% no-repeat no-clip;
+  }
 }
 
 .scroller:dir(rtl) {
@@ -493,8 +532,14 @@ textarea.code-textarea {
   font-weight: 700;
 }
 
-.section-heading:focus {
+.section-heading:focus:not(:focus-visible) {
   outline: none;
+}
+
+.section-heading:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .episode-banner-title {
@@ -513,6 +558,22 @@ textarea.code-textarea {
 
 .text-error {
   color: var(--danger);
+}
+
+.field-error {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.studio-footer code,
+.muted-meta code,
+.section-heading code,
+.inline-check code,
+label code,
+.compare-placeholder code {
+  white-space: nowrap;
 }
 
 input[aria-invalid="true"],
@@ -659,8 +720,14 @@ textarea[aria-invalid="true"] {
 
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  grid-template-columns: 1fr;
   gap: 0.9rem;
+}
+
+@media (min-width: 860px) {
+  .charts-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .chart-card {
@@ -787,8 +854,8 @@ textarea[aria-invalid="true"] {
 }
 
 .log-console {
-  color-scheme: dark;
-  accent-color: var(--accent);
+  color-scheme: only dark;
+  accent-color: var(--accent-dark);
   margin: 0;
   padding: 0.85rem;
   max-block-size: 290px;
@@ -1039,6 +1106,12 @@ textarea.code-textarea {
   white-space: nowrap;
 }
 
+.studio-table thead th:first-child {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 3;
+}
+
 .studio-table tbody th {
   position: sticky;
   inset-inline-start: 0;
@@ -1047,6 +1120,13 @@ textarea.code-textarea {
   font-weight: 600;
   max-inline-size: 320px;
   overflow-wrap: anywhere;
+}
+
+@media (max-width: 680px) {
+  .table-wrapper {
+    max-block-size: none;
+    overflow-y: visible;
+  }
 }
 
 #schedule-table {
@@ -1125,6 +1205,7 @@ textarea.code-textarea {
   border-radius: 999px;
   font-size: 0.76rem;
   font-weight: 700;
+  white-space: nowrap;
   border: 1px solid var(--border-strong);
   background-color: var(--bg-elevated);
 }
@@ -1174,13 +1255,16 @@ textarea.code-textarea {
 
 .wipe-slider-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.6rem;
   flex: 1 1 280px;
+  min-inline-size: 0;
 }
 
 .wipe-slider-group input[type="range"] {
-  flex: 1 1 160px;
+  flex: 1 1 140px;
+  min-inline-size: 0;
 }
 
 .loupe-controls {
@@ -1200,7 +1284,7 @@ textarea.code-textarea {
   background-color: var(--bg-console);
   overflow: clip;
   cursor: crosshair;
-  touch-action: none;
+  touch-action: pan-y;
 }
 
 .compare-stage canvas {
@@ -1237,6 +1321,14 @@ textarea.code-textarea {
   border-radius: var(--radius-sm);
   background-color: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
+}
+
+.match-result-card[data-state="error"] {
+  border-color: var(--danger);
+}
+
+.match-result-card[data-state="error"] dd {
+  color: var(--danger);
 }
 
 .match-result-card dt {
@@ -1398,25 +1490,64 @@ dialog::backdrop {
   border-radius: var(--radius-sm);
 }
 
-@media (max-height: 440px) {
+@media (max-width: 480px), (max-height: 600px) {
+  .studio-dialog {
+    inline-size: min(880px, calc(100dvw - 0.75rem));
+    max-block-size: min(92dvh, calc(100dvh - 0.75rem));
+  }
+
   .dialog-header,
   .dialog-footer {
+    padding: 0.5rem 0.75rem;
+    gap: 0.4rem;
+  }
+
+  .dialog-header h2 {
+    font-size: 0.94rem;
+  }
+
+  .dialog-body {
     padding: 0.5rem 0.75rem;
     gap: 0.45rem;
   }
 
-  .dialog-body {
-    padding: 0.55rem 0.75rem;
-    gap: 0.5rem;
+  .fs-nav-bar {
+    gap: 0.35rem;
+  }
+
+  .fs-nav-bar .btn,
+  .fs-folder-banner .btn,
+  .dialog-footer .btn {
+    padding-block: 0.32rem;
+    padding-inline: 0.55rem;
+    font-size: 0.78rem;
+  }
+
+  .fs-path-pill {
+    flex: 1 1 100%;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.76rem;
+  }
+
+  .fs-folder-banner {
+    padding: 0.4rem 0.6rem;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+  }
+
+  #fs-selection-count {
+    font-size: 0.76rem;
   }
 
   .fs-entries-list {
+    min-block-size: clamp(9rem, 32dvh, 14rem);
     max-block-size: none;
   }
 }
 
 .fs-entry-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: safe center;
   justify-content: space-between;
   gap: 0.6rem;
@@ -1435,7 +1566,7 @@ dialog::backdrop {
   align-items: center;
   gap: 0.55rem;
   min-inline-size: 0;
-  flex: 1 1 auto;
+  flex: 1 1 8.5rem;
 }
 
 .fs-open-dir-btn {
@@ -1536,9 +1667,21 @@ dialog::backdrop {
 }
 
 .btn-xs {
-  padding-block: 0.16rem;
-  padding-inline: 0.48rem;
-  font-size: 0.74rem;
+  min-inline-size: 24px;
+  min-block-size: 24px;
+  padding-block: 0.2rem;
+  padding-inline: 0.55rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+@media (pointer: coarse) {
+  .btn-xs {
+    min-inline-size: 28px;
+    min-block-size: 28px;
+  }
 }
 
 .checkbox-inline {

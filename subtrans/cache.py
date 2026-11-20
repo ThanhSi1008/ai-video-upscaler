@@ -126,11 +126,13 @@ class TranslationCache:
         self._init_db()
 
     @contextlib.contextmanager
-    def _connect(self):
+    def _connect(self, immediate: bool = False):
         conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=10000")
         try:
             with conn:
+                if immediate:
+                    conn.execute("BEGIN IMMEDIATE")
                 yield conn
         finally:
             conn.close()
@@ -139,6 +141,7 @@ class TranslationCache:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+        with self._connect(immediate=True) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS translations (
                     cache_key TEXT PRIMARY KEY,
@@ -426,10 +429,32 @@ class TranslationCache:
 
     def are_all_keys_exhausted(self, key_ids: List[str], model: str) -> bool:
         """Trả về True khi TẤT CẢ key_ids hợp lệ trong danh sách đều đã cạn RPD cho model hiện tại."""
-        valid_ids = [kid for kid in key_ids if kid and kid != "none"]
+        valid_ids = list(dict.fromkeys(kid for kid in key_ids if kid and kid != "none"))
         if not valid_ids:
             return self.is_model_exhausted(model)
-        return all(self.is_key_model_exhausted(kid, model) for kid in valid_ids)
+        today_pt = get_today_pt_str()
+        now_pt = get_now_pt()
+        placeholders = ",".join("?" for _ in valid_ids)
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT key_id, exhausted_until_pt FROM key_exhaustion "
+                f"WHERE model = ? AND pt_date = ? AND key_id IN ({placeholders})",
+                [model, today_pt, *valid_ids],
+            )
+            exhausted_set = set()
+            for kid, until_str in cursor.fetchall():
+                if not until_str:
+                    continue
+                try:
+                    exhausted_until = datetime.datetime.fromisoformat(until_str)
+                    if exhausted_until.tzinfo is None:
+                        exhausted_until = exhausted_until.replace(tzinfo=PT_TZ)
+                    if now_pt < exhausted_until:
+                        exhausted_set.add(kid)
+                except Exception:
+                    pass
+        return all(kid in exhausted_set for kid in valid_ids)
 
     def mark_model_exhausted(
         self,
@@ -457,20 +482,36 @@ class TranslationCache:
             cursor = conn.cursor()
             cursor.execute("SELECT exhausted_until_pt FROM model_exhaustion WHERE model = ?", (model,))
             row = cursor.fetchone()
-            if not row or not row[0]:
+        if not row or not row[0]:
+            return False
+        try:
+            exhausted_until = datetime.datetime.fromisoformat(row[0])
+            if exhausted_until.tzinfo is None:
+                exhausted_until = exhausted_until.replace(tzinfo=PT_TZ)
+            now_pt = get_now_pt()
+            if now_pt < exhausted_until:
+                return True
+        except Exception:
+            return False
+
+        # Đã qua 00:00 PT: mở transaction BEGIN IMMEDIATE để dọn an toàn (kiểm tra lại dưới lock ghi)
+        with self._connect(immediate=True) as wconn:
+            wcur = wconn.cursor()
+            wcur.execute("SELECT exhausted_until_pt FROM model_exhaustion WHERE model = ?", (model,))
+            wrow = wcur.fetchone()
+            if not wrow or not wrow[0]:
                 return False
             try:
-                exhausted_until = datetime.datetime.fromisoformat(row[0])
-                now_pt = get_now_pt()
-                if now_pt < exhausted_until:
+                w_until = datetime.datetime.fromisoformat(wrow[0])
+                if w_until.tzinfo is None:
+                    w_until = w_until.replace(tzinfo=PT_TZ)
+                if get_now_pt() < w_until:
                     return True
-                else:
-                    # Đã qua 00:00 PT, tự động dọn bản ghi
-                    conn.execute("DELETE FROM model_exhaustion WHERE model = ?", (model,))
-                    conn.commit()
-                    return False
             except Exception:
                 return False
+            wconn.execute("DELETE FROM model_exhaustion WHERE model = ?", (model,))
+            wconn.commit()
+            return False
 
     def get_model_exhaustion_info(self, model: str) -> Optional[Dict[str, Any]]:
         """Lấy thông tin chi tiết về việc hết hạn mức của model."""
@@ -660,5 +701,9 @@ def execute_and_log_api_request(
             quota_value=str(quota_value or ""),
             key_id=key_id
         )
+        try:
+            setattr(e, "_logged_api_request", True)
+        except Exception:
+            pass
         raise
 

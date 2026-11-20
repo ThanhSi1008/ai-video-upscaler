@@ -108,9 +108,10 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         ]
         res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if res.returncode != 0 or not os.path.exists(audio_tmp) or os.path.getsize(audio_tmp) == 0:
-            # Fallback an toàn nếu -af thất bại: chạy lại lệnh cơ bản
+            # Fallback an toàn nếu -af thất bại: giữ nguyên track đã chọn qua -map
             ext_cmd_basic = [
                 "ffmpeg", "-y", "-i", video_path,
+                "-map", chosen_stream_map,
                 "-vn", "-ac", "1", "-ar", "16000",
                 "-c:a", "pcm_s16le",
                 audio_tmp
@@ -120,9 +121,15 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
                 return False
 
         from src.config import is_gpu_lock_held_by_other
+        force_cpu = os.environ.get("UPSCALER_FORCE_WHISPER_CPU", "").strip().lower() in ("1", "true", "yes")
         gpu_busy_pid = is_gpu_lock_held_by_other()
-        if gpu_busy_pid is not None:
-            print(f"ℹ️ [WHISPER STT] GPU đang bận bởi tiến trình Upscale (PID={gpu_busy_pid}) -> Chuyển Whisper sang CPU để bảo toàn VRAM.")
+        if force_cpu or gpu_busy_pid is not None:
+            reason = (
+                "UPSCALER_FORCE_WHISPER_CPU=1 (--async-subs)"
+                if force_cpu
+                else f"GPU đang bận bởi tiến trình Upscale (PID={gpu_busy_pid})"
+            )
+            print(f"ℹ️ [WHISPER STT] {reason} -> Chuyển Whisper sang CPU (int8) để bảo toàn VRAM.")
             device = "cpu"
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -237,12 +244,16 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         return False
 
 
-def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool = False) -> Tuple[Optional[str], Optional[str]]:
+def find_or_extract_subtitles(
+    video_path: str,
+    prefer_whisper_when_no_ja: bool = False,
+    dry_run: bool = False,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Tìm hoặc trích xuất phụ đề tiếng Nhật (ja) và tiếng Anh (en) cho video:
     1. Quét các file phụ đề sẵn có cùng thư mục video hoặc trong subtrans/samples.
-    2. Nếu thiếu, dùng ffprobe/ffmpeg trích xuất track tương ứng từ container video.
-    3. Nếu hoàn toàn không có track JA, chạy Whisper STT dự phòng.
+    2. Nếu thiếu và dry_run=False, dùng ffprobe/ffmpeg trích xuất track tương ứng từ container video.
+    3. Nếu hoàn toàn không có track JA và dry_run=False, chạy Whisper STT dự phòng.
     """
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     vid_dir = os.path.dirname(os.path.abspath(video_path))
@@ -327,7 +338,7 @@ def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool =
             if (s.get("codec_name") or "").lower() not in bitmap_sub_codecs
         ]
 
-        if sub_info:
+        if sub_info and not dry_run:
             os.makedirs(tmp_dir, exist_ok=True)
 
             # 2a. Trích xuất stream EN từ container video nếu chưa có file EN rời
@@ -356,7 +367,9 @@ def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool =
                 elif other_en_candidates:
                     chosen_en_stream = other_en_candidates[0]
                 elif len(sub_info) > 0:
-                    chosen_en_stream = sub_info[0]
+                    first_lang = str(sub_info[0].get("tags", {}).get("language", "") or "").strip().lower()
+                    if not first_lang or first_lang == "und" or first_lang.startswith("en"):
+                        chosen_en_stream = sub_info[0]
 
                 if chosen_en_stream is not None:
                     en_sub = _extract_text_stream(chosen_en_stream, "extracted_en")
@@ -382,6 +395,11 @@ def find_or_extract_subtitles(video_path: str, prefer_whisper_when_no_ja: bool =
         )
         if env_val in ("1", "true", "yes"):
             prefer_whisper_when_no_ja = True
+
+    if dry_run:
+        if not ja_sub and not prefer_whisper_when_no_ja and en_sub and os.path.exists(en_sub) and os.path.getsize(en_sub) > 100:
+            ja_sub = en_sub
+        return ja_sub, en_sub
 
     # 3. Cơ chế dự phòng: Nếu không có track phụ đề tiếng Nhật dạng text
     if not ja_sub:
