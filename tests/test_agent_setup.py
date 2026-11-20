@@ -344,3 +344,21 @@ def test_upscaler_mcp_server_jsonrpc_handlers():
     capped = mod._cap_output(huge_lines)
     assert capped.endswith("... [truncated]")
     assert len(capped) <= mod.MAX_OUTPUT_CHARS + 32
+
+
+def test_first_1kb_header_utf8_decode():
+    """Verify that the first 1 KB (1024 bytes) of critical modules decodes cleanly as UTF-8."""
+    target_files = [
+        "src/logger.py",
+        "src/trt_zero_copy_upscaler.py",
+        "subtrans/dtw_auto_align.py",
+    ]
+    for rel_path in target_files:
+        p = REPO_ROOT / rel_path
+        assert p.is_file(), f"Target file missing: {rel_path}"
+        raw_bytes = p.read_bytes()
+        decoded = raw_bytes[:1024].decode("utf-8")
+        assert len(decoded) > 0
+        assert all(ord(c) < 128 for c in decoded), (
+            f"Non-ASCII character found in the first 1024 bytes of {rel_path}"
+        )

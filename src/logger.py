@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 """
 src/logger.py
-Quản lý hiển thị terminal và ghi file log có cấu trúc:
-- Tự động tạo file log chuyên dụng theo tên video và timestamp: logs/<name>_<timestamp>.log
-- Tự động duy trì symlink logs/latest.log trỏ tới lần chạy mới nhất
-- Lưu chi tiết viễn trắc từng chunk (thời gian trích xuất, FPS AI, NVENC encode)
-- Thu thập và lưu bảng tổng kết Benchmark thực tế
+Terminal display management and structured log file generation:
+- Automatically creates dedicated log files by video title and timestamp: logs/<name>_<timestamp>.log
+- Automatically maintains logs/latest.log symlink pointing to the most recent run
+- Records per-chunk telemetry details (extract time, AI FPS, NVENC encode)
+- Collects and saves empirical benchmark summary tables
 """
 
 import json
@@ -22,17 +21,17 @@ _LAST_GRACEFUL_PAUSE_TRIGGERED: bool = False
 
 
 def get_live_status_path() -> str:
-    """Đường dẫn file trạng thái thời gian thực logs/live_status.json cho Web GUI & CLI."""
+    """Path to logs/live_status.json realtime status file for Web GUI and CLI."""
     return os.path.join(LOGS_DIR, "live_status.json")
 
 
 def get_graceful_pause_flag_path() -> str:
-    """Đường dẫn file cờ yêu cầu dừng êm sau khi hoàn tất chunk hiện tại."""
+    """Path to the flag file requesting graceful pause after completing current chunk."""
     return os.path.join(LOGS_DIR, ".graceful_pause.flag")
 
 
 def request_graceful_pause(reason: str = "user_request") -> str:
-    """Tạo cờ yêu cầu dừng êm ở ranh giới chunk 8s kế tiếp (bảo toàn checkpoint)."""
+    """Create a flag file requesting graceful pause at the next 8s chunk boundary (checkpoint safe)."""
     os.makedirs(LOGS_DIR, exist_ok=True)
     flag_path = get_graceful_pause_flag_path()
     tmp_path = f"{flag_path}.{os.getpid()}.tmp"
@@ -48,7 +47,7 @@ def request_graceful_pause(reason: str = "user_request") -> str:
 
 
 def clear_graceful_pause() -> None:
-    """Xóa cờ dừng êm nếu đang tồn tại."""
+    """Remove graceful pause flag if it exists."""
     flag_path = get_graceful_pause_flag_path()
     try:
         if os.path.exists(flag_path):
@@ -58,23 +57,23 @@ def clear_graceful_pause() -> None:
 
 
 def is_graceful_pause_requested() -> bool:
-    """Kiểm tra xem có yêu cầu dừng êm đang chờ xử lý hay không."""
+    """Check if a graceful pause request is currently pending."""
     return os.path.exists(get_graceful_pause_flag_path())
 
 
 def mark_graceful_pause_triggered(triggered: bool = True) -> None:
-    """Ghi nhận trạng thái vừa dừng êm trong tiến trình hiện tại."""
+    """Record graceful pause state in the current process."""
     global _LAST_GRACEFUL_PAUSE_TRIGGERED
     _LAST_GRACEFUL_PAUSE_TRIGGERED = bool(triggered)
 
 
 def was_graceful_paused() -> bool:
-    """Trả về True nếu tập vừa kết thúc do yêu cầu dừng êm của người dùng."""
+    """Return True if execution ended due to a user graceful pause request."""
     return _LAST_GRACEFUL_PAUSE_TRIGGERED
 
 
 def read_live_status() -> Dict[str, Any]:
-    """Đọc an toàn logs/live_status.json; trả về dict rỗng nếu chưa có hoặc đang ghi."""
+    """Safely read logs/live_status.json; return empty dict if missing or invalid."""
     path = get_live_status_path()
     if not os.path.exists(path):
         return {}

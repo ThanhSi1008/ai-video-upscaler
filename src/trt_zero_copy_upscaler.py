@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 """
 src/trt_zero_copy_upscaler.py
-Kiến trúc suy luận Zero-Disk & Zero-Copy thế hệ mới:
+Next-generation Zero-Disk and Zero-Copy inference architecture:
 1. GPUColorConverterP010LE:
-   - Chuyển đổi trực tiếp Tensor RGB FP16 [B, 3, H, W] sang định dạng rawvideo 'p010le'
-     (YUV420P 10-bit Little-Endian, MSB-aligned) theo chuẩn BT.709 TV Limited Range ngay trên GPU VRAM.
-   - Triệt tiêu 100% tải nén/giải nén PNG và CPU swscale, giảm 50% băng thông truyền PCIe D2H.
+   - Directly converts RGB FP16 tensor [B, 3, H, W] to rawvideo 'p010le'
+     (YUV420P 10-bit Little-Endian, MSB-aligned) per BT.709 TV Limited Range in GPU VRAM.
+   - Eliminates 100% of PNG compress/decompress overhead and CPU swscale, halving PCIe D2H bandwidth.
 2. SRVGGNetCompactTRTWrapper:
-   - Wrapper giữ nguyên 100% trọng số của realesr-animevideov3, thực hiện trích xuất đặc trưng FP16
-     nhưng giữ phép cộng phần dư (Residual Add) và Bicubic nội suy ở FP32 để triệt tiêu sai số làm tròn.
+   - Wrapper preserving 100% realesr-animevideov3 weights with FP16 feature extraction
+     while computing Residual Add and Bicubic interpolation in FP32 to avoid precision loss.
 3. DoubleBufferedPipeUpscaler:
-   - Gối đầu 3 CUDA Streams độc lập (Stream H2D, Stream Compute, Stream D2H) với bộ đệm Pinned Memory
-   - Đẩy trực tiếp luồng byte p010le vào FFmpeg NVENC pipe (In-Memory Dedup Re-expansion, 0 byte file ảnh trên đĩa).
+   - Overlaps 3 independent CUDA streams (H2D, Compute, D2H) with pinned host memory buffers.
+   - Pipes p010le raw frames directly to FFmpeg NVENC (in-memory deduplication re-expansion, zero disk I/O).
 """
 
 import collections

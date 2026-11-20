@@ -1,17 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 subtrans/dtw_auto_align.py
-Thuật toán Auto-Align Subtitle Timestamps thế hệ mới bằng Quy hoạch động đơn điệu
-(Anchor-Guided Monotonic Dynamic Time Warping - MS-DTW):
-1. Khắc phục triệt để các ca góc của thuật toán tham lam cục bộ:
-   - 1 JA <-> 2 EN: Whisper gộp 1 câu dài có ngắt nghỉ ngắn -> Tự động tách câu tiếng Nhật
-     tại dấu câu (、, 。) theo tỷ lệ thời lượng của 2 mốc EN phòng thu.
-   - 2 JA <-> 1 EN: Whisper ngắt làm 2 câu ngắn -> Tự động gộp tiếng Nhật vào khung thời gian của câu EN.
-   - OP/ED Quarantine: Phát hiện khoảng trống EN > 45s (nhạc mở đầu / kết thúc), giữ nguyên timestamp Whisper,
-     tuyệt đối không cho phép lời bài hát tranh chấp biên với câu thoại.
-   - Lọc bỏ thẻ SDH trong tiếng Anh ([groans], (sighs), ♪ ... ♪).
-2. Điểm neo ngữ nghĩa (Anchor Bonus):
-   - Thưởng điểm khi câu JA và EN cùng xuất hiện tên nhân vật trong Cast Sheet, hoặc cùng có dấu câu ? !.
+Anchor-Guided Monotonic Dynamic Time Warping (MS-DTW) subtitle alignment algorithm:
+1. Resolves local greedy edge cases:
+   - 1 JA <-> 2 EN: Whisper merges into 1 long sentence -> split Japanese text at punctuation
+     proportionally based on duration of the two studio EN cues.
+   - 2 JA <-> 1 EN: Whisper splits into 2 short cues -> merge Japanese text into the EN cue timing window.
+   - OP/ED Quarantine: Detect EN gaps > 45s (intro/outro music), preserve Whisper timestamps,
+     strictly preventing song lyrics from disputing dialogue cue boundaries.
+   - Filter SDH tags in English ([groans], (sighs), musical notes).
+2. Semantic Anchor Bonus:
+   - Bonus points when JA and EN cues share character names in Cast Sheet, or identical punctuation (! ?).
 """
 
 import re
@@ -29,28 +27,28 @@ class SubCue:
 
 
 def estimate_ja_mora(text: str) -> int:
-    """Ước tính số lượng âm tiết (mora) của câu thoại tiếng Nhật."""
+    """Estimate Japanese mora count for dialogue text."""
     clean = re.sub(r"[\s\W_]+", "", text)
     return max(1, len(clean))
 
 
 def estimate_en_words(text: str) -> int:
-    """Ước tính số từ tiếng Anh sau khi loại bỏ các thẻ âm thanh SDH."""
+    """Estimate English word count after stripping SDH audio tags."""
     clean = re.sub(r"\[.*?\]|\(.*?\)|♪.*?♪", "", text).strip()
     return max(1, len(clean.split()))
 
 
 def split_ja_text_proportionally(ja_text: str, ratio_first: float) -> Tuple[str, str]:
     """
-    Tách câu tiếng Nhật của Whisper thành 2 phần khi khớp với 2 câu EN liên tiếp (1:2 Match).
-    Ưu tiên tách tại dấu phẩy '、', dấu chấm '。', dấu than '！', dấu hỏi '？', dấu cách hoặc trợ từ.
+    Split Whisper Japanese text into 2 parts when matching 2 consecutive EN cues (1:2 Match).
+    Prioritize splitting at punctuation marks, spaces, or particles.
     """
     n = len(ja_text)
     if n <= 4:
         return ja_text, ""
     target_pos = max(1, min(n - 1, int(round(n * ratio_first))))
 
-    # Tìm điểm ngắt tự nhiên (dấu câu / khoảng trắng) trong bán kính +-35% quanh target_pos
+    # Find natural breakpoint (punctuation or whitespace) within +-35% radius around target_pos
     best_idx = None
     best_dist = n
     for m in re.finditer(r"[、。！？…\s ]+", ja_text):
@@ -68,9 +66,9 @@ def split_ja_text_proportionally(ja_text: str, ratio_first: float) -> Tuple[str,
 
 def split_en_reference_for_2_to_1(en_text: str, ratio_first: float) -> Tuple[str, str]:
     """
-    Tách câu tham chiếu tiếng Anh tại điểm ngắt mệnh đề tự nhiên (dấu phẩy, chấm phẩy, gạch ngang,
-    hoặc liên từ) khi 2 câu Whisper tiếng Nhật liên tiếp cùng ánh xạ vào 1 câu EN dài (2:1 Match).
-    Ngăn hiện tượng Gemini dịch lặp lại toàn bộ 1 câu EN giống hệt nhau trên 2 cue liên tiếp.
+    Split English reference text at natural clause boundary (comma, semicolon, dash,
+    or conjunction) when 2 consecutive Whisper Japanese cues map to 1 long EN cue (2:1 Match).
+    Prevents Gemini from repeating identical EN reference across 2 consecutive cues.
     """
     clean = (en_text or "").strip()
     n = len(clean)
@@ -80,13 +78,13 @@ def split_en_reference_for_2_to_1(en_text: str, ratio_first: float) -> Tuple[str
     target_pos = max(1, min(n - 1, int(round(n * ratio_first))))
     candidates: List[Tuple[int, int, int]] = []
 
-    # Ưu tiên 1: Dấu ngắt mệnh đề (, ; : — -- ! ?)
+    # Priority 1: Clause punctuation marks (, ; : - -- ! ?)
     for m in re.finditer(r"(?:[,;:—]|--|\.\.\.|[!?])\s+", clean):
         cut_end = m.end()
         if 3 <= cut_end <= n - 3:
             candidates.append((abs(cut_end - target_pos), m.end(), m.end()))
 
-    # Ưu tiên 2: Liên từ nối mệnh đề (and, but, so, while, when, because)
+    # Priority 2: Coordinating conjunctions (and, but, so, while, when, because)
     if not candidates:
         for m in re.finditer(r"\s+(?:and|but|so|while|when|because|though)\s+", clean, flags=re.IGNORECASE):
             cut_pos = m.start()
