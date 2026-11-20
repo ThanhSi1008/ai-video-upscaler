@@ -28,14 +28,14 @@ GLOSSARIES_DIR = Path(__file__).resolve().parent.parent / "glossaries"
 
 def find_series_glossary(series_or_filename: str, glossaries_dir: Optional[Path] = None) -> Optional[Path]:
     """
-    Tự động tìm file glossary riêng của bộ anime trong thư mục glossaries/.
-    Ví dụ: 'Futsutsuka_Na_Akujo_Dewa_Gozaimasu_Ga' -> glossaries/glossary.futsutsuka.yaml
+    Auto-detect a series-specific glossary file under glossaries/.
+    Example: 'Futsutsuka_Na_Akujo_Dewa_Gozaimasu_Ga' -> glossaries/glossary.futsutsuka.yaml
     """
     g_dir = glossaries_dir or GLOSSARIES_DIR
     if not g_dir.exists() or not series_or_filename:
         return None
 
-    # Chuẩn hoá tên chuỗi đầu vào (hỗ trợ cả đường dẫn chứa tên thư mục cha như 'Frieren/S01E01.mkv')
+    # Normalize input string (supports parent folder names like 'Frieren/S01E01.mkv')
     raw_str = str(series_or_filename)
     path_obj = Path(raw_str)
     search_targets = [path_obj.name]
@@ -82,11 +82,13 @@ def _parse_pronoun_list(raw_list: List[Dict[str, Any]]) -> List[PronounRule]:
 
 def resolve_glossary_target(glossary_path: Optional[Path]) -> Optional[Path]:
     """
-    Giải tham chiếu file glossary dạng text-pointer trên Windows
-    (ví dụ: glossary.reincarnatedasasword.yaml -> glossary.tenken.yaml).
+    Resolve cross-platform plain-text alias pointers safely
+    (e.g., glossaries/base.yaml -> ../subtrans/glossary.yaml,
+    glossary.reincarnatedasasword.yaml -> glossary.tenken.yaml).
     """
     if not glossary_path or not glossary_path.exists():
         return glossary_path
+    repo_root = Path(__file__).resolve().parent.parent
     seen = set()
     curr = glossary_path.resolve()
     while curr.exists() and curr not in seen:
@@ -97,7 +99,8 @@ def resolve_glossary_target(glossary_path: Optional[Path]) -> Optional[Path]:
             raw = curr.read_text(encoding="utf-8").strip()
             if "\n" not in raw and raw.endswith((".yaml", ".yml")):
                 nxt = (curr.parent / raw).resolve()
-                if nxt.exists() and nxt != curr:
+                # Allow pointers targeting within the same directory or repository root.
+                if (nxt.is_relative_to(repo_root) or nxt.is_relative_to(curr.parent.resolve())) and nxt.exists() and nxt != curr:
                     curr = nxt
                     continue
         except Exception:
@@ -107,7 +110,7 @@ def resolve_glossary_target(glossary_path: Optional[Path]) -> Optional[Path]:
 
 
 def compute_glossary_hash(glossary: Optional[Glossary]) -> str:
-    """Tính SHA-256 ngắn (16 ký tự) từ toàn bộ nội dung Glossary để chống đụng độ cache khi sửa từ điển."""
+    """Compute a short 16-char SHA-256 hash of Glossary contents for cache busting."""
     if not glossary:
         return ""
     payload = {
@@ -133,7 +136,7 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
             else:
                 data = json.load(f)
 
-        # Xử lý symlink dạng text pointer trên Windows
+        # Handle cross-platform plain-text pointer aliases
         if isinstance(data, str) and data.strip().endswith((".yaml", ".yml")):
             target_path = (resolved_path.parent / data.strip()).resolve()
             if target_path.exists() and target_path != resolved_path:

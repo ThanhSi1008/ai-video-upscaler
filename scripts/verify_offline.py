@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs", "web"}
 ROOT_FILES = {"upscale.py", "upscale.bat", "upscale_turbo.bat", "subtrans.py", "subtrans.bat",
               "web_gui.py", "web_gui.bat", "pytest.ini", "requirements.txt", "shows.yaml",
-              "AGENTS.md", "GEMINI.md", "CLAUDE.md", "README.md"}
+              "GEMINI.md", "README.md"}
 SUFFIXES = {".py", ".bat", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt", ".html", ".css", ".js", ".svg"}
 GUARD = '''"""Offline guard loaded before test collection in the source snapshot."""
 import _socket
@@ -93,7 +93,7 @@ def snapshot_sources(root: Path, destination: Path) -> int:
 
 
 def _rmtree_force(path: Path) -> None:
-    """Xóa sạch thư mục tạm kể cả các file read-only (như .git/objects trên Windows)."""
+    """Force-remove a temporary directory including read-only files (e.g., .git/objects on Windows)."""
     if not path.exists():
         return
 

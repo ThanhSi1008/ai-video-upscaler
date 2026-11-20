@@ -11,7 +11,7 @@ description: >-
 ## 1. Start / Resume Protocol
 
 ```powershell
-# Read-only bootstrap (Git branch, HEAD, dirty tree, START_HERE, STATE, freshness check):
+# Read-only bootstrap (Git branch, HEAD, dirty tree, STATE, freshness check):
 .\.venv\Scripts\python.exe scripts/agent_context.py
 
 # Fast AST symbol discovery (saves context tokens vs reading entire large modules):
@@ -26,27 +26,28 @@ For multi-step tasks, immediately create `docs/agents/tasks/YYYY-MM-DD-<slug>.md
 Before staging or committing, verify all Definition of Done gates:
 
 ```powershell
-# 1. Instruction byte budgets (AGENTS.md <= 12 KiB, AGENTS + subtrans/AGENTS <= 32 KiB) & relative links:
+# 1. Instruction budgets (GEMINI.md <= 12 KiB & <= 120 lines, GEMINI + subtrans-anime-ops <= 32 KiB) & relative links:
 .\.venv\Scripts\python.exe scripts/agent_context.py --check
 
-# 2. Isolated offline test suite (when code/tests/configs changed):
+# 2. Isolated offline test suite & linter:
 .\.venv\Scripts\python.exe scripts/verify_offline.py
+.\.venv\Scripts\ruff.exe check .
 
 # 3. Ensure no secrets, checkpoints, caches, or scratch files are staged:
 git status --short
 git diff --cached --check
 ```
 
-## 3. Mandatory Per-Request Commit Format (`AGENTS.md` §5)
+## 3. Mandatory Per-Request Commit Format (`GEMINI.md` §5)
 
-Commit **immediately** upon completing each user or research request (never batch unrelated requests). Every commit message body MUST contain 3 explicit sections:
+Commit **immediately** upon completing each user or research request (never batch unrelated requests). Every commit message body MUST be in English and contain 3 explicit sections:
 
 ```text
 <type>(<scope>): <concise summary>
 
-- Nguon yeu cau: <Nguoi dung yeu cau truc tiep / AI nghien cuu de xuat>
-- Hanh dong cu the:
+- Request Source: <Direct user request / AI research proposal>
+- Actions:
   + <Module/file changed, bug fixed, or capability added>
-- So lieu & Ket qua:
-  + <pytest counts & time, agent_context.py --check byte sizes, mux/fps or N/A>
+- Metrics & Verification:
+  + <pytest counts & time, agent_context.py --check status, ruff status, mux/fps or N/A>
 ```

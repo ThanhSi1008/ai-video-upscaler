@@ -1,77 +1,53 @@
-# LỘ TRÌNH KIẾN TRÚC & ĐÁNH GIÁ ĐỊNH LƯỢNG (`subtrans`)
-**Dự án:** Subtitle Translation Engine (`subtrans`)  
-**Triết lý vận hành:** **100% Cloud API (Gemini Cloud), KHÔNG SỬ DỤNG MODEL LOCAL (Bỏ qua Ollama / Local LLMs)** theo chỉ định trực tiếp từ Người dùng.  
-**Thứ tự ưu tiên chuẩn mực:** **Đo (Evaluation Harness) ➔ Đổi Schema & Ngữ cảnh ➔ Linter V1 ➔ Cascade Model (Flash/Lite) ➔ Dữ liệu RAG & Error Bank**.
+# Subtrans Architecture Roadmap & Quantitative Spec (`subtrans`)
 
----
+> **Engine:** Anime Subtitle Translation Engine (`subtrans/`)
+> **Operating Policy:** **100% Cloud Gemini API (NO Ollama / Local LLMs)**
+> **Pipeline Order:** **Eval Harness -> Schema & Context -> Linter -> Cascade Repair -> Hybrid RAG & Error Bank**
 
-## 1. Giai Đoạn P0: Nền Móng & Bộ Thước Đo Định Lượng (Evaluation Harness)
+## 1. P0: Deterministic Evaluation Harness (`subtrans/eval/`)
 
-### 1.1. Ba Lớp Kiểm Thử
-1. **Regression Test Suite:** Đóng băng 6 ca lỗi kinh điển (mỗi ca gồm JA, EN, Expected VI, Bad Pattern):
-   - Ca 1: Multi-speaker CC splitting (câu Kenshuu gọi "Thuần phi Kin" Futsutsuka Ep 07).
-   - Ca 2: Tràn 3–4 dòng do gối đầu thời gian (Strict zero-overlap 40ms gap).
-   - Ca 3: Ô nhiễm SQLite cache do chuỗi dry-run `[DRY-RUN]` hoặc `[Chưa dịch]`.
-   - Ca 4: Bảo tồn tên riêng Romaji trong xưng hô gọi tên (Vocative name retention).
-   - Ca 5: Tiếng cười anime bị gán nhầm câu thoại tiếng Anh (Laughter sound cue detection: `ふはははは!`).
-   - Ca 6: Triệt tiêu dị bản lặp lại trong Dual Dialogue (Anti-duplicate variant: `>= 15 chars` chung hoặc `>= 60%` từ vựng).
-2. **Pronoun & Relationship Benchmark Suite:**
-   - 150–200 cue mẫu từ *Futsutsuka* và *Tenken* được gắn nhãn tay `(speaker, addressee, mode, allowed_pronouns)`.
-   - Đây là thước đo trực tiếp đo tỷ lệ chính xác đại từ (Pronoun Accuracy %).
-3. **Holdout Episode Test:**
-   - 1–2 tập người dùng tự sửa toàn bộ phụ đề tiếng Việt làm tập kiểm thử độc lập (không đưa vào RAG/Prompt).
+1. **Regression Suite (`regression_suite.yaml`, 6 cases):**
+   - Multi-speaker CC splitting (Kenshuu / *"Thuần phi Kin"* in *Futsutsuka* Ep 07)
+   - Strict zero-overlap `40ms` gap preventing 3-4 line overflow
+   - SQLite cache isolation rejecting `[DRY-RUN]` / `[Chưa dịch]` pollution
+   - Romaji vocative name retention
+   - Anime laughter detection (`ふはははは!`) avoiding false EN alignment
+   - Dual Dialogue duplicate-variant suppression (`>= 15` common chars or `>= 60%` token overlap)
+2. **Pronoun & Relationship Suite (`pronoun_suite.yaml`):** Annotated `(speaker, addressee, mode, allowed_pronouns)` benchmark cues.
+3. **Deterministic Metrics (`metrics.py`):**
+   - **Pronoun Accuracy (%)**, **Romaji Retention (%)**, **CJK Leakage (%)**
+   - **CPS Violation (%):** Netflix target `<= 17 CPS`; Anime ceiling `<= 22-25 CPS`
+   - **Zero-Overlap Compliance (%):** `c.end <= next.start - 40ms`
 
-### 1.2. Bộ Chỉ Số Tất Định (Deterministic Metrics)
-* **Pronoun Accuracy (%):** Tỷ lệ câu xưng hô đúng theo cặp `(speaker, addressee, mode)`.
-* **Romaji Retention (%):** Tỷ lệ giữ nguyên tên riêng Romaji khi tiếng Nhật gọi tên.
-* **CJK Leakage (%):** Tỷ lệ phát hiện ký tự Kanji/Hiragana/Katakana bị lọt vào phụ đề tiếng Việt.
-* **CPS Violation (%):** Tỷ lệ câu có tốc độ đọc vượt quá ngưỡng an toàn:
-  - Mục tiêu (Netflix Standard): `<= 17 CPS`.
-  - Trần tối đa (Anime Fansub): `<= 22–25 CPS`.
-* **Zero-Overlap Compliance (%):** Tỷ lệ 100% tuân thủ `c.end <= next.start - 40ms`.
+## 2. P1: Think-Before-Translate Schema & Linter (`subtrans/models.py`, `linter.py`)
 
----
-
-## 2. Giai Đoạn P1: Schema "Suy Luận Trước, Dịch Sau" & Linter V1
-
-### 2.1. Nâng Cấp Pydantic Schema cho Gemini
-Tận dụng tính năng giữ nguyên thứ tự thuộc tính trong Schema từ tháng 11/2025 của Gemini API để tạo Chain-of-Thought ngầm (suy luận bối cảnh trước khi sinh ra bản dịch `vi`):
+Preserving JSON schema property order forces context reasoning before emitting `vi`:
 
 ```python
 class CueOutputItem(BaseModel):
     id: int
-    speaker: str                 # Nhân vật nói (từ cast sheet hoặc "unknown")
-    addressee: Optional[str]     # Nhân vật nghe (nếu xác định được)
+    speaker: str
+    addressee: Optional[str]
     mode: Literal[
-        "spoken", "inner", "narration", "spell", 
+        "spoken", "inner", "narration", "spell",
         "flashback", "comm", "lyrics", "onscreen"
     ]
-    en_conflict: bool            # Cờ đánh dấu EN mâu thuẫn/thêm thắt so với JA
-    vi: str                      # Bản dịch tiếng Việt hoàn chỉnh
+    en_conflict: bool
+    vi: str
     uncertain: Literal[
-        "none", "pronoun", "referent", "wordplay", 
+        "none", "pronoun", "referent", "wordplay",
         "archaic", "term", "other"
     ]
 ```
 
-### 2.2. Linter Hậu Kiểm V1
-Kiểm tra tự động trước khi xuất file `.srt`:
-1. **Kiểm tra CPS:** Kéo dài end time nếu còn gap, nén từ ngữ nếu vượt trần.
-2. **Kiểm tra CJK & Unicode NFC:** Tự động chuẩn hóa hoặc báo lỗi.
-3. **Kiểm tra Tên riêng & Đại từ:** So khớp với bảng Cast Sheet của tập.
+Post-pass checks (`linter.py`): CPS bounds, CJK/Katakana leakage, Unicode NFC normalization, Romaji vocatives, `RULE_GLOSSARY_TERM`, and `RULE_PRONOUN_CONSISTENCY`.
 
----
+## 3. P2: Smart Cloud Cascade (`subtrans/cascade.py`)
 
-## 3. Giai Đoạn P2: Cascade Model Thông Minh (Chỉ Dùng Cloud API)
-* Không dùng local model.
-* Chiến lược Cascade:
-  - **Draft Pass:** Sử dụng `gemini-3.5-flash-lite` theo từng batch.
-  - **Review/Repair Pass:** Chỉ gom các câu có điểm khó $S(cue)$ cao hoặc bị cắm cờ `uncertain != "none"` gửi vào 1–2 request `gemini-3.8-flash` dưới dạng biên tập/chỉnh sửa (`editing review format`), vừa tiết kiệm RPD vừa đạt chất lượng cao nhất.
+- **Draft Pass:** `gemini-3.5-flash-lite` batch translation (`thinking_level=MINIMAL`).
+- **Repair Pass:** Routes high-difficulty $S(\text{cue})$ or `uncertain != "none"` cues to `gemini-3.8-flash` (`thinking_level=LOW`) in an editing review pass with `digit_mismatch` quarantine.
 
----
+## 4. P3: Hybrid BM25 + FTS5 RAG & Error Bank (`subtrans/rag.py`)
 
-## 4. Giai Đoạn P3: Dữ Liệu RAG Nhẹ & Error Bank
-* Xây dựng kho tri thức cục bộ:
-  - Bảng `units`: Các cặp câu đã được người dùng duyệt (`gold`).
-  - Bảng `error_bank`: Các lỗi từng xảy ra kèm cách sửa đúng và quy tắc.
-  - Tự động gợi ý Few-shot mẫu cho các tập kế tiếp.
+- Local SQLite WAL knowledge base (`subtrans/.cache/knowledge.db`) storing `gold_units` (seeded with `BUILTIN_GOLD_EXEMPLARS` via `rag seed`, plus curated `silver` units) and `error_bank` cautions.
+- Uses SQLite FTS5 2-gram/3-gram character tokenization for 2-character Kanji terms (`魔術`, `聖杯`, `令呪`) + role-pair BM25 scoring.

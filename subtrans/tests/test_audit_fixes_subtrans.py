@@ -16,8 +16,8 @@ from typer.testing import CliRunner
 import scripts.agent_context as agent_context_mod
 import scripts.batch_translate_all as batch_mod
 import scripts.benchmark_pipeline as bench_mod
-import scripts.embed_fate_subtitles as embed_fate_mod
-import scripts.organize_vietnamese_subs as org_subs_mod
+import scripts.oneoff.embed_fate_subtitles as embed_fate_mod
+import scripts.oneoff.organize_vietnamese_subs as org_subs_mod
 import scripts.set_track_defaults as set_track_mod
 import scripts.upscale_x4_single as upscale_single_mod
 import subtrans.config as st_config

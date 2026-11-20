@@ -2,28 +2,28 @@
 # Configuration for anime subtitle translation (Verified against Google official docs 2026-10-01)
 
 gemini:
-  model: "gemini-3.5-flash-lite"  # Primary cloud model mặc định (500 RPD/key, tốc độ cực nhanh, không nghẽn 503)
-  high_quality_model: "gemini-3.8-flash"  # Model chất lượng cao khi bật cờ --subs-quality high
+  model: "gemini-3.5-flash-lite"  # Default primary cloud model (500 RPD/key, fast, low 503 contention)
+  high_quality_model: "gemini-3.8-flash"  # High-quality model when --subs-quality high is enabled
   fallback_models:
     - "gemini-3.8-flash"
     - "gemini-3.7-flash"
     - "gemini-3.6-flash"
     - "gemini-3.5-flash"
   lite_model: "gemini-3.5-flash-lite"
-  max_rpm: "chưa biết (cần đo)"  # RPM chưa biết, cần đo thực tế
-  max_rpd: 20  # Chưa xác minh (nguồn bên thứ ba)
+  max_rpm: "unknown (needs measurement)"  # Unverified RPM; depends on account tier
+  max_rpd: 20  # Unverified (third-party reference)
   model_rpd_limits:
-    gemini-3.8-flash: 20       # 20 RPD (chưa xác minh, nguồn bên thứ ba)
-    gemini-3.7-flash: 20       # 20 RPD (chưa xác minh, nguồn bên thứ ba)
-    gemini-3.6-flash: 20       # 20 RPD (chưa xác minh, nguồn bên thứ ba)
-    gemini-3.5-flash: 20       # 20 RPD (chưa xác minh, nguồn bên thứ ba)
-    gemini-3.5-flash-lite: 500 # 500 RPD (chưa xác minh, nguồn bên thứ ba)
-    gemini-3.1-flash-lite: 500 # 500 RPD (chưa xác minh, nguồn bên thứ ba)
+    gemini-3.8-flash: 20       # 20 RPD (unverified reference)
+    gemini-3.7-flash: 20       # 20 RPD (unverified reference)
+    gemini-3.6-flash: 20       # 20 RPD (unverified reference)
+    gemini-3.5-flash: 20       # 20 RPD (unverified reference)
+    gemini-3.5-flash-lite: 500 # 500 RPD (unverified reference)
+    gemini-3.1-flash-lite: 500 # 500 RPD (unverified reference)
   request_timeout_ms: 45000  # Timeout per request in MILLISECONDS (45s) per google.genai types.HttpOptions
-  explicit_context_caching: false  # Tùy chọn khóa cứng Explicit Context Cache (TTL 15m) trên máy chủ Gemini
+  explicit_context_caching: false  # Optional Explicit Context Cache (TTL 15m) on Gemini API
 
 translation:
-  batch_size: 100            # Cấu hình được từ 100–150 cue
+  batch_size: 100            # Configurable 100-150 cues per batch
   stage_watchdog_seconds: 1500  # Watchdog timeout for whole stage (25 mins per episode)
   max_retries_per_model: 3
   skip_styles: '(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_\s\-]|$)'
@@ -32,7 +32,7 @@ translation:
   line_max_chars: 42
   allow_silent_fallback: false  # Do NOT silently switch models mid-episode on 429 quota; pause and wait instead
   validate_batch_pronouns: true # Assert pronoun consistency across batches
-  auto_align_whisper_to_en: true # Tự động ghim mốc thời gian Whisper theo track EN phòng thu
+  auto_align_whisper_to_en: true # Auto-align Whisper cues to studio EN timestamps
 
 privacy:
   mode: "allow_cloud"  # "allow_cloud" or "local_only"

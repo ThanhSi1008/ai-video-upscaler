@@ -15,6 +15,7 @@ EXPECTED_SKILLS = {
     "video-upscale-ops",
     "subtrans-anime-ops",
     "agent-handoff-commit",
+    "modern-web-guidance",
 }
 
 ALLOWED_PLUGIN_KEYS = {
@@ -56,6 +57,11 @@ def test_workspace_skills_have_valid_frontmatter():
         assert f"name: {skill_name}" in fm
         assert "description:" in fm
 
+    guides_dir = skills_dir / "modern-web-guidance" / "guides"
+    assert guides_dir.is_dir()
+    guide_files = list(guides_dir.rglob("*.md"))
+    assert 1 <= len(guide_files) <= 45, f"Expected pruned guides <= 45, got {len(guide_files)}"
+
 
 def test_workspace_plugins_manifests_and_logos():
     plugins_dir = AGENTS_DIR / "plugins"
@@ -78,10 +84,21 @@ def test_session_start_hook_emits_valid_inject_steps(tmp_path):
     )
     (tmp_path / ".env").write_text("GEMINI_API_KEY=TOP_SECRET_VALUE", encoding="utf-8")
     (tmp_path / ".temp_ep01").mkdir()
-    msg = mod.build_status_message(tmp_path)
-    assert "[upscaler-guard]" in msg
-    assert "Checkpoints(.temp_*)=1" in msg
-    assert "TOP_SECRET_VALUE" not in msg
+
+    # Empty tasks dir omits Latest_Task=none noise
+    msg_no_task = mod.build_status_message(tmp_path)
+    assert "[upscaler-guard]" in msg_no_task
+    assert "Checkpoints(.temp_*)=1" in msg_no_task
+    assert "TOP_SECRET_VALUE" not in msg_no_task
+    assert "Latest_Task=none" not in msg_no_task
+
+    # Active task file appends Task=...
+    tasks_dir = tmp_path / "docs" / "agents" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "TEMPLATE.md").write_text("# Template\n", encoding="utf-8")
+    (tasks_dir / "2026-11-21-sample-task.md").write_text("# Active\n", encoding="utf-8")
+    msg_with_task = mod.build_status_message(tmp_path)
+    assert "Task=docs/agents/tasks/2026-11-21-sample-task.md" in msg_with_task
 
 
 def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
@@ -96,6 +113,8 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         repo_root=tmp_path,
     )
     assert res_env["decision"] == "deny"
+    assert "GEMINI.md" in res_env["reason"]
+    assert "AGENTS.md" not in res_env["reason"]
 
     res_example = mod.evaluate_tool_call(
         {"toolCall": {"name": "read_file", "args": {"Path": "e:/ai-video-upscaler/.env.example"}}},
@@ -184,3 +203,9 @@ def test_upscaler_mcp_server_jsonrpc_handlers():
     assert call_resp is not None
     assert call_resp["result"]["isError"] is False
     assert "glossary." in call_resp["result"]["content"][0]["text"]
+
+    # Oversized payload truncation guard
+    huge_lines = "\n".join(f"line {i}: " + ("x" * 100) for i in range(mod.MAX_OUTPUT_LINES + 20))
+    capped = mod._cap_output(huge_lines)
+    assert capped.endswith("... [truncated]")
+    assert len(capped) <= mod.MAX_OUTPUT_CHARS + 32

@@ -17,13 +17,13 @@ def make_memory(root: Path) -> None:
 
 def test_valid_memory_accepts_relative_links_and_ignores_remote_and_code(tmp_path):
     make_memory(tmp_path)
-    (tmp_path / "docs/agents/START_HERE.md").write_text(
-        "[rules](../../AGENTS.md#rules)\n[map](PROJECT_MAP.md)\n"
+    (tmp_path / "docs/agents/STATE.md").write_text(
+        "[rules](../../GEMINI.md#rules)\n[map](PROJECT_MAP.md)\n"
         "[remote](https://example.invalid/not-fetched)\n"
         "```md\n[example](missing-example.md)\n```\n",
         encoding="utf-8",
     )
-    # Old research documentation is deliberately outside the validation scope.
+    # Historical research docs are outside the active memory validation scope.
     (tmp_path / "docs/old.md").write_text("[old](gone.md)", encoding="utf-8")
     assert agent_context.check_memory(tmp_path) == []
 
@@ -39,7 +39,7 @@ def test_check_reports_missing_required_file_and_broken_target(tmp_path):
 
 def test_check_rejects_links_outside_repo_and_nonportable_file_urls(tmp_path):
     make_memory(tmp_path)
-    (tmp_path / "AGENTS.md").write_text(
+    (tmp_path / "GEMINI.md").write_text(
         "[outside](../outside.md)\n[absolute](file:///C:/outside.md)", encoding="utf-8"
     )
     errors = agent_context.check_memory(tmp_path)
@@ -47,13 +47,19 @@ def test_check_rejects_links_outside_repo_and_nonportable_file_urls(tmp_path):
     assert any("nonportable local link" in e for e in errors)
 
 
-def test_byte_budgets_use_utf8_bytes_and_combined_scope(tmp_path):
+def test_byte_budgets_and_line_limits_use_utf8_and_combined_scope(tmp_path):
     make_memory(tmp_path)
-    (tmp_path / "AGENTS.md").write_text("ệ" * (agent_context.ROOT_BUDGET // 3 + 1), encoding="utf-8")
-    (tmp_path / "subtrans/AGENTS.md").write_text("x" * agent_context.COMBINED_BUDGET, encoding="utf-8")
+    (tmp_path / "GEMINI.md").write_text("ệ" * (agent_context.ROOT_BUDGET // 3 + 1), encoding="utf-8")
+    (tmp_path / agent_context.SUBTRANS_SKILL_REL).write_text("x" * agent_context.COMBINED_BUDGET, encoding="utf-8")
     errors = agent_context.check_memory(tmp_path)
-    assert any("AGENTS.md exceeds" in e for e in errors)
-    assert any("Root + subtrans AGENTS exceed" in e for e in errors)
+    assert any("GEMINI.md exceeds" in e and "bytes" in e for e in errors)
+    assert any("Root + subtrans skill exceed" in e for e in errors)
+
+    # Line limit enforcement (<= MAX_ROOT_LINES)
+    make_memory(tmp_path)
+    (tmp_path / "GEMINI.md").write_text("\n".join(["line"] * (agent_context.MAX_ROOT_LINES + 1)), encoding="utf-8")
+    line_errors = agent_context.check_memory(tmp_path)
+    assert any(f"GEMINI.md exceeds {agent_context.MAX_ROOT_LINES} lines" in e for e in line_errors)
 
 
 def test_bootstrap_reads_only_curated_memory_and_git_metadata(tmp_path, monkeypatch, capsys):
@@ -236,7 +242,7 @@ def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_p
     monkeypatch.setattr(
         agent_context,
         "git_output",
-        lambda root, *args: "scripts/embed_fate_subtitles.py\nsrc/pipeline.py",
+        lambda root, *args: "scripts/oneoff/embed_fate_subtitles.py\nsrc/pipeline.py",
     )
     warn = agent_context.check_freshness(tmp_path, head_short="0d6e3b6")
     assert warn is not None

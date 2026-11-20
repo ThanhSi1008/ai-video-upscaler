@@ -1,36 +1,35 @@
-# Handoff: <tên tác vụ>
+# Handoff: <Task Title>
 
-Tạo khi bắt đầu tác vụ nhiều bước; cập nhật trong lúc làm, trước compact/bàn giao/dừng. Mỗi tác vụ một file.
+Create when starting a multi-step task; update after milestones, before compaction/handoff, or before stopping. One file per task.
 
-## Yêu cầu và phạm vi
-- Ngày/múi giờ:
-- Nguồn yêu cầu và mục tiêu:
-- Kết quả cần bàn giao:
-- Được phép / chưa được phép:
-- Ràng buộc quan trọng:
-- Trạng thái: đang làm / chờ thông tin / hoàn tất.
+## Request & Scope
+- Date / Timezone:
+- Request source & goal:
+- Deliverables:
+- Allowed / Restricted actions:
+- Key constraints:
+- Status: in-progress / blocked / completed
 
-## Mốc mã nguồn và điều phối
+## Codebase Anchor & Coordination
 - Root, branch, baseline commit:
-- File đã sửa (kể cả chưa commit):
-- Chủ sở hữu từng phần / subagent / kết quả đã nhận:
-- Tiến trình/session đang chạy và nơi xem kết quả:
-- File dữ liệu production cần giữ:
+- Modified files (including uncommitted):
+- Ownership / subagents / received outputs:
+- Active background jobs & evidence paths:
+- Production data to preserve:
 
-## Đã làm và bằng chứng
-- Thay đổi: file:symbol, lý do.
-- Quyết định đã chốt / giả thuyết / hướng thử bị loại và lý do.
-- Lệnh kiểm tra, interpreter, số pass/fail/skip, thời gian, evidence path.
-- Mux/frame/fps: số đo thật hoặc N/A + lý do.
+## Completed Work & Evidence
+- Changes (`file:symbol` + rationale):
+- Decisions / rejected approaches:
+- Verification commands, interpreter (`.venv`), pass/fail/skip counts, duration, evidence path:
+- Mux / frame-count / fps: actual measurements or `N/A — no media artifact produced`
 
-## Bước tiếp theo
-1. Hành động cụ thể tiếp theo, file/symbol hoặc lệnh.
-2. Việc còn lại và điều kiện hoàn tất.
-- Câu hỏi/approval còn chờ (không coi thời gian trôi qua là đồng ý):
-- Rủi ro/giới hạn cần báo người dùng:
+## Next Steps
+1. Immediate next action (`file:symbol` or command).
+2. Remaining work & acceptance criteria.
+- Open questions / pending approvals:
+- Risks / limitations to report:
 
-## Kết thúc
-- Kết quả và giới hạn đã thông báo:
-- Commit/tag: điền hash có sẵn hoặc tra `git log -- <file-handoff>` sau commit, không dùng <pending> cho task đã xong.
-- Tài liệu cập nhật: [STATE](../STATE.md), [AGENTS](../../../AGENTS.md), bản đồ/quyết định liên quan.
-
+## Closure
+- Final summary & caveats communicated:
+- Commit / tag (`git log -n 1 -- <handoff-file>`):
+- Docs updated: [STATE](../STATE.md), [GEMINI](../../../GEMINI.md), [PROJECT_MAP](../PROJECT_MAP.md), [DECISIONS](../DECISIONS.md).

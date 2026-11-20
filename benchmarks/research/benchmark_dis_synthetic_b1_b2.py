@@ -259,11 +259,13 @@ def generate_noise_frames(base_img, gaussian_sigma=0.0, n=60):
 
 # ----------------- HÀM ĐÁNH GIÁ VÀ ĐO ĐẠC -----------------
 
-def evaluate_clip_policies(clip_path, ground_truth_motion_per_frame, thresh_list=[0.2, 0.3, 0.4, 0.5]):
+def evaluate_clip_policies(clip_path, ground_truth_motion_per_frame, thresh_list=None):
     """
-    Quét dedup plan trên clip và so sánh với ground truth.
-    ground_truth_motion_per_frame: danh sách bool [có chuyển động >= 0.1 px so với frame liền trước]
+    Scan dedup plan on a clip and compare against ground truth motion flags.
+    ground_truth_motion_per_frame: list of bools [motion >= 0.1 px from previous frame]
     """
+    if thresh_list is None:
+        thresh_list = [0.2, 0.3, 0.4, 0.5]
     results = {}
     with tempfile.TemporaryDirectory() as td:
         # 1. Default

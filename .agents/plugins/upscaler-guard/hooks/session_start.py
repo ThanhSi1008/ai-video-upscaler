@@ -1,8 +1,8 @@
 """SessionStart lifecycle hook for e:\\ai-video-upscaler.
 
-Injects a compact (<300 chars) live operational status line into new agent sessions:
+Injects a compact (<250 chars) live operational status line into new agent sessions:
 Git branch/HEAD, GPU lock status, active .temp_* checkpoints, daytime Gemini quota guard,
-and latest task handoff path. Stdlib-only; never reads .env or imports app runtime.
+and active task handoff path when present. Stdlib-only; never reads .env or app runtime.
 """
 
 from __future__ import annotations
@@ -44,22 +44,22 @@ def build_status_message(root: Path, now: datetime | None = None) -> str:
     checkpoints = sorted(p.name for p in root.glob(".temp_*") if p.is_dir())
     quota_window = "GUARD_ACTIVE(>=14:00)" if now.hour >= 14 else "normal(<14:00)"
 
+    parts = [
+        f"[upscaler-guard] Git={branch}@{head}",
+        f"GPU_Lock={'ACTIVE' if gpu_locked else 'idle'}",
+        f"Checkpoints(.temp_*)={len(checkpoints)}",
+        f"Gemini_Quota={quota_window}",
+    ]
+
     tasks_dir = root / "docs" / "agents" / "tasks"
-    latest_task = "none"
     if tasks_dir.is_dir():
         candidates = sorted(
             p.name for p in tasks_dir.glob("*.md") if p.name.upper() != "TEMPLATE.MD"
         )
         if candidates:
-            latest_task = f"docs/agents/tasks/{candidates[-1]}"
+            parts.append(f"Task=docs/agents/tasks/{candidates[-1]}")
 
-    return (
-        f"[upscaler-guard] Git={branch}@{head} | "
-        f"GPU_Lock={'ACTIVE' if gpu_locked else 'idle'} | "
-        f"Checkpoints(.temp_*)={len(checkpoints)} | "
-        f"Gemini_Quota={quota_window} | "
-        f"Latest_Task={latest_task}"
-    )
+    return " | ".join(parts)
 
 
 def main() -> int:

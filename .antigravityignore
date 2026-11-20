@@ -1,0 +1,66 @@
+# .antigravityignore — Workspace indexing, token-budget & benchmark-contamination exclusions
+# Note: Python tooling and pytest still read ignored files on disk when explicitly referenced.
+
+# 1. Historical archives (already distilled into docs/agents/DECISIONS.md)
+docs/archive/
+
+# 2. Caches, build artifacts & local Python/toolchain environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.cache/
+.venv/
+venv/
+ENV/
+bin/python311/
+bin/ffmpeg/
+scratch/
+
+# 3. Runtime logs, locks & mutable queue/workspace state
+logs/
+*.log
+out/
+state/
+pending_subs.json
+skills-lock.json
+.gpu_active.lock
+.temp_*
+subtrans/.cache/
+test_frames/
+archive_subtitles/
+
+# 4. Heavy binary weights, TensorRT engines & media assets
+models_bench/
+samples/
+*.onnx
+*.engine
+*.trt
+*.plan
+*.pth
+*.safetensors
+*.bin
+*.param
+*.mkv
+*.mp4
+*.webm
+*.mov
+*.avi
+*.wav
+*.flac
+*.nip
+
+# 5. Token-heavy full-episode subtitle samples (keep lightweight sample_30s_*.ass visible)
+subtrans/samples/*.srt
+subtrans/samples/sample_3min_*
+
+# 6. Blind benchmark ground truth (prevent answer leakage into agent context)
+benchmarks/upscale/ab_test/KEY_ANSWER.json
+
+# 7. Secrets & credentials
+.env
+.env.*
+!.env.example
+subtrans/.env

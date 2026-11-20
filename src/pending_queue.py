@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 src/pending_queue.py
-Quản lý hàng đợi các tập phụ đề chưa đạt chuẩn nhúng (pending_subs.json).
-Module thuần thư viện chuẩn Python (stdlib-only) để subtrans/pipeline.py có thể nạp
-độc lập mà KHÔNG kích hoạt import torch / CUDA hay quét phần cứng video.
+Manages the pending subtitle translation queue (state/pending_subs.json).
+Stdlib-only module so subtrans/pipeline.py can import it without loading
+torch, CUDA, or video hardware probing.
 """
 
 import json
@@ -12,11 +12,12 @@ import sys
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SRC_DIR)
-PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "pending_subs.json")
+PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "state", "pending_subs.json")
+LEGACY_PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "pending_subs.json")
 
 
 def _resolve_pending_file() -> str:
-    """Ưu tiên thuộc tính src.config.PENDING_SUBS_FILE nếu module src.config đã được nạp (tương thích monkeypatch)."""
+    """Prefer src.config.PENDING_SUBS_FILE if src.config is loaded (supports monkeypatching)."""
     cfg_mod = sys.modules.get("src.config")
     if cfg_mod is not None and hasattr(cfg_mod, "PENDING_SUBS_FILE"):
         return str(getattr(cfg_mod, "PENDING_SUBS_FILE"))
@@ -24,12 +25,16 @@ def _resolve_pending_file() -> str:
 
 
 def load_pending_subs() -> list:
-    """Đọc danh sách các tập phụ đề chưa đạt chuẩn (Item 4b)."""
+    """Load pending subtitle entries, falling back to legacy root path if unmigrated."""
     target_file = _resolve_pending_file()
-    if not os.path.exists(target_file):
-        return []
+    read_path = target_file
+    if not os.path.exists(read_path):
+        if target_file == PENDING_SUBS_FILE and os.path.exists(LEGACY_PENDING_SUBS_FILE):
+            read_path = LEGACY_PENDING_SUBS_FILE
+        else:
+            return []
     try:
-        with open(target_file, "r", encoding="utf-8") as f:
+        with open(read_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except Exception:
@@ -37,7 +42,7 @@ def load_pending_subs() -> list:
 
 
 def save_pending_subs(items: list) -> None:
-    """Ghi nguyên tử danh sách pending_subs.json xuống đĩa."""
+    """Atomically write the pending subtitle queue JSON to disk."""
     target_file = _resolve_pending_file()
     try:
         parent = os.path.dirname(os.path.abspath(target_file))
@@ -52,7 +57,7 @@ def save_pending_subs(items: list) -> None:
 
 
 def add_pending_sub(record: dict) -> None:
-    """Thêm hoặc cập nhật một tập vào pending_subs.json."""
+    """Add or update an episode entry in the pending subtitle queue."""
     if os.environ.get("PYTEST_CURRENT_TEST") and "dummy" in str(record.get("base_name", "")):
         return
     items = load_pending_subs()
@@ -62,7 +67,7 @@ def add_pending_sub(record: dict) -> None:
 
 
 def remove_pending_sub(base_name: str) -> None:
-    """Xóa một tập khỏi pending_subs.json khi đã đạt chuẩn (khớp base_name hoặc video_path)."""
+    """Remove a completed episode entry from the pending queue (matches base_name or video_path)."""
     if not base_name:
         return
     items = load_pending_subs()

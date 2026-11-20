@@ -1,11 +1,11 @@
 """Read-only Stdio MCP Server (JSON-RPC 2.0) for e:\\ai-video-upscaler.
 
-Provides safe, zero-side-effect codebase & operational inspection tools:
-- upscaler_memory_check: Run agent_context memory/budget/freshness check.
-- upscaler_find_symbol: Locate Python classes/functions across the repo via AST.
-- upscaler_file_symbols: List AST signatures & line ranges for a specific Python file.
-- upscaler_list_checkpoints: Inspect .temp_* checkpoint manifests read-only (never modifies/deletes).
-- upscaler_list_glossaries: List available per-series anime glossaries in glossaries/.
+Provides bounded, zero-side-effect codebase and operational inspection tools:
+- upscaler_memory_check: Validate memory files, budgets, and Git status.
+- upscaler_find_symbol: Search Python AST classes/functions across repo.
+- upscaler_file_symbols: List AST signatures and line ranges for one Python file.
+- upscaler_list_checkpoints: Inspect .temp_* checkpoints and .gpu_active.lock state.
+- upscaler_list_glossaries: List anime glossaries in glossaries/.
 """
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ if str(REPO_ROOT) not in sys.path:
 from scripts import agent_context  # noqa: E402
 
 PROTOCOL_VERSION = "2024-11-05"
+MAX_OUTPUT_CHARS = 4000
+MAX_OUTPUT_LINES = 80
 
 TOOLS = [
     {
         "name": "upscaler_memory_check",
-        "description": "Verify agent memory files, relative links, instruction byte budgets, and Git baseline status (read-only).",
+        "description": "Check agent memory files, links, budgets, and Git HEAD.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -35,13 +37,13 @@ TOOLS = [
     },
     {
         "name": "upscaler_find_symbol",
-        "description": "Search Python AST definitions across src/, subtrans/, scripts/, tests/ by class or function name.",
+        "description": "Find Python AST class/function definitions across repo.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Partial or exact class/function name to locate.",
+                    "description": "Symbol substring.",
                 }
             },
             "required": ["query"],
@@ -50,13 +52,13 @@ TOOLS = [
     },
     {
         "name": "upscaler_file_symbols",
-        "description": "Extract AST classes, methods, functions, and line ranges for a relative Python path (e.g. 'src/pipeline.py').",
+        "description": "List AST classes, functions, and line ranges for a Python file.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative path to a Python source file.",
+                    "description": "Repo-relative .py path.",
                 }
             },
             "required": ["path"],
@@ -65,7 +67,7 @@ TOOLS = [
     },
     {
         "name": "upscaler_list_checkpoints",
-        "description": "Read-only summary of any .temp_<basename> video upscale checkpoints and .gpu_active.lock state.",
+        "description": "Read-only summary of .temp_* checkpoints and .gpu_active.lock.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -74,7 +76,7 @@ TOOLS = [
     },
     {
         "name": "upscaler_list_glossaries",
-        "description": "List per-series anime glossaries under glossaries/ with file sizes.",
+        "description": "List anime glossary files in glossaries/ with sizes.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -82,6 +84,25 @@ TOOLS = [
         },
     },
 ]
+
+
+def _cap_output(
+    text: str,
+    max_chars: int = MAX_OUTPUT_CHARS,
+    max_lines: int = MAX_OUTPUT_LINES,
+) -> str:
+    """Bound tool return payloads so raw output never floods the context window."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    truncated = False
+    if len(lines) > max_lines:
+        text = "\n".join(lines[:max_lines])
+        truncated = True
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+        truncated = True
+    return f"{text}\n... [truncated]" if truncated else text
 
 
 def _capture(fn, *args) -> str:
@@ -102,7 +123,7 @@ def call_tool(name: str, arguments: dict) -> tuple[str, bool]:
         head = agent_context.git_output(REPO_ROOT, "rev-parse", "--short", "HEAD") or "unknown"
         if errors:
             return f"Branch={branch}@{head}\nFAIL:\n" + "\n".join(errors), True
-        return f"Branch={branch}@{head}\nPASS: All memory files, links, and byte budgets valid.", False
+        return f"Branch={branch}@{head}\nPASS: All memory files, links, and budgets valid.", False
 
     if name == "upscaler_find_symbol":
         query = str(arguments.get("query") or "").strip()
@@ -184,11 +205,12 @@ def handle_request(req: dict) -> dict | None:
         t_name = str(params.get("name") or "")
         t_args = params.get("arguments") or {}
         text, is_err = call_tool(t_name, t_args)
+        bounded_text = _cap_output(text)
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "content": [{"type": "text", "text": text}],
+                "content": [{"type": "text", "text": bounded_text}],
                 "isError": is_err,
             },
         }

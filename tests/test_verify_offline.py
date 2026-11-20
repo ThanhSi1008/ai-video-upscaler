@@ -9,7 +9,8 @@ from scripts.verify_offline import allowed_source, isolated_environment, snapsho
 
 @pytest.mark.parametrize("name", [".env", "subtrans/.env", "subtrans/.cache/knowledge.db",
                                  "out/episode.srt", ".temp_episode/manifest.json",
-                                 "pending_subs.json", "models_bench/model.pth", "../src/a.py",
+                                 "pending_subs.json", "state/pending_subs.json",
+                                 "models_bench/model.pth", "../src/a.py",
                                  "src/__pycache__/a.py", "samples/video.mkv"])
 def test_private_runtime_files_are_excluded(name):
     assert not allowed_source(Path(name))

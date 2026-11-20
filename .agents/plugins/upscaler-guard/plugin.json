@@ -5,8 +5,8 @@
   "description": "Enforces project safety invariants via lifecycle hooks: blocks .env/API-key leaks, guards .temp_* checkpoints, protects daytime Gemini RPD quota, and warns against unisolated pytest or concurrent GPU runs.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "Chạy kiểm tra ngữ cảnh Agent và kiểm thử offline cô lập toàn dự án",
-    "Tạo bảng thuật ngữ glossary mới cho một bộ anime và kiểm thử dry-run",
-    "Kiểm tra trạng thái checkpoint video và đánh giá hiệu năng pipeline hiện tại"
+    "Run agent context check and isolated offline test suite across the repo",
+    "Author a per-series anime glossary and validate with subtrans --dry-run",
+    "Inspect video .temp_* checkpoint state and pipeline telemetry"
   ]
 }

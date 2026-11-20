@@ -33,12 +33,17 @@ venv.bak/
 !samples/sample_30s.mkv
 *.mov
 *.avi
+*.webm
+*.wav
+*.flac
 *.tmp
 *.lock
 *.vi.srt
 .temp_*
 vid_probe.json
 temp_sub.ass
+state/
+pending_subs.json
 logs/*
 !logs/.gitkeep
 tests/**/*.png
@@ -46,9 +51,12 @@ tests/*.png
 
 # Model weights & compiled TensorRT/ONNX artifacts
 *.pth
+*.safetensors
 *.bin
 *.param
 *.engine
+*.trt
+*.plan
 *.nip
 models/*.onnx
 !bin/realesrgan/models/*.bin

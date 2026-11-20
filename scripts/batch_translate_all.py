@@ -146,11 +146,10 @@ def prefetch_episode_stage_a(
     skip_if_series_cast_missing: bool = False,
 ) -> dict:
     """
-    Chuẩn bị trước (gối đầu nền) phụ đề text & bảng nhân vật Stage A Cast Sheet cho tập kế tiếp `N+1`
-    trong lúc tập `N` đang dịch batch cuối / mux MKV:
-    - Tuyệt đối KHÔNG chạy Whisper STT (`prefer_whisper_when_no_ja=False`) để không tranh chấp CPU/GPU.
-    - Ghi sẵn `<base_name>.cast.yaml` vào `output_dir` để khi `upscale.py --subs-only` khởi chạy ở tập `N+1`,
-      Stage A lập tức đọc từ đĩa trong ~0ms mà không mất thời gian chờ mạng.
+    Background Stage A prefetch (text subtitles + Cast Sheet) for episode N+1
+    while episode N finishes final translation/muxing:
+    - Never invokes Whisper STT (`prefer_whisper_when_no_ja=False`) to avoid CPU/GPU contention.
+    - Writes `<base_name>.cast.yaml` into `output_dir` so episode N+1 reads it in ~0 ms.
     """
     vid_dir = os.path.dirname(os.path.abspath(fpath))
     base_name = os.path.splitext(os.path.basename(fpath))[0]
@@ -233,7 +232,7 @@ def prefetch_episode_stage_a(
 
 
 class StageAPrefetchWorker:
-    """Bộ điều phối chạy nền 1 luồng chuẩn bị trước Stage A cho tập `N+1` an toàn, hủy sạch khi hết quota."""
+    """Single-worker background Stage A prefetcher for episode N+1; cancels cleanly on quota exhaustion."""
 
     def __init__(self, prefetch_fn=None):
         from concurrent.futures import ThreadPoolExecutor
@@ -262,7 +261,7 @@ class StageAPrefetchWorker:
         def _task():
             if same_folder:
                 if same_series_headstart_sec > 0:
-                    # Nhường tập N tạo <series>.cast.yaml trước nếu cùng thư mục series để không gọi trùng Stage A
+                    # Give episode N time to emit <series>.cast.yaml before prefetching same-series episodes
                     if self._cancel_event.wait(timeout=same_series_headstart_sec):
                         return {"status": "CANCELLED"}
                 if self._cancel_event.is_set():
@@ -295,8 +294,7 @@ class StageAPrefetchWorker:
         except (TimeoutError, FuturesTimeoutError):
             if fut.cancel():
                 return None
-            # Không nuốt TimeoutError khi worker thread vẫn đang chạy/ghi file:
-            # đợi luồng kết thúc hẳn để tránh race với run_translation_for_file.
+            # Do not swallow TimeoutError while worker is still writing files; wait to prevent races.
             try:
                 return fut.result()
             except Exception:
@@ -372,7 +370,7 @@ def run_translation_for_file(
                 "status": "QUOTA_EXHAUSTED",
                 "duration_seconds": round(elapsed, 1),
                 "attempt": attempt,
-                "error": "Toàn bộ chuỗi model Gemini đã cạn hạn mức ngày (RPD). Dừng hàng đợi chờ reset 00:00 PT.",
+                "error": "All Gemini models exhausted daily RPD quota; stopping queue until 00:00 PT reset.",
             }
 
         if res.returncode == 0 and is_partial_subtitle_output(combined_out):
@@ -380,7 +378,7 @@ def run_translation_for_file(
                 "status": "PARTIAL_PENDING",
                 "duration_seconds": round(elapsed, 1),
                 "attempt": attempt,
-                "error": "Phụ đề xuất ở chế độ .partial.srt (đã lưu vào pending_subs.json, không retry lãng phí quota).",
+                "error": "Subtitle emitted as .partial.srt (saved to pending queue; skipping retry).",
             }
 
         translation_done = (
@@ -394,11 +392,11 @@ def run_translation_for_file(
                 "status": "EMBED_FAILED",
                 "duration_seconds": round(elapsed, 1),
                 "attempt": attempt,
-                "error": "Dịch phụ đề đã hoàn tất (file ngoài sẵn sàng) nhưng bước nhúng/audit MKV trả về lỗi — không retry dịch lại.",
+                "error": "Translation succeeded (sidecar available) but MKV embed/audit failed; skipping re-translation.",
             }
 
         last_err = res.stderr[-500:] if res.stderr else res.stdout[-500:]
-        print(f"⚠️ [ATTEMPT {attempt}/{max_retries} FAILED] {os.path.basename(fpath)}: {last_err.strip()[-200:]}", flush=True)
+        print(f"[ATTEMPT {attempt}/{max_retries} FAILED] {os.path.basename(fpath)}: {last_err.strip()[-200:]}", flush=True)
         if attempt < max_retries:
             time.sleep(10 * attempt)
 
@@ -412,12 +410,12 @@ def run_translation_for_file(
 def build_cli_parser():
     import argparse
     parser = argparse.ArgumentParser(description="Batch Subtitle Translation Orchestrator for Raw Sources")
-    parser.add_argument("--no-auto-offset", action="store_true", help="Tắt tự động phát hiện và bù độ lệch phụ đề JA-EN")
-    parser.add_argument("--no-embed", action="store_true", help="Không nhúng phụ đề vào container MKV gốc")
-    parser.add_argument("--prefer-whisper", action="store_true", help="Ưu tiên Whisper STT + DTW khi thiếu track JA")
-    parser.add_argument("--subs-quality", choices=["normal", "fast", "high"], default="normal", help="Chế độ chất lượng dịch")
-    parser.add_argument("--max-retries", type=int, default=3, help="Số lần thử lại tối đa cho lỗi mạng tạm thời")
-    parser.add_argument("--no-prefetch", action="store_true", help="Tắt chạy gối đầu Stage A Cast Sheet cho tập N+1")
+    parser.add_argument("--no-auto-offset", action="store_true", help="Disable automatic JA-EN subtitle offset detection")
+    parser.add_argument("--no-embed", action="store_true", help="Do not embed subtitles into source MKV containers")
+    parser.add_argument("--prefer-whisper", action="store_true", help="Prefer Whisper STT + DTW when JA track is missing")
+    parser.add_argument("--subs-quality", choices=["normal", "fast", "high"], default="normal", help="Translation quality tier")
+    parser.add_argument("--max-retries", type=int, default=3, help="Max retries on transient network failures")
+    parser.add_argument("--no-prefetch", action="store_true", help="Disable Stage A Cast Sheet prefetching for episode N+1")
     return parser
 
 
@@ -467,11 +465,11 @@ def main(argv=None):
 
             # Check if already processed in state or already has VI sub
             if rel_path in state["history"] and state["history"][rel_path].get("status") == "SUCCESS":
-                print(f"[{idx}/{len(queue)}] ⏭️ ĐÃ DỊCH XONG TRƯỚC ĐÓ: {rel_path}", flush=True)
+                print(f"[{idx}/{len(queue)}] [SKIP] Already translated: {rel_path}", flush=True)
                 continue
 
             if not args.no_embed and has_vietnamese_sub(fpath):
-                print(f"[{idx}/{len(queue)}] ⏭️ CONTAINER ĐÃ CÓ PHỤ ĐỀ TIẾNG VIỆT: {rel_path}", flush=True)
+                print(f"[{idx}/{len(queue)}] [SKIP] Container already has VI subtitle: {rel_path}", flush=True)
                 state["history"][rel_path] = {
                     "status": "SUCCESS",
                     "duration_seconds": 0,
@@ -486,7 +484,7 @@ def main(argv=None):
                 pf_res = prefetcher.wait_if_inflight(fpath)
                 if pf_res and pf_res.get("status") == "PREFETCHED":
                     print(
-                        f"  ⚡ [STAGE-A PREFETCH HIT] Đã chuẩn bị sẵn bảng nhân vật ({pf_res.get('characters', 0)} chars) cho '{fname}'.",
+                        f"  [STAGE-A PREFETCH HIT] Prepared cast sheet ({pf_res.get('characters', 0)} chars) for '{fname}'.",
                         flush=True,
                     )
                 next_ep = _find_next_eligible(idx)
@@ -498,7 +496,7 @@ def main(argv=None):
                         subs_quality=quality_mode,
                     )
 
-            print(f"\n[{idx}/{len(queue)}] 🚀 BẮT ĐẦU DỊCH: {rel_path}...", flush=True)
+            print(f"\n[{idx}/{len(queue)}] Translating: {rel_path}...", flush=True)
             res = run_translation_for_file(
                 fpath,
                 max_retries=args.max_retries,
@@ -517,28 +515,28 @@ def main(argv=None):
 
             if res["status"] == "SUCCESS":
                 state["completed"] += 1
-                print(f"[{idx}/{len(queue)}] ✅ HOÀN THÀNH ({res['duration_seconds']}s): {fname}", flush=True)
+                print(f"[{idx}/{len(queue)}] DONE ({res['duration_seconds']}s): {fname}", flush=True)
             elif res["status"] == "QUOTA_EXHAUSTED":
                 if prefetcher is not None:
                     prefetcher.shutdown(cancel=True)
                     prefetcher = None
                 print(
-                    f"\n🛑 [{idx}/{len(queue)}] CẠN HẠN MỨC NGÀY (RPD) TRÊN TOÀN BỘ CHUỖI GEMINI KHI DỊCH '{fname}'.\n"
-                    "   • Đã bảo toàn toàn bộ câu đã dịch trong SQLite cache & pending_subs.json.\n"
-                    "   • Dừng sớm hàng đợi an toàn (chờ 00:00 PT / 14:00-15:00 giờ VN rồi chạy lại).",
+                    f"\n[{idx}/{len(queue)}] DAILY RPD QUOTA EXHAUSTED across Gemini chain on '{fname}'.\n"
+                    "   - Saved partial translations in SQLite cache & state/pending_subs.json.\n"
+                    "   - Stopping queue cleanly until 00:00 PT (14:00-15:00 VN) reset.",
                     flush=True,
                 )
                 save_state(state)
                 break
             elif res["status"] == "PARTIAL_PENDING":
                 state["failed"] += 1
-                print(f"[{idx}/{len(queue)}] ⏸️ TẠM LƯU PARTIAL: {fname} ({res.get('error')})", flush=True)
+                print(f"[{idx}/{len(queue)}] PARTIAL SAVED: {fname} ({res.get('error')})", flush=True)
             elif res["status"] == "EMBED_FAILED":
                 state["failed"] += 1
-                print(f"[{idx}/{len(queue)}] ⚠️ DỊCH XONG NHƯNG LỖI NHÚNG MKV: {fname} ({res.get('error')})", flush=True)
+                print(f"[{idx}/{len(queue)}] TRANSLATED (EMBED FAILED): {fname} ({res.get('error')})", flush=True)
             else:
                 state["failed"] += 1
-                print(f"[{idx}/{len(queue)}] ❌ THẤT BẠI: {fname} (Lỗi: {res.get('error')})", flush=True)
+                print(f"[{idx}/{len(queue)}] FAILED: {fname} (Error: {res.get('error')})", flush=True)
 
             save_state(state)
             time.sleep(2)
@@ -548,8 +546,8 @@ def main(argv=None):
 
     total_done = state["completed"] + state["skipped"]
     print("\n" + "=" * 80, flush=True)
-    print(f"🎉 HOÀN TẤT TOÀN BỘ HÀNG ĐỢI!", flush=True)
-    print(f"📊 Tổng số tập: {state['total']} | Đã hoàn tất: {total_done} | Thành công mới: {state['completed']} | Bỏ qua (đã có): {state['skipped']} | Thất bại: {state['failed']}", flush=True)
+    print("BATCH QUEUE COMPLETED", flush=True)
+    print(f"Total: {state['total']} | Completed: {total_done} | New: {state['completed']} | Skipped: {state['skipped']} | Failed: {state['failed']}", flush=True)
     print("=" * 80, flush=True)
 
 if __name__ == "__main__":

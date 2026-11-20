@@ -87,3 +87,25 @@ def test_futsutsuka_glossary_content():
     assert "Tuệ Nguyệt" not in term_vi_map.values()
     assert "Lợi Lợi" not in term_vi_map.values()
 
+
+def test_glossary_text_pointers_resolve_cross_platform():
+    from subtrans.glossary import GLOSSARIES_DIR, resolve_glossary_target
+
+    base_alias = GLOSSARIES_DIR / "base.yaml"
+    assert base_alias.is_file()
+    resolved_base = resolve_glossary_target(base_alias)
+    assert resolved_base is not None and resolved_base.resolve() == DEFAULT_BASE_GLOSSARY_PATH.resolve()
+    base_g = load_glossary(base_alias)
+    assert base_g is not None and len(base_g.terms) >= 200
+
+    for alias_name, target_name in (
+        ("glossary.demonslayer.yaml", "glossary.kimetsu.yaml"),
+        ("glossary.reincarnatedasasword.yaml", "glossary.tenken.yaml"),
+        ("glossary.tenseishitarakendeshita.yaml", "glossary.tenken.yaml"),
+    ):
+        alias_path = GLOSSARIES_DIR / alias_name
+        resolved = resolve_glossary_target(alias_path)
+        assert resolved is not None and resolved.name == target_name
+        loaded = load_glossary(alias_path)
+        assert loaded is not None and len(loaded.terms) > 0
+

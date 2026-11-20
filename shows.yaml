@@ -1,17 +1,17 @@
-# shows.yaml - Ánh xạ tự động mô hình SR & chính sách Dedup theo từng bộ / nguồn anime
-# Cú pháp mỗi rule (độ ưu tiên từ trên xuống dưới, thấp hơn cờ CLI --model / --dedup-policy):
-#   - pattern: Chuỗi con hoặc glob ('*', '?') khớp tên file hoặc thư mục (an toàn với ngoặc vuông '[SubsPlease]', '[BD 1080p]')
-#     model: ID mô hình trong models/models.yaml:
-#       • animevideov3                           (Mặc định 4x->2x, nét đậm mịn, khử nhiễu tốt cho cả BD & Web-DL)
-#       • animejanai-hd-v3-ultracompact          (Native 2x nhanh ~18.5 fps, khử nhiễu muỗi nén 8-bit Web-DL / SubsPlease)
-#       • animejanai-hd-v3-sharp1-ultracompact   (Native 2x nhanh ~18.5 fps, sắc nét giữ film grain gốc cho Blu-ray 1080p sạch)
-#       • animejanai-hd-v3-superultracompact     (Native 2x siêu tốc ~20.8 fps, khử nhiễu nhẹ cho tập thoại đời thường)
-#       • animejanai-hd-v3-sharp1-superultracompact (Native 2x siêu tốc ~20.8 fps cho Blu-ray nhẹ)
-#       • animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3
-#     dedup_policy: (Tùy chọn) default | dis | sakuga | dis-sakuga | sensitive-b | motion | drift | off
+# shows.yaml - Automatic per-series / source-tag SR model & dedup policy mapping
+# Rule syntax (evaluated top-to-bottom; overridden by CLI --model / --dedup-policy):
+#   - pattern: Substring or glob ('*', '?') matching filename/folder (bracket-safe for '[SubsPlease]', '[BD 1080p]')
+#     model: Model ID from models/models.yaml:
+#       - animevideov3                           (Default 4x->2x: bold lines, strong denoise for BD & Web-DL)
+#       - animejanai-hd-v3-ultracompact          (Native 2x ~18.5 fps: mosquito-noise removal for 8-bit Web-DL / SubsPlease)
+#       - animejanai-hd-v3-sharp1-ultracompact   (Native 2x ~18.5 fps: sharp grain retention for clean Blu-ray 1080p)
+#       - animejanai-hd-v3-superultracompact     (Native 2x ~20.8 fps: light denoise for dialogue episodes)
+#       - animejanai-hd-v3-sharp1-superultracompact (Native 2x ~20.8 fps for light Blu-ray sources)
+#       - animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3
+#     dedup_policy: (Optional) default | dis | sakuga | dis-sakuga | sensitive-b | motion | drift | off
 
 shows:
-  # 1. Nguồn phát sóng hằng tuần Crunchyroll Web-DL ([SubsPlease], [Erai-raws]):
+  # 1. Weekly Crunchyroll Web-DL sources ([SubsPlease], [Erai-raws]):
   - pattern: "[SubsPlease]*"
     model: "animejanai-hd-v3-ultracompact"
     dedup_policy: "default"
@@ -25,7 +25,7 @@ shows:
     model: "animejanai-hd-v3-ultracompact"
     dedup_policy: "default"
 
-  # 2. Nguồn đĩa Blu-ray 1080p sạch ([BD 1080p], BluRay, BDRip):
+  # 2. Clean 1080p Blu-ray sources ([BD 1080p], BluRay, BDRip):
   - pattern: "*[BD*"
     model: "animevideov3"
     dedup_policy: "dis"
@@ -36,9 +36,9 @@ shows:
     model: "animevideov3"
     dedup_policy: "dis"
 
-  # --- MẪU GỢI Ý BỔ SUNG CHO TỪNG BỘ RIÊNG LẺ (bỏ dấu '#' khi muốn áp dụng) ---
+  # --- OPTIONAL SERIES OVERRIDES (uncomment to activate) ---
   #
-  # Bộ hành động nặng (Sakuga / lia máy liên tục):
+  # Heavy action / sakuga shows:
   # - pattern: "*Fate*"
   #   model: "animejanai-hd-v3-sharp1-ultracompact"
   #   dedup_policy: "sakuga"

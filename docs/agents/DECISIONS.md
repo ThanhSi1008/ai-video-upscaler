@@ -1,98 +1,51 @@
-# Hồ Sơ Quyết Định Kiến Trúc (Architectural Decision Records - ADR)
+# Architectural Decision Records (ADR)
 
-> **Cập nhật ngày:** 2026-11-15
->
-> **Tài liệu liên quan:** [START_HERE](START_HERE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [STATE](STATE.md) | [VALIDATION](VALIDATION.md) | [Root AGENTS](../../AGENTS.md) | [Video Pipeline](../video-pipeline.md) | [Dedup Architecture](../dedup-architecture.md) | [Audit & Safety](../audit-and-safety.md) | [Subtrans AGENTS](../../subtrans/AGENTS.md)
+> **Updated:** 2026-11-21 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [VALIDATION](VALIDATION.md)
 
----
+## Active ADRs
 
-## Danh Mục Các Quyết Định Kiến Trúc
+### ADR-001: 100% Local GPU Video Upscale & 100% Cloud Gemini Subtrans
+- **Decision:** Run Video SR locally on NVIDIA CUDA/TensorRT 10.16 FP16 (`RTX 3060 12GB`); run subtitle translation strictly via Google Gemini Cloud API (3-key round-robin). Never load local LLMs (Ollama / TranslateGemma) when GPU upscaling or subtrans runs.
+- **Rationale:** Concurrent local LLM loading exhausts 12GB VRAM and causes OOM crashes.
 
-### ADR-001: 100% Cục Bộ cho Video Upscale & 100% Cloud API cho Dịch Thuật
-- **Bối cảnh:** Thiết bị mục tiêu là Windows 11 Workstation với RTX 3060 (12GB VRAM). Vừa upscale video 4K vừa chạy LLM cục bộ (Ollama / Local LLM) gây cạn kiệt VRAM nghiêm trọng (OOM).
-- **Quyết định:**
-  - AI Video Upscale chạy 100% cục bộ trên PyTorch CUDA FP16 Native.
-  - Phụ đề chạy 100% qua Google Gemini Cloud API (3 API key luân phiên).
-  - Tuyệt đối cấm nạp Local LLM khi tiến trình GPU Upscale đang chạy.
+### ADR-002: Mandatory `-max_interleave_delta 0` for Stream-Copy MKV Mux
+- **Decision:** Always mux with `-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0`.
+- **Rationale:** Prevents FFmpeg interleave skew across multi-channel audio (5.1/FLAC/TrueHD) and softsubs that triggers local audio dropouts on TV/media players.
 
-### ADR-002: Bắt Buộc Cờ `-max_interleave_delta 0` Khi Mux Stream Copy
-- **Bối cảnh:** Khi mux container MKV chứa nhiều stream âm thanh đa kênh (5.1, FLAC, AC3) và nhiều phụ đề mềm, FFmpeg mặc định có thể tạo ra độ lệch interleave giữa audio và video.
-- **Quyết định:** Lệnh mux bắt buộc dùng:
-  `-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0`
-- **Lý do:** Ngăn chặn triệt để lỗi tràn bộ đệm và mất tiếng cục bộ sau vài phút phát lại trên TV/trình phát video.
+### ADR-003: Two-Way ITU-R BT.709 Color Matrix
+- **Decision:** Extract with `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (TV Limited -> RGB24 Full); encode with `pc -> tv` (`p010le`) and tag `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
+- **Rationale:** Eliminates gamma wash-out and crushed blacks on anime masters.
 
-### ADR-003: Chuỗi Ma Trận Màu Sắc BT.709 Hai Chiều Chuẩn Xác
-- **Bối cảnh:** Anime sản xuất theo chuẩn BT.709 TV Limited Range. Nếu chuyển đổi sai giữa RGB Full Range và YUV Limited Range, hình ảnh 4K sẽ bị bợt màu (gamma wash-out) hoặc bết đen.
-- **Quyết định:**
-  - Trích xuất: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (YUV Limited -> RGB24 Full).
-  - Mã hóa: `scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv` (RGB24 Full -> YUV Limited `p010le`).
-  - Gắn cờ metadata: `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
+### ADR-004: Keyframe GOP + DIS Optical Flow Deduplication
+- **Decision:** Split on source IDR keyframes (`split_video_segments`), force-keep chunk frame 0, scan 1-pass `mpdecimate` (`768:320:0.33` default) + optional early-exit DIS optical flow (`--dedup-policy dis`, `--dis-thresh 0.30`), and re-expand frames in NVENC/Concat Demuxer.
+- **Rationale:** Anime limited animation contains ~55-62% duplicate frames; DIS preserves slow pans/zooms without full-frame inference cost.
 
-### ADR-004: Deduplication Trước Suy Luận Bằng Keyframe GOP + DIS Optical Flow
-- **Bối cảnh:** Anime chứa ~60% khung hình tĩnh hoặc trùng lặp do kỹ thuật hoạt họa giới hạn (Limited Animation 8–12 fps). Upscale từng frame trùng lặp gây lãng phí 60% thời gian GPU.
-- **Quyết định:**
-  - Cắt video theo Keyframe GOP (`split_video_segments`).
-  - Quét `mpdecimate` với ngưỡng mặc định `768:320:0.33`.
-  - Bổ sung phát hiện chuyển động lia máy/zoom qua dòng chảy quang học DIS (`--dedup-policy dis`, `--dis-thresh 0.30`).
-  - Tái tạo frame 4K hoàn chỉnh qua FFmpeg Concat Demuxer (triệt tiêu 100% dung lượng đĩa của hardlinks).
+### ADR-005: AnimeJaNai Residual Fix (`janai-fix`)
+- **Decision:** Add `F.interpolate(x, scale_factor=2.0, mode='nearest')` residual skip in `AnimeJaNaiCompact2x` (`src/cuda_engine.py`).
+- **Rationale:** Matches Spandrel CPU reference bit-exactly (PSNR 75-158 dB; prevents darkened/corrupted output).
 
-### ADR-005: Đính Chính Mô Hình AnimeJaNai (`janai-fix`)
-- **Bối cảnh:** Kiến trúc `AnimeJaNaiCompact2x` nguyên bản học residual trên không gian ảnh nội suy bicubic/nearest. Khi chạy suy luận PyTorch thuần nếu thiếu phép cộng nearest $\times 2$, ảnh đầu ra sẽ bị tối đen hoặc sai lệch cấu trúc nghiêm trọng.
-- **Quyết định:** Bổ sung phép cộng residual nearest $\times 2$ trong `src/cuda_engine.py`:
-  `F.interpolate(x, scale_factor=2.0, mode='nearest')`. Đạt khớp bit-exact 0.0 với spandrel CPU chuẩn (PSNR 75–158 dB).
+### ADR-006: Whisper 5.1 FC Extraction & Hallucination Filtering
+- **Decision:** For 5.1+ Japanese audio without JA subs, mix center speech (`pan=mono|c0=0.7*FC+0.15*FL+0.15*FR,highpass=f=80,lowpass=f=8000,afftdn=nf=-25`), transcribe with `faster-whisper` (`large-v3-turbo`) + Silero VAD, strip `WHISPER_HALLUCINATION_REGEX` / `SCREAM_OR_REPEAT_LOOP_REGEX`, and snap timestamps to studio EN via monotonic DTW (`subtrans/dtw_auto_align.py`).
 
-### ADR-006: Khử Ảo Giác Whisper & Trích Xuất Kênh Trung Tâm Thoại (FC)
-- **Bối cảnh:** Whisper khi gặp nhạc nền OP/ED hoặc tiếng hét kéo dài trong anime thường phát sinh ảo giác (lặp câu YouTube `ご視聴ありがとうございました`, lặp token `ああああああああ`). Track âm thanh đa kênh 5.1 có tiếng nhạc lớn ở kênh bên làm át giọng nói.
-- **Quyết định:**
-  - Dùng `ffprobe` chọn track tiếng Nhật; với âm thanh 5.1 (`channels >= 6`), trộn ưu tiên kênh trung tâm Front Center (FC):
-    `pan=mono|c0=0.7*FC+0.15*FL+0.15*FR,highpass=f=80,lowpass=f=8000,afftdn=nf=-25`.
-  - Bộ lọc Regex `WHISPER_HALLUCINATION_REGEX` & `SCREAM_OR_REPEAT_LOOP_REGEX`.
-  - Tự động drop các câu Whisper mồ côi (`is_dropped_sound=True`) nằm giữa khoảng lặng nhạc EN (> 2500ms).
-  - Pass 3 chuẩn hóa mốc thời gian chỉ chạy trên `active_cues` và bảo toàn Dual Dialogue.
+### ADR-007: Multi-Speaker CC Splitting & Dual Dialogue Merging
+- **Decision:** Split combined CC events (`-（Speaker1）...\N-（Speaker2）...`) in `subtrans/parser.py`, preserve `Cue.speaker`, translate independently, and merge simultaneous cues into 2-line Dual Dialogue (`- Line 1\n- Line 2`) in `subtrans/writer.py` with duplicate-variant suppression (`>= 15` common prefix chars or `>= 60%` token overlap).
 
-### ADR-007: Bảo Toàn Người Nói Multi-Speaker & Hiển Thị Song Song
-- **Bối cảnh:** Phụ đề Closed Captions Nhật thường gộp 2 người nói vào cùng 1 event (ví dụ `-（絹秀）... \N -（清佳）...`).
-- **Quyết định:**
-  - Tách thành 2 event độc lập trong `subtrans/parser.py`, lưu người nói vào `Cue.speaker`.
-  - Dịch độc lập từng câu để không bỏ sót thoại của nhân vật phụ.
-  - Gom lại thành Dual Dialogue 2 dòng (`- Lời 1\n- Lời 2`) ở `subtrans/writer.py` khi thời gian đồng thời.
+### ADR-008: TensorRT 10.16 FP16 + NVENC `p6 fullres CQ 18` (No INT8 PTQ / No Preset Downgrade)
+- **Decision:** Use TensorRT 10.16 FP16 (`HMMA.16816.F16`, `builder_optimization_level=5`, 2-slot `_out_ring`) + CUDA P0 (`7500 MHz`) + HAGS (`HwSchMode=2`), paired with `hevc_nvenc` `main10`, `p010le`, `p6`, `CQ 18`, `multipass fullres`, `rc-lookahead 32`, Dual AQ (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
+- **Rationale:** `INT8 PTQ` causes `Q/DQ` reformat stalls and 8-bit banding across 33 `PReLU` layers; lowering `p6 -> p1` saves `0.0s` under AI-bound regimes while adding mosquito noise around black lineart.
 
-### ADR-008: TensorRT 10 FP16 (`HMMA.F16`) + NVENC `p6 fullres CQ 18` — Không Lượng Tử Hóa `INT8` Hay Hạ Preset NVENC
-- **Bối cảnh:** RTX 3060 (GA106) mở khóa gấp đôi tốc độ Tensor Core ở `FP16 accumulate` (`51 TFLOPS` so với `25.4 TFLOPS` `FP32 accumulate`). Đặt vấn đề có nên ép tiếp xuống `INT8 PTQ` hoặc hạ preset NVENC `p6 -> p1..p3` để tăng tốc thêm không.
-- **Quyết định:**
-  - Giữ chuẩn **TensorRT 10.16 FP16** (`builder_optimization_level=5`, vòng đệm VRAM `_out_ring` 2-slot) kết hợp mở khóa xung VRAM **P0 (`7500 MHz`)** và **HAGS (`HwSchMode=2`)**; **không dùng `INT8 PTQ`**.
-  - Giữ chuẩn **NVENC `preset p6`, `multipass fullres`, `CQ 18`, `rc-lookahead 32`, `spatial-aq 1` (`aq-strength 6`), `temporal-aq 1`**.
-- **Lý do vật lý & toán học:**
-  - Trên `realesr-animevideov3` (32 lớp nối tiếp không có `BatchNorm` + 33 lớp `PReLU` dốc âm theo kênh), `INT8 PTQ` vừa bị nghẽn `Q/DQ Reformat` giữa `Conv` và `PReLU`, vừa gây xung đột giữa biên độ nét mực đen/tia sáng (outliers) với vùng chuyển sắc mịn bầu trời đêm -> sinh vân bậc thang 8-bit (`color banding`), phá hỏng chuỗi xuất **10-bit `p010le`**.
-  - Mạch ASIC NVENC Gen 7 ở `p6` nén 4K 10-bit đạt **~55–70 fps** và chạy bất đồng bộ song song với AI (~22–28 fps hiệu dụng). Theo định luật $\min(R_{\text{AI}}, R_{\text{NVENC}})$, hạ `p6 -> p1` tiết kiệm **0.0 giây** nhưng làm xuất hiện nhiễu hạt muỗi quanh nét vẽ đen và tăng 25–40% dung lượng file.
+### ADR-009: Zero-Disk 3-Stage Overlap, Cyclic Cel (`A->B->A`), & 1-Pass Concat-Mux
+- **Decision:** Default `--zero-disk=True`: stream `NVDEC RGB24` via `readinto()` -> pinned `NHWC` -> Triton JIT `p010le` -> `hevc_nvenc` pipe with 3-stage overlap (`Decode N+1 || GPU N || Encode N-1`), `BLAKE2b` + SIMD `Cyclic Cel` memoization (Belady's OPT / NTFS `os.link`), `raw_actions_rle` `< 1 ms` GOP re-partitioning, 1-pass `mux_segments_directly`, and 1-pass `-f streamhash` MD5 audit.
 
-### ADR-009: Kiến Trúc Zero-Disk 3-Stage Overlapped Pipe, Cyclic Cel Memoization (`A->B->A`) & 1-Pass Concat-Mux
-- **Bối cảnh:** Trên máy dùng RAM `DDR4-2133` (2 thanh khác hãng không bật được XMP 3200), việc ghi/đọc PNG 4K trung gian và hoán vị mảng trên CPU gây nghẽn băng thông RAM và hao mòn SSD.
-- **Quyết định:**
-  - **Zero-Disk Pipe (`--zero-disk` / `upscale_turbo.bat`):** Đọc luồng RGB24 trực tiếp vào mảng NumPy cấp phát sẵn (`readinto` 0-copy), truyền tuần tự `NHWC` qua Pinned Memory lên GPU, hoán vị ở `uint8`, chuyển màu BT.709 `p010le` bằng kernel **Triton JIT** ngay trên VRAM và bơm thẳng sang ống `hevc_nvenc`.
-  - **Gối đầu 3 tầng thực sự & Queue GOP-RLE:** Prefetch `Decode(N+1)` ngay trước khi GPU suy luận `Chunk N`, đẩy bước đóng gói đuôi MP4 sang `EncodeWorker`; lưu chuỗi nén `raw_actions_rle` trong `plan.json` để tái phân hoạch GOP trong `< 1 ms` và tách sẵn `raw_segs` cho tập kế tiếp trong `--queue`.
-  - **Cyclic Cel Memoization & 1-Pass Mux:** Băm `BLAKE2b` + kiểm tra nhiễu lượng tử OpenCV SIMD kết hợp thuật toán loại bỏ tối ưu **Belady's OPT** để không suy luận lại các bức vẽ lặp chu kỳ `A->B->A` (nhép miệng/chớp mắt); ghép trực tiếp `up_*.mp4` với audio/sub/font gốc bằng `mux_segments_directly` (khử ~8 GB ghi/đọc `merged_4k.mp4`) và đối soát MD5 đa luồng bằng 1 lượt `-f streamhash`.
+### ADR-010: Reject Cross-Episode OP/ED Cache
+- **Decision:** Never share/cache rendered 4K OP/ED video across episodes.
+- **Rationale:** Staff/cast credits change in 100% of EDs and >70% of OPs (breaking bit-exact matching), GOP boundaries drift across cold opens (violating 1:1 `nb_frames`), audio overlaps OP/ED transitions, and net whole-season speedup is only ~1.7-2.2%.
 
-### ADR-010: Từ Chối (Reject) Cross-Episode OP/ED Cache — Bảo Toàn Tính Toàn Vẹn Khung Hình, Tín Dụng Nhân Sự & Đồng Bộ Mux Phòng Thu
-- **Bối cảnh:**
-  - Có đề xuất xây dựng cơ chế nhận diện và tái sử dụng video 4K của đoạn nhạc mở đầu (Opening - OP ~90s) và nhạc kết thúc (Ending - ED ~90s) giữa các tập phim trong cùng một bộ anime để giảm thời gian suy luận GPU (~12.5% tổng thời lượng phim trên lý thuyết).
-- **Quyết định:**
-  - **Chính thức bác bỏ và không triển khai tính năng Cross-Episode OP/ED Cache.**
-  - Duy trì toàn vẹn nguyên tắc suy luận độc lập từng tập phim; tiếp tục tận dụng tối đa cơ chế Deduplication Keyframe GOP + DIS Optical Flow (`ADR-004`) và Cyclic Cel Memoization `A->B->A` (`ADR-009`) ngay trong luồng RAM của tập hiện hành.
-  - Ưu tiên tăng tốc toàn diện thông qua cấu hình mặc định Zero-Disk Pipe (`--zero-disk=True`) và quy tắc tự động hóa mô hình trong `shows.yaml` (tiết kiệm thực tế 45%–50% thời gian chạy mà an toàn tuyệt đối).
-- **Lý do kỹ thuật & Phân tích từ nguyên lý đầu tiên:**
-  1. **Sai lệch tín dụng nhân sự và diễn viên lồng tiếng (Staff & Cast Credits Mutation):**
-     - Trong quy trình sản xuất anime, danh sách diễn viên lồng tiếng (Cast), họa sĩ diễn hoạt (Key Animators), studio phụ trợ và đạo diễn từng tập (Episode Directors) thay đổi **100% ở ED và hơn 70% ở OP** theo từng tập cụ thể. Chữ tín dụng này được render cứng vào hình ảnh nguồn. Việc tái sử dụng video 4K từ tập trước sẽ làm hiển thị sai tên nhân sự của tập hiện tại, gây lỗi nghiêm trọng về tính chính xác nội dung và tiêu chuẩn lưu trữ.
-     - Chữ tín dụng xuất hiện trên 80%–90% số frame của OP/ED, khiến cơ chế kiểm tra khớp frame chính xác (Bit-exact / Hash Matching) bị trượt cache (miss) gần như 100%.
-  2. **Lệch ranh giới GOP & Gãy chuỗi thời gian (GOP Jitter & PTS Discontinuity):**
-     - Ranh giới bắt đầu OP thay đổi linh hoạt theo độ dài đoạn mở đầu (Cold Open). Chuỗi Keyframe IDR của video nén nguồn không trùng khớp giữa các tập.
-     - Việc cắt ghép video 4K ngoài ranh giới IDR gốc buộc phải re-encode phân đoạn chuyển tiếp (smart-cut) hoặc làm đứt gãy chuỗi Presentation Time Stamp (PTS/DTS), gây lỗi nhấp nháy/nhòe frame đầu và vi phạm trực tiếp bất biến bảo toàn số lượng khung hình (`ffprobe -count_frames` khớp 1:1, `AGENTS.md` §7).
-  3. **Hòa trộn âm thanh đè thoại & Biến thể SFX (Audio Bleeding & SFX Variants):**
-     - Lời thoại nhân vật thường kéo dài đè lên nốt nhạc đầu của OP hoặc nhạc nền ED nổi lên từ cảnh cao trào cuối phim; một số tập đặc biệt có thêm hiệu ứng âm thanh (SFX) riêng trong OP.
-     - Dự án áp dụng Stream Copy âm thanh gốc nguyên bản (`ADR-002`). Tách rời video và audio OP để ghép nối sẽ dẫn đến lệch pha đồng bộ microsecond ($0.0\text{ ms}$), gây hiện tượng lệch khẩu hình hát và lệch nhịp phách.
-  4. **Nguy cơ lệch vĩnh viễn phụ đề mềm (Subtitle Timeline Drift):**
-     - Phụ đề mềm (ASS/SRT) được canh chỉnh theo thời gian tuyệt đối của từng tập. Chỉ cần lệch 1 khung hình ($41.7\text{ ms}$) tại điểm ghép nối OP, toàn bộ phụ đề thoại trong hơn 20 phút còn lại của tập phim sẽ bị trôi mốc thời gian vĩnh viễn.
-  5. **Nghịch lý Pareto — Lợi ích thực tế quá nhỏ so với chi phí và rủi ro:**
-     - Với pipeline hiện tại (TensorRT 10 FP16, `--zero-disk`, GOP Dedup lọc 55%–62% frame), một đoạn OP 90s chỉ mất khoảng **~65 giây** GPU.
-     - Do ED không thể cache vì đổi chữ, tổng thời gian tiết kiệm thực tế trên toàn mùa phim chỉ đạt **~1.7% – 2.2%** (khoảng ~10 phút trên ca chạy qua đêm 8 tiếng).
-     - Việc đánh đổi độ ổn định của toàn bộ hệ thống muxing phòng thu và tính toàn vẹn của video/audio/phụ đề để lấy 2% thời gian là đi ngược lại hoàn toàn Tôn chỉ Pareto của dự án (`AGENTS.md` §1).
+### ADR-011: GA106 Silicon Ceiling, NVENC `fullres` Wall & E-Drive Isolation
+- **Hardware Ceilings (RTX 3060 12GB `GA106-302-A1`, i5-12600K, 32GB DDR4-2133, WD_BLACK SN7100 NVMe):**
+  - Isolated dense `cublasGemmEx(16F)` = `38.84 TFLOPS`; `cublasGemmEx(32F)` = `23.21 TFLOPS`; GDDR6 STREAM Triad = `302.61 GB/s`; PCIe 4.0 DMA = `22.81 GB/s` H2D / `22.64 GB/s` D2H; Triton input norm = `0.513 ms/batch` (`290.88 GB/s`); **7th-Gen NVENC 4K Main10 `-multipass fullres` steady wall = `22.70 fps` (`44.05 ms/frame`)**.
+  - **3 Canonical Regimes (`Fate/Apocrypha Ep 22`, 1,478 frames, 95.06% unique):** `animevideov3` (`10.13 fps` E2E / `11.00 fps` TRT, 170W TGP bound) | `animejanai-hd-v3-sharp1-ultracompact` Native 2x (`18.52 fps` E2E / `22.83 fps` TRT, compute-NVENC knee) | `animejanai-hd-v3-sharp1-superultracompact` Native 2x (`20.80 fps` E2E / `44.91 fps` TRT, NVENC-bound).
+  - **E-Drive Isolation (`src/env_isolation.py`):** Route Python 3.11.9 (`bin/python311/`), `.venv`, `bin/ffmpeg/`, `TEMP`/`TMP`/`TMPDIR` (`scratch/tmp`), and all HF/Torch/CUDA/Triton/Pip/Ruff caches (`E:\ai-video-upscaler\.cache/`) strictly onto E: drive.
+
+### ADR-012: Antigravity-Exclusive Single-Context & Language Contract
+- **Decision:** Consolidate root instructions into `GEMINI.md` (<120 lines), move subsystem runbooks into lazy-loaded `.agents/skills/`, ignore historical archives and heavy binary/subtitle artifacts via `.antigravityignore`, enforce 100% English across repo/code/docs/commits while preserving VI/JA linguistic domain data, and deliver user-facing chat reports in Vietnamese inside Antigravity Desktop App.

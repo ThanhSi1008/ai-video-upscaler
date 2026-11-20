@@ -2,12 +2,12 @@
   "name": "upscaler-mcp",
   "displayName": "AI Video Upscaler Read-Only Inspector MCP",
   "version": "1.0.0",
-  "description": "Optional read-only MCP stdio server exposing fast AST symbol lookup, memory health, .temp_* checkpoint manifest inspection, and anime glossary discovery. Ships disabled by default to save prompt tokens; enable anytime when needed.",
+  "description": "Optional read-only MCP stdio server exposing fast AST symbol lookup, memory health, .temp_* checkpoint inspection, and anime glossary discovery. Disabled by default to save tokens.",
   "logo": "assets/logo.svg",
   "disabled": true,
   "suggestedPrompts": [
-    "Liệt kê các symbol AST trong src/pipeline.py và subtrans/pipeline.py",
-    "Kiểm tra danh sách glossary anime hiện có và trạng thái checkpoint",
-    "Kiểm tra sức khỏe bộ nhớ Agent qua upscaler-mcp"
+    "List AST symbols in src/pipeline.py and subtrans/pipeline.py",
+    "List available anime glossaries and check active .temp_* checkpoints",
+    "Verify agent memory health and byte budgets via upscaler-mcp"
   ]
 }

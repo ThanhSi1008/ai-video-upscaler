@@ -18,7 +18,7 @@ set "CUDA_CACHE_PATH=%SCRIPT_DIR%.cache\cuda_compute_cache"
 set "TRITON_CACHE_DIR=%SCRIPT_DIR%.cache\triton_cache"
 set "TORCHINDUCTOR_CACHE_DIR=%SCRIPT_DIR%.cache\inductor_cache"
 
-:: Ưu tiên môi trường ảo .venv hoặc venv
+:: Prefer local .venv or venv
 if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
     set "PYTHON_EXEC=%SCRIPT_DIR%.venv\Scripts\python.exe"
 ) else if exist "%SCRIPT_DIR%venv\Scripts\python.exe" (

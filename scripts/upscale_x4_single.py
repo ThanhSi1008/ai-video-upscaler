@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 scripts/upscale_x4_single.py
-Công cụ phóng to ảnh đơn lẻ x4 (Native 4x Super-Resolution) chuyên dụng:
-- Sử dụng kiến trúc RealESR-AnimeVideoV3 gốc (64f16c, PixelShuffle 4x).
-- KHÔNG qua bước nội suy hạ mẫu Bicubic 0.5x (giữ nguyên độ phóng đại x4).
-- Tối ưu hóa suy luận trên NVIDIA Tensor Cores (FP16 NHWC / PyTorch CUDA).
-- Hỗ trợ đường dẫn Unicode tiếng Việt có dấu an toàn trên Windows.
+Single-image native 4x Super-Resolution utility:
+- Uses native RealESR-AnimeVideoV3 architecture (64f16c, PixelShuffle 4x).
+- Skips 0.5x bicubic downsampling (preserves full 4x scale).
+- Runs optimized FP16 NHWC inference on NVIDIA Tensor Cores or CPU fallback.
 
-Cách sử dụng:
+Usage:
     python scripts/upscale_x4_single.py "path/to/image.png"
     python scripts/upscale_x4_single.py "path/to/image.png" --output "path/to/output_4x.png"
 """
@@ -37,10 +36,8 @@ EXPECTED_WEIGHTS_SHA256 = "b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d7136300
 
 
 class RealESRAnimeVideoV3_4x(nn.Module):
-    """
-    Mô hình RealESR-AnimeVideoV3 x4 gốc (Native 4x).
-    Bỏ qua lớp F.interpolate(out_4x, scale_factor=0.5, mode='bicubic') để giữ nguyên x4.
-    """
+    """Native 4x RealESR-AnimeVideoV3 model (no 0.5x bicubic downsampling)."""
+
     def __init__(self):
         super().__init__()
         self.body = nn.ModuleList()
@@ -57,7 +54,7 @@ class RealESRAnimeVideoV3_4x(nn.Module):
         for layer in self.body:
             feat = layer(feat)
         out = self.upsampler(feat)
-        base = F.interpolate(x, scale_factor=4.0, mode='nearest')
+        base = F.interpolate(x, scale_factor=4.0, mode="nearest")
         return out + base
 
 
@@ -70,7 +67,7 @@ def _sha256_file(path: str) -> str:
 
 
 def resolve_weights_path(custom_path: Optional[str] = None) -> str:
-    """Tự động tìm kiếm file trọng số realesr-animevideov3.pth trong dự án (không dùng C:)."""
+    """Resolve realesr-animevideov3.pth locally inside project root (never C:)."""
     configure_e_drive_isolation(project_root=_REPO_ROOT)
     candidates = [
         custom_path,
@@ -83,12 +80,12 @@ def resolve_weights_path(custom_path: Optional[str] = None) -> str:
         if c and os.path.exists(c):
             return os.path.abspath(c)
 
-    # Nếu chưa có, tải tự động về models_bench/ và kiểm tra SHA-256 qua file tạm
+    # Auto-download to models_bench/ and verify SHA-256 via atomic temp file
     target_path = os.path.join(_REPO_ROOT, "models_bench", "realesr-animevideov3.pth")
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     tmp_path = f"{target_path}.tmp_{os.getpid()}"
     url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
-    print(f"📥 Đang tự động tải trọng số RealESR-AnimeVideoV3 từ {url}...")
+    print(f"Downloading RealESR-AnimeVideoV3 weights from {url}...")
     import urllib.request
 
     try:
@@ -117,15 +114,11 @@ def upscale_single_image(
     device_str: Optional[str] = None,
     dry_run: bool = False,
 ) -> str:
-    """
-    Thực hiện upscale ảnh x4 bằng RealESR-AnimeVideoV3 native 4x.
-    Returns:
-        Đường dẫn file ảnh 4K/4x đã lưu.
-    """
+    """Upscale a single image natively by 4x using RealESR-AnimeVideoV3."""
     configure_e_drive_isolation(project_root=_REPO_ROOT)
     input_path = os.path.abspath(os.path.expanduser(input_path))
     if not os.path.exists(input_path):
-        raise FileNotFoundError(f"Không tìm thấy file ảnh nguồn: {input_path}")
+        raise FileNotFoundError(f"Source image not found: {input_path}")
 
     if not output_path:
         base_dir = os.path.dirname(input_path)
@@ -137,18 +130,17 @@ def upscale_single_image(
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     if dry_run:
-        print(f"🔍 [DRY RUN] Input: {input_path} -> Output: {output_path} (precision={precision})")
+        print(f"[DRY RUN] Input: {input_path} -> Output: {output_path} (precision={precision})")
         return output_path
 
     weights_file = resolve_weights_path(weights_path)
 
-    print(f"\n{'='*70}")
-    print(f"🖼️  File nguồn: {input_path}")
+    print(f"\n{'=' * 70}")
+    print(f"Source image: {input_path}")
     img_pil = Image.open(input_path).convert("RGB")
     orig_w, orig_h = img_pil.size
-    print(f"📐 Kích thước gốc: {orig_w} × {orig_h}")
+    print(f"Input resolution: {orig_w} x {orig_h}")
 
-    # Chuyển đổi tensor chuẩn hóa [0.0, 1.0]
     img_np = np.array(img_pil, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
 
@@ -160,15 +152,13 @@ def upscale_single_image(
         device = torch.device("cpu")
 
     dev_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
-    print(f"⚙️  Thiết bị suy luận: {device} ({dev_name})")
+    print(f"Compute device: {device} ({dev_name})")
 
     lock_ctx = gpu_exclusivity_lock() if device.type == "cuda" else contextlib.nullcontext()
     with lock_ctx:
-        # Khởi tạo mô hình
         model = RealESRAnimeVideoV3_4x().to(device)
 
-        # Nạp weights an toàn (weights_only=True)
-        print(f"📦 Nạp trọng số: {os.path.basename(weights_file)}")
+        print(f"Loading weights: {os.path.basename(weights_file)}")
         sd = torch.load(weights_file, map_location="cpu", weights_only=True)
         weights = sd.get("params_ema", sd.get("params", sd))
         clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
@@ -183,28 +173,26 @@ def upscale_single_image(
             model = model.float()
             tensor = tensor.to(device).float()
 
-        print(f"🚀 Đang suy luận AI x4 native (Precision: {'FP16 NHWC' if use_fp16 else 'FP32'})...")
+        print(f"Running native 4x inference ({'FP16 NHWC' if use_fp16 else 'FP32'})...")
         t0 = time.time()
         with torch.inference_mode():
             out = model(tensor)
             out = out.clamp(0.0, 1.0)
         elapsed = time.time() - t0
 
-        # Chuyển về numpy uint8
         out_cpu = out.squeeze(0).permute(1, 2, 0).float().cpu().numpy()
         out_uint8 = (out_cpu * 255.0 + 0.5).astype(np.uint8)
         out_h, out_w, _ = out_uint8.shape
 
-    print(f"✨ Hoàn tất suy luận trong {elapsed:.3f} giây!")
-    print(f"📐 Kích thước sau upscale x4: {out_w} × {out_h} (Tỷ lệ: 4.0x)")
+    print(f"Inference completed in {elapsed:.3f}s.")
+    print(f"Output resolution (4.0x): {out_w} x {out_h}")
 
-    # Lưu ảnh xuất ra
-    print(f"💾 Đang lưu ảnh: {output_path}")
+    print(f"Saving image: {output_path}")
     out_pil = Image.fromarray(out_uint8)
     out_pil.save(output_path, format="PNG", compress_level=3)
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"✅ Đã lưu thành công: {output_path} ({size_mb:.2f} MB)")
-    print(f"{'='*70}\n")
+    print(f"Saved successfully: {output_path} ({size_mb:.2f} MB)")
+    print(f"{'=' * 70}\n")
 
     return output_path
 
@@ -222,37 +210,37 @@ def main(argv=None):
     configure_e_drive_isolation(project_root=_REPO_ROOT)
 
     parser = argparse.ArgumentParser(
-        description="Upscale ảnh đơn lẻ x4 native bằng RealESR-AnimeVideoV3 (không hạ 0.5)"
+        description="Native 4x image upscale using RealESR-AnimeVideoV3 (no 0.5x downsampling)"
     )
     parser.add_argument(
         "input",
-        help="Đường dẫn file ảnh đầu vào",
+        help="Input image file path",
     )
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="Đường dẫn file ảnh đầu ra (mặc định: <tên_ảnh>_4x.png cùng thư mục)",
+        help="Output image file path (default: <name>_4x.png in same folder)",
     )
     parser.add_argument(
         "-w", "--weights",
         default=None,
-        help="Đường dẫn tùy chọn tới file trọng số realesr-animevideov3.pth",
+        help="Optional path to realesr-animevideov3.pth weights",
     )
     parser.add_argument(
         "--precision",
         choices=["fp16", "fp32"],
         default="fp16",
-        help="Độ chính xác dấu phẩy động (mặc định: fp16)",
+        help="Floating-point precision (default: fp16)",
     )
     parser.add_argument(
         "--device",
         default=None,
-        help="Thiết bị tính toán: cuda:0 hoặc cpu (mặc định: tự động chọn CUDA nếu có)",
+        help="Compute device: cuda:0 or cpu (default: auto-select CUDA if available)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Mô phỏng đường dẫn đầu vào/ra mà không tải weights hay chạy GPU",
+        help="Simulate input/output resolution without loading weights or running GPU inference",
     )
 
     args = parser.parse_args(argv)

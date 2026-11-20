@@ -281,7 +281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             out_p.parent.mkdir(parents=True, exist_ok=True)
             with open(out_p, "w", encoding="utf-8") as f:
                 f.write(report_md)
-            print(f"Báo cáo Markdown đã được lưu tại: {out_p}")
+            print(f"Markdown report saved to: {out_p}")
         except Exception as e:
             print(f"❌ Error writing output markdown file: {e}", file=sys.stderr)
             return 1

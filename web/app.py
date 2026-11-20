@@ -1669,9 +1669,9 @@ def create_app(
             for gf in sorted(glossaries_dir.glob("*.yaml")):
                 glossaries.append({"name": gf.name, "path": str(gf.resolve())})
 
-        # Danh sách pending_subs.json (ưu tiên tệp gốc của workspace trước out/)
+        # Pending subtitles queue (check state/, legacy root, then out/)
         pending_items: List[Dict[str, Any]] = []
-        for p_cand in (root / "pending_subs.json", root / "out" / "pending_subs.json"):
+        for p_cand in (root / "state" / "pending_subs.json", root / "pending_subs.json", root / "out" / "pending_subs.json"):
             if p_cand.is_file():
                 try:
                     p_raw = json.loads(p_cand.read_text(encoding="utf-8"))

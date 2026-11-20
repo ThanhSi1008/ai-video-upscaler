@@ -1,10 +1,10 @@
 """PreToolUse safety hook for e:\\ai-video-upscaler.
 
-Enforces AGENTS.md & VALIDATION.md boundaries automatically:
-1. Hard-denies reading/writing/printing .env or GEMINI_API_KEY values.
-2. Requires explicit confirmation (force_ask) before deleting .temp_* checkpoints.
-3. Requires confirmation (force_ask) before invoking live Gemini API commands (subtrans check/models/run without --dry-run).
-4. Warns/asks before running bare pytest on the production repo or starting GPU inference when .gpu_active.lock is present.
+Enforces GEMINI.md, subtrans-anime-ops, and VALIDATION.md boundaries automatically:
+1. Hard-denies reading/editing/printing .env or GEMINI_API_KEY values.
+2. Prompts (force_ask) before deleting .temp_* checkpoints.
+3. Prompts (force_ask) before invoking live Gemini API commands.
+4. Prompts (ask / force_ask) before running bare pytest or concurrent GPU jobs.
 """
 
 from __future__ import annotations
@@ -80,10 +80,7 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
         if _is_secret_env_path(str(target)):
             return {
                 "decision": "deny",
-                "reason": (
-                    "Blocked by upscaler-guard (AGENTS.md §5): Never read, edit, or expose "
-                    ".env files containing GEMINI_API_KEY. Use .env.example for templates."
-                ),
+                "reason": "Blocked (GEMINI.md §5): Never read, edit, or expose .env secrets; use .env.example.",
             }
         return {"decision": "allow"}
 
@@ -95,28 +92,19 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
         if env_match and _is_secret_env_path(env_match.group(1)):
             return {
                 "decision": "deny",
-                "reason": (
-                    "Blocked by upscaler-guard (AGENTS.md §5): Printing .env contents "
-                    "in terminal output is prohibited to protect GEMINI_API_KEY."
-                ),
+                "reason": "Blocked (GEMINI.md §5): Printing .env contents to stdout is prohibited.",
             }
 
         if KEY_PRINT_RE.search(cmd):
             return {
                 "decision": "deny",
-                "reason": (
-                    "Blocked by upscaler-guard (AGENTS.md §5): Printing GEMINI_API_KEY "
-                    "to stdout/logs is strictly prohibited."
-                ),
+                "reason": "Blocked (GEMINI.md §5): Printing GEMINI_API_KEY to stdout/logs is prohibited.",
             }
 
         if TEMP_DELETE_RE.search(cmd) or UPSCALE_CLEAN_RE.search(cmd):
             return {
                 "decision": "force_ask",
-                "reason": (
-                    "Checkpoint Guard (AGENTS.md §5): Deleting or overwriting .temp_<basename> "
-                    "resume checkpoints requires explicit user confirmation."
-                ),
+                "reason": "Checkpoint Guard (GEMINI.md §5): Deleting or overwriting .temp_* checkpoints requires confirmation.",
             }
 
         # Live Gemini API quota guard
@@ -126,11 +114,7 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
             if not any(flag in cmd for flag in safe_flags):
                 return {
                     "decision": "force_ask",
-                    "reason": (
-                        "Gemini Quota Guard (AGENTS.md §5 & subtrans/AGENTS.md): Command may "
-                        "make live Gemini API requests (check/models/run without --dry-run). "
-                        "Approve only if live RPD consumption is intended."
-                    ),
+                    "reason": "Gemini Quota Guard (GEMINI.md §5 & subtrans-anime-ops): Command may consume live Gemini API RPD; confirm intent.",
                 }
 
         # GPU exclusivity lock guard
@@ -140,10 +124,7 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
             if is_gpu_cmd and not any(flag in cmd for flag in non_gpu_flags):
                 return {
                     "decision": "force_ask",
-                    "reason": (
-                        "GPU Exclusivity Guard (AGENTS.md §4.6): .gpu_active.lock exists in "
-                        "workspace root. Confirm no other GPU upscale job is active."
-                    ),
+                    "reason": "GPU Exclusivity Guard (GEMINI.md §3): .gpu_active.lock exists; confirm no other GPU job is running.",
                 }
 
         # Bare pytest on production repo guard
@@ -159,11 +140,7 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
             if not any(tok in cmd for tok in safe_pytest_markers):
                 return {
                     "decision": "ask",
-                    "reason": (
-                        "Test Isolation Guard (docs/agents/VALIDATION.md): Bare pytest on the "
-                        "production repo can touch .gpu_active.lock, SQLite caches, or models.yaml. "
-                        "Prefer: .\\.venv\\Scripts\\python.exe scripts/verify_offline.py"
-                    ),
+                    "reason": "Test Isolation Guard (VALIDATION.md): Run .\\.venv\\Scripts\\python.exe scripts/verify_offline.py instead of bare pytest.",
                 }
 
     return {"decision": "allow"}

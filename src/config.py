@@ -79,29 +79,39 @@ REALESRGAN_BIN = os.path.join(BIN_DIR, "realesrgan-ncnn-vulkan")
 MODELS_DIR = os.path.join(BIN_DIR, "models")
 LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 GPU_LOCK_FILE = os.path.join(ROOT_DIR, ".gpu_active.lock")
-PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "pending_subs.json")
+_DEFAULT_PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "state", "pending_subs.json")
+LEGACY_PENDING_SUBS_FILE = os.path.join(ROOT_DIR, "pending_subs.json")
+PENDING_SUBS_FILE = _DEFAULT_PENDING_SUBS_FILE
 
 
 def load_pending_subs() -> list:
-    """Đọc danh sách các tập phụ đề chưa đạt chuẩn (Item 4b)."""
-    if not os.path.exists(PENDING_SUBS_FILE):
-        return []
+    """Load pending subtitle entries (with legacy root fallback)."""
+    read_path = PENDING_SUBS_FILE
+    if not os.path.exists(read_path):
+        if PENDING_SUBS_FILE == _DEFAULT_PENDING_SUBS_FILE and os.path.exists(LEGACY_PENDING_SUBS_FILE):
+            read_path = LEGACY_PENDING_SUBS_FILE
+        else:
+            return []
     try:
-        with open(PENDING_SUBS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(read_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
     except Exception:
         return []
 
 
 def add_pending_sub(record: dict) -> None:
-    """Thêm hoặc cập nhật một tập vào pending_subs.json."""
+    """Add or update an episode in the pending subtitle queue."""
     if os.environ.get("PYTEST_CURRENT_TEST") and "dummy" in record.get("base_name", ""):
         return
     items = load_pending_subs()
-    # Loại bỏ bản ghi cũ cùng base_name nếu có
+    # Deduplicate existing entries sharing the same base_name
     items = [it for it in items if it.get("base_name") != record.get("base_name")]
     items.append(record)
     try:
+        parent = os.path.dirname(os.path.abspath(PENDING_SUBS_FILE))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(PENDING_SUBS_FILE, "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
     except Exception:
@@ -109,7 +119,7 @@ def add_pending_sub(record: dict) -> None:
 
 
 def remove_pending_sub(base_name: str) -> None:
-    """Xóa một tập khỏi pending_subs.json khi đã đạt chuẩn (khớp base_name hoặc video_path)."""
+    """Remove a completed episode from the pending queue (matches base_name or video_path)."""
     if not base_name:
         return
     items = load_pending_subs()
@@ -133,6 +143,9 @@ def remove_pending_sub(base_name: str) -> None:
     new_items = [it for it in items if not _is_match(it)]
     if len(new_items) != len(items):
         try:
+            parent = os.path.dirname(os.path.abspath(PENDING_SUBS_FILE))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(PENDING_SUBS_FILE, "w", encoding="utf-8") as f:
                 json.dump(new_items, f, ensure_ascii=False, indent=2)
         except Exception:

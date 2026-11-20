@@ -6,9 +6,9 @@ models:
     rpd: 20
     max_output_tokens: 16384
     thinking_level: low
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active
-    rpd_source: đọc từ lỗi 429 (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+    rpd_source: observed from 429 error (GenerateRequestsPerDayPerProjectPerModel-FreeTier)
   gemini-3.7-flash:
     tier: free_tier
     rpm: 5
@@ -16,9 +16,9 @@ models:
     rpd: 20
     max_output_tokens: 16384
     thinking_level: low
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active_with_spikes
-    note: Thường xuyên gặp 503 UNAVAILABLE (high demand spike)
+    note: Frequent 503 UNAVAILABLE errors under high demand spikes
   gemini-3.6-flash:
     tier: free_tier
     rpm: 5
@@ -26,7 +26,7 @@ models:
     rpd: 20
     max_output_tokens: 16384
     thinking_level: low
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active
   gemini-3.5-flash:
     tier: free_tier
@@ -35,7 +35,7 @@ models:
     rpd: 20
     max_output_tokens: 16384
     thinking_level: low
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active
   gemini-2.5-flash:
     tier: free_tier
@@ -44,7 +44,7 @@ models:
     rpd: 20
     max_output_tokens: 8192
     thinking_budget: 0
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active
   gemini-3.5-flash-lite:
     tier: free_tier
@@ -53,7 +53,7 @@ models:
     rpd: 500
     max_output_tokens: 16384
     thinking_level: minimal
-    verified_source: ảnh AI Studio của người dùng 2026-10-07
+    verified_source: AI Studio user screenshot 2026-10-07
     status: active
   gemini-3.1-flash-lite:
     tier: free_tier
@@ -62,7 +62,7 @@ models:
     rpd: 500
     max_output_tokens: 16384
     thinking_level: minimal
-    rpd_source: chưa xác minh (nguồn bên thứ ba)
+    rpd_source: unverified (third-party reference)
     status: active
 chain:
 - gemini-3.5-flash-lite

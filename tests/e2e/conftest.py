@@ -296,15 +296,19 @@ class FastMockPipeUpscaler:
 
 
 @pytest.fixture(autouse=True)
-def mock_pipeline_env(monkeypatch, tmp_path):
+def mock_pipeline_env(request, monkeypatch, tmp_path):
     """
-    Fixture tự động cô lập phần cứng và mạng cho toàn bộ các bài test E2E:
-    - Triệt tiêu file khóa GPU (.gpu_active.lock)
-    - Thay thế AI upscaler bằng bộ phóng to 2x siêu tốc OpenCV (0.02s)
-    - Tự động điều phối Zero-Disk P010LE writer qua FFmpeg mà không tốn GPU VRAM
-    - Tắt AntiSleep Win32 native calls
-    - Mock Gemini API và chặn gọi whisper model download ngoài luồng
+    Auto-isolated hardware & network mock environment for opaque-box E2E tier tests (test_tier*.py):
+    - Stubs GPU exclusivity locks, AI upscalers (2x OpenCV fast mock), and AntiSleep Win32 calls.
+    - Routes Zero-Disk P010LE writes through FFmpeg without GPU VRAM and mocks Gemini/Whisper calls.
+    - Scoped to test_tier* unless explicitly requested as a fixture so unit-mocked E2E suites
+      (test_e2e_*.py) retain their original subprocess.run environment.
     """
+    test_file = Path(str(getattr(request, "path", getattr(request.node, "fspath", "")))).name
+    if not test_file.startswith("test_tier"):
+        yield
+        return
+
     orig_run = subprocess.run
     def safe_subprocess_run(cmd, *args, **kwargs):
         # Chặn Stage B spawn recursive whisper subprocesses ngoài tầm kiểm soát

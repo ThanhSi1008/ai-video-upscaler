@@ -779,8 +779,8 @@ def _partition_actions_into_chunks(
     fps_val: float,
 ) -> Tuple[List[Dict[str, Any]], int, int, int]:
     """
-    Phân hoạch danh sách hành động keep/drop lên lưới chunk_frame_counts thực tế (hoặc lưới segment_seconds),
-    cưỡng bức frame đầu mỗi chunk = 'keep' theo bất biến AGENTS.md và sinh cấu trúc runs.
+    Partition keep/drop actions onto actual chunk_frame_counts (or segment_seconds grid),
+    forcing chunk frame 0 = 'keep' per GEMINI.md invariant, and emit RLE runs.
     """
     actions = list(base_actions)
     total_frames = len(actions)
@@ -1031,7 +1031,7 @@ def scan_dedup_plan(
         chunk_start_indices = set(range(0, total_frames, frames_per_chunk))
         num_chunks = (total_frames + frames_per_chunk - 1) // frames_per_chunk
 
-    # BẮT BUỘC ÉP GIỮ FRAME ĐẦU MỖI CHUNK per AGENTS.md Invariant:
+    # Force-keep frame 0 of every chunk per GEMINI.md invariant:
     for c_start in chunk_start_indices:
         if c_start < total_frames:
             frame_actions[c_start] = "keep"

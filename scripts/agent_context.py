@@ -19,21 +19,19 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 
+SUBTRANS_SKILL_REL = ".agents/skills/subtrans-anime-ops/SKILL.md"
 REQUIRED_FILES = (
-    "AGENTS.md",
     "GEMINI.md",
-    "CLAUDE.md",
-    "subtrans/AGENTS.md",
-    "docs/agents/START_HERE.md",
     "docs/agents/PROJECT_MAP.md",
     "docs/agents/STATE.md",
     "docs/agents/DECISIONS.md",
     "docs/agents/VALIDATION.md",
     "docs/agents/tasks/TEMPLATE.md",
-    "docs/agents/tasks/2026-10-29-agent-memory.md",
+    SUBTRANS_SKILL_REL,
 )
-BOOTSTRAP_FILES = ("docs/agents/START_HERE.md", "docs/agents/STATE.md")
+BOOTSTRAP_FILES = ("docs/agents/STATE.md",)
 ROOT_BUDGET = 12 * 1024
+MAX_ROOT_LINES = 120
 COMBINED_BUDGET = 32 * 1024
 LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)")
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
@@ -88,11 +86,16 @@ def git_output(root: Path, *args: str) -> str | None:
 
 
 def memory_files(root: Path) -> list[str]:
-    """Bound validation to the memory system, not old research reports."""
-    files = {"AGENTS.md", "GEMINI.md", "CLAUDE.md", "subtrans/AGENTS.md"}
+    """Bound validation to the active memory system and workspace skills, not historical archives."""
+    files = {"GEMINI.md"}
     memory_dir = root / "docs" / "agents"
     if memory_dir.is_dir() and _inside(root, memory_dir):
         files.update(p.relative_to(root).as_posix() for p in memory_dir.rglob("*.md"))
+    skills_dir = root / ".agents" / "skills"
+    if skills_dir.is_dir() and _inside(root, skills_dir):
+        for skill_md in skills_dir.glob("*/SKILL.md"):
+            if _inside(root, skill_md):
+                files.add(skill_md.relative_to(root).as_posix())
     return sorted(files)
 
 
@@ -127,14 +130,22 @@ def check_memory(root: Path) -> list[str]:
             errors.append(f"Missing or unsafe required file: {relative}")
 
     sizes = {}
-    for relative in ("AGENTS.md", "subtrans/AGENTS.md"):
+    for relative in ("GEMINI.md", SUBTRANS_SKILL_REL):
         path = root / relative
         if _inside(root, path) and path.is_file():
             sizes[relative] = path.stat().st_size
-    if sizes.get("AGENTS.md", 0) > ROOT_BUDGET:
-        errors.append(f"AGENTS.md exceeds {ROOT_BUDGET} bytes: {sizes['AGENTS.md']}")
+    if sizes.get("GEMINI.md", 0) > ROOT_BUDGET:
+        errors.append(f"GEMINI.md exceeds {ROOT_BUDGET} bytes: {sizes['GEMINI.md']}")
+    gemini_path = root / "GEMINI.md"
+    if _inside(root, gemini_path) and gemini_path.is_file():
+        try:
+            gemini_lines = len(_read_memory(root, "GEMINI.md").splitlines())
+            if gemini_lines > MAX_ROOT_LINES:
+                errors.append(f"GEMINI.md exceeds {MAX_ROOT_LINES} lines: {gemini_lines}")
+        except (OSError, UnicodeError, ValueError):
+            pass  # Read failure will be reported in the link-validation loop below.
     if sum(sizes.values()) > COMBINED_BUDGET:
-        errors.append(f"Root + subtrans AGENTS exceed {COMBINED_BUDGET} bytes: {sum(sizes.values())}")
+        errors.append(f"Root + subtrans skill exceed {COMBINED_BUDGET} bytes: {sum(sizes.values())}")
 
     for relative in memory_files(root):
         path = root / relative
@@ -202,7 +213,7 @@ def show_bootstrap(root: Path) -> None:
             print(_read_memory(root, relative).rstrip())
         except (OSError, UnicodeError, ValueError) as exc:
             print(f"Unavailable: {exc}")
-    print("\nRead root AGENTS.md and the task-relevant nested AGENTS.md.")
+    print("\nRead root GEMINI.md and task-relevant skills under .agents/skills/*/SKILL.md.")
     print("Further context: docs/agents/PROJECT_MAP.md, DECISIONS.md, VALIDATION.md, tasks/.")
     print("Reconcile the saved state against current Git and the latest user request.")
 
@@ -421,7 +432,10 @@ def main(argv: list[str] | None = None) -> int:
         if errors:
             exit_code = 1
         else:
-            print(f"PASS: required memory files, local links, root <= {ROOT_BUDGET} bytes, root + subtrans <= {COMBINED_BUDGET} bytes")
+            print(
+                f"PASS: required memory files, local links, GEMINI.md <= {MAX_ROOT_LINES} lines / {ROOT_BUDGET} bytes, "
+                f"root + subtrans skill <= {COMBINED_BUDGET} bytes"
+            )
             freshness_warn = check_freshness(root)
             if freshness_warn:
                 print(f"WARN: {freshness_warn}")

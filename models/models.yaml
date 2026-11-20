@@ -1,10 +1,9 @@
-# models/models.yaml - Registry danh mục mô hình Super-Resolution
-# Chuẩn hóa theo quy định D1 (AGENTS.md)
+# models/models.yaml - Super-Resolution model registry (GEMINI.md compliant)
 
 models:
   animevideov3:
     id: "animevideov3"
-    name: "RealESR-AnimeVideoV3 (Mặc định)"
+    name: "RealESR-AnimeVideoV3 (Default)"
     arch:
       type: "SRVGGNetCompact"
       num_feat: 64
