@@ -2,7 +2,7 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `d702fac` (`fix(all): resolve verified P0/P1/P2 audit findings across video, subtrans, scripts, and web studio`)
+> **Commit Baseline:** `e117af6` (`chore(repo): consolidate Antigravity context, optimize token budget, and reorganize repo`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
