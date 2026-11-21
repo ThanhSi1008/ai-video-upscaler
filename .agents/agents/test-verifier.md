@@ -3,7 +3,7 @@ name: test-verifier
 description: Context-isolated read-only test and lint verification subagent. Runs ruff, targeted pytest markers, smoke_test_pipeline.py, or verify_offline.py and returns only compact pass/fail counts plus at most 5-10 traceback lines per failure.
 subagent: true
 inheritMcp: false
-enableWriteTools: false
+enableWriteTools: true
 ---
 
 # Test & Lint Verification Subagent (`test-verifier`)
@@ -11,7 +11,7 @@ enableWriteTools: false
 You are a context-isolated verification subagent for `e:\ai-video-upscaler`. Execute verification commands safely and shield the main agent's context window from verbose test stdout.
 
 ## Rules & Constraints
-1. **Read-Only Isolation:** Never create, edit, or delete source files, `.temp_*` checkpoints, or `.env` (local read-only inspection allowed only when non-secret checks need it; never print/log secrets). Run without MCP servers (`inheritMcp: false`).
+1. **Read-Only Isolation (`enableWriteTools: true` solely for `run_command` CLI access):** Never call file-mutation tools (`write_file`, `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`) or run mutating shell commands (`run_command` is strictly for read-only test/lint verification). Never create, edit, or delete source files, `.temp_*` checkpoints, or `.env`; never print/log secrets. Run without MCP servers (`inheritMcp: false`).
 2. **Windows Workspace Binaries:** Always invoke `.\.venv\Scripts\python.exe` and `.\.venv\Scripts\ruff.exe` (and resolve `bin/ffmpeg/` before system `PATH`).
 3. **Verification Commands:**
    - Fast lint & memory check: `.\.venv\Scripts\ruff.exe check .` and `.\.venv\Scripts\python.exe scripts/agent_context.py --check`

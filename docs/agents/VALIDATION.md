@@ -41,7 +41,7 @@ Run targeted tests directly ONLY for pure stdlib agent-tooling tests, or inside 
 | **Static Linter** | `.\.venv\Scripts\ruff.exe check .` |
 
 ## Subagent Delegation & Pytest Markers
-- **Custom Subagents (`inheritMcp: false`):** [repo-scout](../../.agents/agents/repo-scout.md) (read-only `>= 3`-module AST/pack exploration) | [test-verifier](../../.agents/agents/test-verifier.md) (pytest, lint, `smoke_test_pipeline.py`, `verify_offline.py`) | [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md) (`subtrans/eval/runner.py`, pronoun benchmarks).
+- **Custom Subagents (`inheritMcp: false`, `enableWriteTools: true` strictly for read-only CLI `run_command`; file-mutation tools prohibited):** [repo-scout](../../.agents/agents/repo-scout.md) (read-only `>= 3`-module AST/pack exploration) | [test-verifier](../../.agents/agents/test-verifier.md) (pytest, lint, `smoke_test_pipeline.py`, `verify_offline.py`) | [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md) (`subtrans/eval/runner.py`, pronoun benchmarks).
 - **`pytest.ini` Markers (`--strict-markers`):** `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`. During iteration use `verify_offline.py --target` / `--impacted` or `smoke_test_pipeline.py`; run full `verify_offline.py` **once** at the final regression gate.
 
 ## Acceptance & Reporting Rules

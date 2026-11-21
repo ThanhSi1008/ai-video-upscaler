@@ -352,7 +352,15 @@ def test_workspace_scoped_rules_and_custom_subagents():
         text = agent_path.read_text(encoding="utf-8")
         assert "subagent: true" in text
         assert "inheritMcp: false" in text
-        assert "enableWriteTools: false" in text
+        assert "enableWriteTools: true" in text
+        for forbidden_tool in (
+            "write_file",
+            "edit_file",
+            "write_to_file",
+            "replace_file_content",
+            "multi_replace_file_content",
+        ):
+            assert forbidden_tool in text, f"{agent_name} must prohibit {forbidden_tool}"
 
     subtrans_rule = (rules_dir / "subtrans.md").read_text(encoding="utf-8")
     assert "subtrans/**/*" in subtrans_rule and "glossaries/*.yaml" in subtrans_rule

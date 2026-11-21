@@ -34,7 +34,7 @@ def make_memory(root: Path) -> None:
             f"description: Test subagent {stem}\n"
             "subagent: true\n"
             "inheritMcp: false\n"
-            "enableWriteTools: false\n"
+            "enableWriteTools: true\n"
             "---\n\n# Subagent Fixture\n",
             encoding="utf-8",
         )
