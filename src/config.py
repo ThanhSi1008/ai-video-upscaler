@@ -81,6 +81,7 @@ LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 GPU_LOCK_FILE = os.path.join(ROOT_DIR, ".gpu_active.lock")
 
 _GPU_LOCK_OWNED: bool = False
+_GPU_LOCK_DEPTH: int = 0
 
 
 def is_gpu_lock_held_by_other() -> int | None:
@@ -104,14 +105,20 @@ def is_gpu_lock_held_by_other() -> int | None:
 
 
 def acquire_gpu_lock() -> None:
-    """Atomically claim .gpu_active.lock for this PID, reclaiming stale locks from dead PIDs."""
-    global _GPU_LOCK_OWNED
+    """Atomically claim .gpu_active.lock for this PID with re-entrant reference counting."""
+    global _GPU_LOCK_OWNED, _GPU_LOCK_DEPTH
+    if not _GPU_LOCK_OWNED and _GPU_LOCK_DEPTH > 0:
+        _GPU_LOCK_DEPTH = 0
     other_pid = is_gpu_lock_held_by_other()
     if other_pid is not None:
         raise RuntimeError(
             f"GPU đang bận bởi tiến trình khác đang hoạt động (PID={other_pid}, lock: {GPU_LOCK_FILE}). "
             f"Chỉ cho phép duy nhất 1 tiến trình suy luận GPU tại một thời điểm."
         )
+    if _GPU_LOCK_DEPTH > 0 and os.path.exists(GPU_LOCK_FILE):
+        _GPU_LOCK_DEPTH += 1
+        _GPU_LOCK_OWNED = True
+        return
     lock_dir = os.path.dirname(os.path.abspath(GPU_LOCK_FILE))
     if lock_dir:
         os.makedirs(lock_dir, exist_ok=True)
@@ -130,6 +137,7 @@ def acquire_gpu_lock() -> None:
                 f"GPU đang bận bởi tiến trình khác đang hoạt động (PID={holder_pid}, lock: {GPU_LOCK_FILE}). "
                 f"Chỉ cho phép duy nhất 1 tiến trình suy luận GPU tại một thời điểm."
             )
+        _GPU_LOCK_DEPTH = 1
         _GPU_LOCK_OWNED = True
     except Exception:
         if os.path.exists(tmp_lock):
@@ -141,8 +149,15 @@ def acquire_gpu_lock() -> None:
 
 
 def release_gpu_lock() -> None:
-    """Release .gpu_active.lock only if not currently owned by another live PID."""
-    global _GPU_LOCK_OWNED
+    """Decrement re-entrant GPU lock depth and remove .gpu_active.lock when outer holder exits."""
+    global _GPU_LOCK_OWNED, _GPU_LOCK_DEPTH
+    if not _GPU_LOCK_OWNED and _GPU_LOCK_DEPTH > 0:
+        _GPU_LOCK_DEPTH = 0
+    if _GPU_LOCK_DEPTH > 1:
+        _GPU_LOCK_DEPTH -= 1
+        _GPU_LOCK_OWNED = True
+        return
+    _GPU_LOCK_DEPTH = 0
     _GPU_LOCK_OWNED = False
     if is_gpu_lock_held_by_other() is not None:
         return
@@ -156,9 +171,6 @@ def release_gpu_lock() -> None:
 @contextlib.contextmanager
 def gpu_exclusivity_lock():
     """Re-entrant context manager enforcing single-process GPU ownership via .gpu_active.lock."""
-    if _GPU_LOCK_OWNED:
-        yield GPU_LOCK_FILE
-        return
     acquire_gpu_lock()
     try:
         yield GPU_LOCK_FILE
@@ -168,7 +180,9 @@ def gpu_exclusivity_lock():
 
 def _atexit_release_gpu_lock() -> None:
     """Release GPU lock on process exit only when owned by this process."""
-    if _GPU_LOCK_OWNED:
+    global _GPU_LOCK_DEPTH
+    if _GPU_LOCK_OWNED or _GPU_LOCK_DEPTH > 0:
+        _GPU_LOCK_DEPTH = 1
         release_gpu_lock()
 
 

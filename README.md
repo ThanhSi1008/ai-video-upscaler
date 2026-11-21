@@ -86,7 +86,7 @@ pip install -r requirements.txt
 | Specification | Legacy PyTorch (`batch=1`) | Legacy PyTorch PNG (`batch=6`) | Current (`TensorRT 10 + Zero-Disk`, `batch=8`) |
 | :--- | :--- | :--- | :--- |
 | **Clocks & QoS** | i5-12600K, RTX 3060 (P2) | i5-12600K, RTX 3060 (P2) | i5-12600K (`HighQoS` P-Core), RTX 3060 (`HAGS=2`, P0 `7500 MHz`) |
-| **Engine** | PyTorch CUDA FP16 (`b=1`) | PyTorch CUDA FP16 (`b=6`) | **TensorRT 10.16 FP16** (`opt=5`, 2-slot `_out_ring`) / CUDA FP16 |
+| **Engine** | PyTorch CUDA FP16 (`b=1`) | PyTorch CUDA FP16 (`b=6`) | **TensorRT 10.16 FP16** (`opt=3`, 2-slot `_out_ring`) / CUDA FP16 |
 | **Throughput** | `1.37 fps` GPU-only | `4.8–5.2 fps` GPU-only (~`10–12+ fps` eff.) | `10.13 fps` E2E (`animevideov3`), `18.52 fps` (`sharp1-uc`), `20.80 fps` (`sharp1-suc`) |
 | **Frame I/O** | PIL `Image.save` (~45 ms/f) | OpenCV `cv2.imwrite` AVX2 (~14 ms/f) | **Zero-Disk Pipe** (`NVDEC RGB24 -> Triton p010le`, 0 disk PNGs) |
 | **Encoder** | `hevc_nvenc` Main10 (`p6`, `CQ 19`) | `hevc_nvenc` Main10 (`p6`, `qres`, LA `24`) | `hevc_nvenc` Main10 (`p6`, **`CQ 18`**, `maxrate 45M`, **`fullres`**, LA **`32`**, Dual AQ) |

@@ -942,7 +942,8 @@ def embed_subtitle_track(
             pass
 
     # Lấy thông tin streams của mkv_path để lọc bỏ track tiếng Việt cũ (Item 4d: idempotent)
-    non_vie_sub_indices = []
+    non_vie_subs: List[tuple[int, bool]] = []
+    probed_subs = False
     if not hasattr(subprocess.run, "_mock_name"):
         try:
             if av is not None:
@@ -950,14 +951,16 @@ def embed_subtitle_track(
                     sub_stream_idx = 0
                     for s in c.streams.subtitles:
                         lang = str((s.metadata or {}).get("language", "")).lower()
+                        is_forced = bool(getattr(s.disposition, "forced", 0)) if s.disposition is not None else False
                         if lang not in ("vie", "vi", "vietnamese"):
-                            non_vie_sub_indices.append(sub_stream_idx)
+                            non_vie_subs.append((sub_stream_idx, is_forced))
                         sub_stream_idx += 1
+                    probed_subs = True
         except Exception:
-            non_vie_sub_indices = None
+            probed_subs = False
 
-    if non_vie_sub_indices is None or (hasattr(subprocess.run, "_mock_name") and not non_vie_sub_indices):
-        non_vie_sub_indices = []
+    if not probed_subs or (hasattr(subprocess.run, "_mock_name") and not non_vie_subs):
+        non_vie_subs = []
         try:
             probe_cmd = ["ffprobe", "-v", "error", "-show_streams", "-of", "json", mkv_path]
             r_probe = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -967,8 +970,9 @@ def embed_subtitle_track(
                 for s in data.get("streams", []):
                     if s.get("codec_type") == "subtitle":
                         lang = str(s.get("tags", {}).get("language", "")).lower()
+                        is_forced = bool((s.get("disposition") or {}).get("forced", 0))
                         if lang not in ("vie", "vi", "vietnamese"):
-                            non_vie_sub_indices.append(sub_stream_idx)
+                            non_vie_subs.append((sub_stream_idx, is_forced))
                         sub_stream_idx += 1
         except Exception:
             pass
@@ -983,7 +987,7 @@ def embed_subtitle_track(
         "-map", "1:0",       # Luồng phụ đề tiếng Việt mới ở vị trí s:0
     ]
     # Chỉ map các luồng phụ đề cũ không phải tiếng Việt (bỏ track vie cũ)
-    for s_idx in non_vie_sub_indices:
+    for s_idx, _ in non_vie_subs:
         cmd.extend(["-map", f"0:s:{s_idx}"])
 
     cmd.extend([
@@ -994,8 +998,8 @@ def embed_subtitle_track(
         "-metadata:s:s:0", f"title={title}",
         "-disposition:s:0", "default" if is_default else "0",
     ])
-    for i in range(1, len(non_vie_sub_indices) + 1):
-        cmd.extend([f"-disposition:s:{i}", "0"])
+    for i, (_, was_forced) in enumerate(non_vie_subs, start=1):
+        cmd.extend([f"-disposition:s:{i}", "forced" if was_forced else "0"])
 
     cmd.extend([
         "-max_interleave_delta", "0",

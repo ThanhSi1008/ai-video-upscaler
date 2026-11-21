@@ -113,7 +113,7 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
                             should_remove = True
                         elif not os.path.exists(resolved):
                             should_remove = True
-                        elif work_base and work_base in item:
+                        elif work_base and item == work_base:
                             should_remove = True
                     except Exception:
                         should_remove = True

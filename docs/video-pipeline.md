@@ -8,7 +8,7 @@
 | Module | Responsibility |
 | :--- | :--- |
 | [`src/pipeline.py`](../src/pipeline.py) | Main orchestrator: true 3-stage overlap (`Decode N+1 \|\| GPU N \|\| Encode N-1`), 1-pass Concat-Mux, checkpoint resume |
-| [`src/build_trt_engine.py`](../src/build_trt_engine.py) | ONNX export & TensorRT 10.16 FP16 runtime (`builder_optimization_level=5`, `execute_async_v3`, 2-slot `_out_ring`, shape/address cache) |
+| [`src/build_trt_engine.py`](../src/build_trt_engine.py) | ONNX export & TensorRT 10.16 FP16 runtime (`builder_optimization_level=3`, `execute_async_v3`, 2-slot `_out_ring`, shape/address cache) |
 | [`src/trt_zero_copy_upscaler.py`](../src/trt_zero_copy_upscaler.py) | Zero-Disk Pipe engine: pinned `NHWC` `uint8` H2D, Triton JIT input norm & `p010le` color kernels, Cyclic Cel Belady `OPT`, Batch-0 sanity downsample |
 | [`src/cuda_engine.py`](../src/cuda_engine.py) | PyTorch CUDA FP16 engine: `RealESRAnimeVideoV3` (8K 2-frame tail slicing), `AnimeJaNaiCompact2x` (`janai-fix`), Spandrel wrapper, `batch_size=8`, Cyclic Hardlink worker |
 | [`src/models_resolver.py`](../src/models_resolver.py) | Model registry (`models/models.yaml`), per-series mapping (`shows.yaml`), SHA-256 verification |
@@ -38,7 +38,7 @@ Chunk N+1: [DecodeWorker: FFmpeg extract deduped 1080p PNGs]             ──�
 
 - **Target Workstation:** RTX 3060 12GB (`GA106`, VRAM P0 `7500 MHz` + `HAGS=2` via [unlock_rtx3060_admin.bat](../scripts/unlock_rtx3060_admin.bat)) + Core i5-12600K (`HighQoS` P-Core affinity).
 - **Default Model:** `realesr-animevideov3` (`SRVGGNetCompact` 4x + Bicubic 0.5x -> 2x) plus official Native 2x models (`AnimeJaNaiCompact2x`, `SPAN`) via Spandrel `0.4.2`.
-- **TensorRT 10 FP16 (`HMMA.16816.F16`):** Auto-builds `.engine` (`opt=5` + `TimingCache`), fuses `Conv2d + PReLU + PixelShuffle`, and reuses a 2-slot VRAM `_out_ring` (~199 MB/slot at `batch_size=8`) to avoid ~2,100 `torch.empty` calls/episode.
+- **TensorRT 10 FP16 (`HMMA.16816.F16`):** Auto-builds `.engine` (`opt=3` + `TimingCache`), fuses `Conv2d + PReLU + PixelShuffle`, and reuses a 2-slot VRAM `_out_ring` (~199 MB/slot at `batch_size=8`) to avoid ~2,100 `torch.empty` calls/episode.
 - **8K 2-Frame Micro-Slicing:** Intermediate `PixelShuffle(4)` (`7680x4320`) is sliced in 2-frame pairs before 0.5x downsampling, cutting 8K VRAM buffer spikes by 75%.
 - **No `INT8 PTQ`:** Preserves 16-bit FP16 range across 33 `PReLU` layers to prevent 8-bit color banding on 10-bit `p010le` masters.
 - **`AnimeJaNaiCompact2x` Fix (`janai-fix`):** Adds `F.interpolate(x, scale_factor=2.0, mode="nearest")` residual skip, matching Spandrel CPU bit-for-bit (PSNR 75-158 dB).

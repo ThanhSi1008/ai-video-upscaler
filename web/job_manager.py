@@ -94,7 +94,7 @@ def _has_valid_upscaled_output(out_4k: Path) -> bool:
                 adata = json.loads(ac.read_text(encoding="utf-8"))
                 if isinstance(adata, dict):
                     status = str(adata.get("status") or "").strip().upper()
-                    if status == "FAIL":
+                    if status.startswith("FAIL"):
                         return False
             except Exception:
                 pass

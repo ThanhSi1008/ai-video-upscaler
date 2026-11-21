@@ -31,7 +31,7 @@
 - **Decision:** Split combined CC events (`-（Speaker1）...\N-（Speaker2）...`) in `subtrans/parser.py`, preserve `Cue.speaker`, translate independently, and merge simultaneous cues into 2-line Dual Dialogue (`- Line 1\n- Line 2`) in `subtrans/writer.py` with duplicate-variant suppression (`>= 15` common prefix chars or `>= 60%` token overlap).
 
 ### ADR-008: TensorRT 10.16 FP16 + NVENC `p6 fullres CQ 18` (No INT8 PTQ / No Preset Downgrade)
-- **Decision:** Use TensorRT 10.16 FP16 (`HMMA.16816.F16`, `builder_optimization_level=5`, 2-slot `_out_ring`) + CUDA P0 (`7500 MHz`) + HAGS (`HwSchMode=2`), paired with `hevc_nvenc` `main10`, `p010le`, `p6`, `CQ 18`, `multipass fullres`, `rc-lookahead 32`, Dual AQ (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
+- **Decision:** Use TensorRT 10.16 FP16 (`HMMA.16816.F16`, `builder_optimization_level=3`, 2-slot `_out_ring`) + CUDA P0 (`7500 MHz`) + HAGS (`HwSchMode=2`), paired with `hevc_nvenc` `main10`, `p010le`, `p6`, `CQ 18`, `multipass fullres`, `rc-lookahead 32`, Dual AQ (`spatial-aq 1`, `aq-strength 6`, `temporal-aq 1`).
 - **Rationale:** `INT8 PTQ` causes `Q/DQ` reformat stalls and 8-bit banding across 33 `PReLU` layers; lowering `p6 -> p1` saves `0.0s` under AI-bound regimes while adding mosquito noise around black lineart.
 
 ### ADR-009: Zero-Disk 3-Stage Overlap, Cyclic Cel (`A->B->A`), & 1-Pass Concat-Mux

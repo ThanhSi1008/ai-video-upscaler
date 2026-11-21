@@ -43,6 +43,7 @@ subtrans.cli -> TranslationPipeline
 | [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`, 3-stage overlap, Background Cel on `dec_exec`, resume frame check, Zero-Disk & 1-Pass Mux |
 | [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | PyAV probing + FFmpeg: `probe_video`, `split_video_segments`, `_count_leading_discard_packets`, `extract_frames_raw_rgb24`, `mux_segments_directly` |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `match_show_pattern`, `resolve_model_for_video`, `verify_weights_sha256` |
+| [`show_routing.py`](../../src/show_routing.py) | Stdlib-only `shows.yaml` matcher (`match_show_pattern`, `candidate_show_names`, `match_show_rule`) shared across `src/` and `web/` |
 | [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (8K 2-frame slicing), `AnimeJaNaiCompact2x`, `SpandrelModelWrapper`, `GPUPersistentWorker`, `get_gpu_worker` |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: NCNN Vulkan fallback runner |
 | [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `@triton.jit` `_nhwc_u8_to_nchw_fp16_norm_kernel` & `_rgb_to_p010le_triton_kernel`, `_PipeDrainWorker`, `DoubleBufferedPipeUpscaler` (0-alloc rings, Belady `OPT`) |

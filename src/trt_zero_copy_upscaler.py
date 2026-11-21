@@ -1097,7 +1097,8 @@ class DoubleBufferedPipeUpscaler:
                 cpu_total_norm_ms = 0.0
                 cpu_total_infer_ms = 0.0
                 cpu_total_conv_ms = 0.0
-                for start_idx in range(0, num_distinct, self.batch_size):
+                for batch_idx, start_idx in enumerate(range(0, num_distinct, self.batch_size)):
+                    slot = batch_idx % 2
                     end_idx = min(start_idx + self.batch_size, num_distinct)
                     cur_B = end_idx - start_idx
                     t_nrm_s = time.perf_counter()
@@ -1129,13 +1130,15 @@ class DoubleBufferedPipeUpscaler:
                             .contiguous()
                             .numpy()
                         )
+                    while not slot_drain_events[slot].wait(timeout=0.1):
+                        drain_worker.check_error()
                     t_cnv_s = time.perf_counter()
-                    out_p010 = self.color_conv.rgb_to_p010le(out_rgb)
+                    out_p010 = self.color_conv.rgb_to_p010le(out_rgb, slot=slot)
                     cpu_total_conv_ms += (time.perf_counter() - t_cnv_s) * 1000.0
                     out_np = out_p010.numpy()
 
                     slot_views = {start_idx + i: out_np[i] for i in range(cur_B)}
-                    _drain_ready_frames(end_idx, slot_views)
+                    _drain_ready_frames(end_idx, slot_views, slot_idx=slot)
 
                 if record_micro:
                     n_b = max(1, (num_distinct + self.batch_size - 1) // self.batch_size)

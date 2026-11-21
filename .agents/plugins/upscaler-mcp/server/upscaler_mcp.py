@@ -155,7 +155,11 @@ def call_tool(name: str, arguments: dict) -> tuple[str, bool]:
                         checkpoint_dirs.append(cp)
         for cp in checkpoint_dirs:
             manifest_file = cp / "manifest.json"
-            up_segs = list((cp / "upscaled_segs").glob("up_*.mp4")) if (cp / "upscaled_segs").is_dir() else []
+            up_segs = (
+                [p for p in (cp / "upscaled_segs").glob("up_*.mp4") if not p.name.endswith(".tmp.mp4")]
+                if (cp / "upscaled_segs").is_dir()
+                else []
+            )
             model_id = "unknown"
             if manifest_file.is_file():
                 try:

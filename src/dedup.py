@@ -124,19 +124,19 @@ def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> s
         return cli_policy.lower()
 
     shows_yaml = os.path.join(ROOT_DIR, "shows.yaml")
+    if not os.path.exists(shows_yaml) and os.path.exists("shows.yaml"):
+        shows_yaml = "shows.yaml"
     if os.path.exists(shows_yaml):
         try:
             import yaml
-            from src.models_resolver import match_show_pattern
+            from src.show_routing import match_show_rule
             with open(shows_yaml, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             rules = data.get("shows", []) or []
-            vname = os.path.basename(video_path)
-            vdir = os.path.basename(os.path.dirname(os.path.abspath(video_path)))
             for r in rules:
                 pat = r.get("pattern", "")
                 pol = r.get("dedup_policy")
-                if pol and (match_show_pattern(vname, pat) or match_show_pattern(vdir, pat)):
+                if pol and match_show_rule(video_path, pat):
                     return str(pol).lower()
         except Exception as exc:
             print(
@@ -993,6 +993,14 @@ def scan_dedup_plan(
         f"Parse log debug không khớp: keep ({raw_keep}) + drop ({raw_drop}) != tổng actions ({total_frames})"
     )
     if expected_frames is not None:
+        if total_frames < expected_frames:
+            try:
+                from src.ffmpeg_ops import _count_leading_discard_packets
+                n_discard = _count_leading_discard_packets(input_path)
+                if n_discard > 0 and (expected_frames - n_discard) == total_frames:
+                    expected_frames = total_frames
+            except Exception:
+                pass
         assert total_frames == expected_frames, (
             f"Số frame quét từ debug log ({total_frames}) không khớp số frame ffprobe đếm được ({expected_frames})!"
         )
@@ -1469,7 +1477,7 @@ def are_raw_segments_complete(
             sorted([
                 os.path.join(segs_dir, f)
                 for f in os.listdir(segs_dir)
-                if f.startswith("seg_") and f.endswith(".mp4")
+                if f.startswith("seg_") and f.endswith(".mp4") and not f.endswith(".tmp.mp4")
             ])
             if os.path.isdir(segs_dir)
             else []

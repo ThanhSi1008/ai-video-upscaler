@@ -113,3 +113,55 @@ def test_shows_yaml_valid_and_subtrans_configs_purged_of_ollama():
     mod_cfg = load_models_config()
     assert "translategemma:12b" not in mod_cfg.get("models", {})
     assert "local" not in mod_cfg.get("chain", [])
+
+
+def test_season_subfolder_routing_and_batch2_guards(tmp_path: Path, monkeypatch):
+    """Verify season-subfolder grandparent routing, FAIL* audit rejection, and nested GPU lock refcounting."""
+    import json
+    import src.config as app_config
+    from src.models_resolver import is_valid_completed_4k_output
+    from web.fs_browser import SafeLocalFSBrowser
+
+    shows_yaml = tmp_path / "shows.yaml"
+    shows_yaml.write_text(
+        'shows:\n  - pattern: "*Frieren*BD*"\n    model: "animejanai-hd-v3-sharp1-ultracompact"\n    dedup_policy: "dis"\n',
+        encoding="utf-8",
+    )
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "models.yaml").write_text(Path("models/models.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+
+    season_ep = tmp_path / "Sousou no Frieren [BD 1080p]" / "Season 01" / "01.mkv"
+    season_ep.parent.mkdir(parents=True)
+    season_ep.write_bytes(b"vid")
+
+    non_season_ep = tmp_path / "Sousou no Frieren [BD 1080p]" / "random_tmp_dir" / "01.mkv"
+    non_season_ep.parent.mkdir(parents=True)
+    non_season_ep.write_bytes(b"vid")
+
+    with patch("src.models_resolver.SHOWS_YAML", str(shows_yaml)), patch("src.dedup.ROOT_DIR", str(tmp_path)):
+        assert resolve_model_for_video(str(season_ep), None)["id"] == "animejanai-hd-v3-sharp1-ultracompact"
+        assert resolve_dedup_policy(str(season_ep), None) == "dis"
+        assert resolve_dedup_policy(str(non_season_ep), None) == "default"
+
+    browser = SafeLocalFSBrowser(tmp_path)
+    routed = browser.resolve_routing_for_path(season_ep)
+    assert routed["model_id"] == "animejanai-hd-v3-sharp1-ultracompact"
+    assert routed["dedup_policy"] == "dis"
+
+    out_4k = tmp_path / "ep01_4K.mkv"
+    out_4k.write_bytes(b"X" * (1024 * 1024 + 64))
+    (tmp_path / "ep01_4K.audit.json").write_text(json.dumps({"status": "FAILED_SANITY"}), encoding="utf-8")
+    assert is_valid_completed_4k_output(str(out_4k)) is False
+
+    lock_file = tmp_path / ".gpu_active.lock"
+    monkeypatch.setattr(app_config, "GPU_LOCK_FILE", str(lock_file))
+    monkeypatch.setattr(app_config, "_GPU_LOCK_OWNED", False)
+    monkeypatch.setattr(app_config, "_GPU_LOCK_DEPTH", 0)
+    app_config.acquire_gpu_lock()
+    app_config.acquire_gpu_lock()
+    assert lock_file.is_file() and app_config._GPU_LOCK_DEPTH == 2
+    app_config.release_gpu_lock()
+    assert lock_file.is_file() and app_config._GPU_LOCK_OWNED is True and app_config._GPU_LOCK_DEPTH == 1
+    app_config.release_gpu_lock()
+    assert not lock_file.exists() and app_config._GPU_LOCK_OWNED is False and app_config._GPU_LOCK_DEPTH == 0

@@ -9,36 +9,10 @@ import yaml
 from typing import Dict, Any, Optional
 
 from src.config import ROOT_DIR, DEFAULT_OUTPUT_DIR
+from src.show_routing import match_show_pattern, match_show_rule
 
 MODELS_YAML = "models/models.yaml"
 SHOWS_YAML = "shows.yaml"
-
-
-def match_show_pattern(text: str, pattern: str) -> bool:
-    """
-    Khớp mẫu tên file/thư mục anime từ shows.yaml không phân biệt hoa thường.
-    An toàn tuyệt đối với dấu ngoặc vuông literal như '[SubsPlease]', '[BD 1080p]'
-    (không bị fnmatch hiểu nhầm '[...]' là tập ký tự đơn).
-    Hỗ trợ cả ký tự đại diện glob ('*', '?') lẫn chuỗi con (substring).
-    """
-    if not text or not pattern:
-        return False
-    t_low = str(text).lower()
-    p_low = str(pattern).strip().lower()
-    if not p_low:
-        return False
-    if "*" not in p_low and "?" not in p_low:
-        return p_low in t_low
-    regex_parts = ["^"]
-    for ch in p_low:
-        if ch == "*":
-            regex_parts.append(".*")
-        elif ch == "?":
-            regex_parts.append(".")
-        else:
-            regex_parts.append(re.escape(ch))
-    regex_parts.append("$")
-    return re.match("".join(regex_parts), t_low, flags=re.DOTALL) is not None
 
 
 def _resolve_repo_path(path_str: str) -> str:
@@ -134,14 +108,10 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
                 shows_data = yaml.safe_load(f) or {}
             shows_rules = shows_data.get("shows", []) or []
 
-            vid_name = os.path.basename(video_path)
-            vid_dir = os.path.basename(os.path.dirname(os.path.abspath(video_path)))
-
             for rule in shows_rules:
                 pat = rule.get("pattern", "")
                 m_target = str(rule.get("model", "")).strip().lower()
-                # Khớp với tên file hoặc tên thư mục chứa (an toàn với ngoặc vuông '[...]')
-                if match_show_pattern(vid_name, pat) or match_show_pattern(vid_dir, pat):
+                if match_show_rule(video_path, pat):
                     if m_target in lower_to_key:
                         chosen_id = lower_to_key[m_target]
                         resolution_source = f"shows.yaml (Khớp mẫu '{pat}')"
@@ -197,7 +167,8 @@ def is_valid_completed_4k_output(candidate_path: str, min_size_bytes: int = 1024
             return False
     except OSError:
         return False
-    if _read_sibling_audit_status(candidate_path) == "FAIL":
+    status = _read_sibling_audit_status(candidate_path)
+    if status and status.startswith("FAIL"):
         return False
     return True
 

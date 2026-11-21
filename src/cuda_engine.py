@@ -390,7 +390,8 @@ class GPUPersistentWorker:
         fmt: str = "png",
         batch_size: Optional[int] = None,
         logger=None,
-        mid_chunk_callback=None
+        mid_chunk_callback=None,
+        dedup: bool = True,
     ) -> Dict[str, Any]:
         """Run batched SR inference on frames in input_dir and write outputs to output_dir."""
         os.makedirs(output_dir, exist_ok=True)
@@ -476,12 +477,12 @@ class GPUPersistentWorker:
             else:
                 all_in_arrs = [_read_img_bgr_u8(p) for p in img_files]
 
-            if total_frames > 1:
+            if dedup and total_frames > 1:
                 from src.dedup import deduplicate_cyclic_frames
                 distinct_arrs, frame_to_distinct = deduplicate_cyclic_frames(all_in_arrs)
             else:
                 distinct_arrs = list(all_in_arrs)
-                frame_to_distinct = [0]
+                frame_to_distinct = list(range(total_frames))
             del all_in_arrs
 
             num_distinct = len(distinct_arrs)
@@ -772,6 +773,7 @@ def upscale_frames_with_fallback(
     logger=None,
     mid_chunk_callback=None,
     use_tensorrt: bool = True,
+    dedup: bool = True,
 ) -> Dict[str, Any]:
     """Run chunk SR inference with FP16 -> FP32 -> NCNN fallback without changing model identity."""
     if engine is None:
@@ -809,7 +811,8 @@ def upscale_frames_with_fallback(
             fmt=fmt,
             batch_size=batch_size,
             logger=logger,
-            mid_chunk_callback=mid_chunk_callback
+            mid_chunk_callback=mid_chunk_callback,
+            dedup=dedup,
         )
         worker.restart_if_needed(logger=logger)
         res["engine_used"] = f"{engine}_{precision}"
@@ -844,6 +847,7 @@ def upscale_frames_with_fallback(
                 batch_size=batch_size,
                 logger=logger,
                 mid_chunk_callback=mid_chunk_callback,
+                dedup=dedup,
             )
             worker_fp32.restart_if_needed(logger=logger)
             res["engine_used"] = f"{engine}_fp32_fallback"

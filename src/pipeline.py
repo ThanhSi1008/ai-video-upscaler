@@ -328,10 +328,20 @@ def run_upscale_pipeline(
                                 except OSError:
                                     pass
 
+                    # Always purge interrupted *.tmp.mp4 / .tmp_* partial segments even when resume=True
+                    for d_path in (segs_dir, up_segs_dir):
+                        if os.path.isdir(d_path):
+                            for fname in os.listdir(d_path):
+                                if fname.endswith(".tmp.mp4") or fname.startswith(".tmp_"):
+                                    try:
+                                        os.remove(os.path.join(d_path, fname))
+                                    except OSError:
+                                        pass
+
                     existing_segs = sorted([
                         os.path.join(segs_dir, f)
                         for f in os.listdir(segs_dir)
-                        if f.startswith("seg_") and f.endswith(".mp4")
+                        if f.startswith("seg_") and f.endswith(".mp4") and not f.endswith(".tmp.mp4")
                     ]) if os.path.exists(segs_dir) else []
                     can_reuse_segs = bool(resume) and are_raw_segments_complete(
                         segs_dir, plan_file, existing_segs
@@ -385,6 +395,7 @@ def run_upscale_pipeline(
                             to_console=True
                         )
 
+                    allow_cyclic_dedup = bool(dedup and effective_dedup_policy != "off")
                     measured_total_f = (
                         int(dedup_plan["total_frames"])
                         if dedup_plan
@@ -506,7 +517,7 @@ def run_upscale_pipeline(
                                 f_count = len(raw_rgb)
                                 distinct_frames = raw_rgb
                                 frame_to_distinct = list(range(f_count))
-                                if dedup and f_count > 1:
+                                if allow_cyclic_dedup and f_count > 1:
                                     from src.dedup import deduplicate_cyclic_frames
                                     distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(raw_rgb)
                                 first_rgb_frame = (
@@ -820,6 +831,32 @@ def run_upscale_pipeline(
                                             if cur_free < 800.0:
                                                 prev_enc_elapsed = future_encode.result()
                                                 total_enc_time += prev_enc_elapsed
+                                                prev_c_idx = last_encode_item["target"][0]
+                                                prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                                prev_seg_elapsed = (
+                                                    max(0.001, (last_seg_ai_end - last_seg_start) + prev_enc_elapsed)
+                                                    if last_seg_ai_end >= last_seg_start
+                                                    else max(0.001, time.time() - last_seg_start)
+                                                )
+                                                prev_seg_fps = (prev_exp_frames / prev_seg_elapsed) if prev_seg_elapsed > 0 else 0.0
+                                                render_progress(
+                                                    prev_c_idx + 1, total_segs,
+                                                    prefix=f"✨ Đoạn {prev_c_idx+1:02d}/{total_segs:02d}",
+                                                    suffix=f"[{prev_seg_fps:.2f} fps | Đã giải phóng RAM Disk]"
+                                                )
+                                                logger.log_chunk_done(
+                                                    chunk_idx=prev_c_idx,
+                                                    total_chunks=total_segs,
+                                                    frames=prev_exp_frames,
+                                                    ai_time=last_ai_result["elapsed_seconds"],
+                                                    ai_fps=last_ai_result["fps"],
+                                                    enc_time=prev_enc_elapsed,
+                                                    total_chunk_time=prev_seg_elapsed,
+                                                    output_seg=last_encode_item["target"][2],
+                                                    t0_seconds=last_ai_result.get("t0_seconds"),
+                                                    steady_fps=last_ai_result.get("steady_fps"),
+                                                    rss_mb=last_ai_result.get("peak_rss_mb")
+                                                )
                                                 future_encode = None
                                                 free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
 
@@ -1018,7 +1055,7 @@ def run_upscale_pipeline(
                                                         unique_frames_rgb,
                                                         repeat_counts,
                                                         enc_proc,
-                                                        cyclic_dedup=bool(dedup),
+                                                        cyclic_dedup=allow_cyclic_dedup,
                                                         capture_first_rgb_small=should_check_sanity,
                                                         precomputed_dedup=pre_dedup,
                                                     )
@@ -1159,6 +1196,7 @@ def run_upscale_pipeline(
                                                     logger=logger,
                                                     mid_chunk_callback=_mid_chunk_bp_check,
                                                     use_tensorrt=use_tensorrt,
+                                                    dedup=allow_cyclic_dedup,
                                                 )
 
                                                 # Tích lũy kích thước frame PNG thực tế
@@ -1239,12 +1277,23 @@ def run_upscale_pipeline(
                                                     except OSError:
                                                         pass
                                                 if future_encode is not None:
+                                                    prev_enc_failed = None
                                                     try:
                                                         prev_enc = future_encode.result()
                                                         total_enc_time += prev_enc
-                                                    except Exception:
-                                                        pass
+                                                    except Exception as prev_err:
+                                                        prev_msg = str(prev_err)
+                                                        prev_is_enospc = (
+                                                            (isinstance(prev_err, OSError) and getattr(prev_err, "errno", None) == 28)
+                                                            or "No space left on device" in prev_msg
+                                                            or "ENOSPC" in prev_msg
+                                                            or "exit code 228" in prev_msg
+                                                        )
+                                                        if not prev_is_enospc:
+                                                            prev_enc_failed = prev_err
                                                     future_encode = None
+                                                    if prev_enc_failed is not None:
+                                                        raise prev_enc_failed
                                                 if future_extract is not None and not (zero_disk and engine == "cuda"):
                                                     try:
                                                         res_pref = future_extract.result()
@@ -1548,7 +1597,7 @@ def run_upscale_pipeline(
                 all_upscaled_segs = sorted([
                     os.path.join(up_segs_dir, f)
                     for f in os.listdir(up_segs_dir)
-                    if f.startswith("up_") and f.endswith(".mp4")
+                    if f.startswith("up_") and f.endswith(".mp4") and not f.endswith(".tmp.mp4")
                 ])[:total_segs] if os.path.exists(up_segs_dir) else []
                 staging_output = f"{output_path}.mux_tmp.mkv"
                 if os.path.exists(staging_output):

@@ -2,7 +2,7 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `bb7dd91` (`feat(scripts): add deduplicated unnumbered focus_full review bundle mode`)
+> **Commit Baseline:** `f5352e3` (`perf(harness): isolate offline suite to <45s and harden agent guardrails`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 

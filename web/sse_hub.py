@@ -166,7 +166,7 @@ def scan_temp_checkpoints(
             size_bytes = 0
             if raw_segs_dir.is_dir():
                 for f in os.scandir(raw_segs_dir):
-                    if f.name.startswith("seg_") and f.name.endswith(".mp4"):
+                    if f.name.startswith("seg_") and f.name.endswith(".mp4") and not f.name.endswith(".tmp.mp4"):
                         raw_count += 1
                         try:
                             size_bytes += f.stat().st_size
@@ -174,7 +174,7 @@ def scan_temp_checkpoints(
                             pass
             if up_segs_dir.is_dir():
                 for f in os.scandir(up_segs_dir):
-                    if f.name.startswith("up_") and f.name.endswith(".mp4"):
+                    if f.name.startswith("up_") and f.name.endswith(".mp4") and not f.name.endswith(".tmp.mp4"):
                         up_count += 1
                         try:
                             size_bytes += f.stat().st_size

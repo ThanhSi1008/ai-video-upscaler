@@ -12,6 +12,8 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence
 import yaml
 
+from src.show_routing import match_show_pattern, match_show_rule
+
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 
@@ -56,28 +58,6 @@ def is_valid_dedup_policy(policy: str) -> bool:
                 return False
             return math.isfinite(val) and val > 0.0
     return False
-
-
-def match_show_pattern(text: str, pattern: str) -> bool:
-    """Case-insensitive glob matcher for shows.yaml patterns (safe with square brackets)."""
-    if not text or not pattern:
-        return False
-    t_low = str(text).lower()
-    p_low = str(pattern).strip().lower()
-    if not p_low:
-        return False
-    if "*" not in p_low and "?" not in p_low:
-        return p_low in t_low
-    regex_parts = ["^"]
-    for ch in p_low:
-        if ch == "*":
-            regex_parts.append(".*")
-        elif ch == "?":
-            regex_parts.append(".")
-        else:
-            regex_parts.append(re.escape(ch))
-    regex_parts.append("$")
-    return re.match("".join(regex_parts), t_low, flags=re.DOTALL) is not None
 
 
 def natural_sort_key(name: str) -> List[Any]:
@@ -146,8 +126,6 @@ class SafeLocalFSBrowser:
         vid_str = str(video_path)
         if "\x00" in vid_str:
             raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
-        vid_name = os.path.basename(vid_str.rstrip("\\/"))
-        parent_dir = os.path.basename(os.path.dirname(os.path.abspath(vid_str)))
 
         chosen_model = None
         matched_rule_pattern = None
@@ -178,7 +156,7 @@ class SafeLocalFSBrowser:
             pat = str(rule.get("pattern", "")).strip()
             if not pat:
                 continue
-            if match_show_pattern(vid_name, pat) or match_show_pattern(parent_dir, pat):
+            if match_show_rule(vid_str, pat):
                 m_target = str(rule.get("model", "")).strip().lower()
                 if m_target and m_target in lower_to_key:
                     if not chosen_model:
@@ -193,7 +171,7 @@ class SafeLocalFSBrowser:
             pat = str(rule.get("pattern", "")).strip()
             if not pat:
                 continue
-            if match_show_pattern(vid_name, pat) or match_show_pattern(parent_dir, pat):
+            if match_show_rule(vid_str, pat):
                 pol_target = str(rule.get("dedup_policy", "")).strip().lower()
                 if pol_target and is_valid_dedup_policy(pol_target):
                     rule_dedup = pol_target

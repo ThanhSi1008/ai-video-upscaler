@@ -11,12 +11,16 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.ffmpeg_ops import probe_video
-from src.dedup import scan_dedup_plan, load_or_create_plan
+from src.dedup import scan_dedup_plan, load_or_create_plan, resolve_dedup_policy
 from src.config import DEVICE_NAME
 from src.models_resolver import find_existing_4k_output_path
 
 
-def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def find_cached_plan(
+    video_path: str,
+    output_dir: Optional[str] = None,
+    expected_policy: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Tìm file plan.json đã quét trước đó cho video trong các đường dẫn tiêu chuẩn.
     Trả về nội dung dictionary nếu hợp lệ, None nếu chưa có.
@@ -44,6 +48,10 @@ def find_cached_plan(video_path: str, output_dir: Optional[str] = None) -> Optio
                 with open(p, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if data.get("total_kept_frames") and len(data.get("chunks", [])) > 0:
+                    plan_pol = data.get("dedup_policy")
+                    if expected_policy and plan_pol is not None:
+                        if str(plan_pol).strip().lower() != str(expected_policy).strip().lower():
+                            continue
                     # Nếu là file generic full_ep_plan.json thì phải kiểm tra đúng source_file
                     if "full_ep_plan.json" in p:
                         if data.get("source_file") == os.path.basename(video_path):
@@ -60,12 +68,14 @@ def preflight_video_plan(
     video_path: str,
     output_dir: Optional[str] = None,
     segment_seconds: int = 8,
-    progress_callback=None
+    progress_callback=None,
+    dedup_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Quét hoặc nạp plan.json cho một video cụ thể.
     """
-    cached = find_cached_plan(video_path, output_dir)
+    eff_policy = resolve_dedup_policy(video_path, dedup_policy)
+    cached = find_cached_plan(video_path, output_dir, expected_policy=eff_policy)
     if cached:
         return cached
 
@@ -89,7 +99,8 @@ def preflight_video_plan(
         plan_path=plan_path,
         segment_seconds=segment_seconds,
         fps_num=fps_num,
-        fps_den=fps_den
+        fps_den=fps_den,
+        policy=eff_policy,
     )
     return plan_data
 
@@ -221,8 +232,8 @@ class BackgroundQueuePreflightManager:
                     evt = self._video_events.setdefault(vkey, threading.Event())
 
                 try:
-                    # Kiểm tra xem đã có plan chưa
-                    cached = find_cached_plan(vid, self.output_dir)
+                    eff_pol = resolve_dedup_policy(vid, self.dedup_policy)
+                    cached = find_cached_plan(vid, self.output_dir, expected_policy=eff_pol)
                     if cached:
                         self.results[vid] = cached
                         continue
@@ -327,6 +338,7 @@ def compute_overnight_schedule(
     preflight_now: bool = False,
     start_time: Optional[datetime] = None,
     subs_quality: str = "normal",
+    dedup_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
@@ -365,9 +377,10 @@ def compute_overnight_schedule(
         # 1. Tìm hoặc quét plan.json
         plan = None
         if preflight_now:
-            plan = preflight_video_plan(vid, output_dir, segment_seconds)
+            plan = preflight_video_plan(vid, output_dir, segment_seconds, dedup_policy=dedup_policy)
         else:
-            plan = find_cached_plan(vid, output_dir)
+            eff_pol = resolve_dedup_policy(vid, dedup_policy) if dedup_policy else None
+            plan = find_cached_plan(vid, output_dir, expected_policy=eff_pol)
 
         is_exact = plan is not None
         if plan:
