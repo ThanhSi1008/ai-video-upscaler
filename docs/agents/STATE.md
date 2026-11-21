@@ -2,13 +2,14 @@
 
 > **Updated:** 2026-11-22
 >
-> **Commit Baseline:** `ecec85e` (`fix(subtrans): stabilize cache keys, sticky context cache & dialogue guards`)
+> **Commit Baseline:** `c9aa756` (`fix(web,cli): harden web studio security, scheduler/env parity, ruff & real-sut tests`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
 ## 1. Current Baseline Summary
 
-- **Offline Verification Baseline (`2026-11-22`):** **100% PASS** (`843 passed, 6 skipped, 0 failed/errors` out of `849` tests, `58.86s` [down from `510.79s`] via 6-worker sharded `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-ujk_pq2q`) with `sitecustomize.py` subprocess socket guard & `UPSCALER_HEVC_ENCODER=libx265`; `smoke_test_pipeline.py` = `PASS` in `0.53s` incl. `mux_segments_directly`; `subtrans.py eval` = `PASS`; `ruff check .` = `0` errors incl. `B023`/`F601`/`F811`; `agent_context.py --check` = `PASS`).
+- **Offline Verification Baseline (`2026-11-22`):** **100% PASS** (`849 passed, 6 skipped, 0 failed, 0 errors` out of `855` tests via 6-worker sharded `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-8pfekwzx`) with `sitecustomize.py` subprocess socket guard & `UPSCALER_HEVC_ENCODER=libx265`; `smoke_test_pipeline.py` = `PASS` in `0.52s` incl. `mux_segments_directly`; `ruff check .` = `0` errors; `agent_context.py --check` = `PASS`).
+- **Edge-Case Remediation Pass (`c9aa756`+):** Per-segment shell-chain guard enforcement (`_split_command_chains` in `.agents/plugins/upscaler-guard/hooks/pre_tool_guard.py`), `TranslationCache` column model/backend hydration & Cascade `(repair)` provenance retention under `--subs-upgrade` (`subtrans/cache.py`, `subtrans/pipeline.py`), Windows 17-column `TelemetryCollector` CSV parsing/reporting (`src/night_report.py`), call-time path resolution + `--source-dir`/`-o`/`--state-file`/`--dry-run` CLI flags (`scripts/batch_translate_all.py`), and `compute_pending_subs_reserved_seconds` `--async-subs` deadline reservation fix (`upscale.py`).
 - **4-Batch Audit Remediation (`f5352e3`, `52dcb5b`, `ecec85e` + Web/CLI/Ruff Batch 4):**
   - **Batch 1 — Test Isolation & Harness (`f5352e3`):** Subprocess-wide `sitecustomize.py` socket guard, CPU `libx265` E2E isolation, bounded `<=280`L `read_file`/`view_file` Context Firewall (`>350`L files), `benchmarks/subtrans/*.py` `--dry-run` + quota guard, scoped `@pytest.mark.subtrans`, and 6-worker LPT sharding.
   - **Batch 2 — Video Pipeline & Season Routing (`52dcb5b`):** Stale `*.tmp.mp4`/`.tmp_*` purge on resume across all 4 enumerators, `src/show_routing.py` safe season/volume/disc grandparent matching, Open-GOP `_count_leading_discard_packets` fix, `cudaEventSynchronize` before `_out_ring` reuse, `RAMDisk` free-space verification, and stat-cached YAML/glossary loaders.

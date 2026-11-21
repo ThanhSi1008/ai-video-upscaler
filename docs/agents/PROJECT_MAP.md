@@ -1,6 +1,6 @@
 # Project Map (Codebase Navigation Index)
 
-> **Updated:** 2026-11-21 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
+> **Updated:** 2026-11-22 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
 ## 1. Entrypoints & Data Flows
 
@@ -56,7 +56,7 @@ subtrans.cli -> TranslationPipeline
 | [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos`, AC power & disk checks |
 | [`scheduler.py`](../../src/scheduler.py) | `BackgroundQueuePreflightManager`, `compute_overnight_schedule`, `check_gemini_quota_for_queue` |
 | [`logger.py`](../../src/logger.py) | `RunLogger`, atomic `logs/live_status.json`, `logs/.graceful_pause.flag` check |
-| [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window`, `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text` |
+| [`night_report.py`](../../src/night_report.py) | `parse_telemetry_window` (legacy + Windows 17-col `TelemetryCollector` CSV), `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text` |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio` (`faster-whisper` + 5.1 FC mono + Silero VAD + Glossary prompt) |
 | [`pending_queue.py`](../../src/pending_queue.py) | Stdlib-only queue manager for `state/pending_subs.json` (with legacy root fallback; avoids importing `torch`) |
 
@@ -68,7 +68,7 @@ subtrans.cli -> TranslationPipeline
 ## 5. Tooling, Benchmarks, Tests & Archives
 
 - **[`.agents/`](../../.agents):** `rules/` (glob-scoped `video-gpu.md`, `subtrans.md`, `web-ui.md`), `agents/` (`repo-scout.md`, `test-verifier.md`, `subtrans-evaluator.md` with `inheritMcp: false`), `skills/` (`agent-handoff-commit`, `safe-offline-test`, `video-upscale-ops`, `subtrans-anime-ops`, pruned 39-guide `modern-web-guidance`), `plugins/upscaler-guard/` (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`), `plugins/upscaler-mcp/` (`disabled: true`).
-- **[`scripts/`](../../scripts):** `agent_context.py` (`--pack`/`--symbols`/`--slice`/`--impact`/`--install-hooks`), `export_review_bundle.py` (`--sync-latest` 6 bundles incl. `--focus full`), `verify_offline.py` (`--target`/`--impacted`), `smoke_test_pipeline.py` (`< 5s` 24f CPU pipeline smoke test), `silicon_roofline_probe.py`, `telemetry_collector.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `batch_translate_all.py`, `set_track_defaults.py`, `upscale_x4_single.py`, `unlock_rtx3060_admin.ps1`, `unlock_rtx3060_admin.bat`, and `scripts/oneoff/` (`embed_fate_subtitles.py`, `organize_vietnamese_subs.py`).
+- **[`scripts/`](../../scripts):** `agent_context.py` (`--pack`/`--symbols`/`--slice`/`--impact`/`--install-hooks`), `export_review_bundle.py` (`--sync-latest` 6 bundles incl. `--focus full`), `verify_offline.py` (`--target`/`--impacted`), `smoke_test_pipeline.py` (`< 5s` 24f CPU pipeline smoke test), `silicon_roofline_probe.py`, `telemetry_collector.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `batch_translate_all.py` (`--source-dir`/`-o`/`--state-file`/`--dry-run`), `set_track_defaults.py`, `upscale_x4_single.py`, `unlock_rtx3060_admin.ps1`, `unlock_rtx3060_admin.bat`, and `scripts/oneoff/` (`embed_fate_subtitles.py`, `organize_vietnamese_subs.py`).
 - **[`benchmarks/README.md`](../../benchmarks/README.md):** `upscale/`, `subtrans/`, `research/`, and summary reports.
 - **Tests (`pytest.ini` markers: `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`):** `tests/` (unit/capability suites incl. `test_architecture_boundaries.py`, `test_export_review_bundle.py`, `test_smoke_pipeline.py`, `test_web_gui.py`, `test_nvenc_config_and_vram.py`, `test_zero_disk_and_trt_export.py`, `test_cli_lock_and_pipeline_regressions.py`, `test_gop_rle_and_3stage_overlap.py`, `test_zero_disk_ring_buffers_and_cel.py`), `tests/e2e/` (Group A/B + Tier 1–4 suites), and `subtrans/tests/` (all subtrans tests consolidated).
 - **Runtime & Archives (excluded via [`.antigravityignore`](../../.antigravityignore)):** `docs/archive/` (20 historical task logs + 7 legacy reports), `state/pending_subs.json`, `logs/`, `out/`, `scratch/` (incl. `scratch/review_bundles/`), `models_bench/`, `subtrans/.cache/`, `.cache/` (`.env` / `subtrans/.env` are locally readable, gitignored).

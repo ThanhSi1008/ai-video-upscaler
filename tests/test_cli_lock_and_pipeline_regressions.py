@@ -22,7 +22,8 @@ import torch.nn.functional as F
 import src.config as app_config
 from src.cuda_engine import GPUPersistentWorker
 from src.dedup import build_preflight_subprocess_spec
-from src.night_report import parse_telemetry_window
+from datetime import datetime
+from src.night_report import generate_night_report_text, parse_telemetry_window
 from src.subtitles import find_or_extract_subtitles
 from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler, SRVGGNetCompactTRTWrapper
 from subtrans.cache import TranslationCache
@@ -48,6 +49,97 @@ def test_night_report_parse_telemetry_window_thermal_states(tmp_path: Path):
     assert "error" not in res
     assert res["delta_ssd_mb"] == pytest.approx(24.0)
     assert res["thermal_states"] == ["Fair", "Nominal"]
+
+
+def test_night_report_windows_telemetry_collector_schema_and_discovery(tmp_path: Path, monkeypatch):
+    header = (
+        "timestamp,elapsed_s,pstate,gpu_util_pct,mem_util_pct,enc_util_pct,dec_util_pct,"
+        "mem_clock_mhz,core_clock_mhz,power_w,temp_c,vram_used_mib,vram_free_mib,"
+        "cpu_pct,ram_used_gb,ssd_read_mb_s,ssd_write_mb_s"
+    )
+    rows = [
+        "2026-11-22T01:00:00,0.0,P2,80.0,40.0,20.0,10.0,7500,1500,120.0,65.0,4000,8288,30.0,12.0,0.0,0.0",
+        "2026-11-22T01:00:01,1.0,P0,90.0,55.0,35.0,20.0,7500,1850,150.0,72.0,6200,6088,40.0,13.5,100.0,50.0",
+        "2026-11-22T01:00:03,3.0,P0,100.0,60.0,45.0,25.0,7500,1900,150.0,70.0,5800,6488,50.0,13.0,50.0,25.0",
+    ]
+    win_csv = tmp_path / "win_telemetry.csv"
+    win_csv.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+
+    parsed = parse_telemetry_window(str(win_csv))
+    assert parsed["schema"] == "windows_telemetry_v1"
+    assert parsed["samples_count"] == 3
+    assert parsed["delta_read_gib"] == pytest.approx(200.0 / 1024.0)
+    assert parsed["delta_write_gib"] == pytest.approx(100.0 / 1024.0)
+    assert parsed["delta_ssd_mb"] == pytest.approx(300.0)
+    assert parsed["delta_ssd_gib"] == pytest.approx(300.0 / 1024.0)
+    assert parsed["avg_gpu_util_pct"] == pytest.approx(90.0)
+    assert parsed["peak_vram_mib"] == pytest.approx(6200.0)
+    assert parsed["avg_power_w"] == pytest.approx(140.0)
+    assert parsed["peak_power_w"] == pytest.approx(150.0)
+    assert parsed["peak_temp_c"] == pytest.approx(72.0)
+    assert parsed["avg_cpu_pct"] == pytest.approx(40.0)
+    assert parsed["peak_ram_used_gb"] == pytest.approx(13.5)
+    assert parsed["pstates"] == ["P0", "P2"]
+    assert parsed["thermal_states"] == ["Nominal"]
+
+    t0 = int(datetime(2026, 11, 22, 1, 0, 0).timestamp())
+    sliced = parse_telemetry_window(str(win_csv), start_epoch=t0, end_epoch=t0 + 1)
+    assert sliced["samples_count"] == 2
+    assert sliced["delta_ssd_mb"] == pytest.approx(150.0)
+
+    hot_csv = tmp_path / "hot_telemetry.csv"
+    hot_row = "2026-11-22T01:00:05,5.0,P0,99.0,60.0,50.0,20.0,7500,1900,170.0,85.0,7000,5288,45.0,14.0,10.0,5.0"
+    hot_csv.write_text("\n".join([header, hot_row]) + "\n", encoding="utf-8")
+    hot = parse_telemetry_window(str(hot_csv))
+    assert hot["thermal_states"] == ["Thermal Throttle (>=83C)"]
+    assert hot["delta_ssd_mb"] == pytest.approx(15.0)
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "win_night_telemetry.csv").write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+    report_win = generate_night_report_text("win_night")
+    assert "6,200 MiB" in report_win
+    assert "P0, P2" in report_win
+    assert "140.0 W" in report_win
+    assert "Băng thông NVMe SSD" in report_win
+
+    (tmp_path / "logs" / "soak_telemetry_legacy_night.csv").write_text(
+        "epoch,timestamp,disk0_mb_total,pageouts,swap_used_mb,thermal_state\n"
+        "1000,2026-11-13T01:00:00,100.0,10,64.0,Nominal\n"
+        "1060,2026-11-13T01:01:00,124.0,12,96.0,Nominal\n",
+        encoding="utf-8",
+    )
+    report_leg = generate_night_report_text("legacy_night")
+    assert "iostat disk0" in report_leg
+    assert "24.00 MB" in report_leg
+
+
+def test_compute_pending_subs_reserved_seconds_async_vs_sequential():
+    completed = [("ep1.mkv", "out/ep1_4K.mkv"), ("ep2.mkv", "out/ep2_4K.mkv")]
+
+    # Sequential mode reserves 300s per completed episode
+    assert upscale_cli.compute_pending_subs_reserved_seconds(completed, [], 300.0, True) == pytest.approx(600.0)
+
+    # --async-subs reserves 0s for finished (poll == 0) and in-flight (poll is None) Stage B procs
+    done_proc = MagicMock()
+    done_proc.poll.return_value = 0
+    inflight_proc = MagicMock()
+    inflight_proc.poll.return_value = None
+    async_procs = [
+        ("ep1.mkv", "out/ep1_4K.mkv", done_proc, 0.0),
+        ("ep2.mkv", "out/ep2_4K.mkv", inflight_proc, 1.0),
+    ]
+    assert upscale_cli.compute_pending_subs_reserved_seconds(completed, async_procs, 300.0, True) == pytest.approx(0.0)
+
+    # Unlaunched fallback episode (not in async_sub_procs) still reserves 300s
+    completed_with_fallback = [*completed, ("ep3.mkv", "out/ep3_4K.mkv")]
+    assert upscale_cli.compute_pending_subs_reserved_seconds(
+        completed_with_fallback, async_procs, 300.0, True
+    ) == pytest.approx(300.0)
+
+    # Disabled subtitles or non-positive overhead reserves 0s
+    assert upscale_cli.compute_pending_subs_reserved_seconds(completed_with_fallback, [], 300.0, False) == pytest.approx(0.0)
+    assert upscale_cli.compute_pending_subs_reserved_seconds(completed_with_fallback, [], 0.0, True) == pytest.approx(0.0)
 
 
 def test_pid_aware_gpu_lock_and_pending_sub_matching(tmp_path: Path, monkeypatch):

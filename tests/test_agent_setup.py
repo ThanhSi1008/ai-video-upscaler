@@ -361,6 +361,126 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
     assert res_live_batch["decision"] == "force_ask"
 
 
+def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
+    mod = _load_module(
+        AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "pre_tool_guard.py",
+        "upscaler_pre_tool_guard_chains",
+    )
+
+    big_py = tmp_path / "src" / "big_mod.py"
+    big_py.parent.mkdir(parents=True, exist_ok=True)
+    big_py.write_text("\n".join(f"x_{i} = {i}" for i in range(380)) + "\n", encoding="utf-8")
+    small_py = tmp_path / "small.py"
+    small_py.write_text("a = 1\nb = 2\n", encoding="utf-8")
+
+    # 1. Chained review_bundles shell reads across && and ; are denied
+    for bad_bundle in (
+        "python scripts/export_review_bundle.py --sync-latest && cat scratch/review_bundles/latest.txt",
+        "echo ok; Get-Content scratch/review_bundles/focus_web.txt",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_bundle}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "deny", f"Expected deny for: {bad_bundle}"
+
+    # 2. Unbounded dump in a later chain is denied while single bounded pipeline remains allowed
+    for bad_dump in (
+        "cat small.py | head -n 5 && Get-Content src/big_mod.py",
+        "cat small.py | head -n 5; cat src/big_mod.py",
+        "echo head | cat src/big_mod.py",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_dump}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "deny", f"Expected deny for: {bad_dump}"
+
+    for bounded_pipe in (
+        "Get-Content src/big_mod.py | Select-Object -First 30",
+        "cat src/big_mod.py | head -n 30",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bounded_pipe}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "allow", f"Expected allow for: {bounded_pipe}"
+
+    # 3. Chained build_trt_engine execution is denied
+    for bad_trt in (
+        "python src/build_trt_engine.py --help && python src/build_trt_engine.py",
+        "CUDA_VISIBLE_DEVICES=0 python src/build_trt_engine.py || echo fail",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_trt}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "deny", f"Expected deny for: {bad_trt}"
+
+    res_trt_safe = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "python src/build_trt_engine.py --help; python upscale.py --list-models"}}},
+        repo_root=tmp_path,
+    )
+    assert res_trt_safe["decision"] == "allow"
+
+    # 4. Chained live Gemini API commands across ;, &&, ||, and | prompt (force_ask)
+    for chained_sub in (
+        "python subtrans.py eval && python subtrans.py run ep1.ass",
+        "python subtrans.py --help || python upscale.py --subs-only ep1.mkv",
+        "python subtrans.py run ep1.ass | head -n 5",
+        "python upscale.py --list-models; python upscale.py --subs-upgrade ep1.mkv",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": chained_sub}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "force_ask", f"Expected force_ask for: {chained_sub}"
+
+    res_sub_dry = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "python subtrans.py eval && python upscale.py --subs-only ep1.mkv --dry-run"}}},
+        repo_root=tmp_path,
+    )
+    assert res_sub_dry["decision"] == "allow"
+
+    # 5. GPU lock guard blocks chained GPU commands and RUN_GPU_TESTS=1
+    (tmp_path / ".gpu_active.lock").write_text("9999", encoding="utf-8")
+    for lock_cmd in (
+        "python upscale.py --list-models && python upscale.py ep1.mkv",
+        "RUN_GPU_TESTS=1 pytest tests/test_agent_setup.py",
+        "$env:RUN_GPU_TESTS=1; pytest tests/test_agent_setup.py",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": lock_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "force_ask", f"Expected force_ask for: {lock_cmd}"
+    (tmp_path / ".gpu_active.lock").unlink()
+
+    # 6. Chained unflagged upscale / benchmark segments are denied
+    for bad_up in (
+        "python upscale.py --list-models && python upscale.py ep1.mkv",
+        "python upscale.py --dry-run ep1.mkv || python upscale.py ep1.mkv",
+        "python upscale.py ep1.mkv | Select-Object -First 10",
+        "python upscale.py --list-models; python scripts/benchmark_pipeline.py",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_up}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "deny", f"Expected deny for: {bad_up}"
+
+    # 7. Cross-segment CUDA_VISIBLE_DEVICES=-1 pytest isolation remains allowed
+    for safe_py in (
+        "$env:CUDA_VISIBLE_DEVICES=-1; pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py",
+        "CUDA_VISIBLE_DEVICES=-1 pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py",
+    ):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": safe_py}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "allow", f"Expected allow for: {safe_py}"
+
+
 def test_workspace_scoped_rules_and_custom_subagents():
     rules_dir = AGENTS_DIR / "rules"
     agents_dir = AGENTS_DIR / "agents"

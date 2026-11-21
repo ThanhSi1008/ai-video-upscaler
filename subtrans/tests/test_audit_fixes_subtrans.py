@@ -257,6 +257,91 @@ def test_batch_translate_does_not_retry_3x_when_only_embed_fails():
     assert mock_run.call_count == 1
 
 
+def test_batch_translate_cli_overrides_monkeypatch_and_dry_run(tmp_path, monkeypatch):
+    src_dir = tmp_path / "raw_sources"
+    frieren_dir = src_dir / "Frieren"
+    fate_dir = src_dir / "Fate"
+    frieren_dir.mkdir(parents=True)
+    fate_dir.mkdir(parents=True)
+    ep1 = frieren_dir / "Frieren_E01.mkv"
+    ep2 = fate_dir / "Fate_E01.mkv"
+    ep1.write_bytes(b"MKV1")
+    ep2.write_bytes(b"MKV2")
+
+    out_dir = tmp_path / "subs_out"
+    state_file = tmp_path / "custom_state" / "batch_state.json"
+
+    # 1. Parser accepts --source-dir, -o/--output-dir, --state-file, and --dry-run
+    parsed = batch_mod.build_cli_parser().parse_args([
+        "--source-dir", str(src_dir),
+        "-o", str(out_dir),
+        "--state-file", str(state_file),
+        "--dry-run",
+    ])
+    assert parsed.source_dir == src_dir
+    assert parsed.output_dir == out_dir
+    assert parsed.state_file == state_file
+    assert parsed.dry_run is True
+
+    # 2. monkeypatch.setattr resolves module globals at call time (never writes live logs/)
+    monkeypatch.setattr(batch_mod, "RAW_SOURCES_DIR", src_dir)
+    monkeypatch.setattr(batch_mod, "SUB_OUT_DIR", out_dir)
+    monkeypatch.setattr(batch_mod, "STATE_FILE", state_file)
+
+    queued = batch_mod.collect_queue()
+    assert len(queued) == 2
+    batch_mod.save_state({"total": 2, "completed": 1, "skipped": 0, "failed": 0, "history": {}})
+    assert state_file.exists()
+    assert batch_mod.load_state()["completed"] == 1
+
+    # 3. --dry-run without --state-file does NOT create or mutate default STATE_FILE on disk
+    default_state_dry = tmp_path / "untouched" / "default_state.json"
+    monkeypatch.setattr(batch_mod, "STATE_FILE", default_state_dry)
+    sub_cmds = []
+    prefetch_calls = []
+
+    def _fake_subproc(cmd, **kwargs):
+        sub_cmds.append(cmd)
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "[DRY-RUN] ok\n"
+        proc.stderr = ""
+        return proc
+
+    def _fake_prefetch(fpath, output_dir=None, subs_quality="normal", dry_run=False):
+        prefetch_calls.append((fpath, output_dir, subs_quality, dry_run))
+        return {"status": "SKIPPED_NO_TEXT_SUB", "episode": Path(fpath).stem}
+
+    orig_worker_cls = batch_mod.StageAPrefetchWorker
+    monkeypatch.setattr(
+        batch_mod,
+        "StageAPrefetchWorker",
+        lambda: orig_worker_cls(prefetch_fn=_fake_prefetch),
+    )
+    with patch("scripts.batch_translate_all.subprocess.run", side_effect=_fake_subproc), \
+         patch("scripts.batch_translate_all.has_vietnamese_sub", return_value=False):
+        batch_mod.main([
+            "--source-dir", str(src_dir),
+            "-o", str(out_dir),
+            "--dry-run",
+        ])
+
+    assert not default_state_dry.exists()
+    assert len(sub_cmds) == 2
+    assert all("--dry-run" in cmd and str(out_dir) in cmd for cmd in sub_cmds)
+    assert len(prefetch_calls) == 1
+    assert prefetch_calls[0][1] == out_dir
+    assert prefetch_calls[0][3] is True
+
+    # 4. Direct prefetch_episode_stage_a(dry_run=True) avoids TranslationCache and forwards dry_run
+    seen_dry = []
+    with patch("src.subtitles.find_or_extract_subtitles", side_effect=lambda f, **kw: seen_dry.append(kw.get("dry_run")) or (None, None)), \
+         patch("subtrans.cache.TranslationCache", side_effect=AssertionError("Should not open cache in dry_run")):
+        pf = batch_mod.prefetch_episode_stage_a(str(ep1), output_dir=out_dir, dry_run=True)
+    assert pf["status"] == "SKIPPED_NO_TEXT_SUB"
+    assert seen_dry == [True]
+
+
 # ---------------------------------------------------------------------------
 # P0.3: Clamp negative subtitle timestamps (parser.py & writer.py)
 # ---------------------------------------------------------------------------

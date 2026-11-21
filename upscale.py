@@ -19,7 +19,7 @@ import re
 import argparse
 import subprocess
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple, Sequence
+from typing import Any, Optional, List, Dict, Tuple, Sequence
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -217,6 +217,20 @@ def check_deadline_and_eta(
 
     print(f"⏳ [DEADLINE OK] Tập '{os.path.basename(video_path)}' ({n_unique} unique frames [{source_tag}]): Cần ~{eta_med/60:.1f}m (Quyết định P5+7%: {decision_eta/60:.1f}m), còn {seconds_left/60:.1f}m trước hạn chót {deadline_str}.")
     return True, False, deadline_dt
+
+
+def compute_pending_subs_reserved_seconds(
+    completed_videos: Sequence[Tuple[str, str]],
+    async_sub_procs: Sequence[Tuple[str, str, Any, Any]],
+    subtitles_overhead: float,
+    subs_after_upscale: bool,
+) -> float:
+    """Return remaining sequential Stage B subtitle seconds not yet launched in async_sub_procs."""
+    if not subs_after_upscale or subtitles_overhead <= 0:
+        return 0.0
+    async_by_src = {src: proc for src, _, proc, _ in async_sub_procs}
+    pending_count = sum(1 for src, _ in completed_videos if src not in async_by_src)
+    return float(pending_count) * float(subtitles_overhead)
 
 
 def build_arg_parser():
@@ -1132,7 +1146,12 @@ def main():
             # Kiểm tra deadline nếu có (A6), bỏ qua nếu tập đã hoàn tất từ trước
             deadline_dt = None
             if args.deadline and not already_done_path:
-                subs_reserved_sec = (len(completed_videos) * subtitles_overhead) if args.subs_after_upscale else 0.0
+                subs_reserved_sec = compute_pending_subs_reserved_seconds(
+                    completed_videos,
+                    async_sub_procs,
+                    subtitles_overhead,
+                    args.subs_after_upscale,
+                )
                 can_finish, is_partial, deadline_dt = check_deadline_and_eta(
                     vid,
                     args.deadline,

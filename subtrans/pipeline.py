@@ -634,15 +634,30 @@ class TranslationPipeline:
                     cached_map = self.cache.get_cues_batch([ck for _, ck in cue_keys])
                 else:
                     cached_map = {}
+                    get_entry_fn = getattr(self.cache, "get_cue_entry", None)
                     for _, ck in cue_keys:
-                        val = self.cache.get_cue(ck)
-                        if isinstance(val, str) and val:
-                            cached_map[ck] = (val, {})
+                        handled = False
+                        if callable(get_entry_fn):
+                            entry_val = get_entry_fn(ck)
+                            if entry_val is None:
+                                handled = True
+                            elif isinstance(entry_val, tuple) and len(entry_val) == 2 and isinstance(entry_val[0], str):
+                                if entry_val[0]:
+                                    entry_meta = entry_val[1] if isinstance(entry_val[1], dict) else {}
+                                    cached_map[ck] = (entry_val[0], entry_meta)
+                                handled = True
+                        if not handled:
+                            val = self.cache.get_cue(ck)
+                            if isinstance(val, str) and val:
+                                cached_map[ck] = (val, {})
                 if effective_subs_upgrade and not is_lower_model:
                     cached_map = {
                         ck: entry
                         for ck, entry in cached_map.items()
-                        if "lite" not in str((entry[1] or {}).get("model") or "").lower()
+                        if not any(
+                            tag in str((entry[1] or {}).get("model") or "").lower()
+                            for tag in ("lite", "local")
+                        )
                     }
                 cached_in_batch: List[Cue] = []
                 for cue, ckey in cue_keys:
@@ -652,7 +667,8 @@ class TranslationPipeline:
                         cue.vi = cached_vi
                         cue.draft_vi = cached_vi
                         cue.backend_used = "cache"
-                        cue.model_used = target_m
+                        resolved_model = str((meta or {}).get("model") or "").strip() if isinstance(meta, dict) else ""
+                        cue.model_used = resolved_model or target_m
                         if isinstance(meta, dict):
                             if meta.get("speaker"):
                                 cue.speaker = meta["speaker"]
@@ -789,6 +805,7 @@ class TranslationPipeline:
                             )
                             cue_cache_keys_by_id[cue.id] = ckey
                         cue_meta = {
+                            "model": model_used,
                             "speaker": cue.speaker,
                             "addressee": cue.addressee,
                             "p1": getattr(cue, "p1", None),
@@ -870,6 +887,7 @@ class TranslationPipeline:
                             and rc.vi
                         ):
                             rc_meta = {
+                                "model": rc.model_used,
                                 "speaker": rc.speaker,
                                 "addressee": rc.addressee,
                                 "p1": getattr(rc, "p1", None),

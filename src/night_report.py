@@ -23,6 +23,144 @@ CHUNK_LOG_REGEX = re.compile(
 )
 
 
+def _parse_telemetry_ts(raw_ts: Any) -> Optional[datetime]:
+    """Parse an ISO or space-separated telemetry timestamp into a datetime."""
+    text = str(raw_ts or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _parse_optional_float(val: Any) -> Optional[float]:
+    """Parse numeric telemetry values while treating N/A and empty fields as None."""
+    if val is None:
+        return None
+    cleaned = str(val).strip()
+    if not cleaned or cleaned.upper() in {"N/A", "[NOT SUPPORTED]", "UNKNOWN", "ERR"}:
+        return None
+    try:
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_telem_float(val: Any, default: float = 0.0) -> float:
+    """Convert a telemetry cell to float with a safe fallback."""
+    parsed = _parse_optional_float(val)
+    return parsed if parsed is not None else default
+
+
+def _row_epoch_seconds(row: Dict[str, Any]) -> Optional[int]:
+    """Extract integer epoch seconds from legacy `epoch` or ISO `timestamp` rows."""
+    raw_epoch = str(row.get("epoch") or "").strip()
+    if raw_epoch:
+        try:
+            return int(float(raw_epoch))
+        except (ValueError, TypeError):
+            pass
+    dt = _parse_telemetry_ts(row.get("timestamp"))
+    if dt is not None:
+        return int(dt.timestamp())
+    return None
+
+
+def _parse_windows_telemetry_window(
+    rows: List[Dict[str, Any]],
+    start_epoch: Optional[int],
+    end_epoch: Optional[int],
+) -> Dict[str, Any]:
+    """Aggregate Windows 17-column TelemetryCollector CSV metrics inside [start_epoch, end_epoch]."""
+    parsed_rows = []
+    for row in rows:
+        dt = _parse_telemetry_ts(row.get("timestamp"))
+        ep = _row_epoch_seconds(row)
+        if ep is None:
+            continue
+        if start_epoch is not None and ep < start_epoch:
+            continue
+        if end_epoch is not None and ep > end_epoch:
+            continue
+        exact_ts = dt.timestamp() if dt is not None else float(ep)
+        parsed_rows.append((ep, exact_ts, row))
+
+    if not parsed_rows:
+        return {}
+
+    rows_in_window = [r for _, _, r in parsed_rows]
+    total_read_mb = 0.0
+    total_write_mb = 0.0
+    prev_elapsed: Optional[float] = None
+    prev_ts: Optional[float] = None
+
+    for idx, (_, exact_ts, row) in enumerate(parsed_rows):
+        cur_elapsed = _parse_optional_float(row.get("elapsed_s"))
+        if len(parsed_rows) == 1:
+            dt_sec = 1.0
+        elif idx == 0:
+            dt_sec = 0.0
+        elif cur_elapsed is not None and prev_elapsed is not None and cur_elapsed >= prev_elapsed:
+            dt_sec = max(0.0, cur_elapsed - prev_elapsed)
+        elif exact_ts is not None and prev_ts is not None and exact_ts >= prev_ts:
+            dt_sec = max(0.0, exact_ts - prev_ts)
+        else:
+            dt_sec = 1.0
+
+        if dt_sec > 0.0:
+            total_read_mb += max(0.0, _safe_telem_float(row.get("ssd_read_mb_s"))) * dt_sec
+            total_write_mb += max(0.0, _safe_telem_float(row.get("ssd_write_mb_s"))) * dt_sec
+
+        prev_elapsed = cur_elapsed
+        prev_ts = exact_ts
+
+    gpu_utils = [_safe_telem_float(r.get("gpu_util_pct")) for r in rows_in_window]
+    vrams = [_safe_telem_float(r.get("vram_used_mib")) for r in rows_in_window]
+    powers = [_safe_telem_float(r.get("power_w")) for r in rows_in_window]
+    temps = [_safe_telem_float(r.get("temp_c")) for r in rows_in_window]
+    cpus = [_safe_telem_float(r.get("cpu_pct")) for r in rows_in_window]
+    rams = [_safe_telem_float(r.get("ram_used_gb")) for r in rows_in_window]
+    pstates = sorted({
+        str(r.get("pstate")).strip()
+        for r in rows_in_window
+        if r.get("pstate") and str(r.get("pstate")).strip().upper() != "N/A"
+    }) or ["N/A"]
+
+    peak_temp_c = max(temps) if temps else 0.0
+    thermal_states = ["Nominal"] if peak_temp_c < 83.0 else ["Thermal Throttle (>=83C)"]
+    delta_read_gib = total_read_mb / 1024.0
+    delta_write_gib = total_write_mb / 1024.0
+    delta_ssd_mb = total_read_mb + total_write_mb
+    delta_ssd_gib = delta_ssd_mb / 1024.0
+    n_samples = len(rows_in_window)
+
+    return {
+        "schema": "windows_telemetry_v1",
+        "start_time": rows_in_window[0].get("timestamp", ""),
+        "end_time": rows_in_window[-1].get("timestamp", ""),
+        "samples_count": n_samples,
+        "delta_ssd_mb": delta_ssd_mb,
+        "delta_ssd_gib": delta_ssd_gib,
+        "delta_read_gib": delta_read_gib,
+        "delta_write_gib": delta_write_gib,
+        "avg_gpu_util_pct": sum(gpu_utils) / n_samples,
+        "peak_vram_mib": max(vrams) if vrams else 0.0,
+        "avg_power_w": sum(powers) / n_samples,
+        "peak_power_w": max(powers) if powers else 0.0,
+        "peak_temp_c": peak_temp_c,
+        "avg_cpu_pct": sum(cpus) / n_samples,
+        "peak_ram_used_gb": max(rams) if rams else 0.0,
+        "pstates": pstates,
+        "thermal_states": thermal_states,
+    }
+
+
 def parse_telemetry_window(
     csv_path: str,
     start_epoch: Optional[int] = None,
@@ -38,6 +176,14 @@ def parse_telemetry_window(
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        fieldnames = set(reader.fieldnames or [])
+        is_legacy_schema = "epoch" in fieldnames and "disk0_mb_total" in fieldnames
+        is_windows_schema = not is_legacy_schema and (
+            "gpu_util_pct" in fieldnames or "vram_used_mib" in fieldnames
+        )
+        if is_windows_schema:
+            return _parse_windows_telemetry_window(list(reader), start_epoch, end_epoch)
+
         for row in reader:
             try:
                 ep = int(row["epoch"])
@@ -391,16 +537,23 @@ def generate_night_report_text(session_name: str = "night1") -> str:
     lines.append("")
 
     # 1. Cửa sổ phiên chạy (ưu tiên đọc từ CSV telemetry của session; fallback từ log mới nhất)
-    csv_file = f"logs/soak_telemetry_{session_name}.csv"
+    candidate_csvs = [
+        f"logs/soak_telemetry_{session_name}.csv",
+        f"logs/{session_name}_telemetry.csv",
+        f"logs/telemetry_{session_name}.csv",
+        f"out/benchmarks/{session_name}_telemetry.csv",
+    ]
+    csv_file = next((p for p in candidate_csvs if os.path.exists(p)), candidate_csvs[0])
     start_epoch: Optional[int] = None
     end_epoch: Optional[int] = None
     if os.path.exists(csv_file):
         try:
             with open(csv_file, "r", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
-                if rows:
-                    start_epoch = int(rows[0]["epoch"])
-                    end_epoch = int(rows[-1]["epoch"])
+                epochs = [ep for ep in (_row_epoch_seconds(r) for r in rows) if ep is not None]
+                if epochs:
+                    start_epoch = epochs[0]
+                    end_epoch = epochs[-1]
         except Exception:
             pass
 
@@ -434,13 +587,35 @@ def generate_night_report_text(session_name: str = "night1") -> str:
     telem = parse_telemetry_window(csv_file, start_epoch, end_epoch)
     lines.append("## 2. Viễn Trắc Hệ Thống (Phần Cứng & Ổ Cứng)")
     if telem and not telem.get("error"):
-        lines.append(f"* **Dung lượng chuyển SSD (đọc+ghi qua iostat disk0):** **{telem['delta_ssd_mb']:,.2f} MB** (**{telem['delta_ssd_gib']:.2f} GiB**)")
-        if telem.get("delta_write_gib") is not None and telem.get("delta_read_gib") is not None:
-            lines.append(f"* **Dung lượng ghi SSD thực tế (ioreg):** **{telem['delta_write_gib']:.2f} GiB**")
-            lines.append(f"* **Dung lượng đọc SSD thực tế (ioreg):** **{telem['delta_read_gib']:.2f} GiB**")
-        lines.append(f"* **Tăng trưởng Pageouts:** **+{telem['delta_pageouts']:,}** trang")
-        lines.append(f"* **Bộ nhớ Swap:** Ban đầu **{telem['start_swap_mb']:.2f} MB** ➔ Kết thúc **{telem['end_swap_mb']:.2f} MB** (Tăng: **+{telem['delta_swap_mb']:.2f} MB**, Đỉnh: **{telem['peak_swap_mb']:.2f} MB**)")
-        lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))}")
+        if telem.get("schema") == "windows_telemetry_v1":
+            pstates_str = ", ".join(telem.get("pstates", ["N/A"]))
+            lines.append(
+                f"* **GPU Utilization (TB):** **{telem['avg_gpu_util_pct']:.1f}%** "
+                f"(P-State: {pstates_str} | Mẫu: {telem['samples_count']})"
+            )
+            lines.append(f"* **Đỉnh VRAM (RTX 3060):** **{telem['peak_vram_mib']:,.0f} MiB**")
+            lines.append(
+                f"* **Công suất & Nhiệt độ GPU:** TB **{telem['avg_power_w']:.1f} W** "
+                f"(Đỉnh: **{telem['peak_power_w']:.1f} W**) | Đỉnh nhiệt: **{telem['peak_temp_c']:.1f}°C** "
+                f"({', '.join(telem.get('thermal_states', ['Nominal']))})"
+            )
+            lines.append(
+                f"* **CPU & RAM Hệ thống:** CPU TB **{telem['avg_cpu_pct']:.1f}%** | "
+                f"Đỉnh RAM: **{telem['peak_ram_used_gb']:.2f} GB**"
+            )
+            lines.append(
+                f"* **Băng thông NVMe SSD (tích phân):** Đọc **{telem['delta_read_gib']:.2f} GiB** + "
+                f"Ghi **{telem['delta_write_gib']:.2f} GiB** = Tổng **{telem['delta_ssd_mb']:,.2f} MB** "
+                f"(**{telem['delta_ssd_gib']:.2f} GiB**)"
+            )
+        else:
+            lines.append(f"* **Dung lượng chuyển SSD (đọc+ghi qua iostat disk0):** **{telem['delta_ssd_mb']:,.2f} MB** (**{telem['delta_ssd_gib']:.2f} GiB**)")
+            if telem.get("delta_write_gib") is not None and telem.get("delta_read_gib") is not None:
+                lines.append(f"* **Dung lượng ghi SSD thực tế (ioreg):** **{telem['delta_write_gib']:.2f} GiB**")
+                lines.append(f"* **Dung lượng đọc SSD thực tế (ioreg):** **{telem['delta_read_gib']:.2f} GiB**")
+            lines.append(f"* **Tăng trưởng Pageouts:** **+{telem['delta_pageouts']:,}** trang")
+            lines.append(f"* **Bộ nhớ Swap:** Ban đầu **{telem['start_swap_mb']:.2f} MB** ➔ Kết thúc **{telem['end_swap_mb']:.2f} MB** (Tăng: **+{telem['delta_swap_mb']:.2f} MB**, Đỉnh: **{telem['peak_swap_mb']:.2f} MB**)")
+            lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))}")
     else:
         lines.append(f"* Không nạp được telemetry từ {csv_file}")
     lines.append("")
@@ -477,9 +652,21 @@ def generate_night_report_text(session_name: str = "night1") -> str:
 
     # 4. Thống kê phụ đề & API Gemini
     lines.append("## 4. Thống Kê Phụ Đề & Hạn Mức Gemini API")
-    start_utc_str = datetime.fromtimestamp(start_dt.timestamp(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    end_utc_str = datetime.fromtimestamp(end_dt.timestamp(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    api_stats = query_subtrans_api_stats(start_utc=start_utc_str, end_utc=end_utc_str) if (start_epoch is not None or episodes_info) else query_subtrans_api_stats()
+
+    def _utc_sql_bound(dt_val: datetime, ep_val: Optional[int]) -> Optional[str]:
+        try:
+            ts_val = float(ep_val) if ep_val is not None else dt_val.timestamp()
+            return datetime.fromtimestamp(ts_val, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except OSError:
+            return None
+
+    start_utc_str = _utc_sql_bound(start_dt, start_epoch)
+    end_utc_str = _utc_sql_bound(end_dt, end_epoch)
+    api_stats = (
+        query_subtrans_api_stats(start_utc=start_utc_str, end_utc=end_utc_str)
+        if ((start_epoch is not None or episodes_info) and start_utc_str and end_utc_str)
+        else query_subtrans_api_stats()
+    )
     if api_stats:
         lines.append("### (a) Phân bổ câu thoại đã dịch theo Model:")
         for m, count in sorted(api_stats.get("cues_by_model", {}).items()):

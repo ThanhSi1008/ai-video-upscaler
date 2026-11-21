@@ -263,45 +263,60 @@ class TranslationCache:
         return entry[0] if entry else None
 
     def get_cue_entry(self, cache_key: str) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Truy xuất cả bản dịch VI và metadata suy luận (speaker/addressee/mode/uncertain) từ SQLite cache."""
+        """Retrieve cached VI text along with CoT and model provenance metadata."""
         with self._connect() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT vi, metadata_json FROM translations WHERE cache_key = ?", (cache_key,))
+            cursor.execute(
+                "SELECT vi, metadata_json, model, backend FROM translations WHERE cache_key = ?",
+                (cache_key,),
+            )
             row = cursor.fetchone()
             if row and row[0] and not self._is_polluted_vi(row[0]):
                 meta: Dict[str, Any] = {}
                 if row[1]:
                     try:
-                        meta = json.loads(row[1]) or {}
+                        parsed = json.loads(row[1])
+                        if isinstance(parsed, dict):
+                            meta = parsed
                     except Exception:
                         meta = {}
+                if row[2]:
+                    meta.setdefault("model", str(row[2]))
+                if row[3]:
+                    meta.setdefault("backend", str(row[3]))
                 return row[0].strip(), meta
         return None
 
     def get_cues_batch(self, cache_keys: List[str]) -> Dict[str, Tuple[str, Dict[str, Any]]]:
-        """Truy vấn hàng loạt nhiều cache_key trong 1 kết nối SQLite duy nhất (triệt tiêu hàng trăm lần mở DB)."""
+        """Batch-fetch cached VI text and metadata across many keys in one SQLite connection."""
         if not cache_keys:
             return {}
         unique_keys = list(dict.fromkeys(cache_keys))
         result: Dict[str, Tuple[str, Dict[str, Any]]] = {}
         with self._connect() as conn:
             cursor = conn.cursor()
-            # SQLite hỗ trợ an toàn tối đa 900 biến tham số mỗi câu truy vấn
+            # Chunk at 500 keys to stay well below SQLite's bind-parameter limit
             for i in range(0, len(unique_keys), 500):
                 chunk = unique_keys[i : i + 500]
                 placeholders = ",".join("?" for _ in chunk)
                 cursor.execute(
-                    f"SELECT cache_key, vi, metadata_json FROM translations WHERE cache_key IN ({placeholders})",
+                    f"SELECT cache_key, vi, metadata_json, model, backend FROM translations WHERE cache_key IN ({placeholders})",
                     chunk,
                 )
-                for ckey, vi_raw, meta_raw in cursor.fetchall():
+                for ckey, vi_raw, meta_raw, model_col, backend_col in cursor.fetchall():
                     if vi_raw and not self._is_polluted_vi(vi_raw):
                         meta: Dict[str, Any] = {}
                         if meta_raw:
                             try:
-                                meta = json.loads(meta_raw) or {}
+                                parsed = json.loads(meta_raw)
+                                if isinstance(parsed, dict):
+                                    meta = parsed
                             except Exception:
                                 meta = {}
+                        if model_col:
+                            meta.setdefault("model", str(model_col))
+                        if backend_col:
+                            meta.setdefault("backend", str(backend_col))
                         result[ckey] = (vi_raw.strip(), meta)
         return result
 

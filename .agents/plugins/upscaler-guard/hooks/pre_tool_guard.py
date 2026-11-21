@@ -53,12 +53,13 @@ UPSCALE_CLEAN_RE = re.compile(
     r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b.*(?:--clean-temp|--cleanup|--force)\b",
     re.IGNORECASE,
 )
+_ENV_PREFIX_RE = r"(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|]*)\s+)*"
 BUILD_TRT_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[\w./\\:-]*[/\\])?(?:src[/\\.]build_trt_engine|build_trt_engine(?:\.py)?)\b",
+    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[\w./\\:-]*[/\\])?(?:src[/\\.]build_trt_engine|build_trt_engine(?:\.py)?)\b",
     re.IGNORECASE,
 )
 SUBTRANS_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py|benchmarks[/\\]subtrans[/\\](?!validate_pronouns_regex\.py)[\w.-]+\.py)\b",
+    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py|benchmarks[/\\]subtrans[/\\](?!validate_pronouns_regex\.py)[\w.-]+\.py)\b",
     re.IGNORECASE,
 )
 LOCAL_SUBTRANS_SUBCMD_RE = re.compile(
@@ -66,11 +67,11 @@ LOCAL_SUBTRANS_SUBCMD_RE = re.compile(
     re.IGNORECASE,
 )
 UPSCALE_SUBS_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b.*(?:--subs-only|--subs-upgrade)\b",
+    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b.*(?:--subs-only|--subs-upgrade)\b",
     re.IGNORECASE,
 )
 UPSCALE_GPU_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?(?:[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)|scripts[/\\](?:benchmark_pipeline|silicon_roofline_probe|upscale_x4_single)\.py)\b",
+    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+)?(?:[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)|scripts[/\\](?:benchmark_pipeline|silicon_roofline_probe|upscale_x4_single)\.py)\b",
     re.IGNORECASE,
 )
 BARE_PYTEST_RE = re.compile(
@@ -78,6 +79,18 @@ BARE_PYTEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+SAFE_BUILD_TRT_FLAGS_RE = re.compile(
+    r"(?:^|\s)(?:--help|-h|--dry-run)(?:\s|$)",
+    re.IGNORECASE,
+)
+NON_GPU_FLAGS_RE = re.compile(
+    r"(?:^|\s)(?:--help|-h|--list-models|--dry-run|--subs-only)(?:\s|$)",
+    re.IGNORECASE,
+)
+RUN_GPU_TESTS_RE = re.compile(
+    r"(?:^|[\s;$])(?:env:)?RUN_GPU_TESTS\s*=\s*['\"]?1['\"]?(?:\s|$)",
+    re.IGNORECASE,
+)
 SAFE_SUBTRANS_FLAGS_RE = re.compile(
     r"(?:^|\s)(?:--help|-h|--dry-run|--version|--mock|--test)(?:\s|$)",
     re.IGNORECASE,
@@ -196,6 +209,59 @@ def _split_shell_segments(cmd: str) -> list[str]:
     if tail:
         segments.append(tail)
     return segments
+
+
+def _split_command_chains(cmd: str) -> list[str]:
+    """Split a command string on unquoted ;, &&, ||, or newlines while keeping single | pipes intact."""
+    chains: list[str] = []
+    cur: list[str] = []
+    in_quote: str | None = None
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if in_quote is not None:
+            cur.append(ch)
+            if ch == "\\" and in_quote == '"' and i + 1 < n:
+                cur.append(cmd[i + 1])
+                i += 2
+                continue
+            if ch == in_quote:
+                in_quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch in (";", "\n"):
+            seg = "".join(cur).strip()
+            if seg:
+                chains.append(seg)
+            cur = []
+            i += 1
+            continue
+        if ch == "|" and i + 1 < n and cmd[i + 1] == "|":
+            seg = "".join(cur).strip()
+            if seg:
+                chains.append(seg)
+            cur = []
+            i += 2
+            continue
+        if ch == "&" and i + 1 < n and cmd[i + 1] == "&":
+            seg = "".join(cur).strip()
+            if seg:
+                chains.append(seg)
+            cur = []
+            i += 2
+            continue
+        cur.append(ch)
+        i += 1
+    tail = "".join(cur).strip()
+    if tail:
+        chains.append(tail)
+    return chains
 
 
 def _shlex_tokens(seg: str) -> list[str]:
@@ -494,18 +560,23 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
     # 2. Shell command checks
     if tool_name == "run_command":
         cmd = str(args.get("CommandLine") or "")
+        shell_segs = _split_shell_segments(cmd)
+        chain_segs = _split_command_chains(cmd)
 
         # 2a. Block shell reads targeting scratch/review_bundles/ (allow export_review_bundle.py execution)
-        if BUNDLE_SHELL_READ_RE.search(cmd) and "export_review_bundle.py" not in cmd:
+        if any(BUNDLE_SHELL_READ_RE.search(seg) and "export_review_bundle.py" not in seg for seg in shell_segs):
             return {
                 "decision": "deny",
                 "reason": "Blocked (Context Firewall): Do not dump scratch/review_bundles/ via shell; use scripts/agent_context.py --pack / --slice.",
             }
 
         # 2b. Block unbounded shell dumps on existing repo files > 350 lines
-        if not SHELL_BOUND_RE.search(cmd):
-            for seg in re.split(r"[;&|]+", cmd):
-                m_dump = SHELL_DUMP_CMD_RE.match(seg.strip())
+        for chain_seg in chain_segs:
+            pipe_parts = _split_shell_segments(chain_seg)
+            for idx, part in enumerate(pipe_parts):
+                if any(SHELL_BOUND_RE.search(p) for p in pipe_parts[idx:]):
+                    continue
+                m_dump = SHELL_DUMP_CMD_RE.match(part.strip())
                 if not m_dump:
                     continue
                 tail_str = m_dump.group(1)
@@ -549,22 +620,25 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "reason": "Blocked (GEMINI.md §2): Environment mutations (pip/uv/conda install) are prohibited to protect locked .venv ABI (local untracked snapshot requirements.lock).",
             }
 
-        if TEMP_DELETE_RE.search(cmd) or UPSCALE_CLEAN_RE.search(cmd):
+        if any(TEMP_DELETE_RE.search(seg) or UPSCALE_CLEAN_RE.search(seg) for seg in shell_segs):
             return {
                 "decision": "force_ask",
                 "reason": "Checkpoint Guard (GEMINI.md §4): Deleting or overwriting .temp_* checkpoints requires confirmation.",
             }
 
-        if BUILD_TRT_EXEC_RE.search(cmd) and not any(flag in cmd for flag in ("--help", "-h", "--dry-run")):
+        if any(BUILD_TRT_EXEC_RE.search(seg) and not SAFE_BUILD_TRT_FLAGS_RE.search(seg) for seg in shell_segs):
             return {
                 "decision": "deny",
                 "reason": "Blocked (video-gpu.md): Running build_trt_engine.py requires explicit user approval.",
             }
 
         # Live Gemini API quota guard (allow purely local subcommands eval / compare / rag stats)
-        is_subtrans_cmd = bool(SUBTRANS_EXEC_RE.search(cmd) or UPSCALE_SUBS_EXEC_RE.search(cmd))
-        is_local_subtrans_only = bool(LOCAL_SUBTRANS_SUBCMD_RE.search(cmd)) and not UPSCALE_SUBS_EXEC_RE.search(cmd)
-        if is_subtrans_cmd and not is_local_subtrans_only and not SAFE_SUBTRANS_FLAGS_RE.search(cmd):
+        if any(
+            (SUBTRANS_EXEC_RE.search(seg) or UPSCALE_SUBS_EXEC_RE.search(seg))
+            and not (bool(LOCAL_SUBTRANS_SUBCMD_RE.search(seg)) and not UPSCALE_SUBS_EXEC_RE.search(seg))
+            and not SAFE_SUBTRANS_FLAGS_RE.search(seg)
+            for seg in shell_segs
+        ):
             return {
                 "decision": "force_ask",
                 "reason": "Gemini Quota Guard (GEMINI.md §4 & subtrans.md): Command may consume live Gemini API RPD; confirm intent.",
@@ -572,16 +646,18 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
 
         # GPU exclusivity lock guard
         if (root / ".gpu_active.lock").exists():
-            is_gpu_cmd = bool(UPSCALE_GPU_EXEC_RE.search(cmd)) or ("RUN_GPU_TESTS=1" in cmd)
-            non_gpu_flags = ("--help", "-h", "--list-models", "--dry-run", "--subs-only")
-            if is_gpu_cmd and not any(flag in cmd for flag in non_gpu_flags):
+            if any(
+                (bool(UPSCALE_GPU_EXEC_RE.search(seg)) or bool(RUN_GPU_TESTS_RE.search(seg)))
+                and not NON_GPU_FLAGS_RE.search(seg)
+                for seg in shell_segs
+            ):
                 return {
                     "decision": "force_ask",
                     "reason": "GPU Exclusivity Guard (video-gpu.md): .gpu_active.lock exists; confirm no other GPU job is running.",
                 }
 
         # Unflagged full-episode upscale / benchmark guard
-        if UPSCALE_GPU_EXEC_RE.search(cmd) and not SAFE_UPSCALE_FLAGS_RE.search(cmd):
+        if any(UPSCALE_GPU_EXEC_RE.search(seg) and not SAFE_UPSCALE_FLAGS_RE.search(seg) for seg in shell_segs):
             return {
                 "decision": "deny",
                 "reason": "Blocked (video-gpu.md): Full-episode upscale/benchmark runs require --preview, --dry-run, or scripts/smoke_test_pipeline.py.",
