@@ -89,6 +89,7 @@ SYNC_BUNDLES: tuple[tuple[str, str, list[str]], ...] = (
     ("focus_subtrans.txt", "focus:subtrans", ["subtrans"]),
     ("focus_web.txt", "focus:web", ["web"]),
     ("focus_agents.txt", "focus:agents,scripts", ["agents", "scripts"]),
+    ("focus_full.txt", "focus:full", ["full"]),
 )
 
 
@@ -303,13 +304,20 @@ def _format_py_skeleton(rel_posix: str, text: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _format_full_file(rel_posix: str, text: str) -> str:
+def _format_full_file(rel_posix: str, text: str, *, line_numbers: bool = True) -> str:
     src_lines = text.splitlines()
+    header = f"### [FULL] {rel_posix} ({len(src_lines)} lines)\n"
+    if not line_numbers:
+        return header + ("\n".join(src_lines) + "\n" if src_lines else "")
     numbered = [f"L{idx:04d}: {ln}" for idx, ln in enumerate(src_lines, 1)]
-    return f"### [FULL] {rel_posix} ({len(src_lines)} lines)\n" + "\n".join(numbered) + "\n"
+    return header + "\n".join(numbered) + "\n"
 
 
-def _collect_repo_snapshot(root: Path, include_tests: bool) -> tuple[dict[str, str], dict[str, str], dict[str, set[str]], set[str]]:
+def _collect_repo_snapshot(
+    root: Path,
+    include_tests: bool,
+    build_skeletons: bool = True,
+) -> tuple[dict[str, str], dict[str, str], dict[str, set[str]], set[str]]:
     """Read allowed repo files once and prebuild AST skeletons + import edges."""
     tracked_raw = _git_output(root, "ls-files", "-z")
     tracked_set: set[str] = set()
@@ -347,7 +355,7 @@ def _collect_repo_snapshot(root: Path, include_tests: bool) -> tuple[dict[str, s
         if "\x00" in content:
             continue
         texts[rel] = content
-        if rel.endswith(".py"):
+        if build_skeletons and rel.endswith(".py"):
             skeletons[rel] = _format_py_skeleton(rel, content)
             parts = list(Path(rel).with_suffix("").parts)
             mod_name = ".".join(parts[:-1] if parts and parts[-1] == "__init__" else parts)
@@ -360,43 +368,44 @@ def _collect_repo_snapshot(root: Path, include_tests: bool) -> tuple[dict[str, s
 
     # Build bidirectional 1-hop import neighbors for latest_diff skeletons
     neighbors: dict[str, set[str]] = {}
-    for rel, tree in parsed_py.items():
-        pkg_parts = list(Path(rel).with_suffix("").parts)[:-1]
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    cand = alias.name
-                    while cand:
-                        if cand in mod_to_rel:
-                            imported.add(mod_to_rel[cand])
-                            break
-                        if "." not in cand:
-                            break
-                        cand = cand.rsplit(".", 1)[0]
-            elif isinstance(node, ast.ImportFrom):
-                base = node.module or ""
-                if node.level > 0:
-                    trim = max(0, len(pkg_parts) - (node.level - 1))
-                    pref = pkg_parts[:trim] + (base.split(".") if base else [])
-                    base = ".".join(pref)
-                cands = [base] if base else []
-                for alias in node.names:
-                    if alias.name != "*":
-                        cands.append(f"{base}.{alias.name}" if base else alias.name)
-                for cand in cands:
-                    cur = cand
-                    while cur:
-                        if cur in mod_to_rel:
-                            imported.add(mod_to_rel[cur])
-                            break
-                        if "." not in cur:
-                            break
-                        cur = cur.rsplit(".", 1)[0]
-        for target in imported:
-            if target != rel:
-                neighbors.setdefault(rel, set()).add(target)
-                neighbors.setdefault(target, set()).add(rel)
+    if build_skeletons:
+        for rel, tree in parsed_py.items():
+            pkg_parts = list(Path(rel).with_suffix("").parts)[:-1]
+            imported: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        cand = alias.name
+                        while cand:
+                            if cand in mod_to_rel:
+                                imported.add(mod_to_rel[cand])
+                                break
+                            if "." not in cand:
+                                break
+                            cand = cand.rsplit(".", 1)[0]
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level > 0:
+                        trim = max(0, len(pkg_parts) - (node.level - 1))
+                        pref = pkg_parts[:trim] + (base.split(".") if base else [])
+                        base = ".".join(pref)
+                    cands = [base] if base else []
+                    for alias in node.names:
+                        if alias.name != "*":
+                            cands.append(f"{base}.{alias.name}" if base else alias.name)
+                    for cand in cands:
+                        cur = cand
+                        while cur:
+                            if cur in mod_to_rel:
+                                imported.add(mod_to_rel[cur])
+                                break
+                            if "." not in cur:
+                                break
+                            cur = cur.rsplit(".", 1)[0]
+            for target in imported:
+                if target != rel:
+                    neighbors.setdefault(rel, set()).add(target)
+                    neighbors.setdefault(target, set()).add(rel)
 
     return texts, skeletons, neighbors, tracked_set
 
@@ -456,6 +465,46 @@ def _render_bundle(
 ) -> tuple[str, int, int]:
     """Assemble bundle in strictly deterministic static-first, volatile-last order."""
     all_paths = sorted(texts.keys())
+    if mode.startswith("focus:"):
+        raw_tokens = [t.strip().lower() for t in mode.split(":", 1)[1].split(",") if t.strip()]
+        tok_list = focus_tokens if focus_tokens is not None else raw_tokens
+        if ("full" in raw_tokens and len(raw_tokens) > 1) or ("full" in tok_list and len(tok_list) > 1):
+            raise ValueError("'full' cannot be combined with other --focus tokens")
+
+    if mode == "focus:full":
+        parts: list[str] = [
+            "# AI-VIDEO-UPSCALER REVIEW BUNDLE\n",
+            "## 1. REPOSITORY TREE\n" + "\n".join(all_paths) + "\n",
+            "## 2. FULL REPOSITORY FILES\n",
+        ]
+        for p in all_paths:
+            parts.append(_format_full_file(p, texts[p], line_numbers=False))
+
+        parts.append("## 3. GIT LOG & DIFF\n")
+        if log_stat:
+            parts.append("### git log -1 --stat\n" + log_stat + "\n")
+        else:
+            parts.append("(git metadata unavailable)\n")
+
+        full_count = len(all_paths)
+        skel_count = 0
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        parts.append(
+            "## 4. BUNDLE METADATA\n"
+            f"- Branch / HEAD: {branch}@{head_short}\n"
+            f"- Commit Subject: {commit_subject}\n"
+            f"- Timestamp: {ts}\n"
+            f"- Mode: {mode}\n"
+            f"- Full Files: {full_count} | AST Skeletons: {skel_count}\n"
+        )
+        body_so_far = "\n".join(parts)
+        est = len(body_so_far) + 42
+        for _ in range(2):
+            tail = f"- Characters: {est} | Est. Tokens: {est // 4}\n"
+            est = len(body_so_far) + len(tail)
+        final_text = body_so_far + f"- Characters: {est} | Est. Tokens: {est // 4}\n"
+        return final_text, full_count, skel_count
+
     anchors = [p for p in all_paths if _is_static_anchor(p)]
     anchor_set = set(anchors)
 
@@ -562,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help="Repository root")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--sync-latest", action="store_true", help="Atomically refresh all 5 fixed review bundles")
+    group.add_argument("--sync-latest", action="store_true", help="Atomically refresh all 6 fixed review bundles")
     group.add_argument("--focus", type=str, help="Comma-separated focus preset(s) or path prefixes")
     group.add_argument("--diff", nargs="?", const="HEAD", default=None, help="Export diff bundle (optional git ref)")
     group.add_argument("--full", action="store_true", help="Export full repository text bundle")
@@ -575,13 +624,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: Repository root not found: {root}", file=sys.stderr)
         return 1
 
-    texts, skeletons, neighbors, tracked_set = _collect_repo_snapshot(root, include_tests=args.include_tests)
-    branch = (_git_output(root, "branch", "--show-current") or "detached").strip()
-    head_short = (_git_output(root, "rev-parse", "--short", "HEAD") or "unknown").strip()
-    commit_subject = (_git_output(root, "log", "-1", "--pretty=%s") or "(no commits)").strip()
-    bundle_dir = root / BUNDLE_DIR_REL
-
     try:
+        focus_tokens_cli: list[str] | None = None
+        if args.focus:
+            focus_tokens_cli = [t.strip().lower() for t in args.focus.split(",") if t.strip()]
+            if "full" in focus_tokens_cli and len(focus_tokens_cli) > 1:
+                raise ValueError("'full' cannot be combined with other --focus tokens")
+
+        build_skeletons = focus_tokens_cli != ["full"]
+        texts, skeletons, neighbors, tracked_set = _collect_repo_snapshot(
+            root,
+            include_tests=args.include_tests,
+            build_skeletons=build_skeletons,
+        )
+        branch = (_git_output(root, "branch", "--show-current") or "detached").strip()
+        head_short = (_git_output(root, "rev-parse", "--short", "HEAD") or "unknown").strip()
+        commit_subject = (_git_output(root, "log", "-1", "--pretty=%s") or "(no commits)").strip()
+        bundle_dir = root / BUNDLE_DIR_REL
+
         if args.sync_latest:
             changed, log_stat, diff_text = _compute_diff_context(root, None)
             written: list[str] = []
@@ -602,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.focus:
-            tokens = [t.strip().lower() for t in args.focus.split(",") if t.strip()]
+            tokens = focus_tokens_cli or []
             joined = "_".join(re.sub(r"[^a-z0-9]+", "_", t).strip("_") for t in tokens) or "custom"
             out_path = args.output or (bundle_dir / f"focus_{joined}.txt")
             _, log_stat, _ = _compute_diff_context(root, None)

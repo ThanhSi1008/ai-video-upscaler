@@ -2,15 +2,15 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `e544e0a` (`chore(harness): unify AST context tooling, firewall guards, runtime stabilization & hygiene`)
+> **Commit Baseline:** `bac9e97` (`fix(agents): enable run_command in subagents with read-only rules and align STATE baseline`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
 ## 1. Current Baseline Summary
 
-- **Offline Verification Baseline (`2026-11-21`):** **100% PASS** (`828 passed, 14 skipped, 0 failed/errors` out of `842` collected tests, `269.79s`, `Source files: 294`; `ruff check .` = `0` errors; `smoke_test_pipeline.py` = `PASS` in `0.89s`; `subtrans.eval.runner` = `6/6` regression + `22/22` pronoun PASS in `0.52s`; `agent_context.py --check` = `PASS`; `git diff --check` = `0` errors) via `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-npz3v5l_`).
+- **Offline Verification Baseline (`2026-11-21`):** **100% PASS** (`834 passed, 11 skipped, 0 failed/errors` out of `845` tests, `510.79s`, `Source files: 294`; `ruff check .` = `0` errors; `agent_context.py --check` = `PASS`; `git diff --check` = `0` errors) via `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-bruy_qjr`).
 - **Unified Stabilization, Context Tooling & Harness Upgrade (`2026-11-21`):**
-  - **Tiered AST Context & Bundling (`scripts/`):** Upgraded `agent_context.py` with `_first_meaningful_doc_line`, `BaseModel`/`@dataclass` fields, depth-2 nested AST & JS/CSS discovery, batched `--symbols`/`--pack`, bounded `--slice`, 2-hop + 8 `CROSS_BOUNDARY_CONTRACTS` `--impact`, and independent `pre-commit` + `post-commit` hooks; added `scripts/export_review_bundle.py --sync-latest` writing 5 prefix-cache-ordered bundles atomically in `scratch/review_bundles/`; added `--target` & `--impacted` to `scripts/verify_offline.py`.
+  - **Tiered AST Context & Bundling (`scripts/`):** Upgraded `agent_context.py` with `_first_meaningful_doc_line`, `BaseModel`/`@dataclass` fields, depth-2 nested AST & JS/CSS discovery, batched `--symbols`/`--pack`, bounded `--slice`, 2-hop + 8 `CROSS_BOUNDARY_CONTRACTS` `--impact`, and independent `pre-commit` + `post-commit` hooks; added `scripts/export_review_bundle.py --sync-latest` writing 6 bundles (`latest_diff.txt`, 4 prefix-cache-ordered domain `focus_*.txt`, and deduplicated unnumbered `focus_full.txt` via `--focus full`) atomically in `scratch/review_bundles/`; added `--target` & `--impacted` to `scripts/verify_offline.py`.
   - **Guardrails & MCP (`upscaler-guard`, `upscaler-mcp`, `repo-scout`):** Allowed local `.env` reads (`write/edit` = `force_ask`, `git add/commit` = `deny`), enforced Context/Rewrite Firewall (`scratch/review_bundles/` read `deny`, `>250`L overwrite `deny`, bounded `<=280`L `view_file` & capped shell reads for `>350`L files), `.venv`-first Windows `cmd /c` hook dispatch, `.json`/`.yaml` fast lint, `out/.temp_*` + `STATE` freshness checks, workspace-relative `upscaler_mcp.py`, and `.agents/agents/repo-scout.md`.
   - **Code Quality & Cleanup:** Unified `is_valid_dedup_policy` in `web/fs_browser.py` and fixed 0-based mock `chunks` in `web/app.py`; added `DoubleBufferedPipeUpscaler.release()` and removed dead `_compiled_fn`; consolidated `src/config.py` queue re-exports + re-entrant GPU lock; hardened `src/logger.py` thermal `SW_HIDE`/2s timeout + `latest.log` mirroring; added PID-aware GPU lock fallback in `src/subtitles.py`; extracted `subtrans/prompts.py` verbatim; factored DP forward pass in `subtrans/dtw_auto_align.py`; purged legacy `# -*- coding` / banners across 64 runtime `.py` + 6 `.js` files and cleaned docstrings/comments to English.
   - **Boundary & Harness Tests:** Added `tests/test_architecture_boundaries.py` & `tests/test_export_review_bundle.py`; expanded `tests/test_{agent_context,agent_setup,verify_offline,web_gui,zero_disk_ring_buffers_and_cel}.py`.
@@ -30,7 +30,7 @@
 | **Spandrel Native 2x & Whisper** | `src/cuda_engine.py`, `src/models_resolver.py`, `src/subtitles.py` | PASS | Spandrel `0.4.2`, SHA-256 weight verification, PID-aware GPU lock + CPU int8 fallback `faster-whisper` `large-v3-turbo` |
 | **Dedup, GOP-RLE & Queue** | `src/dedup.py`, `src/scheduler.py`, `src/config.py`, `src/logger.py` | PASS | 1-pass `mpdecimate+DIS`, Cyclic Cel, `<1ms` `raw_actions_rle`, re-entrant GPU lock, `SW_HIDE` thermal query |
 | **Subtrans V2.5 Engine** | `subtrans/*.py`, `subtrans/prompts.py`, `glossaries/*.yaml` | PASS | Verbatim prompt module, 3-key rotation, >4K context cache, MeCab `fugashi`, Linter V2, Flash Cascade, RAG, shared DTW DP |
-| **Agent Tooling & Guards** | `scripts/{agent_context,export_review_bundle}.py`, `.agents/`, `tests/test_architecture_boundaries.py` | PASS | Compact `GEMINI.md` (27L), glob rules, 3 subagents (`inheritMcp: false`, `enableWriteTools: true` solely for `run_command`), Context/Rewrite Firewall hooks, atomic review bundles |
+| **Agent Tooling & Guards** | `scripts/{agent_context,export_review_bundle}.py`, `.agents/`, `tests/test_architecture_boundaries.py` | PASS | Compact `GEMINI.md` (27L), glob rules, 3 subagents (`inheritMcp: false`, `enableWriteTools: true` solely for `run_command`), Context/Rewrite Firewall hooks, 6 atomic review bundles (incl. unnumbered `focus_full.txt`) |
 
 ## 3. Operational Caveats
 - **Daytime Gemini Quota Guard:** Never invoke live Gemini API calls (including `subtrans.py check`/`models`) from `14:00` until overnight runs; use `--dry-run` or stubs.
