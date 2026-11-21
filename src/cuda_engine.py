@@ -17,10 +17,93 @@ import torch.nn.functional as F
 
 from src.config import DEFAULT_BATCH_SIZE, REALESRGAN_BIN
 
+def _pad_replicate_1px(t: torch.Tensor) -> torch.Tensor:
+    """Replicate-pad spatial H, W borders by 1 pixel via Slice+Concat (zero ONNX/TRT ForeignNode)."""
+    t_h = torch.cat((t[:, :, :1, :], t, t[:, :, -1:, :]), dim=2)
+    return torch.cat((t_h[:, :, :, :1], t_h, t_h[:, :, :, -1:]), dim=3)
+
+
+def build_collapsed_4x_to_2x_buffers(
+    b_param: float = 0.0,
+    c_param: float = 0.5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build exact Catmull-Rom (B=0, C=0.5) anti-aliased 4x->2x collapsed 3x3 conv weights (g=3)."""
+    def _cubic_keys(d: torch.Tensor) -> torch.Tensor:
+        xa = d.abs()
+        y1 = (
+            (12.0 - 9.0 * b_param - 6.0 * c_param) * xa ** 3
+            + (-18.0 + 12.0 * b_param + 6.0 * c_param) * xa ** 2
+            + (6.0 - 2.0 * b_param)
+        ) / 6.0
+        y2 = (
+            (-b_param - 6.0 * c_param) * xa ** 3
+            + (6.0 * b_param + 30.0 * c_param) * xa ** 2
+            + (-12.0 * b_param - 48.0 * c_param) * xa
+            + (8.0 * b_param + 24.0 * c_param)
+        ) / 6.0
+        return torch.where(xa < 1.0, y1, torch.where(xa < 2.0, y2, torch.zeros_like(xa)))
+
+    k1d = torch.zeros((2, 3, 4), dtype=torch.float64)
+    for q, center_4x in enumerate((0.5, 2.5)):
+        for dn in (-1, 0, 1):
+            for r in range(4):
+                pos_4x = torch.tensor(float(dn * 4 + r), dtype=torch.float64)
+                k1d[q, dn + 1, r] = _cubic_keys((pos_4x - center_4x) * 0.5)
+        k1d[q] /= k1d[q].sum()
+
+    feat_weight = torch.zeros((12, 16, 3, 3), dtype=torch.float64)
+    base_weight = torch.zeros((12, 1, 3, 3), dtype=torch.float64)
+    for ch in range(3):
+        for qy in range(2):
+            for qx in range(2):
+                out_ch = ch * 4 + qy * 2 + qx
+                for dy_idx in range(3):
+                    for dx_idx in range(3):
+                        outer = k1d[qy, dy_idx][:, None] * k1d[qx, dx_idx][None, :]
+                        feat_weight[out_ch, :, dy_idx, dx_idx] = outer.reshape(16)
+                        base_weight[out_ch, 0, dy_idx, dx_idx] = outer.sum()
+    return feat_weight.float(), base_weight.float()
+
+
+def collapsed_4x_to_2x_forward(
+    feat_48: torch.Tensor,
+    x_rgb: torch.Tensor,
+    aa_feat_weight: torch.Tensor,
+    aa_base_weight: torch.Tensor,
+) -> torch.Tensor:
+    """Collapse PixelShuffle(4) + Nearest(4x) + AA Bicubic(0.5x) into 1080p grouped convs + PixelShuffle(2)."""
+    fw = (
+        aa_feat_weight
+        if (aa_feat_weight.device == feat_48.device and aa_feat_weight.dtype == feat_48.dtype)
+        else aa_feat_weight.to(device=feat_48.device, dtype=feat_48.dtype)
+    )
+    bw = (
+        aa_base_weight
+        if (aa_base_weight.device == x_rgb.device and aa_base_weight.dtype == x_rgb.dtype)
+        else aa_base_weight.to(device=x_rgb.device, dtype=x_rgb.dtype)
+    )
+    if (not torch.onnx.is_in_onnx_export()) and feat_48.device.type == "cpu" and feat_48.shape[0] > 1:
+        B, _, H, W = feat_48.shape
+        out_buf = torch.empty((B, 3, H * 2, W * 2), dtype=feat_48.dtype, device=feat_48.device)
+        for i in range(B):
+            sf = F.conv2d(_pad_replicate_1px(feat_48[i : i + 1]), fw, groups=3)
+            sb = F.conv2d(_pad_replicate_1px(x_rgb[i : i + 1]), bw, groups=3)
+            if sb.dtype != sf.dtype:
+                sb = sb.to(dtype=sf.dtype)
+            out_buf[i : i + 1].copy_(F.pixel_shuffle(sf + sb, 2))
+        return out_buf
+    sub_feat = F.conv2d(_pad_replicate_1px(feat_48), fw, groups=3)
+    sub_base = F.conv2d(_pad_replicate_1px(x_rgb), bw, groups=3)
+    if sub_base.dtype != sub_feat.dtype:
+        sub_base = sub_base.to(dtype=sub_feat.dtype)
+    return F.pixel_shuffle(sub_feat + sub_base, 2)
+
+
 class RealESRAnimeVideoV3(nn.Module):
-    """RealESR-AnimeVideoV3 (64f16c x4 + Nearest 4x + Bicubic 0.5x -> 2x 4K)."""
+    """RealESR-AnimeVideoV3 (64f16c x4 collapsed analytically with Catmull-Rom AA -> 2x 4K)."""
     def __init__(self):
         super().__init__()
+        self.upscale = 4
         self.body = nn.ModuleList()
         self.body.append(nn.Conv2d(3, 64, 3, 1, 1))
         self.body.append(nn.PReLU(64))
@@ -29,25 +112,17 @@ class RealESRAnimeVideoV3(nn.Module):
             self.body.append(nn.PReLU(64))
         self.body.append(nn.Conv2d(64, 48, 3, 1, 1))
         self.upsampler = nn.PixelShuffle(4)
+        fw, bw = build_collapsed_4x_to_2x_buffers(b_param=0.0, c_param=0.5)
+        self.register_buffer("aa_feat_weight", fw, persistent=False)
+        self.register_buffer("aa_base_weight", bw, persistent=False)
 
     def _tail_4x_to_2x(self, feat_slice: torch.Tensor, x_slice: torch.Tensor) -> torch.Tensor:
-        out = self.upsampler(feat_slice)
-        base = F.interpolate(x_slice, scale_factor=4.0, mode='nearest')
-        out_4x = out + base
-        return F.interpolate(out_4x, scale_factor=0.5, mode='bicubic', align_corners=False)
+        return collapsed_4x_to_2x_forward(feat_slice, x_slice, self.aa_feat_weight, self.aa_base_weight)
 
     def forward(self, x):
         feat = x
         for layer in self.body:
             feat = layer(feat)
-        # Micro-slice 8K tail across 2 frames on Full HD+ batches to save ~4.5 GB VRAM
-        if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
-            B, _, H, W = x.shape
-            out_buf = torch.empty((B, 3, H * 2, W * 2), dtype=x.dtype, device=x.device)
-            for s in range(0, B, 2):
-                e = min(s + 2, B)
-                out_buf[s:e].copy_(self._tail_4x_to_2x(feat[s:e], x[s:e]))
-            return out_buf
         return self._tail_4x_to_2x(feat, x)
 
 
@@ -77,7 +152,7 @@ class AnimeJaNaiCompact2x(nn.Module):
 
 
 class SpandrelModelWrapper(nn.Module):
-    """Wrap Spandrel-loaded SR models with 4x->2x bicubic downsampling and 8K micro-slicing."""
+    """Wrap Spandrel-loaded SR models with collapsed SRVGG 4x->2x AA or generic 2-frame-sliced AA bicubic."""
     def __init__(self, inner_model: nn.Module, scale: int = 2, target_scale: float = 2.0):
         super().__init__()
         self.inner_model = inner_model
@@ -92,21 +167,53 @@ class SpandrelModelWrapper(nn.Module):
         else:
             self.upscale = self.scale
 
+        self._can_collapse_srvgg_4x = (
+            self.scale == 4
+            and abs(self.target_scale - 2.0) <= 1e-4
+            and hasattr(inner_model, "body")
+            and hasattr(inner_model, "upsampler")
+            and isinstance(inner_model.upsampler, nn.PixelShuffle)
+            and int(inner_model.upsampler.upscale_factor) == 4
+        )
+        if self._can_collapse_srvgg_4x:
+            fw, bw = build_collapsed_4x_to_2x_buffers(b_param=0.0, c_param=0.5)
+            ref_p = next(inner_model.parameters(), None)
+            if ref_p is not None:
+                fw = fw.to(device=ref_p.device, dtype=ref_p.dtype)
+                bw = bw.to(device=ref_p.device, dtype=ref_p.dtype)
+            self.register_buffer("aa_feat_weight", fw, persistent=False)
+            self.register_buffer("aa_base_weight", bw, persistent=False)
+
     def _tail_4x_to_2x(self, out_4x: torch.Tensor) -> torch.Tensor:
         interp_in = out_4x.float() if (out_4x.device.type == "cpu" and out_4x.dtype == torch.float16) else out_4x
-        out_2x = F.interpolate(interp_in, scale_factor=0.5, mode="bicubic", align_corners=False)
+        scale_ratio = (self.target_scale / float(self.scale)) if self.scale > self.target_scale else 0.5
+        use_aa = scale_ratio < 1.0
+        out_2x = F.interpolate(
+            interp_in,
+            scale_factor=scale_ratio,
+            mode="bicubic",
+            align_corners=False,
+            antialias=use_aa,
+        )
         return out_2x.to(out_4x.dtype) if out_2x.dtype != out_4x.dtype else out_2x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.scale == 2:
             return self.inner_model(x)
 
+        if self._can_collapse_srvgg_4x:
+            feat = x
+            for layer in self.body:
+                feat = layer(feat)
+            return collapsed_4x_to_2x_forward(feat, x, self.aa_feat_weight, self.aa_base_weight)
+
         if abs(self.scale - self.target_scale) > 1e-4:
-            # Micro-slice 8K intermediate tensors across 2 frames on Full HD+ batches
+            # Micro-slice 8K intermediate tensors across 2 frames on Full HD+ batches for generic 4x models
             if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
                 B, _, H, W = x.shape
-                out_h = int(round(H * self.target_scale))
-                out_w = int(round(W * self.target_scale))
+                eff_mult = self.target_scale if self.scale > self.target_scale else (self.scale * 0.5)
+                out_h = int(round(H * eff_mult))
+                out_w = int(round(W * eff_mult))
                 out_buf = torch.empty((B, 3, out_h, out_w), dtype=x.dtype, device=x.device)
                 for s in range(0, B, 2):
                     e = min(s + 2, B)
@@ -657,6 +764,19 @@ def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
                     except Exception:
                         pass
         runners.clear()
+    pareto_bundle = getattr(worker, "_auto_pareto_bundle", None)
+    if isinstance(pareto_bundle, dict):
+        fast_w = pareto_bundle.get("fast_worker")
+        if fast_w is not None and fast_w is not worker:
+            _cleanup_gpu_worker(fast_w)
+        up_sh = pareto_bundle.get("shared_upscaler")
+        if up_sh is not None and hasattr(up_sh, "release"):
+            try:
+                up_sh.release()
+            except Exception:
+                pass
+        pareto_bundle.clear()
+        worker._auto_pareto_bundle = None
     for attr in ("_zero_disk_upscaler", "_zero_disk_wrapper"):
         obj = getattr(worker, attr, None)
         if obj is not None:

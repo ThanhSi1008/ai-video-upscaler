@@ -90,8 +90,52 @@ def list_models_formatted() -> str:
         arch_desc = f"{m['arch']['num_feat']}f{m['arch']['num_conv']}c (x{m['arch']['upscale']})"
         lines.append(f"{m_id:<40} | {m['name']:<34} | {arch_desc:<12} | {is_def}")
     lines.append("=" * 96)
+    lines.append("Chế độ thích ứng: --model auto-pareto (kết hợp cùng họ AnimeJaNai HD V3 Compact 16c + UltraCompact 8c theo cảnh).")
     lines.append("Ghi chú: Để ánh xạ tự động cho từng bộ phim, cấu hình mẫu trong shows.yaml.")
     return "\n".join(lines)
+
+
+AUTO_PARETO_MODEL_ID = "auto-pareto"
+
+
+def _build_auto_pareto_model_info(
+    registry: Dict[str, Any],
+    resolution_source: str,
+) -> Dict[str, Any]:
+    """Build dual-engine same-family routing descriptor for --model auto-pareto."""
+    detail_id = "animejanai-hd-v3-compact"
+    fast_id = "animejanai-hd-v3-ultracompact"
+    if detail_id not in registry or fast_id not in registry:
+        fallback_id = get_default_model_id(registry)
+        info = dict(registry[fallback_id])
+        if info.get("weights_path"):
+            info["weights_path"] = _resolve_repo_path(info["weights_path"])
+        info["resolution_source"] = resolution_source
+        return info
+
+    detail_info = dict(registry[detail_id])
+    fast_info = dict(registry[fast_id])
+    if detail_info.get("weights_path"):
+        detail_info["weights_path"] = _resolve_repo_path(detail_info["weights_path"])
+    if fast_info.get("weights_path"):
+        fast_info["weights_path"] = _resolve_repo_path(fast_info["weights_path"])
+    sha_pair = f"{str(detail_info.get('sha256', ''))[:32]}:{str(fast_info.get('sha256', ''))[:32]}"
+    return {
+        "id": AUTO_PARETO_MODEL_ID,
+        "name": "AnimeJaNai HD V3 Auto-Pareto (Compact 16c + UltraCompact 8c)",
+        "is_auto_pareto": True,
+        "detail_model_id": detail_id,
+        "fast_model_id": fast_id,
+        "detail_model_info": detail_info,
+        "fast_model_info": fast_info,
+        "weights_path": detail_info.get("weights_path", ""),
+        "sha256": sha_pair,
+        "arch": {"type": "SRVGGNetCompact", "num_feat": 64, "num_conv": 16, "upscale": 2},
+        "downsample": "none",
+        "license": detail_info.get("license", ""),
+        "default": False,
+        "resolution_source": resolution_source,
+    }
 
 
 def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None) -> Dict[str, Any]:
@@ -106,12 +150,17 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
     chosen_id = None
     resolution_source = None
 
-    # 1. Ưu tiên cao nhất: CLI arg (hỗ trợ khớp không phân biệt hoa thường cho ID như 2x_AnimeJaNai_V3)
+    # 1. Ưu tiên cao nhất: CLI arg (hỗ trợ khớp không phân biệt hoa thường cho ID như 2x_AnimeJaNai_V3 và auto-pareto)
     # Chấp nhận cả alias cũ 'realesr-animevideov3' -> 'animevideov3'
     if cli_model_arg:
         arg_clean = cli_model_arg.strip().lower()
         if arg_clean == "realesr-animevideov3":
             arg_clean = "animevideov3"
+        if arg_clean == AUTO_PARETO_MODEL_ID:
+            return _build_auto_pareto_model_info(
+                registry,
+                resolution_source=f"Tham số dòng lệnh (--model {cli_model_arg})",
+            )
 
         if arg_clean in lower_to_key:
             chosen_id = lower_to_key[arg_clean]
@@ -119,7 +168,7 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
         else:
             raise ValueError(
                 f"Mô hình '{cli_model_arg}' không tồn tại trong models/models.yaml.\n"
-                f"Danh sách mô hình hợp lệ: {list(registry.keys())}"
+                f"Danh sách mô hình hợp lệ: {[*registry.keys(), AUTO_PARETO_MODEL_ID]}"
             )
 
     # 2. Ưu tiên thứ hai: shows.yaml (nếu chưa chỉ định qua CLI)
@@ -133,6 +182,11 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
                 pat = rule.get("pattern", "")
                 m_target = str(rule.get("model", "")).strip().lower()
                 if match_show_rule(video_path, pat):
+                    if m_target == AUTO_PARETO_MODEL_ID:
+                        return _build_auto_pareto_model_info(
+                            registry,
+                            resolution_source=f"shows.yaml (Khớp mẫu '{pat}')",
+                        )
                     if m_target in lower_to_key:
                         chosen_id = lower_to_key[m_target]
                         resolution_source = f"shows.yaml (Khớp mẫu '{pat}')"

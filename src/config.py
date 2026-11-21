@@ -252,6 +252,7 @@ DEFAULT_GPU_RESTART_CHUNKS = 10
 DEFAULT_SCALE = 2
 DEFAULT_BITRATE = "28M"
 DEFAULT_SEGMENT_TIME = 8
+DEFAULT_ZERO_DISK_SEGMENT_TIME = 24
 DEFAULT_FRAME_FORMAT = "png"
 DEFAULT_OUTPUT_DIR = os.path.join(ROOT_DIR, "out")
 
@@ -292,6 +293,8 @@ HEVC_CQ_LEVEL = "18"
 HEVC_MAXRATE = "45M"
 HEVC_BUFSIZE = "90M"
 HEVC_MULTIPASS = "fullres"
+HEVC_MULTIPASS_POLICY = "auto"
+VALID_NVENC_MULTIPASS_POLICIES = ("auto", "fullres", "qres")
 HEVC_RC_LOOKAHEAD = 32
 HEVC_SPATIAL_AQ = 1
 HEVC_AQ_STRENGTH = 6
@@ -306,14 +309,58 @@ HEVC_COLOR_PRIMARIES = "bt709"
 HEVC_COLOR_TRC = "bt709"
 HEVC_TAG = "hvc1"
 
+_MODEL_TRT_INFER_FPS_ESTIMATE: dict[str, float] = {
+    "animevideov3": 11.5,
+    "realesr-animevideov3": 11.5,
+    "animejanai-hd-v3-compact": 11.8,
+    "animejanai-hd-v3-ultracompact": 22.8,
+    "animejanai-hd-v3-sharp1-ultracompact": 22.8,
+    "animejanai-hd-v3-superultracompact": 44.9,
+    "animejanai-hd-v3-sharp1-superultracompact": 44.9,
+    "span-2x": 15.5,
+    "2x_animejanai_v3": 15.5,
+    "auto-pareto": 18.0,
+}
 
-def get_hevc_rate_args(bitrate: str = "28M") -> list:
+
+def resolve_episode_nvenc_multipass(
+    policy: str = "auto",
+    model_id: str = "animevideov3",
+    dedup_ratio_pct: float = 0.0,
+    engine: str = "cuda",
+    use_tensorrt: bool = True,
+    zero_disk: bool = True,
+) -> str:
+    """Resolve uniform per-episode NVENC multipass ('fullres' or 'qres') to preserve identical HEVC SPS/PPS."""
+    norm = str(policy or "auto").strip().lower()
+    if norm == "fullres":
+        return "fullres"
+    if norm == "qres":
+        return "qres"
+    if norm != "auto":
+        raise ValueError(
+            f"Invalid --nvenc-multipass policy '{policy}'. Expected one of {VALID_NVENC_MULTIPASS_POLICIES}."
+        )
+    if engine != "cuda" or not zero_disk:
+        return "fullres"
+    base_trt_fps = _MODEL_TRT_INFER_FPS_ESTIMATE.get(str(model_id or "").strip().lower(), 11.5)
+    if not use_tensorrt:
+        base_trt_fps *= 0.52
+    keep_frac = max(0.05, min(1.0, 1.0 - (float(dedup_ratio_pct or 0.0) / 100.0)))
+    eff_ai_fps = base_trt_fps / keep_frac
+    return "qres" if eff_ai_fps > 24.0 else "fullres"
+
+
+def get_hevc_rate_args(bitrate: str = "28M", multipass: str | None = None) -> list:
     """Return 10-bit HEVC Main 10 rate-control flags tuned for NVENC or fallback encoders."""
     if HEVC_ENCODER == "hevc_nvenc":
+        eff_mp = str(multipass).strip().lower() if multipass else HEVC_MULTIPASS
+        if eff_mp not in ("fullres", "qres"):
+            eff_mp = HEVC_MULTIPASS
         return [
             "-preset", HEVC_PRESET,
             "-tune", "hq",
-            "-multipass", HEVC_MULTIPASS,
+            "-multipass", eff_mp,
             "-rc", "vbr",
             "-cq", str(HEVC_CQ_LEVEL),
             "-b:v", "0",

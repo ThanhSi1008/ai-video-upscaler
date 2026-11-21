@@ -1,6 +1,6 @@
 # Architectural Decision Records (ADR)
 
-> **Updated:** 2026-11-21 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [VALIDATION](VALIDATION.md)
+> **Updated:** 2026-11-22 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [PROJECT_MAP](PROJECT_MAP.md) | [VALIDATION](VALIDATION.md)
 
 ## Active ADRs
 
@@ -49,3 +49,10 @@
 
 ### ADR-012: Antigravity-Exclusive Single-Context, AI-Native Comments & Tiered Context Harness
 - **Decision:** Keep root instructions compact (`GEMINI.md <= 45` lines / `<= 4,500` bytes), enforce AI-only concise English comments/docstrings while preserving parser/test-coupled Vietnamese runtime logs and VI/JA domain data, allow free local `.env` reads (gating edits with `force_ask` and blocking Git/bundle/HTTP leaks), enforce context + full-overwrite firewalls (`upscaler-guard`), iterate via batched `agent_context.py --pack` / `--slice` / `--impact` and `verify_offline.py --target` / `--impacted`, auto-sync 6 fixed review bundles (`latest_diff.txt`, 4 prefix-cache-friendly domain `focus_*.txt`, and deduplicated unnumbered `focus_full.txt`) via `post-commit` (`export_review_bundle.py --sync-latest`), and require same-commit doc-sync across affected docs.
+
+### ADR-013: Pareto Visual-Quality & E2E Speed Architecture (`O1`–`O6`)
+- **Decision:**
+  1. **`O1` Analytical Catmull-Rom 4x->2x Collapse (`B=0.0, C=0.5`):** Collapse `SRVGGNetCompact` `PixelShuffle(4) + Nearest(4x) + AA Bicubic(0.5x)` into 1080p `Conv2d(48->12, 3x3, groups=3) + Conv2d(3->12, 3x3, groups=3) + PixelShuffle(2)` (`Slice+Concat` replicate border, `_aa2x` TRT cache tag; generic 4x Spandrel falls back to 2-frame-sliced `antialias=True`).
+  2. **`O2` 10-Bit End-to-End Semi-Planar Pipe:** Decode native `p010le` / `nv12` in Zero-Disk mode, convert via `@triton.jit` `_yuv420_to_nchw_fp16_bt709_kernel` (`left` chroma) and `_rgb_to_p010le_triton_kernel` (`left` `[1,2,1]/4 x [1,1]/2` chroma + spatial IGN `±0.499 LSB` dither), normalize `p010le` MSBs for cyclic dedup, and cap `memo_p010 <= 64` frames.
+  3. **`O3` & `O6` `24s` Super-Chunks, Bounded Rolling Preflight & Episode-Locked NVENC:** Auto-promote omitted `-s` to `24s` in CUDA Zero-Disk mode, bound `RollingDedupPlanner` to `max_workers=2` (`-threads 2`, Open-GOP RASL `_count_leading_discard_packets` reconciliation) to protect `DDR4-2133` bandwidth, run in-process PyAV `hevc_nvenc` (`stream.bit_rate = 0`, monotonic `AVFrame` allocation), and lock `--nvenc-multipass auto|fullres|qres` **per-episode** so `-f concat -c copy` never mixes mismatched HEVC VPS/SPS/PPS `extradata`.
+  4. **`O4` & `O5` Perceptual Dedup V2 (`dis-auto`) & Same-Family Routing:** Use `8x8` dual-phase lip-flap cells (`32x32` at 1080p) + 3-DOF textured Lucas-Kanade + noise-calibrated DIS; keep `shows.yaml` mapped to single consistent models per episode (`sharp1-ultracompact` BD, `ultracompact` Web-DL, `animevideov3` fallback) and offer explicit `--model auto-pareto` (`compact` 16c + `ultracompact` 8c, scene-cut hysteresis).

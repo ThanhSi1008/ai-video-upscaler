@@ -15,7 +15,7 @@ import threading
 import uuid
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
-from web.fs_browser import SafeLocalFSBrowser, is_unc_path
+from web.fs_browser import VALID_NVENC_MULTIPASS_POLICIES, SafeLocalFSBrowser, is_unc_path
 from web.sse_hub import check_active_gpu_lock
 
 # Tốc độ suy luận khung hình độc nhất tham chiếu trên RTX 3060 TensorRT 10 FP16 Zero-Disk (từ STATE.md R3)
@@ -26,6 +26,7 @@ MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
     "animejanai-hd-v3-sharp1-ultracompact": (18.5, 15.5),
     "animejanai-hd-v3-superultracompact": (20.8, 17.5),
     "animejanai-hd-v3-sharp1-superultracompact": (20.8, 17.5),
+    "auto-pareto": (16.5, 13.5),
     "span-2x": (14.5, 12.0),
     "2x_AnimeJaNai_V3": (14.5, 12.0),
 }
@@ -120,6 +121,19 @@ def _validate_subs_quality(val: Optional[str]) -> str:
     if norm not in _VALID_SUBS_QUALITIES:
         raise ValueError(
             f"Giá trị subs_quality '{val}' không hợp lệ (chỉ chấp nhận normal, fast hoặc high)."
+        )
+    return norm
+
+
+def _validate_nvenc_multipass(val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    norm = str(val).strip().lower()
+    if not norm:
+        return None
+    if norm not in VALID_NVENC_MULTIPASS_POLICIES:
+        raise ValueError(
+            f"Giá trị nvenc_multipass '{val}' không hợp lệ (chỉ chấp nhận auto, fullres hoặc qres)."
         )
     return norm
 
@@ -580,6 +594,7 @@ class JobManager:
 
         subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         deadline_norm = _validate_deadline(payload.get("deadline"))
+        nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
 
         videos = self.fs_browser.expand_inputs(raw_inputs)
         dry_run = bool(payload.get("dry_run", False))
@@ -598,6 +613,8 @@ class JobManager:
             cmd.extend(["--model", str(payload["model"]).strip()])
         if payload.get("dedup_policy"):
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
+        if nvenc_mp_norm:
+            cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
         if payload.get("batch_size") is not None:
             bs = int(payload["batch_size"])
             if bs < 1:
@@ -644,6 +661,7 @@ class JobManager:
         if not math.isfinite(sec_f):
             raise ValueError("seconds phải là số hữu hạn.")
         seconds = max(3, min(60, int(sec_f)))
+        nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
         self._ensure_ready_to_launch(requires_gpu=True)
 
         cmd = [
@@ -658,6 +676,8 @@ class JobManager:
             cmd.extend(["--model", str(payload["model"]).strip()])
         if payload.get("dedup_policy"):
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
+        if nvenc_mp_norm:
+            cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
         if payload.get("zero_disk") is False:
             cmd.append("--no-zero-disk")
         if payload.get("use_tensorrt") is False:

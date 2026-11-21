@@ -35,10 +35,13 @@ from src.config import (
     DEFAULT_PRECISION,
     DEFAULT_BITRATE,
     DEFAULT_SEGMENT_TIME,
+    DEFAULT_ZERO_DISK_SEGMENT_TIME,
     DEFAULT_FRAME_FORMAT,
     DEFAULT_BATCH_SIZE,
     DEVICE_NAME,
     HEVC_ENCODER,
+    HEVC_MULTIPASS_POLICY,
+    VALID_NVENC_MULTIPASS_POLICIES,
 )
 from src.pending_queue import load_pending_subs, remove_pending_sub
 from src.pipeline import run_upscale_pipeline, FailedResumableError
@@ -70,6 +73,7 @@ _MODEL_TRT_ZERO_DISK_FPS: Dict[str, Tuple[float, float]] = {
     "animejanai-hd-v3-sharp1-superultracompact": (20.8, 17.5),
     "span-2x": (14.5, 12.0),
     "2x_animejanai_v3": (14.5, 12.0),
+    "auto-pareto": (16.5, 13.5),
 }
 
 
@@ -280,7 +284,7 @@ def build_arg_parser():
     parser.add_argument(
         "-m", "--model",
         default=None,
-        help=f"Mô hình AI upscale (Mặc định: tự động chọn qua shows.yaml hoặc mặc định animevideov3)"
+        help="Mô hình AI upscale (Mặc định: tự động chọn qua shows.yaml, mặc định animevideov3, hoặc auto-pareto)"
     )
     parser.add_argument(
         "--engine",
@@ -347,7 +351,13 @@ def build_arg_parser():
         default=None,
         type=_validate_dedup_policy_arg,
         choices=_DedupPolicyChoices(DEDUP_POLICY_PARAMS.keys()),
-        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift/drift-<float> (độ dịch tích lũy), dis/dis-<float> (dòng chảy quang học DIS bắt zoom/lia), sakuga / dis-sakuga (ngưỡng kép bảo vệ đại cảnh hành động), off (giữ tất cả)"
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), dis-auto (tự hiệu chuẩn sàn nhiễu hạt + lưới khẩu hình 8x8 + lia máy bầu trời phẳng), dis/dis-<float>, sakuga/dis-sakuga, sensitive/sensitive-a/sensitive-b, motion, drift/drift-<float>, off"
+    )
+    parser.add_argument(
+        "--nvenc-multipass",
+        default=HEVC_MULTIPASS_POLICY,
+        choices=list(VALID_NVENC_MULTIPASS_POLICIES),
+        help="Chính sách NVENC 2-pass toàn tập (không trộn SPS/PPS giữa các chunk): auto (qres khi AI > 24 fps, fullres khi AI-bound), fullres, qres"
     )
     parser.add_argument(
         "--drift-delta",
@@ -1012,6 +1022,16 @@ def main():
     video_overhead = 420.0  # TensorRT FP16 Zero-Disk mặc định
     has_trt = False
     use_zero_disk = bool(getattr(args, "zero_disk", True))
+    raw_cli_argv = sys.argv[1:]
+    explicit_segment_arg = any(
+        tok in ("-s", "--segment") or tok.startswith("--segment=") or (tok.startswith("-s") and tok[2:].isdigit())
+        for tok in raw_cli_argv
+    )
+    eff_segment_time = (
+        DEFAULT_ZERO_DISK_SEGMENT_TIME
+        if (not explicit_segment_arg and use_zero_disk and args.engine == "cuda" and int(args.segment) == DEFAULT_SEGMENT_TIME)
+        else int(args.segment)
+    )
     if args.engine == "cuda":
         if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
             import importlib.util
@@ -1046,7 +1066,7 @@ def main():
             subtitles_overhead_seconds=subtitles_overhead,
             allow_partial=args.allow_partial,
             output_dir=args.output,
-            segment_seconds=args.segment,
+            segment_seconds=eff_segment_time,
             preflight_now=False,
             subs_quality=args.subs_quality,
         )
@@ -1071,7 +1091,7 @@ def main():
             subtitles_overhead_seconds=subtitles_overhead,
             allow_partial=args.allow_partial,
             output_dir=args.output,
-            segment_seconds=args.segment,
+            segment_seconds=eff_segment_time,
             preflight_now=False,
             subs_quality=args.subs_quality,
         )
@@ -1090,7 +1110,7 @@ def main():
                         subtitles_overhead_seconds=subtitles_overhead,
                         allow_partial=args.allow_partial,
                         output_dir=args.output,
-                        segment_seconds=args.segment,
+                        segment_seconds=eff_segment_time,
                         preflight_now=False,
                         subs_quality=args.subs_quality,
                     )
@@ -1102,7 +1122,7 @@ def main():
             bg_preflight = BackgroundQueuePreflightManager(
                 queue=videos,
                 output_dir=args.output,
-                segment_seconds=args.segment,
+                segment_seconds=eff_segment_time,
                 skip_first=True,
                 benchmark_mode=args.benchmark_mode,
                 on_plan_ready=_on_bg_plan_ready,
@@ -1178,7 +1198,7 @@ def main():
                     precision=args.precision,
                     force=args.force,
                     bitrate=args.bitrate,
-                    segment_time=args.segment,
+                    segment_time=eff_segment_time,
                     fmt=args.format,
                     use_ramdisk=not args.no_ramdisk,
                     resume=not args.no_resume,
@@ -1192,6 +1212,8 @@ def main():
                     batch_size=args.batch_size,
                     zero_disk=getattr(args, "zero_disk", True),
                     use_tensorrt=not getattr(args, "no_tensorrt", False),
+                    nvenc_multipass=getattr(args, "nvenc_multipass", HEVC_MULTIPASS_POLICY),
+                    segment_time_explicit=explicit_segment_arg,
                 )
                 # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):

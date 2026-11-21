@@ -27,8 +27,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from subtrans.cache import compute_key_id, get_next_pt_reset, get_now_pt
 from web.fs_browser import (
+    AUTO_PARETO_MODEL_ID,
+    AUTO_PARETO_MODEL_NAME,
     DEDUP_POLICY_PARAMS,
     SUBTITLE_EXTENSIONS,
+    VALID_NVENC_MULTIPASS_POLICIES,
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
     is_secret_filename,
@@ -103,6 +106,7 @@ class StartUpscaleRequest(BaseModel):
     output_dir: Optional[str] = None
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
+    nvenc_multipass: Optional[str] = None
     batch_size: int = 8
     deadline: Optional[str] = None
     allow_partial: bool = False
@@ -130,12 +134,23 @@ class StartUpscaleRequest(BaseModel):
     def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
         return _validate_no_nul_str(v, "output_dir")
 
+    @field_validator("nvenc_multipass")
+    @classmethod
+    def _validate_mp(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_NVENC_MULTIPASS_POLICIES:
+            raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
+        return norm
+
 
 class StartPreviewRequest(BaseModel):
     video_path: str
     seconds: int = 10
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
+    nvenc_multipass: Optional[str] = None
     zero_disk: bool = True
     use_tensorrt: bool = True
     force: bool = True
@@ -152,6 +167,16 @@ class StartPreviewRequest(BaseModel):
         if v < 1 or v > 3600:
             raise ValueError("seconds phải nằm trong khoảng 1..3600.")
         return v
+
+    @field_validator("nvenc_multipass")
+    @classmethod
+    def _validate_mp(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_NVENC_MULTIPASS_POLICIES:
+            raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
+        return norm
 
 
 class StartSubtransRequest(BaseModel):
@@ -1619,9 +1644,20 @@ def create_app(
         dedup_policies = [
             {"id": k, **v} for k, v in DEDUP_POLICY_PARAMS.items()
         ]
+        pareto_med_fps, pareto_p5_fps = MODEL_REFERENCE_FPS.get(AUTO_PARETO_MODEL_ID, (16.5, 13.5))
+        routing_modes = [
+            {
+                "id": AUTO_PARETO_MODEL_ID,
+                "name": AUTO_PARETO_MODEL_NAME,
+                "ref_median_fps": pareto_med_fps,
+                "ref_p5_fps": pareto_p5_fps,
+            }
+        ]
 
         return {
             "models": models_list,
+            "routing_modes": routing_modes,
+            "nvenc_multipass_policies": list(VALID_NVENC_MULTIPASS_POLICIES),
             "shows_yaml": shows_text,
             "shows_rules": shows_rules,
             "dedup_policies": dedup_policies,
@@ -1661,7 +1697,7 @@ def create_app(
             if not pat:
                 raise ValueError(f"Rule thứ #{idx} thiếu trường 'pattern'.")
             mod = str(item.get("model") or "").strip()
-            if mod and valid_models and mod.lower() not in valid_models:
+            if mod and valid_models and mod.lower() not in valid_models and mod.lower() != AUTO_PARETO_MODEL_ID:
                 raise ValueError(
                     f"Rule '{pat}' trỏ tới model '{mod}' không tồn tại trong models/models.yaml."
                 )
@@ -1715,8 +1751,8 @@ def create_app(
                     continue
                 if match_show_rule(sample, pat):
                     m_target = str(r.get("model") or "").strip().lower()
-                    if m_target and m_target in lower_to_key:
-                        chosen_mod = lower_to_key[m_target]
+                    if m_target == AUTO_PARETO_MODEL_ID or (m_target and m_target in lower_to_key):
+                        chosen_mod = AUTO_PARETO_MODEL_ID if m_target == AUTO_PARETO_MODEL_ID else lower_to_key[m_target]
                         src_desc = f"shows.yaml ('{pat}')"
                         matched_model_pat = pat
                         break
@@ -1735,10 +1771,11 @@ def create_app(
             matched_pat = matched_model_pat or matched_dedup_pat
 
             med_fps, _ = MODEL_REFERENCE_FPS.get(chosen_mod, (10.5, 8.5))
+            default_mod_name = AUTO_PARETO_MODEL_NAME if chosen_mod == AUTO_PARETO_MODEL_ID else chosen_mod
             return {
                 "sample": sample,
                 "model_id": chosen_mod,
-                "model_name": str((reg.get(chosen_mod) or {}).get("name") or chosen_mod),
+                "model_name": str((reg.get(chosen_mod) or {}).get("name") or default_mod_name),
                 "dedup_policy": chosen_pol,
                 "matched_pattern": matched_pat,
                 "resolution_source": src_desc,

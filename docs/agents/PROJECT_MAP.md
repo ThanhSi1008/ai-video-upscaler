@@ -4,16 +4,16 @@
 
 ## 1. Entrypoints & Data Flows
 
-- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--queue`, `--preview`, `--dedup-policy` incl. `sakuga`/`dis-sakuga` and dynamic `dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
+- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--model` incl. `auto-pareto`, `--nvenc-multipass auto|fullres|qres`, `--queue`, `--preview`, `--dedup-policy` incl. `dis-auto`/`sakuga`/`dis-sakuga` and dynamic `dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) -> [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI (`run`, `batch`, `eval`, `rag`, `check`, `models`). Read [subtrans-anime-ops](../../.agents/skills/subtrans-anime-ops/SKILL.md) before editing.
 - [`web_gui.py`](../../web_gui.py) / [`web_gui.bat`](../../web_gui.bat) -> [`web/app.py`](../../web/app.py): Local Real-Time Web Studio (`http://127.0.0.1:8765`, `--mock` implies `--no-browser` & simulated job launches, `docs_url=None`, UNC path rejection, FastAPI + Uvicorn + SSE 1Hz), spawns subprocesses without holding static VRAM; bridges `logs/live_status.json`, `logs/web_job_<id>.log` & `logs/.graceful_pause.flag`.
 
 ```text
 upscale.py:main -> pipeline.run_upscale_pipeline
-  -> probe + model resolve + preflight (P-Core QoS + AntiSleep) + manifest
-  -> GOP split + dedup plan (raw_actions_rle)
+  -> probe + model resolve (incl. auto-pareto) + preflight (P-Core QoS + AntiSleep) + manifest
+  -> GOP split (24s super-chunks in CUDA Zero-Disk) + RollingDedupPlanner (max_workers=2) / raw_actions_rle
   -> 3-Stage Overlap:
-      [Zero-Disk] NVDEC RGB24 pipe (N+1) || TRT 10 FP16 + Triton P010LE (N) || Async NVENC (N-1)
+      [Zero-Disk] FFmpeg p010le/nv12 pipe (N+1) || Triton YUV2RGB + TRT 10 FP16 + Triton P010LE (N) || PyAV/Pipe NVENC (N-1)
       [Fallback]  FFmpeg PNG extract (N+1) || TRT/CUDA FP16 + Hardlink Cel (N) || NVENC + cleanup (N-1)
   -> 1-Pass Concat-Mux (mux_segments_directly) -> Parallel Mux Audit (streamhash MD5) -> cleanup
   -> Stage B subtrans subprocess (sequential or --async-subs)
@@ -38,17 +38,17 @@ subtrans.cli -> TranslationPipeline
 
 | Module | Key Responsibilities & Symbols |
 | :--- | :--- |
-| [`config.py`](../../src/config.py) | Runtime constants, NVMe JIT cache routing, `configure_cuda_fast_math`, `get_hevc_rate_args`, `PENDING_SUBS_FILE` (`state/pending_subs.json`), PID `.gpu_active.lock` |
+| [`config.py`](../../src/config.py) | Runtime constants, NVMe JIT cache routing, `configure_cuda_fast_math`, `resolve_episode_nvenc_multipass`, `get_hevc_rate_args`, `PENDING_SUBS_FILE` (`state/pending_subs.json`), PID `.gpu_active.lock` |
 | [`env_isolation.py`](../../src/env_isolation.py) | `configure_e_drive_isolation`: routes `PATH`, caches (`HF_HOME`, `TORCH_HOME`, `PIP_CACHE_DIR`, etc.), and `TEMP`/`TMP`/`TMPDIR` onto E: drive |
-| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`, 3-stage overlap, Background Cel on `dec_exec`, resume frame check, Zero-Disk & 1-Pass Mux |
-| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | PyAV probing + FFmpeg: `probe_video`, `split_video_segments`, `_count_leading_discard_packets`, `extract_frames_raw_rgb24`, `mux_segments_directly` |
-| [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `match_show_pattern`, `resolve_model_for_video`, `verify_weights_sha256` |
+| [`pipeline.py`](../../src/pipeline.py) | `run_upscale_pipeline`, `FailedResumableError`, 3-stage overlap, `24s` Zero-Disk super-chunks, `auto-pareto` scene-cut hysteresis, Zero-Disk & 1-Pass Mux |
+| [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | PyAV probing + FFmpeg: `probe_video`, `split_video_segments`, `_count_leading_discard_packets`, `extract_frames_raw_yuv420`, `yuv420_to_rgb_small_u8`, `mux_segments_directly` |
+| [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `AUTO_PARETO_MODEL_ID`, `resolve_model_for_video`, `verify_weights_sha256` |
 | [`show_routing.py`](../../src/show_routing.py) | Stdlib-only `shows.yaml` matcher (`match_show_pattern`, `candidate_show_names`, `match_show_rule`) shared across `src/` and `web/` |
-| [`cuda_engine.py`](../../src/cuda_engine.py) | `RealESRAnimeVideoV3` (8K 2-frame slicing), `AnimeJaNaiCompact2x`, `SpandrelModelWrapper`, `GPUPersistentWorker`, `get_gpu_worker` |
+| [`cuda_engine.py`](../../src/cuda_engine.py) | `build_collapsed_4x_to_2x_buffers`, `RealESRAnimeVideoV3` (Catmull-Rom collapsed 2x), `AnimeJaNaiCompact2x`, `SpandrelModelWrapper`, `GPUPersistentWorker` |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: NCNN Vulkan fallback runner |
-| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `@triton.jit` `_nhwc_u8_to_nchw_fp16_norm_kernel` & `_rgb_to_p010le_triton_kernel`, `_PipeDrainWorker`, `DoubleBufferedPipeUpscaler` (0-alloc rings, Belady `OPT`) |
-| [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_get_trt_logger`, `resolve_trt_profile_max_batch`, ONNX export, `TRTRuntimeEngineWrapper` (2-slot `_out_ring`, `execute_async_v3`) |
-| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `deduplicate_cyclic_frames` (`BLAKE2b` + SIMD), `raw_actions_rle`, 1-pass `mpdecimate+DIS`, `run_preflight_worker_cli` |
+| [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `@triton.jit` `_yuv420_to_nchw_fp16_bt709_kernel` & `_rgb_to_p010le_triton_kernel`, `_bound_live_cyclic_memo`, `_InProcessPyAVNVENCEncoder`, `DoubleBufferedPipeUpscaler` |
+| [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule` (`_aa2x`), `resolve_trt_profile_max_batch`, ONNX export, `TRTRuntimeEngineWrapper` (2-slot `_out_ring`, `execute_async_v3`) |
+| [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS` (`dis-auto`), `_check_8x8_lip_flap_gate`, `_estimate_textured_lk_pan_zoom`, `RollingDedupPlanner`, `deduplicate_cyclic_frames`, `raw_actions_rle` |
 | [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays`, `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit` ($|\Delta Y| \le 6/255$, $r \ge 0.98$) |
 | [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity`, `get_all_audio_streams_md5` (in-process PyAV demux + `-f streamhash` fallback), parallel `check_window_interleaving` |
 | [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` (physical RAM disk / `scratch/rolling_buffer` on NVMe Gen4), `cleanup_orphan_ramdisks` |
@@ -70,5 +70,5 @@ subtrans.cli -> TranslationPipeline
 - **[`.agents/`](../../.agents):** `rules/` (glob-scoped `video-gpu.md`, `subtrans.md`, `web-ui.md`), `agents/` (`repo-scout.md`, `test-verifier.md`, `subtrans-evaluator.md` with `inheritMcp: false`), `skills/` (`agent-handoff-commit`, `safe-offline-test`, `video-upscale-ops`, `subtrans-anime-ops`, pruned 39-guide `modern-web-guidance`), `plugins/upscaler-guard/` (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`), `plugins/upscaler-mcp/` (`disabled: true`).
 - **[`scripts/`](../../scripts):** `agent_context.py` (`--pack`/`--symbols`/`--slice`/`--impact`/`--install-hooks`), `export_review_bundle.py` (`--sync-latest` 6 bundles incl. `--focus full`), `verify_offline.py` (`--target`/`--impacted`), `smoke_test_pipeline.py` (`< 5s` 24f CPU pipeline smoke test), `silicon_roofline_probe.py`, `telemetry_collector.py`, `benchmark_pipeline.py`, `compare_benchmarks.py`, `batch_translate_all.py` (`--source-dir`/`-o`/`--state-file`/`--dry-run`), `set_track_defaults.py`, `upscale_x4_single.py`, `unlock_rtx3060_admin.ps1`, `unlock_rtx3060_admin.bat`, and `scripts/oneoff/` (`embed_fate_subtitles.py`, `organize_vietnamese_subs.py`).
 - **[`benchmarks/README.md`](../../benchmarks/README.md):** `upscale/`, `subtrans/`, `research/`, and summary reports.
-- **Tests (`pytest.ini` markers: `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`):** `tests/` (unit/capability suites incl. `test_architecture_boundaries.py`, `test_export_review_bundle.py`, `test_smoke_pipeline.py`, `test_web_gui.py`, `test_nvenc_config_and_vram.py`, `test_zero_disk_and_trt_export.py`, `test_cli_lock_and_pipeline_regressions.py`, `test_gop_rle_and_3stage_overlap.py`, `test_zero_disk_ring_buffers_and_cel.py`), `tests/e2e/` (Group A/B + Tier 1–4 suites), and `subtrans/tests/` (all subtrans tests consolidated).
+- **Tests (`pytest.ini` markers: `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`):** `tests/` (unit/capability suites incl. `test_pareto_o1_o6.py`, `test_architecture_boundaries.py`, `test_export_review_bundle.py`, `test_smoke_pipeline.py`, `test_web_gui.py`, `test_nvenc_config_and_vram.py`, `test_zero_disk_and_trt_export.py`, `test_cli_lock_and_pipeline_regressions.py`, `test_gop_rle_and_3stage_overlap.py`, `test_zero_disk_ring_buffers_and_cel.py`), `tests/e2e/` (Group A/B + Tier 1–4 suites), and `subtrans/tests/` (all subtrans tests consolidated).
 - **Runtime & Archives (excluded via [`.antigravityignore`](../../.antigravityignore)):** `docs/archive/` (20 historical task logs + 7 legacy reports), `state/pending_subs.json`, `logs/`, `out/`, `scratch/` (incl. `scratch/review_bundles/`), `models_bench/`, `subtrans/.cache/`, `.cache/` (`.env` / `subtrans/.env` are locally readable, gitignored).

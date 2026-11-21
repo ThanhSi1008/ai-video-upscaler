@@ -13,11 +13,11 @@ Local **4K Anime Super-Resolution (2x)** and **Cloud Gemini Anime Subtitle Trans
 
 ## 1. 4K Anime Video Upscaler (`upscale.py` / `upscale.bat` / `upscale_turbo.bat`)
 
-- **SR Models:** `realesr-animevideov3` (`SRVGGNetCompact`, default) plus Native 2x models (`AnimeJaNaiCompact2x`, `SPAN`) via Spandrel `0.4.2`, configurable per show in `shows.yaml` and `models/models.yaml`.
-- **TensorRT 10.16 FP16 & Zero-Disk Pipe (`--zero-disk`, Default):** Streams `NVDEC RGB24 pipe -> TensorRT 10 FP16 (2-frame 8K tail micro-slicing) -> Triton JIT p010le -> hevc_nvenc` with zero intermediate PNGs on SSD. Fallback `--no-zero-disk` (`--disk`) uses rolling chunk cleanup.
-- **True 3-Stage Overlap:** Decodes chunk `N+1` and flushes NVENC for chunk `N-1` concurrently with GPU inference on chunk `N`.
-- **Dual Deduplication & Cyclic Cel (`A->B->A`):** 1-pass `mpdecimate + DISOpticalFlow` with early-exit cascade and `raw_actions_rle` `< 1 ms` GOP re-partitioning, paired with `BLAKE2b` + SIMD cel reuse (Belady `OPT` / NTFS `os.link`).
-- **1-Pass Concat-Mux & Parallel Audit:** `mux_segments_directly` preserves original multi-channel audio, softsubs, fonts, and chapters with `-c copy -max_interleave_delta 0`. Batch-0 GPU Output Sanity (`|ΔY| <= 6/255`, Pearson `r >= 0.98`) and parallel `-f streamhash` MD5 audit run before cleanup.
+- **SR Models & Pareto Routing:** `realesr-animevideov3` (`SRVGGNetCompact` Catmull-Rom collapsed 2x `_aa2x`, default fallback), Native 2x models (`AnimeJaNaiCompact2x`, `SPAN`) via Spandrel `0.4.2` mapped per show in `shows.yaml` (`sharp1-ultracompact` for Blu-ray, `ultracompact` for Web-DL), and explicit scene-adaptive `--model auto-pareto` (`compact` 16c + `ultracompact` 8c).
+- **10-Bit End-to-End Zero-Disk Pipe (`--zero-disk`, Default):** Streams semi-planar `p010le` / `nv12` -> `@triton.jit` BT.709 YUV2RGB (`left` chroma) -> TensorRT 10.16 FP16 -> `@triton.jit` `p010le` (`left` chroma + IGN dither) -> in-process PyAV `hevc_nvenc` (`24s` super-chunks, zero intermediate PNGs). Fallback `--no-zero-disk` (`--disk`) uses rolling chunk cleanup.
+- **True 3-Stage Overlap & Rolling Preflight:** `RollingDedupPlanner` (`max_workers=2`) launches GPU inference right after Chunk `0..1` while scanning remaining segments in parallel; decodes chunk `N+1` and flushes NVENC for chunk `N-1` concurrently with GPU inference on chunk `N`.
+- **Perceptual Dedup V2 (`dis-auto`) & Cyclic Cel (`A->B->A`):** 1-pass `mpdecimate + DISOpticalFlow` with `8x8` dual-phase lip-flap guard, 3-DOF textured Lucas-Kanade pan/zoom solver, `raw_actions_rle` `< 1 ms` GOP re-partitioning, and bounded `<= 64`-frame Belady `OPT` cel reuse.
+- **1-Pass Concat-Mux & Parallel Audit:** `mux_segments_directly` preserves original multi-channel audio, softsubs, fonts, and chapters with `-c copy -max_interleave_delta 0` (episode-locked `--nvenc-multipass` guarantees uniform HEVC VPS/SPS/PPS headers). Batch-0 GPU Output Sanity (`|ΔY| <= 6/255`, Pearson `r >= 0.98`) and parallel `-f streamhash` MD5 audit run before cleanup.
 - **Resume & GPU Exclusivity:** Resumes safely from `up_*.mp4` checkpoints under `.temp_<basename>/` and protects VRAM with PID-validated `.gpu_active.lock`.
 
 ---
@@ -68,10 +68,10 @@ pip install -r requirements.txt
 
 ### Key `upscale.py` Options
 - `-o`, `--output`: Output file or directory (default: `out/<name>_4K.mkv`).
-- `-m`, `--model`: SR model ID from `models/models.yaml` (auto-selected via `shows.yaml` if omitted).
-- `--engine` (`cuda`|`cpu`), `--precision` (`fp16`|`fp32`), `--batch-size` (`8` default).
+- `-m`, `--model`: SR model ID from `models/models.yaml` or `auto-pareto` (auto-selected via `shows.yaml` if omitted).
+- `--engine` (`cuda`|`cpu`), `--precision` (`fp16`|`fp32`), `--batch-size` (`8` default), `--nvenc-multipass` (`auto`|`fullres`|`qres`, default `auto`).
 - `--zero-disk` (default `True`) / `--no-zero-disk` (`--disk`), `--no-tensorrt`.
-- `--dedup-policy` (`default`|`sensitive-a`|`sensitive-b`|`motion`|`drift`|`dis`|`sakuga`|`dis-sakuga`|`off`), `--dis-thresh` (`0.30`), `--drift-delta` (`0.75`), `--no-dedup`.
+- `--dedup-policy` (`default`|`dis-auto`|`sensitive-a`|`sensitive-b`|`motion`|`drift`|`dis`|`sakuga`|`dis-sakuga`|`off`), `--dis-thresh` (`0.30`), `--drift-delta` (`0.75`), `--no-dedup`.
 - `--queue`, `--deadline HH:MM`, `--allow-partial`, `--force`, `--no-resume`, `--keep-temp`, `--clean-temp` / `--cleanup`.
 - `--subs-after-upscale` / `--no-subs`, `--async-subs`, `--subs-only`, `--subs-pending`, `--subs-upgrade`, `--subs-quality` (`normal`|`fast`|`high`).
 - `--prefer-whisper`, `--auto-align-en` / `--no-auto-align-en`, `--auto-offset` / `--no-auto-offset`, `--sub-offset-ms`, `--no-embed`, `--target-4k`.
@@ -86,10 +86,10 @@ pip install -r requirements.txt
 | Specification | Legacy PyTorch (`batch=1`) | Legacy PyTorch PNG (`batch=6`) | Current (`TensorRT 10 + Zero-Disk`, `batch=8`) |
 | :--- | :--- | :--- | :--- |
 | **Clocks & QoS** | i5-12600K, RTX 3060 (P2) | i5-12600K, RTX 3060 (P2) | i5-12600K (`HighQoS` P-Core), RTX 3060 (`HAGS=2`, P0 `7500 MHz`) |
-| **Engine** | PyTorch CUDA FP16 (`b=1`) | PyTorch CUDA FP16 (`b=6`) | **TensorRT 10.16 FP16** (`opt=3`, 2-slot `_out_ring`) / CUDA FP16 |
-| **Throughput** | `1.37 fps` GPU-only | `4.8–5.2 fps` GPU-only (~`10–12+ fps` eff.) | `10.13 fps` E2E (`animevideov3`), `18.52 fps` (`sharp1-uc`), `20.80 fps` (`sharp1-suc`) |
-| **Frame I/O** | PIL `Image.save` (~45 ms/f) | OpenCV `cv2.imwrite` AVX2 (~14 ms/f) | **Zero-Disk Pipe** (`NVDEC RGB24 -> Triton p010le`, 0 disk PNGs) |
-| **Encoder** | `hevc_nvenc` Main10 (`p6`, `CQ 19`) | `hevc_nvenc` Main10 (`p6`, `qres`, LA `24`) | `hevc_nvenc` Main10 (`p6`, **`CQ 18`**, `maxrate 45M`, **`fullres`**, LA **`32`**, Dual AQ) |
+| **Engine** | PyTorch CUDA FP16 (`b=1`) | PyTorch CUDA FP16 (`b=6`) | **TensorRT 10.16 FP16** (`opt=3`, `_aa2x` collapsed 2x, 2-slot `_out_ring`) |
+| **Throughput** | `1.37 fps` GPU-only | `4.8–5.2 fps` GPU-only (~`10–12+ fps` eff.) | **`10.91 fps`** (`animevideov3` `_aa2x`), **`18.06–24.44 fps`** (`sharp1-uc` + `dis-auto`), **`16.33 fps`** (`auto-pareto`) |
+| **Frame I/O** | PIL `Image.save` (~45 ms/f) | OpenCV `cv2.imwrite` AVX2 (~14 ms/f) | **10-bit Zero-Disk Pipe** (`p010le/nv12 -> Triton YUV2RGB -> Triton p010le -> PyAV NVENC`) |
+| **Encoder** | `hevc_nvenc` Main10 (`p6`, `CQ 19`) | `hevc_nvenc` Main10 (`p6`, `qres`, LA `24`) | `hevc_nvenc` Main10 (`p6`, **`CQ 18`**, `maxrate 45M`, **`auto` (`fullres`\|`qres`)**, LA **`32`**, Dual AQ) |
 | **Mux & Audit** | 2-step mux (`merged_4k.mp4`) | 2-step mux + sequential audit | **1-Pass `mux_segments_directly`** + **1-Pass `streamhash` MD5** |
 
 ---

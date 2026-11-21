@@ -6,7 +6,7 @@ import queue
 import subprocess
 import threading
 import time
-from typing import List, Tuple, Optional, Any, Dict
+from typing import List, Tuple, Optional, Any, Dict, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
@@ -69,6 +69,189 @@ if _HAS_TRITON:
         tl.store(out_base + 2 * stride_out_c + offs_p, b_f16, mask=mask)
 
     @triton.jit
+    def _yuv420_to_nchw_fp16_bt709_kernel(
+        yuv_ptr,
+        out_ptr,
+        stride_yuv_b, stride_yuv_h, stride_yuv_w,
+        stride_out_b, stride_out_c, stride_out_h, stride_out_w,
+        H, W,
+        IS_P010: tl.constexpr,
+        CHROMA_LEFT: tl.constexpr,
+        BLOCK_X: tl.constexpr,
+        BLOCK_Y: tl.constexpr,
+    ):
+        pid_x = tl.program_id(axis=0)
+        pid_y = tl.program_id(axis=1)
+        pid_b = tl.program_id(axis=2).to(tl.int64)
+
+        H_uv = H // 2
+        W_uv = W // 2
+
+        offs_x = pid_x * BLOCK_X + tl.arange(0, BLOCK_X)
+        offs_y = pid_y * BLOCK_Y + tl.arange(0, BLOCK_Y)
+        mask = (offs_x[None, :] < W_uv) & (offs_y[:, None] < H_uv)
+
+        yuv_b = yuv_ptr + pid_b * stride_yuv_b
+        out_b = out_ptr + pid_b * stride_out_b
+
+        y0 = offs_y[:, None] * 2
+        y1 = y0 + 1
+        x0 = offs_x[None, :] * 2
+        x1 = x0 + 1
+
+        raw_y00 = tl.load(yuv_b + y0 * stride_yuv_h + x0 * stride_yuv_w, mask=mask, other=0)
+        raw_y01 = tl.load(yuv_b + y0 * stride_yuv_h + x1 * stride_yuv_w, mask=mask, other=0)
+        raw_y10 = tl.load(yuv_b + y1 * stride_yuv_h + x0 * stride_yuv_w, mask=mask, other=0)
+        raw_y11 = tl.load(yuv_b + y1 * stride_yuv_h + x1 * stride_yuv_w, mask=mask, other=0)
+
+        cy = offs_y[:, None]
+        cy_prev = tl.maximum(cy - 1, 0)
+        cy_next = tl.minimum(cy + 1, H_uv - 1)
+        cx_next = tl.minimum(offs_x[None, :] + 1, W_uv - 1)
+        uv_r_prev = H + cy_prev
+        uv_r_curr = H + cy
+        uv_r_next = H + cy_next
+        ux0 = x0
+        vx0 = x1
+        ux1 = cx_next * 2
+        vx1 = ux1 + 1
+
+        raw_uc0 = tl.load(yuv_b + uv_r_curr * stride_yuv_h + ux0 * stride_yuv_w, mask=mask, other=0)
+        raw_vc0 = tl.load(yuv_b + uv_r_curr * stride_yuv_h + vx0 * stride_yuv_w, mask=mask, other=0)
+        raw_up0 = tl.load(yuv_b + uv_r_prev * stride_yuv_h + ux0 * stride_yuv_w, mask=mask, other=0)
+        raw_vp0 = tl.load(yuv_b + uv_r_prev * stride_yuv_h + vx0 * stride_yuv_w, mask=mask, other=0)
+        raw_un0 = tl.load(yuv_b + uv_r_next * stride_yuv_h + ux0 * stride_yuv_w, mask=mask, other=0)
+        raw_vn0 = tl.load(yuv_b + uv_r_next * stride_yuv_h + vx0 * stride_yuv_w, mask=mask, other=0)
+        raw_uc1 = tl.load(yuv_b + uv_r_curr * stride_yuv_h + ux1 * stride_yuv_w, mask=mask, other=0)
+        raw_vc1 = tl.load(yuv_b + uv_r_curr * stride_yuv_h + vx1 * stride_yuv_w, mask=mask, other=0)
+        raw_up1 = tl.load(yuv_b + uv_r_prev * stride_yuv_h + ux1 * stride_yuv_w, mask=mask, other=0)
+        raw_vp1 = tl.load(yuv_b + uv_r_prev * stride_yuv_h + vx1 * stride_yuv_w, mask=mask, other=0)
+        raw_un1 = tl.load(yuv_b + uv_r_next * stride_yuv_h + ux1 * stride_yuv_w, mask=mask, other=0)
+        raw_vn1 = tl.load(yuv_b + uv_r_next * stride_yuv_h + vx1 * stride_yuv_w, mask=mask, other=0)
+
+        if IS_P010:
+            inv_64 = 1.0 / 64.0
+            y00_c = (raw_y00.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            y01_c = (raw_y01.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            y10_c = (raw_y10.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            y11_c = (raw_y11.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            uc0 = (raw_uc0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vc0 = (raw_vc0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            up0 = (raw_up0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vp0 = (raw_vp0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            un0 = (raw_un0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vn0 = (raw_vn0.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            uc1 = (raw_uc1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vc1 = (raw_vc1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            up1 = (raw_up1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vp1 = (raw_vp1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            un1 = (raw_un1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            vn1 = (raw_vn1.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64
+            y_off = 64.0
+            y_inv = 1.0 / 876.0
+            c_off = 512.0
+            c_inv = 1.0 / 896.0
+        else:
+            y00_c = raw_y00.to(tl.float32)
+            y01_c = raw_y01.to(tl.float32)
+            y10_c = raw_y10.to(tl.float32)
+            y11_c = raw_y11.to(tl.float32)
+            uc0 = raw_uc0.to(tl.float32)
+            vc0 = raw_vc0.to(tl.float32)
+            up0 = raw_up0.to(tl.float32)
+            vp0 = raw_vp0.to(tl.float32)
+            un0 = raw_un0.to(tl.float32)
+            vn0 = raw_vn0.to(tl.float32)
+            uc1 = raw_uc1.to(tl.float32)
+            vc1 = raw_vc1.to(tl.float32)
+            up1 = raw_up1.to(tl.float32)
+            vp1 = raw_vp1.to(tl.float32)
+            un1 = raw_un1.to(tl.float32)
+            vn1 = raw_vn1.to(tl.float32)
+            y_off = 16.0
+            y_inv = 1.0 / 219.0
+            c_off = 128.0
+            c_inv = 1.0 / 224.0
+
+        # Bilinear MPEG-2 'left' (0.0, 0.5) chroma upsampling (or nearest box when CHROMA_LEFT=False)
+        if CHROMA_LEFT:
+            u_top0 = 0.75 * uc0 + 0.25 * up0
+            v_top0 = 0.75 * vc0 + 0.25 * vp0
+            u_bot0 = 0.75 * uc0 + 0.25 * un0
+            v_bot0 = 0.75 * vc0 + 0.25 * vn0
+            u_top1 = 0.75 * uc1 + 0.25 * up1
+            v_top1 = 0.75 * vc1 + 0.25 * vp1
+            u_bot1 = 0.75 * uc1 + 0.25 * un1
+            v_bot1 = 0.75 * vc1 + 0.25 * vn1
+            u00_c = u_top0
+            v00_c = v_top0
+            u01_c = 0.5 * (u_top0 + u_top1)
+            v01_c = 0.5 * (v_top0 + v_top1)
+            u10_c = u_bot0
+            v10_c = v_bot0
+            u11_c = 0.5 * (u_bot0 + u_bot1)
+            v11_c = 0.5 * (v_bot0 + v_bot1)
+        else:
+            u00_c = uc0
+            v00_c = vc0
+            u01_c = uc0
+            v01_c = vc0
+            u10_c = uc0
+            v10_c = vc0
+            u11_c = uc0
+            v11_c = vc0
+
+        yn00 = (y00_c - y_off) * y_inv
+        yn01 = (y01_c - y_off) * y_inv
+        yn10 = (y10_c - y_off) * y_inv
+        yn11 = (y11_c - y_off) * y_inv
+
+        cb00 = (u00_c - c_off) * c_inv
+        cr00 = (v00_c - c_off) * c_inv
+        cb01 = (u01_c - c_off) * c_inv
+        cr01 = (v01_c - c_off) * c_inv
+        cb10 = (u10_c - c_off) * c_inv
+        cr10 = (v10_c - c_off) * c_inv
+        cb11 = (u11_c - c_off) * c_inv
+        cr11 = (v11_c - c_off) * c_inv
+
+        k_rv = 1.5748
+        k_gu = -0.1873242729306487
+        k_gv = -0.4681242729306487
+        k_bu = 1.8556
+
+        r00 = tl.minimum(tl.maximum(yn00 + k_rv * cr00, 0.0), 1.0).to(tl.float16)
+        g00 = tl.minimum(tl.maximum(yn00 + k_gu * cb00 + k_gv * cr00, 0.0), 1.0).to(tl.float16)
+        b00 = tl.minimum(tl.maximum(yn00 + k_bu * cb00, 0.0), 1.0).to(tl.float16)
+
+        r01 = tl.minimum(tl.maximum(yn01 + k_rv * cr01, 0.0), 1.0).to(tl.float16)
+        g01 = tl.minimum(tl.maximum(yn01 + k_gu * cb01 + k_gv * cr01, 0.0), 1.0).to(tl.float16)
+        b01 = tl.minimum(tl.maximum(yn01 + k_bu * cb01, 0.0), 1.0).to(tl.float16)
+
+        r10 = tl.minimum(tl.maximum(yn10 + k_rv * cr10, 0.0), 1.0).to(tl.float16)
+        g10 = tl.minimum(tl.maximum(yn10 + k_gu * cb10 + k_gv * cr10, 0.0), 1.0).to(tl.float16)
+        b10 = tl.minimum(tl.maximum(yn10 + k_bu * cb10, 0.0), 1.0).to(tl.float16)
+
+        r11 = tl.minimum(tl.maximum(yn11 + k_rv * cr11, 0.0), 1.0).to(tl.float16)
+        g11 = tl.minimum(tl.maximum(yn11 + k_gu * cb11 + k_gv * cr11, 0.0), 1.0).to(tl.float16)
+        b11 = tl.minimum(tl.maximum(yn11 + k_bu * cb11, 0.0), 1.0).to(tl.float16)
+
+        tl.store(out_b + 0 * stride_out_c + y0 * stride_out_h + x0 * stride_out_w, r00, mask=mask)
+        tl.store(out_b + 0 * stride_out_c + y0 * stride_out_h + x1 * stride_out_w, r01, mask=mask)
+        tl.store(out_b + 0 * stride_out_c + y1 * stride_out_h + x0 * stride_out_w, r10, mask=mask)
+        tl.store(out_b + 0 * stride_out_c + y1 * stride_out_h + x1 * stride_out_w, r11, mask=mask)
+
+        tl.store(out_b + 1 * stride_out_c + y0 * stride_out_h + x0 * stride_out_w, g00, mask=mask)
+        tl.store(out_b + 1 * stride_out_c + y0 * stride_out_h + x1 * stride_out_w, g01, mask=mask)
+        tl.store(out_b + 1 * stride_out_c + y1 * stride_out_h + x0 * stride_out_w, g10, mask=mask)
+        tl.store(out_b + 1 * stride_out_c + y1 * stride_out_h + x1 * stride_out_w, g11, mask=mask)
+
+        tl.store(out_b + 2 * stride_out_c + y0 * stride_out_h + x0 * stride_out_w, b00, mask=mask)
+        tl.store(out_b + 2 * stride_out_c + y0 * stride_out_h + x1 * stride_out_w, b01, mask=mask)
+        tl.store(out_b + 2 * stride_out_c + y1 * stride_out_h + x0 * stride_out_w, b10, mask=mask)
+        tl.store(out_b + 2 * stride_out_c + y1 * stride_out_h + x1 * stride_out_w, b11, mask=mask)
+
+    @triton.jit
     def _rgb_to_p010le_triton_kernel(
         rgb_ptr,
         out_ptr,
@@ -77,6 +260,8 @@ if _HAS_TRITON:
         H, W,
         BLOCK_X: tl.constexpr,
         BLOCK_Y: tl.constexpr,
+        CHROMA_LEFT: tl.constexpr = False,
+        USE_DITHER: tl.constexpr = False,
     ):
         pid_x = tl.program_id(axis=0)
         pid_y = tl.program_id(axis=1)
@@ -114,7 +299,7 @@ if _HAS_TRITON:
         b10 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x0 * stride_rgb_w, mask=mask).to(tl.float32)
         b11 = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + x1 * stride_rgb_w, mask=mask).to(tl.float32)
 
-        # Khử NaN (NaN == NaN là False theo IEEE-754) về 0.0 trước khi clamp [0.0, 1.0]
+        # Sanitize IEEE-754 NaNs before [0, 1] gamut clamping
         r00 = tl.where(r00 == r00, r00, 0.0)
         r01 = tl.where(r01 == r01, r01, 0.0)
         r10 = tl.where(r10 == r10, r10, 0.0)
@@ -128,8 +313,6 @@ if _HAS_TRITON:
         b10 = tl.where(b10 == b10, b10, 0.0)
         b11 = tl.where(b11 == b11, b11, 0.0)
 
-        # Clamp out-of-gamut SR model RGB overshoots (< 0.0 or > 1.0) in registers before signed BT.709 matrix
-        # so Cb/Cr channels never cross-bleed on bright Sakuga highlights (matches PNG mode clamp(0.0, 1.0))
         r00 = tl.minimum(tl.maximum(r00, 0.0), 1.0)
         r01 = tl.minimum(tl.maximum(r01, 0.0), 1.0)
         r10 = tl.minimum(tl.maximum(r10, 0.0), 1.0)
@@ -149,6 +332,28 @@ if _HAS_TRITON:
         y_val10 = 64.0 + 186.2376 * r10 + 626.5152 * g10 + 63.2472 * b10
         y_val11 = 64.0 + 186.2376 * r11 + 626.5152 * g11 + 63.2472 * b11
 
+        if USE_DITHER:
+            xf0 = x0.to(tl.float32)
+            xf1 = x1.to(tl.float32)
+            yf0 = y0.to(tl.float32)
+            yf1 = y1.to(tl.float32)
+            p00 = 0.06711056 * xf0 + 0.00583715 * yf0
+            p01 = 0.06711056 * xf1 + 0.00583715 * yf0
+            p10 = 0.06711056 * xf0 + 0.00583715 * yf1
+            p11 = 0.06711056 * xf1 + 0.00583715 * yf1
+            q00 = 52.9829189 * (p00 - tl.extra.cuda.libdevice.floor(p00))
+            q01 = 52.9829189 * (p01 - tl.extra.cuda.libdevice.floor(p01))
+            q10 = 52.9829189 * (p10 - tl.extra.cuda.libdevice.floor(p10))
+            q11 = 52.9829189 * (p11 - tl.extra.cuda.libdevice.floor(p11))
+            d00 = ((q00 - tl.extra.cuda.libdevice.floor(q00)) - 0.5) * 0.998
+            d01 = ((q01 - tl.extra.cuda.libdevice.floor(q01)) - 0.5) * 0.998
+            d10 = ((q10 - tl.extra.cuda.libdevice.floor(q10)) - 0.5) * 0.998
+            d11 = ((q11 - tl.extra.cuda.libdevice.floor(q11)) - 0.5) * 0.998
+            y_val00 = y_val00 + d00
+            y_val01 = y_val01 + d01
+            y_val10 = y_val10 + d10
+            y_val11 = y_val11 + d11
+
         y_r00 = tl.extra.cuda.libdevice.rint(y_val00)
         y_r01 = tl.extra.cuda.libdevice.rint(y_val01)
         y_r10 = tl.extra.cuda.libdevice.rint(y_val10)
@@ -164,13 +369,38 @@ if _HAS_TRITON:
         tl.store(out_b + y1 * stride_out_h + x0 * stride_out_w, y_p010_10, mask=mask)
         tl.store(out_b + y1 * stride_out_h + x1 * stride_out_w, y_p010_11, mask=mask)
 
-        # 2. 2x2 Chroma Subsampling & BT.709 Chroma calculation [64..960]
-        rs = 0.25 * (r00 + r01 + r10 + r11)
-        gs = 0.25 * (g00 + g01 + g10 + g11)
-        bs = 0.25 * (b00 + b01 + b10 + b11)
+        # 2. Chroma Subsampling ('left' (0.0, 0.5) [1,2,1]/4 x [1,1]/2 vs 'center' 2x2 box)
+        if CHROMA_LEFT:
+            xm1 = tl.maximum(x0 - 1, 0)
+            r0m = tl.load(rgb_b + 0 * stride_rgb_c + y0 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            r1m = tl.load(rgb_b + 0 * stride_rgb_c + y1 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            g0m = tl.load(rgb_b + 1 * stride_rgb_c + y0 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            g1m = tl.load(rgb_b + 1 * stride_rgb_c + y1 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            b0m = tl.load(rgb_b + 2 * stride_rgb_c + y0 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            b1m = tl.load(rgb_b + 2 * stride_rgb_c + y1 * stride_rgb_h + xm1 * stride_rgb_w, mask=mask).to(tl.float32)
+            r0m = tl.minimum(tl.maximum(tl.where(r0m == r0m, r0m, 0.0), 0.0), 1.0)
+            r1m = tl.minimum(tl.maximum(tl.where(r1m == r1m, r1m, 0.0), 0.0), 1.0)
+            g0m = tl.minimum(tl.maximum(tl.where(g0m == g0m, g0m, 0.0), 0.0), 1.0)
+            g1m = tl.minimum(tl.maximum(tl.where(g1m == g1m, g1m, 0.0), 0.0), 1.0)
+            b0m = tl.minimum(tl.maximum(tl.where(b0m == b0m, b0m, 0.0), 0.0), 1.0)
+            b1m = tl.minimum(tl.maximum(tl.where(b1m == b1m, b1m, 0.0), 0.0), 1.0)
+            rs = 0.125 * (r0m + r1m) + 0.25 * (r00 + r10) + 0.125 * (r01 + r11)
+            gs = 0.125 * (g0m + g1m) + 0.25 * (g00 + g10) + 0.125 * (g01 + g11)
+            bs = 0.125 * (b0m + b1m) + 0.25 * (b00 + b10) + 0.125 * (b01 + b11)
+        else:
+            rs = 0.25 * (r00 + r01 + r10 + r11)
+            gs = 0.25 * (g00 + g01 + g10 + g11)
+            bs = 0.25 * (b00 + b01 + b10 + b11)
 
         u_val = 512.0 - 102.656512 * rs - 345.343488 * gs + 448.0 * bs
         v_val = 512.0 + 448.0 * rs - 406.921088 * gs - 41.078912 * bs
+
+        if USE_DITHER:
+            pc = 0.06711056 * offs_x[None, :].to(tl.float32) + 0.00583715 * offs_y[:, None].to(tl.float32)
+            qc = 52.9829189 * (pc - tl.extra.cuda.libdevice.floor(pc))
+            dc = ((qc - tl.extra.cuda.libdevice.floor(qc)) - 0.5) * 0.998
+            u_val = u_val + dc
+            v_val = v_val - dc
 
         u_r = tl.extra.cuda.libdevice.rint(u_val)
         v_r = tl.extra.cuda.libdevice.rint(v_val)
@@ -184,6 +414,7 @@ if _HAS_TRITON:
         tl.store(out_b + uv_row * stride_out_h + x1 * stride_out_w, v_p010, mask=mask)
 else:
     _nhwc_u8_to_nchw_fp16_norm_kernel = None
+    _yuv420_to_nchw_fp16_bt709_kernel = None
     _rgb_to_p010le_triton_kernel = None
 
 
@@ -246,15 +477,127 @@ def _nhwc_u8_to_nchw_fp16_norm(
     return out_buf
 
 
+def _yuv420_to_nchw_fp16_bt709(
+    yuv_semi: torch.Tensor,
+    is_p010: bool,
+    out_nchw_fp16: Optional[torch.Tensor] = None,
+    chroma_siting: str = "left",
+    out_dtype: torch.dtype = torch.float16,
+    use_triton: Optional[bool] = None,
+) -> torch.Tensor:
+    """Convert semi-planar P010LE (int16) or NV12 (uint8) [B, 3*H//2, W] into BT.709 RGB [B, 3, H, W]."""
+    if yuv_semi.ndim != 3 or (yuv_semi.shape[1] % 3) != 0:
+        raise ValueError(f"Expected semi-planar YUV420 (B, 3*H//2, W), got shape={tuple(yuv_semi.shape)}")
+
+    B, semi_h, W = yuv_semi.shape
+    H = (semi_h * 2) // 3
+    if out_nchw_fp16 is None:
+        out_buf = torch.empty((B, 3, H, W), dtype=out_dtype, device=yuv_semi.device)
+    else:
+        out_buf = out_nchw_fp16
+
+    if B == 0 or H == 0 or W == 0:
+        return out_buf
+
+    is_left = str(chroma_siting or "left").strip().lower() == "left"
+    should_use_triton = (
+        bool(use_triton)
+        if use_triton is not None
+        else (_HAS_TRITON and yuv_semi.is_cuda and out_buf.is_cuda and out_buf.dtype == torch.float16)
+    )
+    if (
+        should_use_triton
+        and _HAS_TRITON
+        and _yuv420_to_nchw_fp16_bt709_kernel is not None
+        and out_buf.dtype == torch.float16
+    ):
+        BLOCK_X = 16
+        BLOCK_Y = 16
+        grid = (triton.cdiv(W // 2, BLOCK_X), triton.cdiv(H // 2, BLOCK_Y), B)
+        _yuv420_to_nchw_fp16_bt709_kernel[grid](
+            yuv_semi,
+            out_buf,
+            yuv_semi.stride(0), yuv_semi.stride(1), yuv_semi.stride(2),
+            out_buf.stride(0), out_buf.stride(1), out_buf.stride(2), out_buf.stride(3),
+            H, W,
+            IS_P010=bool(is_p010),
+            CHROMA_LEFT=is_left,
+            BLOCK_X=BLOCK_X,
+            BLOCK_Y=BLOCK_Y,
+        )
+        return out_buf
+
+    if is_p010:
+        f_all = (yuv_semi.to(torch.int32) & 0xFFFF).to(torch.float32) * (1.0 / 64.0)
+        y_off, y_inv = 64.0, 1.0 / 876.0
+        c_off, c_inv = 512.0, 1.0 / 896.0
+    else:
+        f_all = yuv_semi.to(torch.float32)
+        y_off, y_inv = 16.0, 1.0 / 219.0
+        c_off, c_inv = 128.0, 1.0 / 224.0
+
+    y_plane = (f_all[:, :H, :] - y_off) * y_inv
+    u_sub = f_all[:, H:, 0::2]
+    v_sub = f_all[:, H:, 1::2]
+
+    if is_left:
+        u_prev = torch.cat((u_sub[:, :1, :], u_sub[:, :-1, :]), dim=1)
+        u_next_y = torch.cat((u_sub[:, 1:, :], u_sub[:, -1:, :]), dim=1)
+        v_prev = torch.cat((v_sub[:, :1, :], v_sub[:, :-1, :]), dim=1)
+        v_next_y = torch.cat((v_sub[:, 1:, :], v_sub[:, -1:, :]), dim=1)
+
+        u_top = 0.75 * u_sub + 0.25 * u_prev
+        u_bot = 0.75 * u_sub + 0.25 * u_next_y
+        v_top = 0.75 * v_sub + 0.25 * v_prev
+        v_bot = 0.75 * v_sub + 0.25 * v_next_y
+
+        u_top_r = torch.cat((u_top[:, :, 1:], u_top[:, :, -1:]), dim=2)
+        u_bot_r = torch.cat((u_bot[:, :, 1:], u_bot[:, :, -1:]), dim=2)
+        v_top_r = torch.cat((v_top[:, :, 1:], v_top[:, :, -1:]), dim=2)
+        v_bot_r = torch.cat((v_bot[:, :, 1:], v_bot[:, :, -1:]), dim=2)
+
+        u_full = torch.empty((B, H, W), dtype=torch.float32, device=yuv_semi.device)
+        v_full = torch.empty((B, H, W), dtype=torch.float32, device=yuv_semi.device)
+        u_full[:, 0::2, 0::2] = u_top
+        u_full[:, 0::2, 1::2] = 0.5 * (u_top + u_top_r)
+        u_full[:, 1::2, 0::2] = u_bot
+        u_full[:, 1::2, 1::2] = 0.5 * (u_bot + u_bot_r)
+        v_full[:, 0::2, 0::2] = v_top
+        v_full[:, 0::2, 1::2] = 0.5 * (v_top + v_top_r)
+        v_full[:, 1::2, 0::2] = v_bot
+        v_full[:, 1::2, 1::2] = 0.5 * (v_bot + v_bot_r)
+    else:
+        u_full = u_sub.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
+        v_full = v_sub.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
+
+    cb = (u_full - c_off) * c_inv
+    cr = (v_full - c_off) * c_inv
+    r = torch.clamp(y_plane + 1.5748 * cr, 0.0, 1.0)
+    g = torch.clamp(y_plane - 0.1873242729306487 * cb - 0.4681242729306487 * cr, 0.0, 1.0)
+    b = torch.clamp(y_plane + 1.8556 * cb, 0.0, 1.0)
+
+    out_buf[:, 0].copy_(r.to(out_buf.dtype))
+    out_buf[:, 1].copy_(g.to(out_buf.dtype))
+    out_buf[:, 2].copy_(b.to(out_buf.dtype))
+    return out_buf
+
+
 # 1. GPU COLOR CONVERTER P010LE (BT.709 10-BIT LIMITED RANGE)
 
 class GPUColorConverterP010LE:
     """Convert RGB [B, 3, H, W] tensors in [0.0, 1.0] to ITU-R BT.709 limited-range P010LE."""
 
-    def __init__(self, device: Optional[torch.device] = None):
+    def __init__(
+        self,
+        device: Optional[torch.device] = None,
+        chroma_siting: str = "center",
+        dither: bool = False,
+    ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
+        self.chroma_siting = str(chroma_siting or "center").strip().lower()
+        self.dither = bool(dither)
         self._p010_ring: List[torch.Tensor] = []
         self._p010_ring_slot: int = 0
         self._has_triton = False
@@ -278,9 +621,20 @@ class GPUColorConverterP010LE:
             self._p010_ring_slot = 0
 
     @staticmethod
-    def _p010le_core(rgb_slice: torch.Tensor) -> torch.Tensor:
+    def _ign_dither_grid(H: int, W: int, device: torch.device) -> torch.Tensor:
+        yy = torch.arange(H, dtype=torch.float32, device=device)[:, None]
+        xx = torch.arange(W, dtype=torch.float32, device=device)[None, :]
+        p = 0.06711056 * xx + 0.00583715 * yy
+        q = 52.9829189 * (p - torch.floor(p))
+        return ((q - torch.floor(q)) - 0.5) * 0.998
+
+    @staticmethod
+    def _p010le_core(
+        rgb_slice: torch.Tensor,
+        chroma_siting: str = "center",
+        dither: bool = False,
+    ) -> torch.Tensor:
         B, _, H, W = rgb_slice.shape
-        # Clamp RGB overshoots and NaNs to [0, 1] before BT.709 matrix transform to avoid chroma leak
         out_fp16 = torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0)
         rgb_clamped = out_fp16.clamp_(0.0, 1.0)
         r = rgb_clamped[:, 0]
@@ -292,10 +646,20 @@ class GPUColorConverterP010LE:
         y.add_(r, alpha=186.2376)
         y.add_(g, alpha=626.5152)
         y.add_(b, alpha=63.2472)
+        if dither:
+            y = y + GPUColorConverterP010LE._ign_dither_grid(H, W, rgb_slice.device).unsqueeze(0)
         y_p010 = (torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32) << 6).to(torch.int16)
 
-        # 2. 4:2:0 chroma subsampling before BT.709 UV transform [64..960]
-        rgb_sub = F.avg_pool2d(rgb_clamped, kernel_size=2, stride=2)
+        # 2. 4:2:0 chroma subsampling ('left' (0.0, 0.5) [1,2,1]/4 x [1,1]/2 vs 'center' 2x2 box)
+        if str(chroma_siting or "center").strip().lower() == "left":
+            vert_avg = 0.5 * (rgb_clamped[:, :, 0::2, :] + rgb_clamped[:, :, 1::2, :])
+            mid = vert_avg[:, :, :, 0::2]
+            right = vert_avg[:, :, :, 1::2]
+            left_pad = torch.cat((vert_avg[:, :, :, :1], vert_avg[:, :, :, 1:-1:2]), dim=3)
+            rgb_sub = 0.25 * left_pad + 0.50 * mid + 0.25 * right
+        else:
+            rgb_sub = F.avg_pool2d(rgb_clamped, kernel_size=2, stride=2)
+
         rs = rgb_sub[:, 0]
         gs = rgb_sub[:, 1]
         bs = rgb_sub[:, 2]
@@ -310,6 +674,11 @@ class GPUColorConverterP010LE:
         v.add_(gs, alpha=-406.921088)
         v.add_(bs, alpha=-41.078912)
 
+        if dither:
+            dc = GPUColorConverterP010LE._ign_dither_grid(H // 2, W // 2, rgb_slice.device).unsqueeze(0)
+            u = u + dc
+            v = v - dc
+
         u_p010 = (torch.clamp(torch.round(u), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
         v_p010 = (torch.clamp(torch.round(v), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
 
@@ -319,7 +688,7 @@ class GPUColorConverterP010LE:
 
     @torch.inference_mode()
     def _convert_slice(self, rgb_slice: torch.Tensor) -> torch.Tensor:
-        return self._p010le_core(rgb_slice)
+        return self._p010le_core(rgb_slice, chroma_siting=self.chroma_siting, dither=self.dither)
 
     @torch.inference_mode()
     def rgb_to_p010le(self, rgb_tensor: torch.Tensor, slot: Optional[int] = None) -> torch.Tensor:
@@ -342,7 +711,9 @@ class GPUColorConverterP010LE:
                 rgb_tensor.stride(0), rgb_tensor.stride(1), rgb_tensor.stride(2), rgb_tensor.stride(3),
                 out_buf.stride(0), out_buf.stride(1), out_buf.stride(2),
                 H, W,
-                BLOCK_X=BLOCK_X, BLOCK_Y=BLOCK_Y
+                BLOCK_X=BLOCK_X, BLOCK_Y=BLOCK_Y,
+                CHROMA_LEFT=(self.chroma_siting == "left"),
+                USE_DITHER=self.dither,
             )
             return out_buf
 
@@ -358,28 +729,54 @@ class GPUColorConverterP010LE:
 
 
 class SRVGGNetCompactTRTWrapper(nn.Module):
-    """Hybrid-precision wrapper running conv backbone in FP16 and residual/bicubic tail in FP32."""
+    """Hybrid-precision wrapper collapsing SRVGG 4x->2x via Catmull-Rom AA (zero 8K intermediate tensors)."""
     def __init__(self, base_srvgg_model: nn.Module, scale: Optional[float] = None):
         super().__init__()
         self.body = base_srvgg_model.body
         self.upsampler = base_srvgg_model.upsampler
         if hasattr(base_srvgg_model, "upscale"):
-            self.upscale = base_srvgg_model.upscale
+            self.upscale = int(base_srvgg_model.upscale)
         else:
             self.upscale = 4 if isinstance(self.upsampler, nn.PixelShuffle) and self.upsampler.upscale_factor == 4 else 2
         self.target_scale = float(scale) if scale is not None else 2.0
+        self._use_collapsed_aa2x = (
+            self.upscale == 4
+            and abs(self.target_scale - 2.0) <= 1e-4
+            and isinstance(self.upsampler, nn.PixelShuffle)
+            and int(self.upsampler.upscale_factor) == 4
+        )
+        if self._use_collapsed_aa2x:
+            from src.cuda_engine import build_collapsed_4x_to_2x_buffers
+            fw, bw = build_collapsed_4x_to_2x_buffers(b_param=0.0, c_param=0.5)
+            ref_p = next(base_srvgg_model.parameters(), None)
+            if ref_p is not None:
+                fw = fw.to(device=ref_p.device, dtype=ref_p.dtype)
+                bw = bw.to(device=ref_p.device, dtype=ref_p.dtype)
+            self.register_buffer("aa_feat_weight", fw, persistent=False)
+            self.register_buffer("aa_base_weight", bw, persistent=False)
 
     def _tail_upsample(self, feat_slice: torch.Tensor, x_slice: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+        if self._use_collapsed_aa2x:
+            from src.cuda_engine import collapsed_4x_to_2x_forward
+            return collapsed_4x_to_2x_forward(
+                feat_slice.float(),
+                x_slice.float(),
+                self.aa_feat_weight.float(),
+                self.aa_base_weight.float(),
+            ).to(out_dtype)
+
         out = self.upsampler(feat_slice)
         base = F.interpolate(x_slice.float(), scale_factor=float(self.upscale), mode="nearest")
         out_f32 = out.float() + base
 
         if abs(float(self.upscale) - self.target_scale) > 1e-4:
+            scale_ratio = self.target_scale / float(self.upscale)
             out_target = F.interpolate(
                 out_f32,
-                scale_factor=self.target_scale / float(self.upscale),
+                scale_factor=scale_ratio,
                 mode="bicubic",
                 align_corners=False,
+                antialias=(scale_ratio < 1.0),
             )
         else:
             out_target = out_f32
@@ -391,8 +788,11 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
         for layer in self.body:
             feat = layer(feat)
 
+        if self._use_collapsed_aa2x:
+            from src.cuda_engine import collapsed_4x_to_2x_forward
+            return collapsed_4x_to_2x_forward(feat, x, self.aa_feat_weight, self.aa_base_weight).to(out_dtype)
+
         B, _, H, W = x.shape
-        # Micro-slice 8K tail across 2 frames on Full HD+ batches outside ONNX export
         if (not torch.onnx.is_in_onnx_export()) and B > 2 and self.upscale >= 4 and (H * W) >= (540 * 960):
             out_h = int(round(H * self.target_scale))
             out_w = int(round(W * self.target_scale))
@@ -564,8 +964,259 @@ class _PipeDrainWorker:
             self._thread.join(timeout=3.0)
 
 
+def _infer_frame_luma_hw(arr: np.ndarray) -> Tuple[int, int]:
+    """Infer (H, W) luma dimensions from 2D semi-planar YUV420, NHWC, or NCHW frame arrays."""
+    if arr.ndim == 2:
+        return (int(arr.shape[0]) * 2) // 3, int(arr.shape[1])
+    if arr.ndim == 3 and arr.shape[0] == 3 and arr.shape[-1] != 3:
+        return int(arr.shape[1]), int(arr.shape[2])
+    return int(arr.shape[0]), int(arr.shape[1])
+
+
+def _bound_live_cyclic_memo(
+    distinct_frames: Sequence[np.ndarray],
+    frame_to_distinct: Sequence[int],
+    max_memo_frames: int = 64,
+) -> Tuple[List[np.ndarray], List[int]]:
+    """Bound concurrent live cyclic memo entries (<= max_memo_frames) via Belady's OPT with monotonic IDs."""
+    cap = max(1, int(max_memo_frames))
+    num_u = len(frame_to_distinct)
+    if num_u <= 1 or len(distinct_frames) <= cap:
+        return list(distinct_frames), list(frame_to_distinct)
+
+    occ_deques: dict[int, collections.deque[int]] = {}
+    for pos, d_idx in enumerate(frame_to_distinct):
+        occ_deques.setdefault(int(d_idx), collections.deque()).append(pos)
+
+    if sum(1 for dq in occ_deques.values() if len(dq) > 1) <= cap:
+        return list(distinct_frames), list(frame_to_distinct)
+
+    live_tokens: dict[int, int] = {}
+    active_token_for_orig: dict[int, int] = {}
+    token_source_frame: dict[int, np.ndarray] = {}
+    raw_tokens: List[int] = []
+    next_tok = 0
+
+    for u_idx, raw_d in enumerate(frame_to_distinct):
+        orig_d = int(raw_d)
+        dq = occ_deques[orig_d]
+        dq.popleft()
+
+        if orig_d in active_token_for_orig:
+            tok = active_token_for_orig[orig_d]
+        else:
+            tok = next_tok
+            next_tok += 1
+            active_token_for_orig[orig_d] = tok
+            token_source_frame[tok] = distinct_frames[orig_d]
+
+        raw_tokens.append(tok)
+
+        if not dq:
+            live_tokens.pop(orig_d, None)
+            active_token_for_orig.pop(orig_d, None)
+        else:
+            next_use = dq[0]
+            if orig_d in live_tokens:
+                live_tokens[orig_d] = next_use
+            elif len(live_tokens) < cap:
+                live_tokens[orig_d] = next_use
+            else:
+                farthest_orig, farthest_pos = max(live_tokens.items(), key=lambda kv: kv[1])
+                if next_use >= farthest_pos:
+                    # Current frame's next use is farthest: split its future occurrences instead of caching now
+                    active_token_for_orig.pop(orig_d, None)
+                else:
+                    # Evict farthest live entry and split its remaining future occurrences
+                    live_tokens.pop(farthest_orig, None)
+                    active_token_for_orig.pop(farthest_orig, None)
+                    live_tokens[orig_d] = next_use
+
+    # Re-index tokens in strict first-appearance order so batching & _drain_ready_frames stay monotonic
+    tok_to_new_d: dict[int, int] = {}
+    new_distinct: List[np.ndarray] = []
+    new_mapping: List[int] = []
+    for tok in raw_tokens:
+        nd = tok_to_new_d.get(tok)
+        if nd is None:
+            nd = len(new_distinct)
+            tok_to_new_d[tok] = nd
+            new_distinct.append(token_source_frame[tok])
+        new_mapping.append(nd)
+    return new_distinct, new_mapping
+
+
+class _NoOpStdin:
+    def close(self) -> None:
+        pass
+
+
+class _InProcessPyAVNVENCEncoder:
+    """In-process PyAV hevc_nvenc p010le MP4 writer eliminating OS pipe writes and ffmpeg.exe spawns."""
+
+    def __init__(
+        self,
+        output_mp4_path: str,
+        fps_str: str = "24000/1001",
+        width: int = 3840,
+        height: int = 2160,
+        multipass: Optional[str] = None,
+    ):
+        import fractions
+        import av
+
+        if HEVC_ENCODER != "hevc_nvenc":
+            raise ValueError(f"In-process PyAV encoder requires hevc_nvenc, got {HEVC_ENCODER}")
+        if "hevc_nvenc" not in getattr(av, "codecs_available", set()):
+            raise RuntimeError("hevc_nvenc unavailable in PyAV build")
+
+        if "/" in str(fps_str):
+            num_s, den_s = str(fps_str).split("/", 1)
+            fps_num = max(1, int(round(float(num_s))))
+            fps_den = max(1, int(round(float(den_s))))
+        else:
+            fps_f = float(fps_str)
+            if abs(fps_f - 23.976) < 0.02:
+                fps_num, fps_den = 24000, 1001
+            else:
+                fps_num, fps_den = max(1, int(round(fps_f * 1000))), 1000
+
+        self.output_mp4_path = output_mp4_path
+        self.width = int(width)
+        self.height = int(height)
+        self._fps_frac = fractions.Fraction(fps_num, fps_den)
+        self._time_base = fractions.Fraction(fps_den, fps_num)
+        self._pts_counter = 0
+        self._closed = False
+        self._aborted = False
+        self._rc: Optional[int] = None
+        self.stdin = _NoOpStdin()
+        self.stderr = None
+        self._stderr_tail: collections.deque[str] = collections.deque(maxlen=16)
+
+        rate_args = get_hevc_rate_args(bitrate="28M", multipass=multipass)
+        parsed_opts: dict[str, str] = {"profile": str(HEVC_PROFILE)}
+        idx = 0
+        while idx < len(rate_args):
+            tok = str(rate_args[idx])
+            if tok.startswith("-") and (idx + 1) < len(rate_args):
+                opt_key = tok.lstrip("-")
+                opt_val = str(rate_args[idx + 1])
+                if opt_key not in ("b:v",):
+                    parsed_opts[opt_key] = opt_val
+                idx += 2
+            else:
+                idx += 1
+
+        self._av = av
+        self._container = av.open(
+            output_mp4_path,
+            mode="w",
+            options={"video_track_timescale": str(fps_num)},
+        )
+        try:
+            stream = self._container.add_stream("hevc_nvenc", rate=self._fps_frac)
+            stream.width = self.width
+            stream.height = self.height
+            stream.pix_fmt = HEVC_PIX_FMT
+            stream.time_base = self._time_base
+            # Explicitly zero bit_rate on both stream and codec_context so libavcodec never defaults to 2 Mbps
+            stream.bit_rate = 0
+            stream.codec_context.bit_rate = 0
+            stream.codec_context.color_range = 1
+            stream.codec_context.colorspace = 1
+            stream.codec_context.color_primaries = 1
+            stream.codec_context.color_trc = 1
+            stream.codec_context.codec_tag = HEVC_TAG
+            stream.options = dict(parsed_opts)
+            stream.codec_context.open()
+            if stream.options:
+                raise ValueError(f"Unconsumed PyAV hevc_nvenc options: {stream.options}")
+            self._stream = stream
+        except Exception:
+            try:
+                self._container.close()
+            except Exception:
+                pass
+            if os.path.exists(output_mp4_path):
+                try:
+                    os.remove(output_mp4_path)
+                except OSError:
+                    pass
+            raise
+
+    def encode_p010le_frame(self, buf_arr: np.ndarray, repeats: int = 1) -> None:
+        """Encode semi-planar P010LE frame with distinct AVFrame instances per repeat (safe for rc-lookahead=32)."""
+        if self._closed or self._aborted or repeats <= 0:
+            return
+        H, W = self.height, self.width
+        row_bytes = W * 2
+        y_mv = memoryview(buf_arr[:H, :]).cast("B")
+        uv_mv = memoryview(buf_arr[H:, :]).cast("B")
+        av_mod = self._av
+        for _ in range(int(repeats)):
+            fr = av_mod.VideoFrame(W, H, "p010le")
+            p0 = fr.planes[0]
+            p1 = fr.planes[1]
+            if p0.line_size == row_bytes:
+                p0.update(y_mv)
+            else:
+                dst0 = np.frombuffer(p0, dtype=np.uint8).reshape(H, p0.line_size)
+                dst0[:, :row_bytes] = np.frombuffer(y_mv, dtype=np.uint8).reshape(H, row_bytes)
+            if p1.line_size == row_bytes:
+                p1.update(uv_mv)
+            else:
+                dst1 = np.frombuffer(p1, dtype=np.uint8).reshape(H // 2, p1.line_size)
+                dst1[:, :row_bytes] = np.frombuffer(uv_mv, dtype=np.uint8).reshape(H // 2, row_bytes)
+            # Assign strictly monotonic PTS on a fresh AVFrame (never mutate an in-flight lookahead AVFrame)
+            fr.pts = self._pts_counter
+            self._pts_counter += 1
+            fr.time_base = self._time_base
+            fr.color_range = 1
+            fr.colorspace = 1
+            fr.color_primaries = 1
+            fr.color_trc = 1
+            for pkt in self._stream.encode(fr):
+                self._container.mux(pkt)
+
+    def poll(self) -> Optional[int]:
+        return self._rc
+
+    def wait(self, timeout: Optional[float] = None) -> int:
+        if self._closed:
+            return 0 if self._rc is None else self._rc
+        self._closed = True
+        try:
+            if not self._aborted:
+                for pkt in self._stream.encode(None):
+                    self._container.mux(pkt)
+            self._container.close()
+            self._rc = 1 if self._aborted else 0
+        except Exception as exc:
+            self._stderr_tail.append(str(exc))
+            try:
+                self._container.close()
+            except Exception:
+                pass
+            self._rc = 1
+        return self._rc
+
+    def terminate(self) -> None:
+        self._aborted = True
+        if not self._closed:
+            self._closed = True
+            self._rc = 1
+            try:
+                self._container.close()
+            except Exception:
+                pass
+
+    def kill(self) -> None:
+        self.terminate()
+
+
 class DoubleBufferedPipeUpscaler:
-    """Three-stream overlapped H2D/Compute/D2H upscaler writing directly to an FFmpeg NVENC pipe."""
+    """Three-stream overlapped H2D/Compute/D2H upscaler writing to in-process PyAV or FFmpeg NVENC."""
     def __init__(
         self,
         model_or_engine: Any,
@@ -574,6 +1225,9 @@ class DoubleBufferedPipeUpscaler:
         input_hw: Tuple[int, int] = (1080, 1920),
         scale: int = 2,
         enable_micro_timings: bool = True,
+        chroma_siting: str = "left",
+        dither: bool = True,
+        max_memo_frames: int = 64,
     ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -581,7 +1235,14 @@ class DoubleBufferedPipeUpscaler:
         self.batch_size = max(1, batch_size)
         self.model = model_or_engine
         self.scale = max(1, int(scale))
-        self.color_conv = GPUColorConverterP010LE(self.device)
+        self.chroma_siting = str(chroma_siting or "left").strip().lower()
+        self.dither = bool(dither)
+        self.max_memo_frames = max(1, int(max_memo_frames))
+        self.color_conv = GPUColorConverterP010LE(
+            self.device,
+            chroma_siting=self.chroma_siting,
+            dither=self.dither,
+        )
         self.input_hw = (0, 0)
         self.output_hw = (0, 0)
         self.enable_micro_timings = enable_micro_timings
@@ -598,8 +1259,11 @@ class DoubleBufferedPipeUpscaler:
 
         self.host_in_pins: List[torch.Tensor] = []
         self.host_out_pins: List[torch.Tensor] = []
+        self.host_yuv_pins: List[torch.Tensor] = []
         self.gpu_in_ring: List[torch.Tensor] = []
         self.gpu_nhwc_ring: List[torch.Tensor] = []
+        self.gpu_yuv_ring: List[torch.Tensor] = []
+        self._yuv_ring_dtype: Optional[torch.dtype] = None
         self._micro_event_pool: List[Tuple[Any, ...]] = []
         self._sync_event_pool: List[Any] = []
         self.last_first_rgb_small: Optional[np.ndarray] = None
@@ -652,7 +1316,32 @@ class DoubleBufferedPipeUpscaler:
         else:
             self.gpu_in_ring = []
             self.gpu_nhwc_ring = []
+        self.host_yuv_pins = []
+        self.gpu_yuv_ring = []
+        self._yuv_ring_dtype = None
         return self.output_hw
+
+    def _ensure_yuv_rings(self, in_h: int, in_w: int, target_dtype: torch.dtype) -> None:
+        semi_h = (int(in_h) * 3) // 2
+        if (
+            len(self.host_yuv_pins) == 2
+            and self._yuv_ring_dtype == target_dtype
+            and self.host_yuv_pins[0].shape == (self.batch_size, semi_h, int(in_w))
+        ):
+            return
+        pin = self.device.type == "cuda"
+        self.host_yuv_pins = [
+            torch.empty((self.batch_size, semi_h, int(in_w)), dtype=target_dtype, pin_memory=pin)
+            for _ in range(2)
+        ]
+        if self.device.type == "cuda":
+            self.gpu_yuv_ring = [
+                torch.empty((self.batch_size, semi_h, int(in_w)), dtype=target_dtype, device=self.device)
+                for _ in range(2)
+            ]
+        else:
+            self.gpu_yuv_ring = []
+        self._yuv_ring_dtype = target_dtype
 
     def warmup(self, batch_size: int = 2) -> None:
         """Warm up Triton input norm, color converter, and TRT execution context before timing."""
@@ -703,9 +1392,16 @@ class DoubleBufferedPipeUpscaler:
         fps_str: str = "24000/1001",
         width: int = 3840,
         height: int = 2160,
+        chroma_location: str = "center",
+        multipass: Optional[str] = None,
     ) -> subprocess.Popen:
         """Spawn FFmpeg NVENC receiving rawvideo P010LE over stdin pipe."""
-        rate_args = get_hevc_rate_args(bitrate="28M")
+        rate_args = get_hevc_rate_args(bitrate="28M", multipass=multipass) if multipass else get_hevc_rate_args(bitrate="28M")
+        ts_args: List[str] = []
+        if "/" in str(fps_str):
+            num_part = str(fps_str).split("/", 1)[0].strip()
+            if num_part.isdigit() and int(num_part) > 0:
+                ts_args = ["-video_track_timescale", num_part]
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo",
@@ -715,13 +1411,14 @@ class DoubleBufferedPipeUpscaler:
             "-colorspace", HEVC_COLORSPACE,
             "-color_primaries", HEVC_COLOR_PRIMARIES,
             "-color_trc", HEVC_COLOR_TRC,
-            "-chroma_sample_location", "center",
+            "-chroma_sample_location", str(chroma_location or "center"),
             "-r", fps_str,
             "-i", "pipe:0",
             "-c:v", HEVC_ENCODER,
             "-profile:v", HEVC_PROFILE,
             "-pix_fmt", HEVC_PIX_FMT,
             *rate_args,
+            *ts_args,
             "-tag:v", HEVC_TAG,
             output_mp4_path
         ]
@@ -753,10 +1450,50 @@ class DoubleBufferedPipeUpscaler:
             t_err.start()
         return proc
 
+    def open_chunk_encoder(
+        self,
+        output_mp4_path: str,
+        fps_str: str = "24000/1001",
+        width: int = 3840,
+        height: int = 2160,
+        multipass: Optional[str] = None,
+        prefer_pyav: Optional[bool] = None,
+    ) -> Any:
+        """Open _InProcessPyAVNVENCEncoder when safe, falling back cleanly to spawn_nvenc_pipe_writer."""
+        is_popen_mocked = hasattr(subprocess.Popen, "_mock_name")
+        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        allow_pyav = (
+            bool(prefer_pyav)
+            if prefer_pyav is not None
+            else (HEVC_ENCODER == "hevc_nvenc" and not is_popen_mocked and not in_pytest)
+        )
+        if allow_pyav and HEVC_ENCODER == "hevc_nvenc" and not is_popen_mocked:
+            try:
+                return _InProcessPyAVNVENCEncoder(
+                    output_mp4_path=output_mp4_path,
+                    fps_str=fps_str,
+                    width=width,
+                    height=height,
+                    multipass=multipass,
+                )
+            except Exception:
+                pass
+        return self.spawn_nvenc_pipe_writer(
+            output_mp4_path,
+            fps_str=fps_str,
+            width=width,
+            height=height,
+            chroma_location=self.chroma_siting,
+            multipass=multipass,
+        )
+
     @staticmethod
     def _write_frame_to_pipe(encoder_proc: Any, buf_arr: np.ndarray, repeats: int = 1) -> None:
-        """Write repeated P010LE frame buffers to stdin in 8 MiB chunks to avoid Windows MDL exhaustion."""
+        """Dispatch repeated P010LE frames to _InProcessPyAVNVENCEncoder or 8 MiB stdin pipe slices."""
         if repeats <= 0:
+            return
+        if isinstance(encoder_proc, _InProcessPyAVNVENCEncoder):
+            encoder_proc.encode_p010le_frame(buf_arr, repeats)
             return
         mv = memoryview(buf_arr).cast("B")
         total_len = len(mv)
@@ -809,7 +1546,7 @@ class DoubleBufferedPipeUpscaler:
             unique_frames_rgb = list(unique_frames_rgb) + [unique_frames_rgb[-1]] * missing
             num_unique = len(unique_frames_rgb)
 
-        f_h, f_w = unique_frames_rgb[0].shape[:2]
+        f_h, f_w = _infer_frame_luma_hw(unique_frames_rgb[0])
         self.ensure_resolution(f_h, f_w)
 
         if precomputed_dedup is not None and precomputed_dedup[0] is not None and precomputed_dedup[1] is not None:
@@ -820,6 +1557,12 @@ class DoubleBufferedPipeUpscaler:
         else:
             distinct_frames = unique_frames_rgb
             frame_to_distinct = list(range(num_unique))
+
+        distinct_frames, frame_to_distinct = _bound_live_cyclic_memo(
+            distinct_frames,
+            frame_to_distinct,
+            max_memo_frames=self.max_memo_frames,
+        )
 
         num_distinct = len(distinct_frames)
         self.last_distinct_count = num_distinct
@@ -910,9 +1653,42 @@ class DoubleBufferedPipeUpscaler:
                         if record_micro and evt_h2d_s is not None:
                             evt_h2d_s.record(self.stream_h2d)
                         first_arr = distinct_frames[s_idx]
+                        is_yuv = first_arr.ndim == 2
                         is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
                         is_trt = bool(getattr(self.model, "is_tensorrt", False))
-                        if is_hwc:
+                        if is_yuv:
+                            is_p010 = first_arr.dtype in (np.uint16, np.int16)
+                            t_dtype = torch.int16 if is_p010 else torch.uint8
+                            self._ensure_yuv_rings(f_h, f_w, t_dtype)
+                            yuv_pin = self.host_yuv_pins[slot]
+                            for i in range(cur_B):
+                                arr_i = distinct_frames[s_idx + i]
+                                src_view = arr_i.view(np.int16) if is_p010 else arr_i
+                                yuv_pin[i].copy_(torch.from_numpy(src_view))
+                            if self.gpu_yuv_ring:
+                                gpu_yuv = self.gpu_yuv_ring[slot][:cur_B]
+                                gpu_yuv.copy_(yuv_pin[:cur_B], non_blocking=True)
+                            else:
+                                gpu_yuv = yuv_pin[:cur_B].to(self.device, non_blocking=True)
+                            if record_micro and evt_h2d_dma_e is not None:
+                                evt_h2d_dma_e.record(self.stream_h2d)
+                            if self.gpu_in_ring:
+                                in_buf = self.gpu_in_ring[slot][:cur_B]
+                                gpu_tensor = _yuv420_to_nchw_fp16_bt709(
+                                    gpu_yuv,
+                                    is_p010=is_p010,
+                                    out_nchw_fp16=in_buf,
+                                    chroma_siting=self.chroma_siting,
+                                )
+                            else:
+                                gpu_tensor = _yuv420_to_nchw_fp16_bt709(
+                                    gpu_yuv,
+                                    is_p010=is_p010,
+                                    chroma_siting=self.chroma_siting,
+                                )
+                            if not is_trt:
+                                gpu_tensor = gpu_tensor.to(memory_format=torch.channels_last)
+                        elif is_hwc:
                             hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
                             for i in range(cur_B):
                                 hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
@@ -1102,13 +1878,33 @@ class DoubleBufferedPipeUpscaler:
                     end_idx = min(start_idx + self.batch_size, num_distinct)
                     cur_B = end_idx - start_idx
                     t_nrm_s = time.perf_counter()
-                    batch_tensors = []
-                    for i in range(cur_B):
-                        t = torch.from_numpy(distinct_frames[start_idx + i])
-                        if t.ndim == 3 and t.shape[-1] == 3:
-                            t = t.permute(2, 0, 1)
-                        batch_tensors.append(t)
-                    tensor = torch.stack(batch_tensors, dim=0).float().div_(255.0)
+                    first_cpu_arr = distinct_frames[start_idx]
+                    if first_cpu_arr.ndim == 2:
+                        is_p010_cpu = first_cpu_arr.dtype in (np.uint16, np.int16)
+                        yuv_list = [
+                            torch.from_numpy(
+                                distinct_frames[start_idx + i].view(np.int16)
+                                if is_p010_cpu
+                                else distinct_frames[start_idx + i]
+                            )
+                            for i in range(cur_B)
+                        ]
+                        yuv_batch = torch.stack(yuv_list, dim=0)
+                        tensor = _yuv420_to_nchw_fp16_bt709(
+                            yuv_batch,
+                            is_p010=is_p010_cpu,
+                            chroma_siting=self.chroma_siting,
+                            out_dtype=torch.float32,
+                            use_triton=False,
+                        )
+                    else:
+                        batch_tensors = []
+                        for i in range(cur_B):
+                            t = torch.from_numpy(distinct_frames[start_idx + i])
+                            if t.ndim == 3 and t.shape[-1] == 3:
+                                t = t.permute(2, 0, 1)
+                            batch_tensors.append(t)
+                        tensor = torch.stack(batch_tensors, dim=0).float().div_(255.0)
                     cpu_total_norm_ms += (time.perf_counter() - t_nrm_s) * 1000.0
                     t_inf_s = time.perf_counter()
                     out_rgb = self.model(tensor)
@@ -1172,8 +1968,11 @@ class DoubleBufferedPipeUpscaler:
         """Release pinned host buffers, VRAM ring buffers, and pooled CUDA events."""
         self.host_in_pins.clear()
         self.host_out_pins.clear()
+        self.host_yuv_pins.clear()
         self.gpu_in_ring.clear()
         self.gpu_nhwc_ring.clear()
+        self.gpu_yuv_ring.clear()
+        self._yuv_ring_dtype = None
         if getattr(self, "color_conv", None) is not None:
             self.color_conv._p010_ring.clear()
         self._micro_event_pool.clear()

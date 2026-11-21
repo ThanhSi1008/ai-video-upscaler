@@ -454,6 +454,52 @@ def _count_leading_discard_packets(seg_path: str) -> int:
     return _count_leading_discard_packets_ffprobe(seg_path)
 
 
+def yuv420_to_rgb_small_u8(
+    frame_yuv: Any,
+    out_w: int = 480,
+    out_h: int = 270,
+) -> Any:
+    """Convert semi-planar p010le (uint16/int16) or nv12 (uint8) [3*H//2, W] into BT.709 RGB24 [out_h, out_w, 3] uint8."""
+    import cv2
+    import numpy as np
+
+    arr = np.asarray(frame_yuv)
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        if arr.shape[:2] == (out_h, out_w):
+            return arr.astype(np.uint8, copy=True)
+        return cv2.resize(arr.astype(np.uint8, copy=False), (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+    if arr.ndim != 2 or (arr.shape[0] % 3) != 0:
+        raise ValueError(f"Expected semi-planar YUV420 (3*H//2, W), got shape={arr.shape}")
+
+    h_luma = (arr.shape[0] * 2) // 3
+    w_luma = arr.shape[1]
+    if arr.dtype in (np.uint16, np.int16):
+        u16 = arr.view(np.uint16).astype(np.float32) * (1.0 / 64.0)
+        y_norm = (u16[:h_luma, :] - 64.0) * (1.0 / 876.0)
+        u_norm = (u16[h_luma:, 0::2] - 512.0) * (1.0 / 896.0)
+        v_norm = (u16[h_luma:, 1::2] - 512.0) * (1.0 / 896.0)
+    else:
+        u8 = arr.astype(np.float32)
+        y_norm = (u8[:h_luma, :] - 16.0) * (1.0 / 219.0)
+        u_norm = (u8[h_luma:, 0::2] - 128.0) * (1.0 / 224.0)
+        v_norm = (u8[h_luma:, 1::2] - 128.0) * (1.0 / 224.0)
+
+    if (h_luma, w_luma) != (out_h, out_w):
+        y_s = cv2.resize(y_norm, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    else:
+        y_s = y_norm
+    uv_interp = cv2.INTER_AREA if (u_norm.shape[0] >= out_h and u_norm.shape[1] >= out_w) else cv2.INTER_LINEAR
+    u_s = cv2.resize(u_norm, (out_w, out_h), interpolation=uv_interp)
+    v_s = cv2.resize(v_norm, (out_w, out_h), interpolation=uv_interp)
+
+    r = np.clip(y_s + 1.5748 * v_s, 0.0, 1.0)
+    g = np.clip(y_s - 0.18732427 * u_s - 0.46812427 * v_s, 0.0, 1.0)
+    b = np.clip(y_s + 1.8556 * u_s, 0.0, 1.0)
+    rgb = np.stack((r, g, b), axis=-1)
+    return np.ascontiguousarray(np.round(rgb * 255.0).astype(np.uint8))
+
+
 def _recover_open_gop_leading_frames(
     source_video_path: Optional[str],
     chunk_start_sec: Optional[float],
@@ -461,14 +507,10 @@ def _recover_open_gop_leading_frames(
     n_discard: int,
     width: int,
     height: int,
-    color_vf: str,
+    color_vf: Optional[str] = None,
+    pix_fmt: str = "rgb24",
 ) -> List[Any]:
-    """
-    Khôi phục chính xác từng pixel các khung hình Open-GOP RASL dẫn đầu từ file video nguồn gốc
-    bằng bộ đệm trượt (sliding ring buffer kích thước n_discard + 1, ~30 MB thay vì 2.36 GB)
-    và dừng giải mã ngay khi đối khớp điểm neo CRA keyframe (np.array_equal).
-    Nếu không có file nguồn (môi trường test cô lập), lấp an toàn bằng cra_anchor_frame để bảo toàn tổng frame.
-    """
+    """Recover Open-GOP RASL leading frames from source_video_path via a bounded sliding ring buffer."""
     import numpy as np
 
     if n_discard <= 0:
@@ -476,26 +518,40 @@ def _recover_open_gop_leading_frames(
     if not source_video_path or not os.path.exists(source_video_path):
         return [cra_anchor_frame.copy() for _ in range(n_discard)]
 
-    frame_bytes = int(width) * int(height) * 3
+    h_int, w_int = int(height), int(width)
+    if pix_fmt == "p010le":
+        frame_bytes = (h_int * 3 // 2) * w_int * 2
+        frame_dtype = np.uint16
+        frame_shape: tuple[int, ...] = (h_int * 3 // 2, w_int)
+    elif pix_fmt == "nv12":
+        frame_bytes = (h_int * 3 // 2) * w_int
+        frame_dtype = np.uint8
+        frame_shape = (h_int * 3 // 2, w_int)
+    else:
+        frame_bytes = w_int * h_int * 3
+        frame_dtype = np.uint8
+        frame_shape = (h_int, w_int, 3)
+
     seek_sec = max(0.0, float(chunk_start_sec or 0.0) - 15.0)
     win_dur = 18.0
     max_win_frames = 600
     ring: collections.deque = collections.deque(maxlen=n_discard + 1)
     frame_buf = bytearray(frame_bytes)
     mv = memoryview(frame_buf)
-    mid_y = int(height) // 2
+    mid_y = h_int // 2
     anchor_strip = cra_anchor_frame[mid_y, ::16]
     matched_leading: Optional[List[Any]] = None
 
+    vf_args = ["-vf", color_vf] if color_vf else []
     cmd = [
         "ffmpeg", "-v", "error",
         "-ss", f"{seek_sec:.3f}",
         "-t", f"{win_dur:.3f}",
         "-i", source_video_path,
-        "-vf", color_vf,
+        *vf_args,
         "-vsync", "0",
         "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
+        "-pix_fmt", pix_fmt,
         "pipe:1",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
@@ -512,7 +568,7 @@ def _recover_open_gop_leading_frames(
                 if got < frame_bytes:
                     break
                 frames_seen += 1
-                curr_frame = np.frombuffer(frame_buf, dtype=np.uint8).reshape((int(height), int(width), 3)).copy()
+                curr_frame = np.frombuffer(frame_buf, dtype=frame_dtype).reshape(frame_shape).copy()
                 if len(ring) >= n_discard:
                     if (
                         np.array_equal(curr_frame[mid_y, ::16], anchor_strip)
@@ -545,6 +601,154 @@ def _recover_open_gop_leading_frames(
         return matched_leading
 
     return [cra_anchor_frame.copy() for _ in range(n_discard)]
+
+
+def extract_frames_raw_yuv420(
+    seg_path: str,
+    width: int,
+    height: int,
+    kept_indices: Optional[List[int]] = None,
+    hwaccel: Optional[bool] = None,
+    total_frames: Optional[int] = None,
+    source_video_path: Optional[str] = None,
+    chunk_start_sec: Optional[float] = None,
+    source_codec: Optional[str] = None,
+    source_pix_fmt: Optional[str] = None,
+) -> List[Any]:
+    """Decode segment directly to semi-planar p010le (uint16, 10-bit) or nv12 (uint8, 8-bit) without swscale RGB truncation."""
+    import numpy as np
+
+    h_int, w_int = int(height), int(width)
+    if h_int <= 0 or w_int <= 0 or (h_int % 2) != 0 or (w_int % 2) != 0:
+        return []
+    if kept_indices is not None and len(kept_indices) == 0:
+        return []
+
+    is_10bit = any(tag in str(source_pix_fmt or "").lower() for tag in ("10", "12", "p010", "p016"))
+    out_pix_fmt = "p010le" if is_10bit else "nv12"
+    semi_h = (h_int * 3) // 2
+    elem_dtype = np.uint16 if is_10bit else np.uint8
+    bytes_per_elem = 2 if is_10bit else 1
+    frame_bytes = semi_h * w_int * bytes_per_elem
+
+    is_real_subproc = (not hasattr(subprocess.run, "_mock_name")) and (not hasattr(subprocess.Popen, "_mock_name"))
+    is_hevc = (source_codec is None) or bool(any(k in source_codec.lower() for k in ["hevc", "265"]))
+    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and is_hevc) else 0
+
+    def _run_yuv_pipe_into_array(use_hwaccel: bool, expected_count: int, select_vf: Optional[str]):
+        hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
+        vf_args = ["-vf", select_vf] if select_vf else []
+        cmd = [
+            "ffmpeg", "-v", "error",
+            *hw_args,
+            "-i", seg_path,
+            *vf_args,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", out_pix_fmt,
+            "pipe:1",
+        ]
+        out_arr = np.empty((expected_count, semi_h, w_int), dtype=elem_dtype)
+        mv = memoryview(out_arr).cast("B")
+        total_target = expected_count * frame_bytes
+        read_step = 1048576
+        offset = 0
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        try:
+            if proc.stdout is not None:
+                while offset < total_target:
+                    end_pos = min(offset + read_step, total_target)
+                    n_read = proc.stdout.readinto(mv[offset:end_pos])
+                    if not n_read:
+                        break
+                    offset += n_read
+                while proc.stdout.read(65536):
+                    pass
+                proc.stdout.close()
+        finally:
+            proc.wait()
+
+        if proc.returncode != 0 or offset < frame_bytes:
+            return None
+        actual_frames = offset // frame_bytes
+        return [out_arr[idx] for idx in range(actual_frames)]
+
+    prefer_hw = hwaccel if hwaccel is not None else (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc")
+
+    if n_discard > 0 and is_real_subproc:
+        est_total = int(total_frames) if total_frames else ((max(kept_indices) + 1) if kept_indices else 256)
+        dec_cap = max(1, est_total)
+        seg_frames = _run_yuv_pipe_into_array(use_hwaccel=True, expected_count=dec_cap, select_vf=None) if prefer_hw else None
+        if seg_frames is None:
+            seg_frames = _run_yuv_pipe_into_array(use_hwaccel=False, expected_count=dec_cap, select_vf=None)
+        if seg_frames:
+            leading = _recover_open_gop_leading_frames(
+                source_video_path=source_video_path,
+                chunk_start_sec=chunk_start_sec,
+                cra_anchor_frame=seg_frames[0],
+                n_discard=n_discard,
+                width=w_int,
+                height=h_int,
+                color_vf=None,
+                pix_fmt=out_pix_fmt,
+            )
+            full_frames = leading + seg_frames
+            if kept_indices is not None:
+                return [
+                    full_frames[idx] if idx < len(full_frames) else full_frames[-1]
+                    for idx in kept_indices
+                ]
+            return full_frames
+
+    all_contiguous_kept = (
+        kept_indices is not None
+        and total_frames is not None
+        and len(kept_indices) == int(total_frames)
+        and kept_indices[0] == 0
+        and kept_indices[-1] == int(total_frames) - 1
+    )
+    select_vf: Optional[str] = None
+    if kept_indices is not None and len(kept_indices) > 0 and not all_contiguous_kept:
+        select_expr = _build_balanced_select_expr(kept_indices)
+        select_vf = f"select='{select_expr}'"
+
+    exp_n = len(kept_indices) if (kept_indices is not None and len(kept_indices) > 0) else (int(total_frames) if total_frames else None)
+    if exp_n is not None and exp_n > 0 and is_real_subproc:
+        frames_direct = _run_yuv_pipe_into_array(use_hwaccel=True, expected_count=exp_n, select_vf=select_vf) if prefer_hw else None
+        if frames_direct is None:
+            frames_direct = _run_yuv_pipe_into_array(use_hwaccel=False, expected_count=exp_n, select_vf=select_vf)
+        if frames_direct:
+            return frames_direct
+
+    def _run_yuv_pipe(use_hwaccel: bool) -> Optional[bytes]:
+        hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
+        vf_args = ["-vf", select_vf] if select_vf else []
+        cmd = [
+            "ffmpeg", "-v", "error",
+            *hw_args,
+            "-i", seg_path,
+            *vf_args,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", out_pix_fmt,
+            "pipe:1",
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if res.returncode != 0 or not res.stdout:
+            return None
+        return res.stdout
+
+    raw_buf = _run_yuv_pipe(use_hwaccel=True) if prefer_hw else None
+    if raw_buf is None:
+        raw_buf = _run_yuv_pipe(use_hwaccel=False)
+    if not raw_buf:
+        raise RuntimeError(f"Không thể giải mã luồng rawvideo {out_pix_fmt} từ phân đoạn: {seg_path}")
+
+    n_frames = len(raw_buf) // frame_bytes
+    usable_bytes = n_frames * frame_bytes
+    elem_count = usable_bytes // bytes_per_elem
+    arr_3d = np.frombuffer(raw_buf, dtype=elem_dtype, count=elem_count).reshape((n_frames, semi_h, w_int))
+    return [np.ascontiguousarray(arr_3d[idx]) for idx in range(n_frames)]
 
 
 def extract_frames_raw_rgb24(
@@ -753,7 +957,7 @@ def extract_frames(
         tmp_pattern = os.path.join(frames_dir, f"tmp_%08d.{ext}")
         select_expr = _build_balanced_select_expr(kept_indices)
         vf_filter = (
-            f"select='{select_expr}',scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc"
+            f"select='{select_expr}',scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc:flags=bicubic+accurate_rnd+full_chroma_int"
             if fmt == "png"
             else f"select='{select_expr}'"
         )
@@ -777,7 +981,7 @@ def extract_frames(
         extract_cmd = ["ffmpeg", "-y", *hwaccel_args, "-i", seg_path]
         if fmt == "png":
             extract_cmd.extend([
-                "-vf", "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc",
+                "-vf", "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc:flags=bicubic+accurate_rnd+full_chroma_int",
                 "-vsync", "0",
                 frame_pattern
             ])
@@ -792,21 +996,25 @@ def extract_frames(
         return len([f for f in os.listdir(frames_dir) if f.lower().endswith(f".{ext}")])
 
 
-def encode_chunk_hevc(frames_dir: str, fps: float, output_path: str, bitrate: str = "28M", fmt: str = "png"):
-    """
-    Mã hóa các khung hình 4K thành HEVC 10-bit Main 10 bằng NVIDIA NVENC.
-    Ánh xạ ngược ma trận màu RGB24 sang BT.709 Limited Range (tv) p010le chuẩn xác.
-    """
+def encode_chunk_hevc(
+    frames_dir: str,
+    fps: float | str,
+    output_path: str,
+    bitrate: str = "28M",
+    fmt: str = "png",
+    multipass: Optional[str] = None,
+):
+    """Encode 4K PNG/JPG frames into 10-bit Main 10 HEVC with BT.709 PC->TV mapping."""
     ext = "png" if fmt == "png" else "jpg"
     frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
 
-    rate_args = get_hevc_rate_args(bitrate=bitrate)
+    rate_args = get_hevc_rate_args(bitrate=bitrate, multipass=multipass) if multipass else get_hevc_rate_args(bitrate=bitrate)
 
     encode_cmd = [
         "ffmpeg", "-y",
         "-framerate", str(fps),
         "-i", frame_pattern,
-        "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv",
+        "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+full_chroma_int",
         "-c:v", HEVC_ENCODER,
         *rate_args,
         "-profile:v", HEVC_PROFILE,

@@ -32,6 +32,14 @@ DEDUP_POLICY_PARAMS: Dict[str, Dict[str, Any]] = {
     "drift-0.75": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "drift_delta": 0.75, "min_response": 0.10},
     "drift-1.0": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "drift_delta": 1.0, "min_response": 0.10},
     "dis": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "dis_thresh": 0.30},
+    "dis-auto": {
+        "hi": _DEDUP_HI,
+        "lo": _DEDUP_LO,
+        "frac": _DEDUP_FRAC,
+        "dis_thresh": 0.30,
+        "auto_noise_floor": True,
+        "lip_flap_guard": True,
+    },
     "dis-0.2": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "dis_thresh": 0.20},
     "dis-0.3": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "dis_thresh": 0.30},
     "dis-0.4": {"hi": _DEDUP_HI, "lo": _DEDUP_LO, "frac": _DEDUP_FRAC, "dis_thresh": 0.40},
@@ -40,6 +48,10 @@ DEDUP_POLICY_PARAMS: Dict[str, Dict[str, Any]] = {
     "sakuga": {"hi": 1024, "lo": 448, "frac": 0.38, "dis_thresh": 0.35, "local_thresh": 1.50, "min_moving_area_pct": 12.0},
     "off": {"all_keep": True},
 }
+
+AUTO_PARETO_MODEL_ID = "auto-pareto"
+AUTO_PARETO_MODEL_NAME = "AnimeJaNai HD V3 Auto-Pareto (Compact 16c + UltraCompact 8c)"
+VALID_NVENC_MULTIPASS_POLICIES = ("auto", "fullres", "qres")
 
 
 def is_valid_dedup_policy(policy: str) -> bool:
@@ -143,7 +155,10 @@ class SafeLocalFSBrowser:
             cand = override_model.strip().lower()
             if cand == "realesr-animevideov3":
                 cand = "animevideov3"
-            if cand in lower_to_key:
+            if cand == AUTO_PARETO_MODEL_ID:
+                chosen_model = AUTO_PARETO_MODEL_ID
+                source_desc = f"Chỉ định trực tiếp ({chosen_model})"
+            elif cand in lower_to_key:
                 chosen_model = lower_to_key[cand]
                 source_desc = f"Chỉ định trực tiếp ({chosen_model})"
             else:
@@ -166,9 +181,9 @@ class SafeLocalFSBrowser:
                 continue
             if match_show_rule(vid_str, pat):
                 m_target = str(rule.get("model", "")).strip().lower()
-                if m_target and m_target in lower_to_key:
+                if m_target == AUTO_PARETO_MODEL_ID or (m_target and m_target in lower_to_key):
                     if not chosen_model:
-                        chosen_model = lower_to_key[m_target]
+                        chosen_model = AUTO_PARETO_MODEL_ID if m_target == AUTO_PARETO_MODEL_ID else lower_to_key[m_target]
                         source_desc = f"shows.yaml ('{pat}')"
                     matched_model_pattern = pat
                     break
@@ -202,9 +217,10 @@ class SafeLocalFSBrowser:
             chosen_dedup = "default"
 
         model_meta = registry.get(chosen_model, {}) if isinstance(registry, dict) else {}
+        default_name = AUTO_PARETO_MODEL_NAME if chosen_model == AUTO_PARETO_MODEL_ID else chosen_model
         return {
             "model_id": chosen_model,
-            "model_name": str(model_meta.get("name") or chosen_model),
+            "model_name": str(model_meta.get("name") or default_name),
             "dedup_policy": chosen_dedup,
             "dedup_source": dedup_source,
             "matched_pattern": matched_rule_pattern or "",

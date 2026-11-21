@@ -94,11 +94,13 @@ class _GenericTRTExportModule(nn.Module):
         out = self.model(x)
         if abs(self.model_scale - self.target_scale) > 1e-4:
             interp_in = out.float() if (out.device.type == "cpu" and out.dtype == torch.float16) else out
+            scale_ratio = self.target_scale / self.model_scale
             out_target = F.interpolate(
                 interp_in,
-                scale_factor=self.target_scale / self.model_scale,
+                scale_factor=scale_ratio,
                 mode="bicubic",
                 align_corners=False,
+                antialias=(scale_ratio < 1.0),
             )
             if out_target.dtype != x.dtype:
                 out_target = out_target.to(x.dtype)
@@ -107,12 +109,7 @@ class _GenericTRTExportModule(nn.Module):
 
 
 class _PureFP16TRTExportModule(nn.Module):
-    """
-    Mô-đun xuất ONNX tối ưu chuyên biệt cho TensorRT FP16 Builder:
-    Giữ liền mạch đồ thị Conv2d + PReLU + PixelShuffle + Bicubic ở FP16 thuần khiết (0 nút Cast sang FP32
-    trên nhánh trung gian 8K) để trình biên dịch của TensorRT hợp nhất toàn bộ 18 tầng tích chập vào SRAM,
-    chọn tập lệnh HMMA.16816.F16 full-rate và giữ đỉnh VRAM chỉ ~1.33 GB trên RTX 3060.
-    """
+    """Pure-FP16 ONNX export wrapper collapsing SRVGG 4x->2x analytically via Catmull-Rom AA."""
     def __init__(self, base_srvgg_model: nn.Module, target_scale: float = 2.0, scale: Optional[float] = None):
         super().__init__()
         if scale is not None:
@@ -128,23 +125,42 @@ class _PureFP16TRTExportModule(nn.Module):
                 else 2
             )
         self.target_scale = float(target_scale)
+        self._use_collapsed_aa2x = (
+            self.upscale == 4
+            and abs(self.target_scale - 2.0) <= 1e-4
+            and isinstance(self.upsampler, nn.PixelShuffle)
+            and int(self.upsampler.upscale_factor) == 4
+        )
+        if self._use_collapsed_aa2x:
+            from src.cuda_engine import build_collapsed_4x_to_2x_buffers
+            fw, bw = build_collapsed_4x_to_2x_buffers(b_param=0.0, c_param=0.5)
+            ref_p = next(base_srvgg_model.parameters(), None)
+            if ref_p is not None:
+                fw = fw.to(device=ref_p.device, dtype=ref_p.dtype)
+                bw = bw.to(device=ref_p.device, dtype=ref_p.dtype)
+            self.register_buffer("aa_feat_weight", fw, persistent=False)
+            self.register_buffer("aa_base_weight", bw, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = x
         for layer in self.body:
             feat = layer(feat)
+        if self._use_collapsed_aa2x:
+            from src.cuda_engine import collapsed_4x_to_2x_forward
+            return collapsed_4x_to_2x_forward(feat, x, self.aa_feat_weight, self.aa_base_weight)
+
         out = self.upsampler(feat)
         base = F.interpolate(x, scale_factor=float(self.upscale), mode="nearest")
         out_hr = out + base
         if abs(float(self.upscale) - self.target_scale) > 1e-4:
-            # Chỉ ép float32 trên CPU khi input là float16 (CPU thiếu kernel Half bicubic);
-            # trên CUDA giữ nguyên FP16 thuần để tránh tạo tensor 8K FP32 12.74 GB trong TensorRT.
             interp_in = out_hr.float() if (out_hr.device.type == "cpu" and out_hr.dtype == torch.float16) else out_hr
+            scale_ratio = self.target_scale / float(self.upscale)
             out_target = F.interpolate(
                 interp_in,
-                scale_factor=self.target_scale / float(self.upscale),
+                scale_factor=scale_ratio,
                 mode="bicubic",
                 align_corners=False,
+                antialias=(scale_ratio < 1.0),
             )
             if out_target.dtype != x.dtype:
                 out_target = out_target.to(x.dtype)
@@ -177,8 +193,9 @@ def get_trt_engine_path(
     input_hw: Tuple[int, int] = (1080, 1920),
     cache_dir: Optional[str] = None,
     weights_sha256: Optional[str] = None,
+    arch_tag: Optional[str] = None,
 ) -> str:
-    """Tạo đường dẫn file .engine duy nhất gắn liền với model_id, độ phân giải, GPU, TRT version, batch_size (và sha256 nếu truyền)."""
+    """Build deterministic .engine cache path keyed by model_id, arch_tag, GPU, TRT major, resolution, and batch."""
     resolved_cache_dir = cache_dir or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "trt_engines"
     )
@@ -196,6 +213,8 @@ def get_trt_engine_path(
             pass
     in_h, in_w = int(input_hw[0]), int(input_hw[1])
     safe_model = str(model_id).replace(" ", "_").replace("/", "_")
+    if arch_tag:
+        safe_model = f"{safe_model}_{str(arch_tag).strip()}"
     if weights_sha256:
         sha_tag = str(weights_sha256).strip().lower()[:8]
         fname = f"{safe_model}_{sha_tag}_{device_tag}_{trt_ver}_{in_h}x{in_w}_b1-{max_batch}.engine"
@@ -685,7 +704,16 @@ def get_hybrid_engine_or_wrapper(
             input_hw=input_hw,
             available_vram_gb=vram_gb,
         )
-        engine_path = get_trt_engine_path(model_id=model_id, max_batch=trt_max_batch, input_hw=input_hw)
+        is_collapsed_4x = bool(
+            getattr(wrapper, "_use_collapsed_aa2x", False)
+            or (getattr(wrapper, "model_scale", 2.0) > float(scale) + 1e-4)
+        )
+        engine_path = get_trt_engine_path(
+            model_id=model_id,
+            max_batch=trt_max_batch,
+            input_hw=input_hw,
+            arch_tag="aa2x" if is_collapsed_4x else None,
+        )
         if engine_path not in _FAILED_TRT_ENGINES:
             onnx_path = engine_path.replace(".engine", ".onnx")
             try:

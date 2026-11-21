@@ -1,40 +1,40 @@
 # shows.yaml - Automatic per-series / source-tag SR model & dedup policy mapping
 # Rule syntax (evaluated top-to-bottom; overridden by CLI --model / --dedup-policy):
 #   - pattern: Substring or glob ('*', '?') matching filename/folder (bracket-safe for '[SubsPlease]', '[BD 1080p]')
-#     model: Model ID from models/models.yaml:
-#       - animevideov3                           (Default 4x->2x: bold lines, strong denoise for BD & Web-DL)
-#       - animejanai-hd-v3-ultracompact          (Native 2x ~18.5 fps: mosquito-noise removal for 8-bit Web-DL / SubsPlease)
-#       - animejanai-hd-v3-sharp1-ultracompact   (Native 2x ~18.5 fps: sharp grain retention for clean Blu-ray 1080p)
-#       - animejanai-hd-v3-superultracompact     (Native 2x ~20.8 fps: light denoise for dialogue episodes)
-#       - animejanai-hd-v3-sharp1-superultracompact (Native 2x ~20.8 fps for light Blu-ray sources)
-#       - animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3
-#     dedup_policy: (Optional) default | dis | sakuga | dis-sakuga | sensitive-b | motion | drift | off
+#     model: Model ID from models/models.yaml (or 'auto-pareto'):
+#       - animevideov3                           (Default 4x->2x Catmull-Rom AA: bold lines, strong denoise for soft/noisy sources)
+#       - animejanai-hd-v3-ultracompact          (Native 2x: mosquito-noise removal for 8-bit Web-DL / SubsPlease)
+#       - animejanai-hd-v3-sharp1-ultracompact   (Native 2x: sharp grain retention for clean Blu-ray 1080p)
+#       - animejanai-hd-v3-superultracompact     (Native 2x: light denoise for dialogue episodes)
+#       - animejanai-hd-v3-sharp1-superultracompact (Native 2x for light Blu-ray sources)
+#       - animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3 | auto-pareto
+#     dedup_policy: (Optional) default | dis | dis-auto | sakuga | dis-sakuga | sensitive-b | motion | drift | off
 
 shows:
   # 1. Weekly Crunchyroll Web-DL sources ([SubsPlease], [Erai-raws]):
   - pattern: "[SubsPlease]*"
     model: "animejanai-hd-v3-ultracompact"
-    dedup_policy: "default"
+    dedup_policy: "dis-auto"
   - pattern: "*[SubsPlease]*"
     model: "animejanai-hd-v3-ultracompact"
-    dedup_policy: "default"
+    dedup_policy: "dis-auto"
   - pattern: "[Erai-raws]*"
     model: "animejanai-hd-v3-ultracompact"
-    dedup_policy: "default"
+    dedup_policy: "dis-auto"
   - pattern: "*[Erai-raws]*"
     model: "animejanai-hd-v3-ultracompact"
-    dedup_policy: "default"
+    dedup_policy: "dis-auto"
 
   # 2. Clean 1080p Blu-ray sources ([BD 1080p], BluRay, BDRip):
   - pattern: "*[BD*"
-    model: "animevideov3"
-    dedup_policy: "dis"
+    model: "animejanai-hd-v3-sharp1-ultracompact"
+    dedup_policy: "dis-auto"
   - pattern: "*BluRay*"
-    model: "animevideov3"
-    dedup_policy: "dis"
+    model: "animejanai-hd-v3-sharp1-ultracompact"
+    dedup_policy: "dis-auto"
   - pattern: "*BDRip*"
-    model: "animevideov3"
-    dedup_policy: "dis"
+    model: "animejanai-hd-v3-sharp1-ultracompact"
+    dedup_policy: "dis-auto"
 
   # --- OPTIONAL SERIES OVERRIDES (uncomment to activate) ---
   #

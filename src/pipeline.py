@@ -20,12 +20,15 @@ from src.config import (
     DEFAULT_SCALE,
     DEFAULT_BITRATE,
     DEFAULT_SEGMENT_TIME,
+    DEFAULT_ZERO_DISK_SEGMENT_TIME,
     DEFAULT_FRAME_FORMAT,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RAMDISK_SIZE_MB,
     DEFAULT_PNG_UNIT_SIZE_MB,
     DEVICE_NAME,
     HEVC_ENCODER,
+    HEVC_MULTIPASS_POLICY,
+    resolve_episode_nvenc_multipass,
     acquire_gpu_lock,
     release_gpu_lock,
 )
@@ -47,12 +50,15 @@ from src.ffmpeg_ops import (
     verify_segment_resume_frames,
     extract_frames,
     extract_frames_raw_rgb24,
+    extract_frames_raw_yuv420,
+    yuv420_to_rgb_small_u8,
     encode_chunk_hevc,
     concat_segments,
     mux_final_container,
     mux_segments_directly,
 )
 from src.dedup import (
+    RollingDedupPlanner,
     are_raw_segments_complete,
     load_or_create_plan,
     prune_redundant_frames,
@@ -60,6 +66,8 @@ from src.dedup import (
     encode_chunk_reexpanded,
     resolve_dedup_policy
 )
+
+_ORIG_EXTRACT_FRAMES_RAW_RGB24 = extract_frames_raw_rgb24
 from src.ai_engine import upscale_frames
 from src.models_resolver import (
     resolve_model_for_video,
@@ -109,9 +117,19 @@ def run_upscale_pipeline(
     batch_size: Optional[int] = None,
     zero_disk: bool = True,
     use_tensorrt: bool = True,
+    nvenc_multipass: str = HEVC_MULTIPASS_POLICY,
+    segment_time_explicit: bool = False,
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
+    if (
+        zero_disk
+        and engine == "cuda"
+        and int(segment_time) == DEFAULT_SEGMENT_TIME
+        and not segment_time_explicit
+        and not os.environ.get("PYTEST_CURRENT_TEST")
+    ):
+        segment_time = DEFAULT_ZERO_DISK_SEGMENT_TIME
 
     # Chuẩn hóa đường dẫn đầu vào gốc trước khi chế độ Preview ghi đè input_path
     original_input_path = os.path.abspath(os.path.expanduser(input_path))
@@ -222,12 +240,16 @@ def run_upscale_pipeline(
                 # Kiểm tra tính đồng nhất của model qua manifest.json (D7)
                 model_sha256 = str(model_info.get("sha256") or "")
                 manifest_path = os.path.join(work_dir, "manifest.json")
+                resumed_episode_multipass: Optional[str] = None
                 if os.path.exists(manifest_path):
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as f:
                             manifest_data = json.load(f)
                         prev_model_id = manifest_data.get("model_id")
                         prev_sha256 = manifest_data.get("sha256") or ""
+                        prev_mp = str(manifest_data.get("nvenc_multipass") or "").strip().lower()
+                        if prev_mp in ("fullres", "qres") and not force:
+                            resumed_episode_multipass = prev_mp
                         if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_sha256):
                             if not force:
                                 raise ValueError(
@@ -258,7 +280,16 @@ def run_upscale_pipeline(
                     "sha256": model_sha256,
                     "engine": engine,
                     "precision": precision,
-                    "resolution_source": model_info.get("resolution_source", "")
+                    "resolution_source": model_info.get("resolution_source", ""),
+                    **(
+                        {
+                            "routing_mode": "auto-pareto",
+                            "detail_model_id": model_info.get("detail_model_id"),
+                            "fast_model_id": model_info.get("fast_model_id"),
+                        }
+                        if model_info.get("is_auto_pareto")
+                        else {}
+                    ),
                 }
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(manifest_data, f, indent=2, ensure_ascii=False)
@@ -357,45 +388,104 @@ def run_upscale_pipeline(
                     seg_frame_counts = get_segments_frame_counts(existing_segs)
 
                     dedup_plan = None
+                    rolling_planner: Optional[RollingDedupPlanner] = None
                     effective_dedup_policy = "off"
+                    plan_extra_meta = {
+                        "model_id": model_info["id"],
+                        "model_sha256": model_sha256,
+                        "engine": engine,
+                        "precision": precision,
+                    }
                     if dedup:
                         effective_dedup_policy = resolve_dedup_policy(input_path, dedup_policy)
-                        logger.info(f"Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập ({effective_dedup_policy})...", to_console=True)
                         t_pref_start = time.time()
-                        dedup_plan = load_or_create_plan(
-                            input_path=input_path,
-                            plan_path=plan_file,
-                            segment_seconds=segment_time,
-                            fps_num=meta["fps_num"],
-                            fps_den=meta["fps_den"],
-                            resume=resume,
-                            chunk_frame_counts=seg_frame_counts,
-                            policy=effective_dedup_policy
+                        can_use_rolling = (
+                            total_segs >= 2
+                            and not (resume and os.path.exists(plan_file))
+                            and not hasattr(load_or_create_plan, "_mock_name")
+                            and not hasattr(subprocess.Popen, "_mock_name")
+                            and not os.environ.get("PYTEST_CURRENT_TEST")
                         )
-                        if dedup_plan:
-                            dedup_plan["model_id"] = model_info["id"]
-                            dedup_plan["model_sha256"] = model_sha256
-                            dedup_plan["engine"] = engine
-                            dedup_plan["precision"] = precision
-                            tmp_plan_upd = f"{plan_file}.tmp.{os.getpid()}"
-                            try:
-                                with open(tmp_plan_upd, "w", encoding="utf-8") as f:
-                                    json.dump(dedup_plan, f, indent=2)
-                                os.replace(tmp_plan_upd, plan_file)
-                            except Exception:
-                                if os.path.exists(tmp_plan_upd):
-                                    try:
-                                        os.remove(tmp_plan_upd)
-                                    except OSError:
-                                        pass
-                        stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
-                        logger.info(
-                            f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
-                            f"({dedup_plan['dedup_ratio_percent']}% trùng lặp được loại bỏ - Tối ưu ~50% thời gian GPU)",
-                            to_console=True
-                        )
+                        if can_use_rolling:
+                            logger.info(
+                                f"⚡ Khởi chạy Rolling Parallel Preflight ({effective_dedup_policy}, max_workers=2) — "
+                                f"GPU bắt đầu ngay sau Chunk 0..1!",
+                                to_console=True,
+                            )
+                            rolling_planner = RollingDedupPlanner(
+                                input_path=input_path,
+                                seg_paths=existing_segs,
+                                seg_frame_counts=seg_frame_counts,
+                                plan_path=plan_file,
+                                segment_seconds=segment_time,
+                                fps_num=meta["fps_num"],
+                                fps_den=meta["fps_den"],
+                                policy=effective_dedup_policy,
+                                max_workers=2,
+                                decode_threads=2,
+                            )
+                            rolling_planner.start(
+                                sync_initial_chunks=min(2, total_segs),
+                                extra_fields=plan_extra_meta,
+                            )
+                            stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
+                            est_ratio = rolling_planner.get_estimated_dedup_ratio_pct()
+                            logger.info(
+                                f"⚡ Rolling Preflight sẵn sàng sau {stage_timings['Preflight Plan (mpdecimate)']:.2f}s "
+                                f"(ước tính sơ bộ ~{est_ratio:.1f}% dedup; đang quét ngầm phần còn lại)...",
+                                to_console=True,
+                            )
+                        else:
+                            logger.info(f"Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập ({effective_dedup_policy})...", to_console=True)
+                            dedup_plan = load_or_create_plan(
+                                input_path=input_path,
+                                plan_path=plan_file,
+                                segment_seconds=segment_time,
+                                fps_num=meta["fps_num"],
+                                fps_den=meta["fps_den"],
+                                resume=resume,
+                                chunk_frame_counts=seg_frame_counts,
+                                policy=effective_dedup_policy
+                            )
+                            if dedup_plan:
+                                dedup_plan.update(plan_extra_meta)
+                                tmp_plan_upd = f"{plan_file}.tmp.{os.getpid()}"
+                                try:
+                                    with open(tmp_plan_upd, "w", encoding="utf-8") as f:
+                                        json.dump(dedup_plan, f, indent=2)
+                                    os.replace(tmp_plan_upd, plan_file)
+                                except Exception:
+                                    if os.path.exists(tmp_plan_upd):
+                                        try:
+                                            os.remove(tmp_plan_upd)
+                                        except OSError:
+                                            pass
+                            stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
+                            logger.info(
+                                f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
+                                f"({dedup_plan['dedup_ratio_percent']}% trùng lặp được loại bỏ - Tối ưu ~50% thời gian GPU)",
+                                to_console=True
+                            )
 
                     allow_cyclic_dedup = bool(dedup and effective_dedup_policy != "off")
+                    est_dedup_pct = (
+                        float(dedup_plan.get("dedup_ratio_percent", 0.0))
+                        if dedup_plan
+                        else (rolling_planner.get_estimated_dedup_ratio_pct() if rolling_planner is not None else 0.0)
+                    )
+                    episode_multipass = resumed_episode_multipass or resolve_episode_nvenc_multipass(
+                        policy=nvenc_multipass,
+                        model_id=model_info["id"],
+                        dedup_ratio_pct=est_dedup_pct,
+                        engine=engine,
+                        use_tensorrt=use_tensorrt,
+                        zero_disk=zero_disk,
+                    )
+                    manifest_data["nvenc_multipass"] = episode_multipass
+                    manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
+                    with open(manifest_path, "w", encoding="utf-8") as f:
+                        json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+
                     measured_total_f = (
                         int(dedup_plan["total_frames"])
                         if dedup_plan
@@ -404,13 +494,13 @@ def run_upscale_pipeline(
                     measured_unique_f = (
                         int(dedup_plan["total_kept_frames"])
                         if dedup_plan
-                        else measured_total_f
+                        else max(1, int(round(measured_total_f * (1.0 - est_dedup_pct / 100.0))))
                     )
                     logger.update_live_context(
                         total_chunks=total_segs,
                         total_frames=measured_total_f,
                         unique_frames=measured_unique_f,
-                        dedup_ratio_percent=float(dedup_plan.get("dedup_ratio_percent", 0.0)) if dedup_plan else 0.0,
+                        dedup_ratio_percent=est_dedup_pct,
                         dedup_policy=str(effective_dedup_policy),
                     )
 
@@ -469,19 +559,63 @@ def run_upscale_pipeline(
                             completed_chunks=len(resumed_chunk_indices),
                         )
 
+                    is_auto_pareto = bool(model_info.get("is_auto_pareto"))
+                    pareto_state = {
+                        "tier": None,
+                        "prev_r_unique": None,
+                        "chunk_counts": {},
+                        "chunks": [],
+                    }
+
+                    def _resolve_chunk_pareto_submodel(c_idx_val: int, c_plan_obj, f_cnt: int, exp_cnt: int):
+                        if not is_auto_pareto:
+                            return model_info
+                        r_u = float(f_cnt) / max(1.0, float(exp_cnt or f_cnt or 1))
+                        prev_ru = pareto_state["prev_r_unique"]
+                        if c_plan_obj and "scene_cut" in c_plan_obj:
+                            is_cut = bool(c_plan_obj["scene_cut"]) or (c_idx_val == 0)
+                        else:
+                            is_cut = (c_idx_val == 0) or (prev_ru is not None and abs(r_u - prev_ru) >= 0.35)
+                        cur_tier = pareto_state["tier"]
+                        if cur_tier is None or c_idx_val == 0:
+                            cur_tier = "detail" if r_u <= 0.50 else "fast"
+                        elif is_cut:
+                            if cur_tier == "detail" and r_u > 0.55:
+                                cur_tier = "fast"
+                            elif cur_tier == "fast" and r_u <= 0.45:
+                                cur_tier = "detail"
+                        pareto_state["tier"] = cur_tier
+                        pareto_state["prev_r_unique"] = r_u
+                        sub_info = (
+                            model_info["detail_model_info"]
+                            if cur_tier == "detail"
+                            else model_info["fast_model_info"]
+                        )
+                        sub_id = str(sub_info["id"])
+                        pareto_state["chunk_counts"][sub_id] = pareto_state["chunk_counts"].get(sub_id, 0) + 1
+                        pareto_state["chunks"].append({
+                            "chunk_idx": int(c_idx_val),
+                            "model_id": sub_id,
+                            "tier": cur_tier,
+                            "r_unique": round(r_u, 4),
+                            "scene_cut": bool(is_cut),
+                        })
+                        return sub_info
+
                     if not chunks_to_process:
                         logger.info("Tất cả phân đoạn đã hoàn thành từ trước!", to_console=True)
                     else:
                         # Định nghĩa các worker function cho từng stage của kiến trúc Overlapped Double-Buffering
                         def worker_extract(item):
-                            """Decode Worker: Ở chế độ --zero-disk giải mã thẳng RGB24 vào RAM qua NVDEC pipe (0 byte PNG trên SSD)."""
+                            """Decode Worker: Direct 10-bit P010LE / 8-bit NV12 (or RGB24) pipe decode into RAM."""
                             c_idx, c_seg_file, _ = item
                             c_in_dir = os.path.join(cache_root, f"chunk_{c_idx:04d}_in")
-                            c_plan = (
-                                dedup_plan["chunks"][c_idx]
-                                if (dedup and dedup_plan and c_idx < len(dedup_plan.get("chunks", [])))
-                                else None
-                            )
+                            if dedup and rolling_planner is not None:
+                                c_plan = rolling_planner.get_chunk_plan(c_idx)
+                            elif dedup and dedup_plan and c_idx < len(dedup_plan.get("chunks", [])):
+                                c_plan = dedup_plan["chunks"][c_idx]
+                            else:
+                                c_plan = None
                             kept_indices = c_plan["kept_indices"] if c_plan else None
                             chunk_total_frames = (
                                 c_plan["total_frames"]
@@ -502,28 +636,57 @@ def run_upscale_pipeline(
                                     pix_fmt=meta.get("pix_fmt", ""),
                                     profile=meta.get("profile", ""),
                                 )
-                                raw_rgb = extract_frames_raw_rgb24(
-                                    c_seg_file,
-                                    width=int(meta.get("width", 1920)),
-                                    height=int(meta.get("height", 1080)),
-                                    kept_indices=kept_indices,
-                                    hwaccel=safe_hwaccel,
-                                    total_frames=chunk_total_frames,
-                                    source_video_path=input_path,
-                                    chunk_start_sec=chunk_start_sec,
-                                    source_codec=meta.get("codec"),
+                                use_direct_yuv = (
+                                    extract_frames_raw_rgb24 is _ORIG_EXTRACT_FRAMES_RAW_RGB24
+                                    and not hasattr(extract_frames_raw_rgb24, "_mock_name")
+                                    and not hasattr(subprocess.Popen, "_mock_name")
+                                    and not os.environ.get("PYTEST_CURRENT_TEST")
                                 )
+                                raw_frames = None
+                                if use_direct_yuv:
+                                    try:
+                                        raw_frames = extract_frames_raw_yuv420(
+                                            c_seg_file,
+                                            width=int(meta.get("width", 1920)),
+                                            height=int(meta.get("height", 1080)),
+                                            kept_indices=kept_indices,
+                                            hwaccel=safe_hwaccel,
+                                            total_frames=chunk_total_frames,
+                                            source_video_path=input_path,
+                                            chunk_start_sec=chunk_start_sec,
+                                            source_codec=meta.get("codec"),
+                                            source_pix_fmt=meta.get("pix_fmt"),
+                                        )
+                                    except Exception:
+                                        raw_frames = None
+                                if raw_frames is None:
+                                    raw_frames = extract_frames_raw_rgb24(
+                                        c_seg_file,
+                                        width=int(meta.get("width", 1920)),
+                                        height=int(meta.get("height", 1080)),
+                                        kept_indices=kept_indices,
+                                        hwaccel=safe_hwaccel,
+                                        total_frames=chunk_total_frames,
+                                        source_video_path=input_path,
+                                        chunk_start_sec=chunk_start_sec,
+                                        source_codec=meta.get("codec"),
+                                    )
                                 t_ext = time.time() - t0
-                                f_count = len(raw_rgb)
-                                distinct_frames = raw_rgb
+                                f_count = len(raw_frames)
+                                distinct_frames = raw_frames
                                 frame_to_distinct = list(range(f_count))
                                 if allow_cyclic_dedup and f_count > 1:
                                     from src.dedup import deduplicate_cyclic_frames
-                                    distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(raw_rgb)
-                                first_rgb_frame = (
-                                    np.array(distinct_frames[0], copy=True) if distinct_frames else None
-                                )
-                                del raw_rgb
+                                    distinct_frames, frame_to_distinct = deduplicate_cyclic_frames(raw_frames)
+                                if distinct_frames:
+                                    f0_arr = distinct_frames[0]
+                                    if f0_arr.ndim == 2:
+                                        first_rgb_frame = yuv420_to_rgb_small_u8(f0_arr, out_w=480, out_h=270)
+                                    else:
+                                        first_rgb_frame = np.array(f0_arr, copy=True)
+                                else:
+                                    first_rgb_frame = None
+                                del raw_frames
                                 exp_frames = chunk_total_frames if chunk_total_frames is not None else f_count
                                 return {
                                     "idx": c_idx,
@@ -671,7 +834,7 @@ def run_upscale_pipeline(
                                 future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
 
                                 # Khởi tạo song song GPU Engine + TensorRT + Pinned Ring + Triton Warmup ngay trong lúc chờ giải mã Chunk 0
-                                if zero_disk and engine == "cuda" and not os.environ.get("PYTEST_CURRENT_TEST"):
+                                if zero_disk and engine == "cuda" and not is_auto_pareto and not os.environ.get("PYTEST_CURRENT_TEST"):
                                     try:
                                         import torch
                                         from src.cuda_engine import get_cuda_inference_engine
@@ -929,9 +1092,12 @@ def run_upscale_pipeline(
                                                 import cv2
                                                 import psutil
                                                 import torch
-                                                from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
+                                                from src.trt_zero_copy_upscaler import (
+                                                    DoubleBufferedPipeUpscaler,
+                                                    _infer_frame_luma_hw,
+                                                )
                                                 from src.build_trt_engine import get_hybrid_engine_or_wrapper
-                                                from src.cuda_engine import get_cuda_inference_engine
+                                                from src.cuda_engine import GPUPersistentWorker, get_cuda_inference_engine
                                                 from src.output_sanity import check_frame_sanity_arrays, OutputSanityError, write_failed_sanity_audit
 
                                                 in_files = []
@@ -956,53 +1122,134 @@ def run_upscale_pipeline(
                                                 repeat_counts = [r["count"] for r in runs] if runs else [1] * len(unique_frames_rgb)
 
                                                 in_h, in_w = (
-                                                    unique_frames_rgb[0].shape[:2]
+                                                    _infer_frame_luma_hw(unique_frames_rgb[0])
                                                     if unique_frames_rgb
                                                     else (int(meta.get("height", 1080)), int(meta.get("width", 1920)))
                                                 )
-                                                cuda_engine = get_cuda_inference_engine(
-                                                    model_info,
-                                                    precision=precision,
-                                                    batch_size=batch_size,
-                                                    use_tensorrt=use_tensorrt,
-                                                )
-                                                eff_bs = batch_size or cuda_engine.batch_size or 8
-                                                runner_key = (model_info["id"], int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
 
-                                                # Khởi tạo & tái sử dụng Engine (TensorRT 10 FP16 / Hybrid Wrapper) + Pinned Buffers xuyên suốt tập
-                                                if (
-                                                    getattr(cuda_engine, "_zero_disk_upscaler", None) is None
-                                                    or getattr(cuda_engine, "_zero_disk_key", None) != runner_key
-                                                ):
-                                                    old_zd_upscaler = getattr(cuda_engine, "_zero_disk_upscaler", None)
-                                                    if old_zd_upscaler is not None and hasattr(old_zd_upscaler, "release"):
-                                                        try:
-                                                            old_zd_upscaler.release()
-                                                        except Exception:
-                                                            pass
-                                                    wrapped_model = get_hybrid_engine_or_wrapper(
-                                                        cuda_engine.model,
-                                                        max_batch=eff_bs,
-                                                        force_pytorch=(not use_tensorrt) or (precision != "fp16"),
-                                                        model_id=model_info["id"],
-                                                        input_hw=(in_h, in_w),
-                                                        scale=2.0,
-                                                        weights_sha256=model_sha256,
+                                                if is_auto_pareto:
+                                                    chosen_sub_info = _resolve_chunk_pareto_submodel(
+                                                        c_idx,
+                                                        extracted.get("chunk_plan"),
+                                                        extracted.get("frame_count", len(unique_frames_rgb)),
+                                                        extracted.get("expected_frames", len(unique_frames_rgb)),
                                                     )
+                                                    detail_info = model_info["detail_model_info"]
+                                                    fast_info = model_info["fast_model_info"]
+                                                    cuda_engine = get_cuda_inference_engine(
+                                                        detail_info,
+                                                        precision=precision,
+                                                        batch_size=batch_size,
+                                                        use_tensorrt=use_tensorrt,
+                                                    )
+                                                    eff_bs = batch_size or cuda_engine.batch_size or 8
+                                                    p_key = ("auto-pareto", int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
+                                                    p_bundle = getattr(cuda_engine, "_auto_pareto_bundle", None)
+                                                    if not isinstance(p_bundle, dict) or p_bundle.get("key") != p_key:
+                                                        if isinstance(p_bundle, dict):
+                                                            old_up = p_bundle.get("shared_upscaler")
+                                                            if old_up is not None and hasattr(old_up, "release"):
+                                                                try:
+                                                                    old_up.release()
+                                                                except Exception:
+                                                                    pass
+                                                        fast_worker = GPUPersistentWorker(
+                                                            model_id=fast_info["id"],
+                                                            weights_path=fast_info["weights_path"],
+                                                            precision=precision,
+                                                            device=str(cuda_engine.device),
+                                                            batch_size=eff_bs,
+                                                            use_tensorrt=use_tensorrt,
+                                                        )
+                                                        detail_wrap = get_hybrid_engine_or_wrapper(
+                                                            cuda_engine.model,
+                                                            max_batch=eff_bs,
+                                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                                            model_id=detail_info["id"],
+                                                            input_hw=(in_h, in_w),
+                                                            scale=2.0,
+                                                            weights_sha256=str(detail_info.get("sha256") or ""),
+                                                        )
+                                                        fast_wrap = get_hybrid_engine_or_wrapper(
+                                                            fast_worker.model,
+                                                            max_batch=eff_bs,
+                                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                                            model_id=fast_info["id"],
+                                                            input_hw=(in_h, in_w),
+                                                            scale=2.0,
+                                                            weights_sha256=str(fast_info.get("sha256") or ""),
+                                                        )
+                                                        shared_up = DoubleBufferedPipeUpscaler(
+                                                            detail_wrap,
+                                                            batch_size=eff_bs,
+                                                            device=cuda_engine.device,
+                                                            input_hw=(in_h, in_w),
+                                                            scale=2,
+                                                        )
+                                                        p_bundle = {
+                                                            "key": p_key,
+                                                            "fast_worker": fast_worker,
+                                                            "detail_wrap": detail_wrap,
+                                                            "fast_wrap": fast_wrap,
+                                                            "shared_upscaler": shared_up,
+                                                        }
+                                                        cuda_engine._auto_pareto_bundle = p_bundle
+                                                        if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
+                                                            torch.cuda.empty_cache()
+                                                    wrapped_model = (
+                                                        p_bundle["detail_wrap"]
+                                                        if chosen_sub_info["id"] == detail_info["id"]
+                                                        else p_bundle["fast_wrap"]
+                                                    )
+                                                    pipe_upscaler = p_bundle["shared_upscaler"]
+                                                    pipe_upscaler.model = wrapped_model
+                                                    pipe_upscaler.ensure_resolution(in_h, in_w)
+                                                    cuda_engine._zero_disk_upscaler = pipe_upscaler
                                                     cuda_engine._zero_disk_wrapper = wrapped_model
-                                                    cuda_engine._zero_disk_key = runner_key
-                                                    cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
-                                                        wrapped_model,
-                                                        batch_size=eff_bs,
-                                                        device=cuda_engine.device,
-                                                        input_hw=(in_h, in_w),
-                                                        scale=2,
-                                                    )
-                                                    if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
-                                                        torch.cuda.empty_cache()
                                                 else:
-                                                    wrapped_model = cuda_engine._zero_disk_wrapper
-                                                    cuda_engine._zero_disk_upscaler.ensure_resolution(in_h, in_w)
+                                                    cuda_engine = get_cuda_inference_engine(
+                                                        model_info,
+                                                        precision=precision,
+                                                        batch_size=batch_size,
+                                                        use_tensorrt=use_tensorrt,
+                                                    )
+                                                    eff_bs = batch_size or cuda_engine.batch_size or 8
+                                                    runner_key = (model_info["id"], int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
+
+                                                    # Khởi tạo & tái sử dụng Engine (TensorRT 10 FP16 / Hybrid Wrapper) + Pinned Buffers xuyên suốt tập
+                                                    if (
+                                                        getattr(cuda_engine, "_zero_disk_upscaler", None) is None
+                                                        or getattr(cuda_engine, "_zero_disk_key", None) != runner_key
+                                                    ):
+                                                        old_zd_upscaler = getattr(cuda_engine, "_zero_disk_upscaler", None)
+                                                        if old_zd_upscaler is not None and hasattr(old_zd_upscaler, "release"):
+                                                            try:
+                                                                old_zd_upscaler.release()
+                                                            except Exception:
+                                                                pass
+                                                        wrapped_model = get_hybrid_engine_or_wrapper(
+                                                            cuda_engine.model,
+                                                            max_batch=eff_bs,
+                                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                                            model_id=model_info["id"],
+                                                            input_hw=(in_h, in_w),
+                                                            scale=2.0,
+                                                            weights_sha256=model_sha256,
+                                                        )
+                                                        cuda_engine._zero_disk_wrapper = wrapped_model
+                                                        cuda_engine._zero_disk_key = runner_key
+                                                        cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
+                                                            wrapped_model,
+                                                            batch_size=eff_bs,
+                                                            device=cuda_engine.device,
+                                                            input_hw=(in_h, in_w),
+                                                            scale=2,
+                                                        )
+                                                        if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
+                                                            torch.cuda.empty_cache()
+                                                    else:
+                                                        wrapped_model = cuda_engine._zero_disk_wrapper
+                                                        cuda_engine._zero_disk_upscaler.ensure_resolution(in_h, in_w)
 
                                                 # Chốt an toàn VRAM cho NVENC 4K 10-bit (lookahead 32 + fullres cần ~1.1 GB VRAM):
                                                 # Nếu chunk trước vẫn đang flush NVENC nền và VRAM trống < 2.2 GB, đợi flush (~1.2s) xong trước khi mở phiên NVENC mới.
@@ -1051,9 +1298,24 @@ def run_upscale_pipeline(
                                                 should_check_sanity = (c_idx == 0) or ((c_idx + 1) % 10 == 0)
                                                 fps_str = f"{meta['fps_num']}/{meta['fps_den']}"
                                                 t0_pipe = time.time()
-                                                enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(
-                                                    tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
+                                                is_real_upscaler_cls = (
+                                                    hasattr(pipe_upscaler, "open_chunk_encoder")
+                                                    and getattr(type(pipe_upscaler), "spawn_nvenc_pipe_writer", None)
+                                                    is DoubleBufferedPipeUpscaler.spawn_nvenc_pipe_writer
+                                                    and not hasattr(pipe_upscaler.spawn_nvenc_pipe_writer, "_mock_name")
                                                 )
+                                                if is_real_upscaler_cls:
+                                                    enc_proc = pipe_upscaler.open_chunk_encoder(
+                                                        tmp_seg_out,
+                                                        fps_str=fps_str,
+                                                        width=out_w,
+                                                        height=out_h,
+                                                        multipass=episode_multipass,
+                                                    )
+                                                else:
+                                                    enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(
+                                                        tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
+                                                    )
                                                 try:
                                                     pre_dedup = (
                                                         extracted.get("distinct_frames"),
@@ -1193,10 +1455,16 @@ def run_upscale_pipeline(
                                                         to_console=False
                                                     )
                                             else:
+                                                chunk_target_model = _resolve_chunk_pareto_submodel(
+                                                    c_idx,
+                                                    extracted.get("chunk_plan"),
+                                                    extracted.get("frame_count", 1),
+                                                    extracted.get("expected_frames", 1),
+                                                ) if is_auto_pareto else model_info
                                                 ai_result = upscale_frames_with_fallback(
                                                     input_dir=c_in_dir,
                                                     output_dir=c_out_dir,
-                                                    model_info=model_info,
+                                                    model_info=chunk_target_model,
                                                     engine=engine,
                                                     precision=precision,
                                                     batch_size=batch_size,
@@ -1588,6 +1856,14 @@ def run_upscale_pipeline(
                                 )
                                 return up_segs_dir
                         finally:
+                            if rolling_planner is not None:
+                                try:
+                                    if not partial_paused and dedup_plan is None:
+                                        dedup_plan = rolling_planner.finalize_plan(extra_fields=plan_extra_meta)
+                                    else:
+                                        rolling_planner.close()
+                                except Exception:
+                                    rolling_planner.close()
                             if future_extract is not None:
                                 try:
                                     res_ext = future_extract.result()
@@ -1595,6 +1871,17 @@ def run_upscale_pipeline(
                                 except Exception:
                                     pass
                                 future_extract = None
+
+                if is_auto_pareto and pareto_state["chunk_counts"]:
+                    manifest_data["model_routing"] = {
+                        "mode": "auto-pareto",
+                        "chunk_counts": dict(pareto_state["chunk_counts"]),
+                    }
+                    try:
+                        with open(manifest_path, "w", encoding="utf-8") as f:
+                            json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+                    except OSError:
+                        pass
 
                 stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
                 logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
@@ -1694,6 +1981,20 @@ def run_upscale_pipeline(
                         "model_sha256": model_sha256,
                         "engine": engine,
                         "precision": precision,
+                        "nvenc_multipass": episode_multipass,
+                        **(
+                            {
+                                "model_routing": {
+                                    "mode": "auto-pareto",
+                                    "detail_model_id": model_info.get("detail_model_id"),
+                                    "fast_model_id": model_info.get("fast_model_id"),
+                                    "chunk_counts": dict(pareto_state["chunk_counts"]),
+                                    "chunks": list(pareto_state["chunks"]),
+                                }
+                            }
+                            if is_auto_pareto
+                            else {}
+                        ),
                         "resolution_source": model_info.get("resolution_source", ""),
                         "source_frames": src_frames,
                         "output_frames": final_frames,

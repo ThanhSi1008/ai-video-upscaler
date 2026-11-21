@@ -31,6 +31,16 @@ def check_frame_sanity_arrays(
     """
     t0 = time.time()
     target_size = (480, 270)
+    if src_img.ndim == 2:
+        from src.ffmpeg_ops import yuv420_to_rgb_small_u8
+        src_img = yuv420_to_rgb_small_u8(src_img, out_w=480, out_h=270)
+        if not is_rgb:
+            src_img = src_img[:, :, ::-1]
+    if out_img.ndim == 2:
+        from src.ffmpeg_ops import yuv420_to_rgb_small_u8
+        out_img = yuv420_to_rgb_small_u8(out_img, out_w=480, out_h=270)
+        if not is_rgb:
+            out_img = out_img[:, :, ::-1]
     src_small = (
         src_img
         if src_img.shape[:2] == (270, 480)
