@@ -701,11 +701,14 @@ def main():
     args = parse_args()
 
     if getattr(args, "drift_delta", None) is not None:
-        if args.dedup_policy is None or args.dedup_policy == "drift":
+        if args.dedup_policy is None or args.dedup_policy == "drift" or str(args.dedup_policy).startswith("drift-"):
             args.dedup_policy = f"drift-{args.drift_delta}"
 
     if getattr(args, "dis_thresh", None) is not None:
-        if args.dedup_policy is None or args.dedup_policy == "dis":
+        pol_cur = str(args.dedup_policy or "").strip().lower()
+        if pol_cur == "dis-auto" or pol_cur.startswith("dis-auto-"):
+            args.dedup_policy = f"dis-auto-{args.dis_thresh}"
+        elif args.dedup_policy is None or pol_cur == "dis" or pol_cur.startswith("dis-"):
             args.dedup_policy = f"dis-{args.dis_thresh}"
 
     # Xử lý cờ --clean-temp / --cleanup (Dọn dẹp nhanh thư mục tạm và gom gọn audit)

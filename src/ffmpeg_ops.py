@@ -673,7 +673,23 @@ def extract_frames_raw_yuv420(
         actual_frames = offset // frame_bytes
         return [out_arr[idx] for idx in range(actual_frames)]
 
-    prefer_hw = hwaccel if hwaccel is not None else (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc")
+    prefer_hw = (
+        hwaccel
+        if hwaccel is not None
+        else (
+            sys.platform == "win32"
+            and HEVC_ENCODER == "hevc_nvenc"
+            and (
+                True
+                if not source_codec
+                else is_nvdec_supported(
+                    codec=str(source_codec),
+                    pix_fmt=str(source_pix_fmt or ""),
+                    profile="",
+                )
+            )
+        )
+    )
 
     if n_discard > 0 and is_real_subproc:
         est_total = int(total_frames) if total_frames else ((max(kept_indices) + 1) if kept_indices else 256)
@@ -761,6 +777,7 @@ def extract_frames_raw_rgb24(
     source_video_path: Optional[str] = None,
     chunk_start_sec: Optional[float] = None,
     source_codec: Optional[str] = None,
+    source_pix_fmt: Optional[str] = None,
 ) -> List[Any]:
     """
     Giải mã trực tiếp khung hình video sang mảng RGB24 trong RAM qua pipe stdout (0 byte ghi đĩa):
@@ -827,7 +844,23 @@ def extract_frames_raw_rgb24(
         actual_frames = offset // frame_bytes
         return [out_arr[idx] for idx in range(actual_frames)]
 
-    prefer_hw = hwaccel if hwaccel is not None else (sys.platform == "win32" and HEVC_ENCODER == "hevc_nvenc")
+    prefer_hw = (
+        hwaccel
+        if hwaccel is not None
+        else (
+            sys.platform == "win32"
+            and HEVC_ENCODER == "hevc_nvenc"
+            and (
+                True
+                if not source_codec
+                else is_nvdec_supported(
+                    codec=str(source_codec),
+                    pix_fmt=str(source_pix_fmt or ""),
+                    profile="",
+                )
+            )
+        )
+    )
 
     # Nhánh khôi phục Open-GOP CRA/RASL: khi seg_path có B-frame dẫn đầu bị MP4 đánh dấu DISCARD
     if n_discard > 0 and is_real_subproc:

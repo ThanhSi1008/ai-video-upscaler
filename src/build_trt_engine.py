@@ -314,10 +314,11 @@ def export_model_to_onnx(
     device = next(model_copy.parameters()).device if any(True for _ in model_copy.parameters()) else torch.device("cpu")
     model_copy = model_copy.to(memory_format=torch.contiguous_format)
 
-    has_body_srvgg = hasattr(model_copy, "body") and hasattr(model_copy, "upsampler")
+    from src.cuda_engine import is_srvgg_compact_model
+    has_body_srvgg = is_srvgg_compact_model(model_copy)
     if hasattr(model_copy, "inner_model"):
         inner = model_copy.inner_model
-        has_body_srvgg = hasattr(inner, "body") and hasattr(inner, "upsampler")
+        has_body_srvgg = is_srvgg_compact_model(inner)
         model_to_wrap = inner if has_body_srvgg else model_copy
     else:
         model_to_wrap = model_copy
@@ -673,10 +674,11 @@ def get_hybrid_engine_or_wrapper(
     """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    has_body_srvgg = hasattr(pytorch_model, "body") and hasattr(pytorch_model, "upsampler")
+    from src.cuda_engine import is_srvgg_compact_model
+    has_body_srvgg = is_srvgg_compact_model(pytorch_model)
     if hasattr(pytorch_model, "inner_model"):
         inner = pytorch_model.inner_model
-        has_body_srvgg = hasattr(inner, "body") and hasattr(inner, "upsampler")
+        has_body_srvgg = is_srvgg_compact_model(inner)
         model_for_wrapper = inner if has_body_srvgg else pytorch_model
     else:
         model_for_wrapper = pytorch_model

@@ -71,6 +71,20 @@ def get_dedup_params(
     pol = str(policy_name or "default").strip().lower()
     if pol in DEDUP_POLICY_PARAMS:
         params = dict(DEDUP_POLICY_PARAMS[pol])
+    elif pol.startswith("dis-auto-"):
+        val_str = pol[len("dis-auto-"):]
+        try:
+            val = float(val_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}'. Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            ) from exc
+        if not math.isfinite(val) or val <= 0.0:
+            raise ValueError(
+                f"Chính sách dedup không hợp lệ: '{policy_name}' (dis_thresh phải > 0). Danh sách hợp lệ: {list(DEDUP_POLICY_PARAMS.keys())}"
+            )
+        params = dict(DEDUP_POLICY_PARAMS["dis-auto"])
+        params["dis_thresh"] = val
     elif pol.startswith("dis-"):
         val_str = pol[len("dis-"):]
         try:
@@ -384,6 +398,8 @@ def _estimate_textured_lk_pan_zoom(
     scale_factor: float,
     thresh: float,
     sigma_diff: float,
+    xc: Any = None,
+    yc: Any = None,
 ) -> bool:
     """Estimate subpixel camera pan and center-free affine zoom restricted to textured pixels."""
     import cv2
@@ -402,9 +418,13 @@ def _estimate_textured_lk_pan_zoom(
     if int(np.count_nonzero(mask)) < 64:
         return False
 
-    yg, xg = np.mgrid[0:h, 0:w].astype(np.float32)
-    xcm = (xg - (w * 0.5))[mask]
-    ycm = (yg - (h * 0.5))[mask]
+    if xc is not None and yc is not None and xc.shape == (h, w) and yc.shape == (h, w):
+        xcm = xc[mask]
+        ycm = yc[mask]
+    else:
+        yg, xg = np.mgrid[0:h, 0:w].astype(np.float32)
+        xcm = (xg - (w * 0.5))[mask]
+        ycm = (yg - (h * 0.5))[mask]
     ixm = ix[mask]
     iym = iy[mask]
     itm = it[mask]
@@ -446,6 +466,8 @@ def _is_dis_motion_early_exit(
     local_thresh: Optional[float] = None,
     auto_noise_floor: bool = False,
     lip_flap_guard: bool = False,
+    xc: Any = None,
+    yc: Any = None,
 ) -> bool:
     """Evaluate early-exit motion cascade combining 8x8 lip-flap guard, textured pan/zoom, and DIS optical flow."""
     import cv2
@@ -462,7 +484,9 @@ def _is_dis_motion_early_exit(
             return True
 
     if auto_noise_floor:
-        if _estimate_textured_lk_pan_zoom(ref_gray, curr_gray, float(scale_factor), float(thresh), sigma_diff):
+        if _estimate_textured_lk_pan_zoom(
+            ref_gray, curr_gray, float(scale_factor), float(thresh), sigma_diff, xc=xc, yc=yc
+        ):
             return True
         if sigma_diff > 0.8:
             ref_in = cv2.GaussianBlur(ref_gray, (5, 5), 1.1)
@@ -743,6 +767,8 @@ def detect_dis_policy_actions(
             local_thresh=local_thresh,
             auto_noise_floor=auto_noise_floor,
             lip_flap_guard=lip_flap_guard,
+            xc=rx,
+            yc=ry,
         ):
             actions[curr_idx] = "keep"
             ref_gray = curr_gray
@@ -876,6 +902,7 @@ def _scan_fused_mpdecimate_and_dis(
     ref_gray = None
     first_gray_copy = None
     last_gray_copy = None
+    cut_starts: set[int] = set()
     curr_idx = 0
 
     while True:
@@ -888,14 +915,18 @@ def _scan_fused_mpdecimate_and_dis(
             base_act = raw_actions[curr_idx] if curr_idx < len(raw_actions) else "keep"
 
         curr_gray = np.frombuffer(raw_gray, dtype=np.uint8).reshape((scale_h, scale_w))
-        if boundary_out is not None:
-            if first_gray_copy is None:
-                first_gray_copy = curr_gray.copy()
-            last_gray_copy = curr_gray
         is_forced = (
             (curr_idx == 0)
             or (curr_idx in chunk_start_set if chunk_start_set is not None else (curr_idx % max(1, frames_per_chunk_fallback) == 0))
         )
+        if boundary_out is not None:
+            if first_gray_copy is None:
+                first_gray_copy = curr_gray.copy()
+            if is_forced and curr_idx > 0 and last_gray_copy is not None:
+                mad_cut = float(np.mean(np.abs(curr_gray.astype(np.int16) - last_gray_copy.astype(np.int16))))
+                if mad_cut >= 16.0:
+                    cut_starts.add(curr_idx)
+            last_gray_copy = curr_gray.copy() if is_forced else curr_gray
 
         if is_forced or base_act == "keep" or ref_gray is None:
             final_actions.append("keep")
@@ -915,6 +946,8 @@ def _scan_fused_mpdecimate_and_dis(
             local_thresh=local_thresh,
             auto_noise_floor=auto_noise_floor,
             lip_flap_guard=lip_flap_guard,
+            xc=rx,
+            yc=ry,
         ):
             final_actions.append("keep")
             ref_gray = curr_gray
@@ -930,6 +963,7 @@ def _scan_fused_mpdecimate_and_dis(
     if boundary_out is not None:
         boundary_out["first_gray"] = first_gray_copy
         boundary_out["last_gray"] = last_gray_copy.copy() if last_gray_copy is not None else None
+        boundary_out["cut_starts"] = cut_starts
 
     if proc.returncode != 0 or not raw_actions or len(raw_actions) != len(final_actions):
         return None
@@ -1052,7 +1086,8 @@ def scan_dedup_plan(
     motion_tau: float = 0.3,
     drift_delta: Optional[float] = None,
     drift_min_response: float = 0.10,
-    dis_thresh: Optional[float] = None
+    dis_thresh: Optional[float] = None,
+    decode_threads: int = 0,
 ) -> Dict[str, Any]:
     """
     Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
@@ -1112,6 +1147,7 @@ def scan_dedup_plan(
 
     frame_actions: List[str] = []
     fused_dis_final_actions: Optional[List[str]] = None
+    fused_boundary: Dict[str, Any] = {}
     is_dis_policy = policy_clean.startswith("dis") or policy_clean in ["sakuga", "dis-sakuga"]
 
     if policy_clean == "off":
@@ -1154,14 +1190,17 @@ def scan_dedup_plan(
                 local_thresh=effective_local_thresh,
                 auto_noise_floor=effective_auto_noise_floor,
                 lip_flap_guard=effective_lip_flap_guard,
+                decode_threads=decode_threads,
+                boundary_out=fused_boundary,
             )
             if fused_res is not None:
                 frame_actions, fused_dis_final_actions = fused_res
                 total_frames = len(frame_actions)
 
         if not frame_actions:
+            thread_args = ["-threads", str(int(decode_threads))] if decode_threads and int(decode_threads) > 0 else []
             cmd = [
-                "ffmpeg", "-i", input_path,
+                "ffmpeg", *thread_args, "-i", input_path,
                 "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
                 "-v", "debug",
                 "-f", "null", "-"
@@ -1207,15 +1246,29 @@ def scan_dedup_plan(
     assert raw_keep + raw_drop == total_frames, (
         f"Parse log debug không khớp: keep ({raw_keep}) + drop ({raw_drop}) != tổng actions ({total_frames})"
     )
-    if expected_frames is not None:
-        if total_frames < expected_frames:
-            try:
-                from src.ffmpeg_ops import _count_leading_discard_packets
-                n_discard = _count_leading_discard_packets(input_path)
-                if n_discard > 0 and (expected_frames - n_discard) == total_frames:
+    target_expected = (
+        expected_frames
+        if expected_frames is not None
+        else (int(sum(chunk_frame_counts)) if (chunk_frame_counts and sum(chunk_frame_counts) > 0) else None)
+    )
+    if target_expected is not None and total_frames < target_expected:
+        try:
+            from src.ffmpeg_ops import _count_leading_discard_packets
+            n_discard = _count_leading_discard_packets(input_path)
+            if n_discard > 0 and (target_expected - n_discard) == total_frames:
+                if chunk_frame_counts is not None and sum(chunk_frame_counts) == target_expected:
+                    frame_actions = (["keep"] * n_discard) + frame_actions
+                    if fused_dis_final_actions is not None:
+                        fused_dis_final_actions = (["keep"] * n_discard) + fused_dis_final_actions
+                    if fused_boundary.get("cut_starts"):
+                        fused_boundary["cut_starts"] = {int(cs) + n_discard for cs in fused_boundary["cut_starts"]}
+                    raw_keep += n_discard
+                    total_frames = len(frame_actions)
+                elif expected_frames is not None:
                     expected_frames = total_frames
-            except Exception:
-                pass
+        except Exception:
+            pass
+    if expected_frames is not None:
         assert total_frames == expected_frames, (
             f"Số frame quét từ debug log ({total_frames}) không khớp số frame ffprobe đếm được ({expected_frames})!"
         )
@@ -1313,7 +1366,8 @@ def scan_dedup_plan(
                 "total_frames": c_len,
                 "kept_count": len(kept_indices),
                 "kept_indices": kept_indices,
-                "runs": runs
+                "runs": runs,
+                "scene_cut": (c_idx == 0) or (c_start in (fused_boundary.get("cut_starts") or set())),
             })
     else:
         for c_idx in range(num_chunks):
@@ -1350,7 +1404,8 @@ def scan_dedup_plan(
                 "total_frames": c_len,
                 "kept_count": len(kept_indices),
                 "kept_indices": kept_indices,
-                "runs": runs
+                "runs": runs,
+                "scene_cut": (c_idx == 0) or (c_start in (fused_boundary.get("cut_starts") or set())),
             })
 
     dedup_ratio = (1.0 - (total_kept_count / total_frames)) * 100.0 if total_frames > 0 else 0.0
@@ -1402,6 +1457,20 @@ def scan_dedup_plan(
     return plan_data
 
 
+def _canonical_dedup_family(policy_name: str) -> str:
+    """Normalize dynamic policy strings (dis-auto-<f>, dis-<f>, drift-<f>) to their canonical family."""
+    pol = str(policy_name or "default").strip().lower()
+    if pol == "dis-auto" or pol.startswith("dis-auto-"):
+        return "dis-auto"
+    if pol in ("sakuga", "dis-sakuga"):
+        return pol
+    if pol == "dis" or pol.startswith("dis-"):
+        return "dis"
+    if pol == "drift" or pol.startswith("drift-"):
+        return "drift"
+    return pol
+
+
 def load_or_create_plan(
     input_path: str,
     plan_path: str,
@@ -1414,7 +1483,8 @@ def load_or_create_plan(
     motion_tau: float = 0.3,
     drift_delta: Optional[float] = None,
     drift_min_response: float = 0.10,
-    dis_thresh: Optional[float] = None
+    dis_thresh: Optional[float] = None,
+    decode_threads: int = 0,
 ) -> Dict[str, Any]:
     """
     Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
@@ -1437,7 +1507,7 @@ def load_or_create_plan(
             chunks = data.get("chunks", [])
             if data.get("total_frames", 0) > 0 and len(chunks) > 0:
                 cached_policy = data.get("dedup_policy", "default")
-                if cached_policy != policy_clean:
+                if _canonical_dedup_family(cached_policy) != _canonical_dedup_family(policy_clean):
                     raise ValueError(
                         f"Từ chối resume: Kế hoạch trong {plan_path} sử dụng chính sách dedup '{cached_policy}' "
                         f"khác với chính sách yêu cầu '{policy_clean}'. Vui lòng dùng --force hoặc xóa file để quét lại."
@@ -1505,6 +1575,7 @@ def load_or_create_plan(
         except Exception:
             pass
 
+    extra_scan_kw = {"decode_threads": decode_threads} if decode_threads else {}
     return scan_dedup_plan(
         input_path=input_path,
         plan_path=plan_path,
@@ -1516,7 +1587,8 @@ def load_or_create_plan(
         motion_tau=motion_tau,
         drift_delta=effective_drift_delta,
         drift_min_response=drift_min_response,
-        dis_thresh=effective_dis_thresh
+        dis_thresh=effective_dis_thresh,
+        **extra_scan_kw,
     )
 
 
@@ -1530,6 +1602,7 @@ def scan_single_segment_actions(
     dis_thresh: Optional[float] = None,
     drift_delta: Optional[float] = None,
     drift_min_response: float = 0.10,
+    motion_tau_override: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Scan an individual GOP segment with Open-GOP RASL discard reconciliation and bounded decode threads."""
     policy_clean = str(policy or "default").strip().lower()
@@ -1542,7 +1615,7 @@ def scan_single_segment_actions(
     hi = int(p_params.get("hi", DEFAULT_DEDUP_HI))
     lo = int(p_params.get("lo", DEFAULT_DEDUP_LO))
     frac = float(p_params.get("frac", DEFAULT_DEDUP_FRAC))
-    motion_tau = float(p_params.get("tau", 0.30))
+    motion_tau = float(motion_tau_override) if motion_tau_override is not None else float(p_params.get("tau", 0.30))
     effective_drift_delta = float(p_params.get("drift_delta", 0.75))
     effective_dis_thresh = float(p_params.get("dis_thresh", 0.30))
     effective_local_thresh: Optional[float] = (
@@ -1707,6 +1780,10 @@ class RollingDedupPlanner:
         policy: str = "default",
         max_workers: int = 2,
         decode_threads: int = 2,
+        dis_thresh: Optional[float] = None,
+        drift_delta: Optional[float] = None,
+        drift_min_response: float = 0.10,
+        motion_tau: Optional[float] = None,
     ):
         from concurrent.futures import ThreadPoolExecutor
 
@@ -1720,6 +1797,16 @@ class RollingDedupPlanner:
         self.policy = str(policy or "default").strip().lower()
         self.max_workers = max(1, min(int(max_workers), 2))
         self.decode_threads = max(1, int(decode_threads))
+        self.dis_thresh = dis_thresh
+        self.drift_delta = drift_delta
+        self.drift_min_response = float(drift_min_response)
+        self.motion_tau = motion_tau
+        # Validate policy & override params eagerly on construction
+        get_dedup_params(
+            self.policy,
+            dis_thresh_override=self.dis_thresh,
+            drift_delta_override=self.drift_delta,
+        )
         self.total_chunks = len(self.seg_paths)
 
         self._starts: List[int] = []
@@ -1736,8 +1823,26 @@ class RollingDedupPlanner:
         self._final_plan: Optional[Dict[str, Any]] = None
         self._extra_fields: Dict[str, Any] = {}
         self._bg_flusher: Optional[threading.Thread] = None
+        self._aborted = False
 
     def _scan_one(self, c_idx: int) -> Dict[str, Any]:
+        if self._aborted:
+            exp_len = max(1, self.seg_frame_counts[c_idx])
+            return {
+                "chunk_meta": {
+                    "chunk_idx": int(c_idx),
+                    "start_frame": int(self._starts[c_idx]),
+                    "end_frame": int(self._starts[c_idx] + exp_len),
+                    "total_frames": exp_len,
+                    "kept_count": exp_len,
+                    "kept_indices": list(range(exp_len)),
+                    "runs": [{"frame_idx": idx_k, "count": 1} for idx_k in range(exp_len)],
+                    "scene_cut": (c_idx == 0),
+                },
+                "raw_actions": ["keep"] * exp_len,
+                "first_gray": None,
+                "last_gray": None,
+            }
         res = scan_single_segment_actions(
             seg_path=self.seg_paths[c_idx],
             expected_seg_frames=self.seg_frame_counts[c_idx],
@@ -1745,6 +1850,10 @@ class RollingDedupPlanner:
             start_frame=self._starts[c_idx],
             policy=self.policy,
             decode_threads=self.decode_threads,
+            dis_thresh=self.dis_thresh,
+            drift_delta=self.drift_delta,
+            drift_min_response=self.drift_min_response,
+            motion_tau_override=self.motion_tau,
         )
         with self._lock:
             self._results[c_idx] = res
@@ -1772,26 +1881,37 @@ class RollingDedupPlanner:
             r_prev = prev["chunk_meta"]["kept_count"] / max(1, prev["chunk_meta"]["total_frames"])
             cur["chunk_meta"]["scene_cut"] = bool(abs(r_cur - r_prev) >= 0.30)
 
-    def start(self, sync_initial_chunks: int = 2, extra_fields: Optional[Dict[str, Any]] = None) -> None:
+    def start(self, sync_initial_chunks: int = 1, extra_fields: Optional[Dict[str, Any]] = None) -> None:
         from concurrent.futures import ThreadPoolExecutor
 
         if extra_fields:
-            self._extra_fields.update(extra_fields)
+            with self._lock:
+                self._extra_fields.update(extra_fields)
+        if self.total_chunks <= 0:
+            self.finalize_plan()
+            return
         n_sync = min(self.total_chunks, max(1, int(sync_initial_chunks)))
+        if self.total_chunks == 1:
+            self._scan_one(0)
+            self.finalize_plan()
+            return
+
+        # Launch bounded 2-worker pool immediately so seg_0000 and seg_0001 scan concurrently
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.max_workers,
+            thread_name_prefix="RollingPreflight",
+        )
+        for idx in range(self.total_chunks):
+            self._futures[idx] = self._executor.submit(self._scan_one, idx)
+
         for idx in range(n_sync):
-            self._scan_one(idx)
+            self.get_chunk_plan(idx)
 
-        if n_sync < self.total_chunks:
-            self._executor = ThreadPoolExecutor(
-                max_workers=self.max_workers,
-                thread_name_prefix="RollingPreflight",
-            )
-            for idx in range(n_sync, self.total_chunks):
-                self._futures[idx] = self._executor.submit(self._scan_one, idx)
-
+        if len(self._results) < self.total_chunks:
             def _bg_finalize() -> None:
                 try:
-                    self.finalize_plan()
+                    if not self._aborted:
+                        self.finalize_plan()
                 except Exception:
                     pass
 
@@ -1835,7 +1955,12 @@ class RollingDedupPlanner:
                     self._atomic_write_plan(self._final_plan)
                 return self._final_plan
 
-            p_params = get_dedup_params(self.policy)
+            p_params = get_dedup_params(
+                self.policy,
+                dis_thresh_override=self.dis_thresh,
+                drift_delta_override=self.drift_delta,
+            )
+            eff_motion_tau = float(self.motion_tau) if self.motion_tau is not None else float(p_params.get("tau", 0.3))
             is_dis = self.policy.startswith("dis") or self.policy in ("sakuga", "dis-sakuga")
             all_raw: List[str] = []
             chunks_meta: List[Dict[str, Any]] = []
@@ -1869,9 +1994,9 @@ class RollingDedupPlanner:
                     "hi": int(p_params.get("hi", DEFAULT_DEDUP_HI)) if self.policy != "off" else None,
                     "lo": int(p_params.get("lo", DEFAULT_DEDUP_LO)) if self.policy != "off" else None,
                     "frac": float(p_params.get("frac", DEFAULT_DEDUP_FRAC)) if self.policy != "off" else None,
-                    "motion_tau": float(p_params.get("tau", 0.3)) if self.policy == "motion" else None,
+                    "motion_tau": eff_motion_tau if self.policy == "motion" else None,
                     "drift_delta": float(p_params.get("drift_delta", 0.75)) if self.policy.startswith("drift") else None,
-                    "drift_min_response": 0.10 if self.policy.startswith("drift") else None,
+                    "drift_min_response": self.drift_min_response if self.policy.startswith("drift") else None,
                     "dis_thresh": float(p_params.get("dis_thresh", 0.30)) if self.policy.startswith("dis") else None,
                 },
                 "total_frames": self.total_frames,
@@ -1915,8 +2040,12 @@ class RollingDedupPlanner:
                     pass
 
     def close(self) -> None:
+        self._aborted = True
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=False)
             self._executor = None
 
 
@@ -2012,7 +2141,7 @@ def encode_chunk_reexpanded(
         "-f", "concat", "-safe", "0",
         "-i", concat_script_path,
         "-vf", (
-            f"scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv,"
+            f"scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+full_chroma_int,"
             f"fps={fps_num}/{fps_den}"
         ),
         "-pix_fmt", HEVC_PIX_FMT,
@@ -2166,6 +2295,7 @@ def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
         meta["fps_den"],
         chunk_frame_counts=seg_counts,
         policy=eff_pol,
+        decode_threads=2,
     )
 
 

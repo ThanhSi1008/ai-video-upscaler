@@ -151,6 +151,24 @@ class AnimeJaNaiCompact2x(nn.Module):
         return out + base
 
 
+def is_srvgg_compact_model(model: Optional[nn.Module]) -> bool:
+    """Return True strictly for SRVGGNetCompact modules (pure body ModuleList + PixelShuffle)."""
+    if model is None or not isinstance(model, nn.Module):
+        return False
+    body = getattr(model, "body", None)
+    upsampler = getattr(model, "upsampler", None)
+    if not isinstance(body, (nn.ModuleList, nn.Sequential)) or len(body) < 1 or not isinstance(upsampler, nn.PixelShuffle):
+        return False
+    child_names = {name for name, _ in model.named_children()}
+    if not child_names.issubset({"body", "upsampler"}):
+        return False
+    first_layer, last_layer = body[0], body[-1]
+    if not isinstance(first_layer, nn.Conv2d) or not isinstance(last_layer, nn.Conv2d):
+        return False
+    up_r = int(upsampler.upscale_factor)
+    return int(first_layer.in_channels) == 3 and int(last_layer.out_channels) == 3 * (up_r * up_r)
+
+
 class SpandrelModelWrapper(nn.Module):
     """Wrap Spandrel-loaded SR models with collapsed SRVGG 4x->2x AA or generic 2-frame-sliced AA bicubic."""
     def __init__(self, inner_model: nn.Module, scale: int = 2, target_scale: float = 2.0):
@@ -158,9 +176,9 @@ class SpandrelModelWrapper(nn.Module):
         self.inner_model = inner_model
         self.scale = int(scale)
         self.target_scale = float(target_scale)
-        if hasattr(inner_model, "body"):
+        is_pure_srvgg = is_srvgg_compact_model(inner_model)
+        if is_pure_srvgg:
             self.body = inner_model.body
-        if hasattr(inner_model, "upsampler"):
             self.upsampler = inner_model.upsampler
         if hasattr(inner_model, "upscale"):
             self.upscale = inner_model.upscale
@@ -168,11 +186,9 @@ class SpandrelModelWrapper(nn.Module):
             self.upscale = self.scale
 
         self._can_collapse_srvgg_4x = (
-            self.scale == 4
+            is_pure_srvgg
+            and self.scale == 4
             and abs(self.target_scale - 2.0) <= 1e-4
-            and hasattr(inner_model, "body")
-            and hasattr(inner_model, "upsampler")
-            and isinstance(inner_model.upsampler, nn.PixelShuffle)
             and int(inner_model.upsampler.upscale_factor) == 4
         )
         if self._can_collapse_srvgg_4x:

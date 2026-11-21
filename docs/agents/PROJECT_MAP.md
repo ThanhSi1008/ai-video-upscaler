@@ -4,7 +4,7 @@
 
 ## 1. Entrypoints & Data Flows
 
-- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--model` incl. `auto-pareto`, `--nvenc-multipass auto|fullres|qres`, `--queue`, `--preview`, `--dedup-policy` incl. `dis-auto`/`sakuga`/`dis-sakuga` and dynamic `dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
+- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--model` incl. `auto-pareto`, `--nvenc-multipass auto|fullres|qres`, `--queue`, `--preview`, `--dedup-policy` incl. `dis-auto`/`sakuga`/`dis-sakuga` and dynamic `dis-auto-<float>`/`dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) -> [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI (`run`, `batch`, `eval`, `rag`, `check`, `models`). Read [subtrans-anime-ops](../../.agents/skills/subtrans-anime-ops/SKILL.md) before editing.
 - [`web_gui.py`](../../web_gui.py) / [`web_gui.bat`](../../web_gui.bat) -> [`web/app.py`](../../web/app.py): Local Real-Time Web Studio (`http://127.0.0.1:8765`, `--mock` implies `--no-browser` & simulated job launches, `docs_url=None`, UNC path rejection, FastAPI + Uvicorn + SSE 1Hz), spawns subprocesses without holding static VRAM; bridges `logs/live_status.json`, `logs/web_job_<id>.log` & `logs/.graceful_pause.flag`.
 
@@ -44,7 +44,7 @@ subtrans.cli -> TranslationPipeline
 | [`ffmpeg_ops.py`](../../src/ffmpeg_ops.py) | PyAV probing + FFmpeg: `probe_video`, `split_video_segments`, `_count_leading_discard_packets`, `extract_frames_raw_yuv420`, `yuv420_to_rgb_small_u8`, `mux_segments_directly` |
 | [`models_resolver.py`](../../src/models_resolver.py) | `load_models_registry`, `AUTO_PARETO_MODEL_ID`, `resolve_model_for_video`, `verify_weights_sha256` |
 | [`show_routing.py`](../../src/show_routing.py) | Stdlib-only `shows.yaml` matcher (`match_show_pattern`, `candidate_show_names`, `match_show_rule`) shared across `src/` and `web/` |
-| [`cuda_engine.py`](../../src/cuda_engine.py) | `build_collapsed_4x_to_2x_buffers`, `RealESRAnimeVideoV3` (Catmull-Rom collapsed 2x), `AnimeJaNaiCompact2x`, `SpandrelModelWrapper`, `GPUPersistentWorker` |
+| [`cuda_engine.py`](../../src/cuda_engine.py) | `build_collapsed_4x_to_2x_buffers`, `is_srvgg_compact_model`, `RealESRAnimeVideoV3` (Catmull-Rom collapsed 2x), `AnimeJaNaiCompact2x`, `SpandrelModelWrapper`, `GPUPersistentWorker` |
 | [`ai_engine.py`](../../src/ai_engine.py) | `upscale_frames`: NCNN Vulkan fallback runner |
 | [`trt_zero_copy_upscaler.py`](../../src/trt_zero_copy_upscaler.py) | `@triton.jit` `_yuv420_to_nchw_fp16_bt709_kernel` & `_rgb_to_p010le_triton_kernel`, `_bound_live_cyclic_memo`, `_InProcessPyAVNVENCEncoder`, `DoubleBufferedPipeUpscaler` |
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule` (`_aa2x`), `resolve_trt_profile_max_batch`, ONNX export, `TRTRuntimeEngineWrapper` (2-slot `_out_ring`, `execute_async_v3`) |

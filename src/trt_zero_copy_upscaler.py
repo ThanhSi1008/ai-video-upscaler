@@ -1060,6 +1060,7 @@ class _InProcessPyAVNVENCEncoder:
         fps_str: str = "24000/1001",
         width: int = 3840,
         height: int = 2160,
+        chroma_location: str = "left",
         multipass: Optional[str] = None,
     ):
         import fractions
@@ -1094,8 +1095,12 @@ class _InProcessPyAVNVENCEncoder:
         self.stderr = None
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=16)
 
+        chroma_loc_norm = "left" if str(chroma_location or "left").strip().lower() == "left" else "center"
         rate_args = get_hevc_rate_args(bitrate="28M", multipass=multipass)
-        parsed_opts: dict[str, str] = {"profile": str(HEVC_PROFILE)}
+        parsed_opts: dict[str, str] = {
+            "profile": str(HEVC_PROFILE),
+            "chroma_sample_location": chroma_loc_norm,
+        }
         idx = 0
         while idx < len(rate_args):
             tok = str(rate_args[idx])
@@ -1364,6 +1369,15 @@ class DoubleBufferedPipeUpscaler:
                 else torch.empty((cur_bs, 3, in_h, in_w), dtype=torch.float16, device=self.device)
             )
             with torch.inference_mode():
+                semi_h = (in_h * 3) // 2
+                dummy_p010 = torch.zeros((cur_bs, semi_h, in_w), dtype=torch.int16, device=self.device)
+                dummy_nv12 = torch.zeros((cur_bs, semi_h, in_w), dtype=torch.uint8, device=self.device)
+                _yuv420_to_nchw_fp16_bt709(
+                    dummy_p010, is_p010=True, out_nchw_fp16=dummy_in_buf, chroma_siting=self.chroma_siting
+                )
+                _yuv420_to_nchw_fp16_bt709(
+                    dummy_nv12, is_p010=False, out_nchw_fp16=dummy_in_buf, chroma_siting=self.chroma_siting
+                )
                 dummy_in = _nhwc_u8_to_nchw_fp16_norm(dummy_nhwc, out_nchw_fp16=dummy_in_buf)
                 if callable(self.model):
                     dummy_out = self.model(dummy_in)
@@ -1474,6 +1488,7 @@ class DoubleBufferedPipeUpscaler:
                     fps_str=fps_str,
                     width=width,
                     height=height,
+                    chroma_location=self.chroma_siting,
                     multipass=multipass,
                 )
             except Exception:

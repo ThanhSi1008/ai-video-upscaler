@@ -241,6 +241,7 @@ def run_upscale_pipeline(
                 model_sha256 = str(model_info.get("sha256") or "")
                 manifest_path = os.path.join(work_dir, "manifest.json")
                 resumed_episode_multipass: Optional[str] = None
+                resumed_pareto_routing: Optional[dict] = None
                 if os.path.exists(manifest_path):
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -250,6 +251,8 @@ def run_upscale_pipeline(
                         prev_mp = str(manifest_data.get("nvenc_multipass") or "").strip().lower()
                         if prev_mp in ("fullres", "qres") and not force:
                             resumed_episode_multipass = prev_mp
+                        if isinstance(manifest_data.get("model_routing"), dict) and not force:
+                            resumed_pareto_routing = manifest_data.get("model_routing")
                         if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_sha256):
                             if not force:
                                 raise ValueError(
@@ -399,9 +402,38 @@ def run_upscale_pipeline(
                     if dedup:
                         effective_dedup_policy = resolve_dedup_policy(input_path, dedup_policy)
                         t_pref_start = time.time()
+                        plan_requires_sync_loader = False
+                        if resume and os.path.exists(plan_file):
+                            try:
+                                from src.dedup import _canonical_dedup_family, get_dedup_params
+                                with open(plan_file, "r", encoding="utf-8") as pf_chk:
+                                    cached_plan_chk = json.load(pf_chk)
+                                c_chunks = cached_plan_chk.get("chunks", [])
+                                if cached_plan_chk.get("total_frames", 0) > 0 and len(c_chunks) > 0:
+                                    c_pol = str(cached_plan_chk.get("dedup_policy", "default")).lower()
+                                    req_pol = str(effective_dedup_policy).lower()
+                                    req_params = get_dedup_params(req_pol)
+                                    c_params = cached_plan_chk.get("dedup_params") or {}
+                                    pol_conflict = (_canonical_dedup_family(c_pol) != _canonical_dedup_family(req_pol))
+                                    if not pol_conflict and req_pol.startswith("dis") and c_params.get("dis_thresh") is not None:
+                                        pol_conflict = abs(float(c_params["dis_thresh"]) - float(req_params.get("dis_thresh", 0.30))) > 1e-4
+                                    if not pol_conflict and req_pol.startswith("drift") and c_params.get("drift_delta") is not None:
+                                        pol_conflict = abs(float(c_params["drift_delta"]) - float(req_params.get("drift_delta", 0.75))) > 1e-4
+                                    c_counts = [int(c.get("total_frames", 0)) for c in c_chunks]
+                                    can_repart_rle = bool(
+                                        cached_plan_chk.get("raw_actions_rle")
+                                        and not req_pol.startswith(("drift", "dis"))
+                                        and seg_frame_counts
+                                        and sum(seg_frame_counts) == cached_plan_chk.get("total_frames", 0)
+                                    )
+                                    if pol_conflict or c_counts == seg_frame_counts or can_repart_rle:
+                                        plan_requires_sync_loader = True
+                            except Exception:
+                                plan_requires_sync_loader = False
+
                         can_use_rolling = (
                             total_segs >= 2
-                            and not (resume and os.path.exists(plan_file))
+                            and not plan_requires_sync_loader
                             and not hasattr(load_or_create_plan, "_mock_name")
                             and not hasattr(subprocess.Popen, "_mock_name")
                             and not os.environ.get("PYTEST_CURRENT_TEST")
@@ -409,7 +441,7 @@ def run_upscale_pipeline(
                         if can_use_rolling:
                             logger.info(
                                 f"⚡ Khởi chạy Rolling Parallel Preflight ({effective_dedup_policy}, max_workers=2) — "
-                                f"GPU bắt đầu ngay sau Chunk 0..1!",
+                                f"GPU bắt đầu ngay sau Chunk 0!",
                                 to_console=True,
                             )
                             rolling_planner = RollingDedupPlanner(
@@ -425,7 +457,7 @@ def run_upscale_pipeline(
                                 decode_threads=2,
                             )
                             rolling_planner.start(
-                                sync_initial_chunks=min(2, total_segs),
+                                sync_initial_chunks=1,
                                 extra_fields=plan_extra_meta,
                             )
                             stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
@@ -481,6 +513,9 @@ def run_upscale_pipeline(
                         use_tensorrt=use_tensorrt,
                         zero_disk=zero_disk,
                     )
+                    plan_extra_meta["nvenc_multipass"] = episode_multipass
+                    if rolling_planner is not None and hasattr(rolling_planner, "_extra_fields") and isinstance(rolling_planner._extra_fields, dict):
+                        rolling_planner._extra_fields["nvenc_multipass"] = episode_multipass
                     manifest_data["nvenc_multipass"] = episode_multipass
                     manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
                     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -518,6 +553,8 @@ def run_upscale_pipeline(
                     last_pipeline_micro_timings = None
                     accumulated_micro_timings = {
                         "num_batches": 0,
+                        "total_h2d_dma_ms": 0.0,
+                        "total_in_norm_ms": 0.0,
                         "total_h2d_ms": 0.0,
                         "total_trt_ms": 0.0,
                         "total_triton_ms": 0.0,
@@ -567,7 +604,27 @@ def run_upscale_pipeline(
                         "chunks": [],
                     }
 
-                    def _resolve_chunk_pareto_submodel(c_idx_val: int, c_plan_obj, f_cnt: int, exp_cnt: int):
+                    def _persist_pareto_manifest_state() -> None:
+                        if not is_auto_pareto or not pareto_state["chunks"]:
+                            return
+                        manifest_data["model_routing"] = {
+                            "mode": "auto-pareto",
+                            "chunk_counts": dict(pareto_state["chunk_counts"]),
+                            "chunks": list(pareto_state["chunks"]),
+                        }
+                        try:
+                            with open(manifest_path, "w", encoding="utf-8") as mf_out:
+                                json.dump(manifest_data, mf_out, indent=2, ensure_ascii=False)
+                        except OSError:
+                            pass
+
+                    def _resolve_chunk_pareto_submodel(
+                        c_idx_val: int,
+                        c_plan_obj,
+                        f_cnt: int,
+                        exp_cnt: int,
+                        persist: bool = True,
+                    ):
                         if not is_auto_pareto:
                             return model_info
                         r_u = float(f_cnt) / max(1.0, float(exp_cnt or f_cnt or 1))
@@ -600,7 +657,44 @@ def run_upscale_pipeline(
                             "r_unique": round(r_u, 4),
                             "scene_cut": bool(is_cut),
                         })
+                        if persist:
+                            _persist_pareto_manifest_state()
                         return sub_info
+
+                    if is_auto_pareto and resumed_chunk_indices:
+                        saved_by_idx = {}
+                        if isinstance(resumed_pareto_routing, dict):
+                            for sc in (resumed_pareto_routing.get("chunks") or []):
+                                if isinstance(sc, dict) and "chunk_idx" in sc:
+                                    saved_by_idx[int(sc["chunk_idx"])] = sc
+                        for r_idx in sorted(resumed_chunk_indices):
+                            sc_entry = saved_by_idx.get(int(r_idx))
+                            if sc_entry and sc_entry.get("tier") in ("detail", "fast") and sc_entry.get("model_id"):
+                                s_id = str(sc_entry["model_id"])
+                                pareto_state["tier"] = str(sc_entry["tier"])
+                                pareto_state["prev_r_unique"] = float(sc_entry.get("r_unique", 0.5))
+                                pareto_state["chunk_counts"][s_id] = pareto_state["chunk_counts"].get(s_id, 0) + 1
+                                pareto_state["chunks"].append({
+                                    "chunk_idx": int(r_idx),
+                                    "model_id": s_id,
+                                    "tier": str(sc_entry["tier"]),
+                                    "r_unique": round(float(sc_entry.get("r_unique", 0.5)), 4),
+                                    "scene_cut": bool(sc_entry.get("scene_cut", r_idx == 0)),
+                                })
+                            else:
+                                r_plan = None
+                                if dedup and rolling_planner is not None:
+                                    r_plan = rolling_planner.get_chunk_plan(r_idx)
+                                elif dedup and dedup_plan and r_idx < len(dedup_plan.get("chunks", [])):
+                                    r_plan = dedup_plan["chunks"][r_idx]
+                                r_exp = (
+                                    int(r_plan["total_frames"])
+                                    if r_plan
+                                    else (seg_frame_counts[r_idx] if r_idx < len(seg_frame_counts) else 1)
+                                )
+                                r_kept = int(r_plan["kept_count"]) if r_plan else r_exp
+                                _resolve_chunk_pareto_submodel(r_idx, r_plan, r_kept, r_exp, persist=False)
+                        _persist_pareto_manifest_state()
 
                     if not chunks_to_process:
                         logger.info("Tất cả phân đoạn đã hoàn thành từ trước!", to_console=True)
@@ -833,8 +927,78 @@ def run_upscale_pipeline(
                                 # Bắt đầu trích xuất chunk đầu tiên trên luồng DecodeWorker
                                 future_extract = dec_exec.submit(worker_extract, chunks_to_process[0])
 
+                                def _ensure_auto_pareto_bundle(res_h: int, res_w: int):
+                                    import torch
+                                    from src.build_trt_engine import get_hybrid_engine_or_wrapper
+                                    from src.cuda_engine import GPUPersistentWorker, get_cuda_inference_engine
+                                    from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
+
+                                    detail_info = model_info["detail_model_info"]
+                                    fast_info = model_info["fast_model_info"]
+                                    c_eng = get_cuda_inference_engine(
+                                        detail_info,
+                                        precision=precision,
+                                        batch_size=batch_size,
+                                        use_tensorrt=use_tensorrt,
+                                    )
+                                    eff_b = batch_size or c_eng.batch_size or 8
+                                    p_key = ("auto-pareto", int(res_h), int(res_w), int(eff_b), bool(use_tensorrt), precision)
+                                    p_bundle = getattr(c_eng, "_auto_pareto_bundle", None)
+                                    if not isinstance(p_bundle, dict) or p_bundle.get("key") != p_key:
+                                        if isinstance(p_bundle, dict):
+                                            old_up = p_bundle.get("shared_upscaler")
+                                            if old_up is not None and hasattr(old_up, "release"):
+                                                try:
+                                                    old_up.release()
+                                                except Exception:
+                                                    pass
+                                        fast_worker = GPUPersistentWorker(
+                                            model_id=fast_info["id"],
+                                            weights_path=fast_info["weights_path"],
+                                            precision=precision,
+                                            device=str(c_eng.device),
+                                            batch_size=eff_b,
+                                            use_tensorrt=use_tensorrt,
+                                        )
+                                        detail_wrap = get_hybrid_engine_or_wrapper(
+                                            c_eng.model,
+                                            max_batch=eff_b,
+                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                            model_id=detail_info["id"],
+                                            input_hw=(res_h, res_w),
+                                            scale=2.0,
+                                            weights_sha256=str(detail_info.get("sha256") or ""),
+                                        )
+                                        fast_wrap = get_hybrid_engine_or_wrapper(
+                                            fast_worker.model,
+                                            max_batch=eff_b,
+                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                            model_id=fast_info["id"],
+                                            input_hw=(res_h, res_w),
+                                            scale=2.0,
+                                            weights_sha256=str(fast_info.get("sha256") or ""),
+                                        )
+                                        shared_up = DoubleBufferedPipeUpscaler(
+                                            detail_wrap,
+                                            batch_size=eff_b,
+                                            device=c_eng.device,
+                                            input_hw=(res_h, res_w),
+                                            scale=2,
+                                        )
+                                        p_bundle = {
+                                            "key": p_key,
+                                            "fast_worker": fast_worker,
+                                            "detail_wrap": detail_wrap,
+                                            "fast_wrap": fast_wrap,
+                                            "shared_upscaler": shared_up,
+                                        }
+                                        c_eng._auto_pareto_bundle = p_bundle
+                                        if c_eng.device.type == "cuda" and torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                    return c_eng, p_bundle
+
                                 # Khởi tạo song song GPU Engine + TensorRT + Pinned Ring + Triton Warmup ngay trong lúc chờ giải mã Chunk 0
-                                if zero_disk and engine == "cuda" and not is_auto_pareto and not os.environ.get("PYTEST_CURRENT_TEST"):
+                                if zero_disk and engine == "cuda" and not os.environ.get("PYTEST_CURRENT_TEST"):
                                     try:
                                         import torch
                                         from src.cuda_engine import get_cuda_inference_engine
@@ -843,44 +1007,47 @@ def run_upscale_pipeline(
 
                                         pre_h = int(meta.get("height", 1080))
                                         pre_w = int(meta.get("width", 1920))
-                                        pre_cuda = get_cuda_inference_engine(
-                                            model_info,
-                                            precision=precision,
-                                            batch_size=batch_size,
-                                            use_tensorrt=use_tensorrt,
-                                        )
-                                        pre_bs = batch_size or pre_cuda.batch_size or 8
-                                        pre_key = (model_info["id"], pre_h, pre_w, int(pre_bs), bool(use_tensorrt), precision)
-                                        if (
-                                            getattr(pre_cuda, "_zero_disk_upscaler", None) is None
-                                            or getattr(pre_cuda, "_zero_disk_key", None) != pre_key
-                                        ):
-                                            old_pre_upscaler = getattr(pre_cuda, "_zero_disk_upscaler", None)
-                                            if old_pre_upscaler is not None and hasattr(old_pre_upscaler, "release"):
-                                                try:
-                                                    old_pre_upscaler.release()
-                                                except Exception:
-                                                    pass
-                                            pre_wrapped = get_hybrid_engine_or_wrapper(
-                                                pre_cuda.model,
-                                                max_batch=pre_bs,
-                                                force_pytorch=(not use_tensorrt) or (precision != "fp16"),
-                                                model_id=model_info["id"],
-                                                input_hw=(pre_h, pre_w),
-                                                scale=2.0,
-                                                weights_sha256=model_sha256,
+                                        if is_auto_pareto:
+                                            _ensure_auto_pareto_bundle(pre_h, pre_w)
+                                        else:
+                                            pre_cuda = get_cuda_inference_engine(
+                                                model_info,
+                                                precision=precision,
+                                                batch_size=batch_size,
+                                                use_tensorrt=use_tensorrt,
                                             )
-                                            pre_cuda._zero_disk_wrapper = pre_wrapped
-                                            pre_cuda._zero_disk_key = pre_key
-                                            pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
-                                                pre_wrapped,
-                                                batch_size=pre_bs,
-                                                device=pre_cuda.device,
-                                                input_hw=(pre_h, pre_w),
-                                                scale=2,
-                                            )
-                                            if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
-                                                torch.cuda.empty_cache()
+                                            pre_bs = batch_size or pre_cuda.batch_size or 8
+                                            pre_key = (model_info["id"], pre_h, pre_w, int(pre_bs), bool(use_tensorrt), precision)
+                                            if (
+                                                getattr(pre_cuda, "_zero_disk_upscaler", None) is None
+                                                or getattr(pre_cuda, "_zero_disk_key", None) != pre_key
+                                            ):
+                                                old_pre_upscaler = getattr(pre_cuda, "_zero_disk_upscaler", None)
+                                                if old_pre_upscaler is not None and hasattr(old_pre_upscaler, "release"):
+                                                    try:
+                                                        old_pre_upscaler.release()
+                                                    except Exception:
+                                                        pass
+                                                pre_wrapped = get_hybrid_engine_or_wrapper(
+                                                    pre_cuda.model,
+                                                    max_batch=pre_bs,
+                                                    force_pytorch=(not use_tensorrt) or (precision != "fp16"),
+                                                    model_id=model_info["id"],
+                                                    input_hw=(pre_h, pre_w),
+                                                    scale=2.0,
+                                                    weights_sha256=model_sha256,
+                                                )
+                                                pre_cuda._zero_disk_wrapper = pre_wrapped
+                                                pre_cuda._zero_disk_key = pre_key
+                                                pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
+                                                    pre_wrapped,
+                                                    batch_size=pre_bs,
+                                                    device=pre_cuda.device,
+                                                    input_hw=(pre_h, pre_w),
+                                                    scale=2,
+                                                )
+                                                if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
+                                                    torch.cuda.empty_cache()
                                     except (FileNotFoundError, ValueError):
                                         raise
                                     except RuntimeError as pre_rt_err:
@@ -1135,67 +1302,7 @@ def run_upscale_pipeline(
                                                         extracted.get("expected_frames", len(unique_frames_rgb)),
                                                     )
                                                     detail_info = model_info["detail_model_info"]
-                                                    fast_info = model_info["fast_model_info"]
-                                                    cuda_engine = get_cuda_inference_engine(
-                                                        detail_info,
-                                                        precision=precision,
-                                                        batch_size=batch_size,
-                                                        use_tensorrt=use_tensorrt,
-                                                    )
-                                                    eff_bs = batch_size or cuda_engine.batch_size or 8
-                                                    p_key = ("auto-pareto", int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
-                                                    p_bundle = getattr(cuda_engine, "_auto_pareto_bundle", None)
-                                                    if not isinstance(p_bundle, dict) or p_bundle.get("key") != p_key:
-                                                        if isinstance(p_bundle, dict):
-                                                            old_up = p_bundle.get("shared_upscaler")
-                                                            if old_up is not None and hasattr(old_up, "release"):
-                                                                try:
-                                                                    old_up.release()
-                                                                except Exception:
-                                                                    pass
-                                                        fast_worker = GPUPersistentWorker(
-                                                            model_id=fast_info["id"],
-                                                            weights_path=fast_info["weights_path"],
-                                                            precision=precision,
-                                                            device=str(cuda_engine.device),
-                                                            batch_size=eff_bs,
-                                                            use_tensorrt=use_tensorrt,
-                                                        )
-                                                        detail_wrap = get_hybrid_engine_or_wrapper(
-                                                            cuda_engine.model,
-                                                            max_batch=eff_bs,
-                                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
-                                                            model_id=detail_info["id"],
-                                                            input_hw=(in_h, in_w),
-                                                            scale=2.0,
-                                                            weights_sha256=str(detail_info.get("sha256") or ""),
-                                                        )
-                                                        fast_wrap = get_hybrid_engine_or_wrapper(
-                                                            fast_worker.model,
-                                                            max_batch=eff_bs,
-                                                            force_pytorch=(not use_tensorrt) or (precision != "fp16"),
-                                                            model_id=fast_info["id"],
-                                                            input_hw=(in_h, in_w),
-                                                            scale=2.0,
-                                                            weights_sha256=str(fast_info.get("sha256") or ""),
-                                                        )
-                                                        shared_up = DoubleBufferedPipeUpscaler(
-                                                            detail_wrap,
-                                                            batch_size=eff_bs,
-                                                            device=cuda_engine.device,
-                                                            input_hw=(in_h, in_w),
-                                                            scale=2,
-                                                        )
-                                                        p_bundle = {
-                                                            "key": p_key,
-                                                            "fast_worker": fast_worker,
-                                                            "detail_wrap": detail_wrap,
-                                                            "fast_wrap": fast_wrap,
-                                                            "shared_upscaler": shared_up,
-                                                        }
-                                                        cuda_engine._auto_pareto_bundle = p_bundle
-                                                        if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
-                                                            torch.cuda.empty_cache()
+                                                    cuda_engine, p_bundle = _ensure_auto_pareto_bundle(in_h, in_w)
                                                     wrapped_model = (
                                                         p_bundle["detail_wrap"]
                                                         if chosen_sub_info["id"] == detail_info["id"]
@@ -1444,6 +1551,8 @@ def run_upscale_pipeline(
                                                     nb = mt.get("num_batches", 0)
                                                     if nb > 0:
                                                         accumulated_micro_timings["num_batches"] += nb
+                                                        accumulated_micro_timings["total_h2d_dma_ms"] += mt.get("total_h2d_dma_ms", 0.0)
+                                                        accumulated_micro_timings["total_in_norm_ms"] += mt.get("total_in_norm_ms", 0.0)
                                                         accumulated_micro_timings["total_h2d_ms"] += mt.get("total_h2d_ms", 0.0)
                                                         accumulated_micro_timings["total_trt_ms"] += mt.get("total_trt_ms", 0.0)
                                                         accumulated_micro_timings["total_triton_ms"] += mt.get("total_triton_ms", 0.0)
@@ -1601,7 +1710,29 @@ def run_upscale_pipeline(
                                                             pix_fmt=meta.get("pix_fmt", ""),
                                                             profile=meta.get("profile", ""),
                                                         )
-                                                        extracted["raw_rgb_frames"] = extract_frames_raw_rgb24(
+                                                        retry_yuv = None
+                                                        if (
+                                                            extract_frames_raw_rgb24 is _ORIG_EXTRACT_FRAMES_RAW_RGB24
+                                                            and not hasattr(extract_frames_raw_rgb24, "_mock_name")
+                                                            and not hasattr(subprocess.Popen, "_mock_name")
+                                                            and not os.environ.get("PYTEST_CURRENT_TEST")
+                                                        ):
+                                                            try:
+                                                                retry_yuv = extract_frames_raw_yuv420(
+                                                                    c_seg_file,
+                                                                    width=int(meta["width"]),
+                                                                    height=int(meta["height"]),
+                                                                    kept_indices=kept_idx_retry,
+                                                                    hwaccel=safe_hwaccel_retry,
+                                                                    total_frames=retry_total_frames,
+                                                                    source_video_path=input_path,
+                                                                    chunk_start_sec=retry_start_sec,
+                                                                    source_codec=meta.get("codec"),
+                                                                    source_pix_fmt=meta.get("pix_fmt"),
+                                                                )
+                                                            except Exception:
+                                                                retry_yuv = None
+                                                        extracted["raw_rgb_frames"] = retry_yuv if retry_yuv is not None else extract_frames_raw_rgb24(
                                                             c_seg_file,
                                                             width=int(meta["width"]),
                                                             height=int(meta["height"]),
@@ -1611,6 +1742,7 @@ def run_upscale_pipeline(
                                                             source_video_path=input_path,
                                                             chunk_start_sec=retry_start_sec,
                                                             source_codec=meta.get("codec"),
+                                                            source_pix_fmt=meta.get("pix_fmt"),
                                                         )
                                                 elif not os.path.exists(c_in_dir) or len(os.listdir(c_in_dir)) == 0:
                                                     os.makedirs(c_in_dir, exist_ok=True)
@@ -1873,15 +2005,7 @@ def run_upscale_pipeline(
                                 future_extract = None
 
                 if is_auto_pareto and pareto_state["chunk_counts"]:
-                    manifest_data["model_routing"] = {
-                        "mode": "auto-pareto",
-                        "chunk_counts": dict(pareto_state["chunk_counts"]),
-                    }
-                    try:
-                        with open(manifest_path, "w", encoding="utf-8") as f:
-                            json.dump(manifest_data, f, indent=2, ensure_ascii=False)
-                    except OSError:
-                        pass
+                    _persist_pareto_manifest_state()
 
                 stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
                 logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
@@ -1959,10 +2083,14 @@ def run_upscale_pipeline(
                         nb = accumulated_micro_timings["num_batches"]
                         final_micro_timings = {
                             "num_batches": nb,
+                            "total_h2d_dma_ms": round(accumulated_micro_timings["total_h2d_dma_ms"], 2),
+                            "total_in_norm_ms": round(accumulated_micro_timings["total_in_norm_ms"], 2),
                             "total_h2d_ms": round(accumulated_micro_timings["total_h2d_ms"], 2),
                             "total_trt_ms": round(accumulated_micro_timings["total_trt_ms"], 2),
                             "total_triton_ms": round(accumulated_micro_timings["total_triton_ms"], 2),
                             "total_d2h_ms": round(accumulated_micro_timings["total_d2h_ms"], 2),
+                            "avg_h2d_dma_ms": round(accumulated_micro_timings["total_h2d_dma_ms"] / nb, 2),
+                            "avg_in_norm_ms": round(accumulated_micro_timings["total_in_norm_ms"] / nb, 2),
                             "avg_h2d_ms": round(accumulated_micro_timings["total_h2d_ms"] / nb, 2),
                             "avg_trt_ms": round(accumulated_micro_timings["total_trt_ms"] / nb, 2),
                             "avg_triton_ms": round(accumulated_micro_timings["total_triton_ms"] / nb, 2),

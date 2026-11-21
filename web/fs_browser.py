@@ -55,13 +55,13 @@ VALID_NVENC_MULTIPASS_POLICIES = ("auto", "fullres", "qres")
 
 
 def is_valid_dedup_policy(policy: str) -> bool:
-    """Validate static dedup policies and dynamic dis-<float>/drift-<float> variants."""
+    """Validate static dedup policies and dynamic dis-auto-<float>/dis-<float>/drift-<float> variants."""
     pol = str(policy or "").strip().lower()
     if not pol:
         return False
     if pol in DEDUP_POLICY_PARAMS:
         return True
-    for prefix in ("dis-", "drift-"):
+    for prefix in ("dis-auto-", "dis-", "drift-"):
         if pol.startswith(prefix):
             val_str = pol[len(prefix):]
             try:

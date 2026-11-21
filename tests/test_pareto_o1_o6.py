@@ -749,3 +749,307 @@ def test_o5_o6_auto_pareto_pipeline_scene_cut_hysteresis_and_episode_multipass_l
     assert len(set(chunk_multipass_used)) == 1
     assert chunk_multipass_used[0] in ("fullres", "qres")
 
+
+class _NonSRVGGWithBodyAndPixelShuffle(nn.Module):
+    """Spandrel-like non-SRVGG 4x model (e.g. DCTLSA/SeemoRe) having conv_first + body + PixelShuffle(4)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.upscale = 4
+        self.conv_first = nn.Conv2d(3, 8, kernel_size=3, padding=1)
+        self.body = nn.ModuleList([nn.Conv2d(8, 8, kernel_size=3, padding=1)])
+        self.conv_last = nn.Conv2d(8, 48, kernel_size=3, padding=1)
+        self.upsampler = nn.PixelShuffle(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.conv_first(x)
+        for blk in self.body:
+            h = blk(h)
+        return self.upsampler(self.conv_last(h))
+
+
+def test_o1_non_srvgg_with_body_and_pixelshuffle_is_not_misclassified():
+    """Verify non-SRVGG 4x models with conv_first + body + PixelShuffle(4) fall back cleanly without crashing."""
+    from src.build_trt_engine import get_hybrid_engine_or_wrapper
+    from src.cuda_engine import is_srvgg_compact_model
+
+    net = _NonSRVGGWithBodyAndPixelShuffle().eval().float()
+    assert is_srvgg_compact_model(net) is False
+    assert is_srvgg_compact_model(RealESRAnimeVideoV3()) is True
+
+    wrapped = SpandrelModelWrapper(net, scale=4, target_scale=2.0).eval().float()
+    assert wrapped._can_collapse_srvgg_4x is False
+
+    x = torch.rand(2, 3, 12, 16, dtype=torch.float32)
+    with torch.no_grad():
+        out_w = wrapped(x)
+        hyb = get_hybrid_engine_or_wrapper(wrapped, max_batch=2, force_pytorch=True, scale=2.0)
+        out_h = hyb(x)
+    assert out_w.shape == (2, 3, 24, 32)
+    assert float((out_w - out_h.float()).abs().max()) < 1e-5
+
+
+def test_o4_dis_auto_custom_thresh_and_rolling_planner_resume_parity(tmp_path):
+    """Verify dis-auto-<float>, RollingDedupPlanner dis_thresh persistence, and Open-GOP scan_dedup_plan parity."""
+    from src.dedup import get_dedup_params, load_or_create_plan, scan_dedup_plan
+    from web.fs_browser import is_valid_dedup_policy
+
+    p_dyn = get_dedup_params("dis-auto-0.22")
+    assert p_dyn["dis_thresh"] == pytest.approx(0.22)
+    assert p_dyn["auto_noise_floor"] is True
+    assert p_dyn["lip_flap_guard"] is True
+    assert is_valid_dedup_policy("dis-auto-0.22") is True
+    assert is_valid_dedup_policy("dis-auto-0") is False
+
+    seg0 = tmp_path / "seg_0000.mp4"
+    seg1 = tmp_path / "seg_0001.mp4"
+    seg0.write_bytes(b"s0")
+    seg1.write_bytes(b"s1")
+    plan_path = tmp_path / "plan.json"
+
+    with (
+        patch("src.dedup._scan_fused_mpdecimate_and_dis", return_value=(["keep"] * 4, ["keep", "drop", "keep", "drop"])),
+        patch("src.ffmpeg_ops._count_leading_discard_packets", return_value=0),
+    ):
+        planner = RollingDedupPlanner(
+            input_path=str(seg0),
+            seg_paths=[str(seg0), str(seg1)],
+            seg_frame_counts=[4, 4],
+            plan_path=str(plan_path),
+            segment_seconds=24,
+            policy="dis-auto",
+            dis_thresh=0.22,
+        )
+        planner.start(sync_initial_chunks=1)
+        planner.finalize_plan()
+        planner.close()
+
+    resumed = load_or_create_plan(
+        str(seg0),
+        str(plan_path),
+        segment_seconds=24,
+        resume=True,
+        chunk_frame_counts=[4, 4],
+        policy="dis-auto-0.22",
+    )
+    assert resumed["dedup_params"]["dis_thresh"] == pytest.approx(0.22)
+
+    # Open-GOP whole-file scan_dedup_plan with n_discard=2 + chunk_frame_counts=[4, 4] must prepend 2 keeps.
+    plan_gop_path = tmp_path / "plan_gop.json"
+    with (
+        patch(
+            "src.dedup._scan_fused_mpdecimate_and_dis",
+            side_effect=lambda *a, **kw: (
+                kw["boundary_out"].update({"cut_starts": {2}}) or (["keep"] * 6, ["keep", "drop", "keep", "drop", "keep", "keep"])
+            ),
+        ),
+        patch("src.ffmpeg_ops._count_leading_discard_packets", return_value=2),
+        patch("src.dedup.subprocess.run") as sp_run,
+    ):
+        sp_run.return_value = MagicMock(returncode=0, stdout="ffmpeg version 7.1\n")
+        gop_plan = scan_dedup_plan(
+            str(seg0),
+            str(plan_gop_path),
+            segment_seconds=24,
+            chunk_frame_counts=[4, 4],
+            policy="dis-auto",
+        )
+    assert gop_plan["total_frames"] == 8
+    assert [c["total_frames"] for c in gop_plan["chunks"]] == [4, 4]
+    assert gop_plan["chunks"][0]["scene_cut"] is True
+    assert gop_plan["chunks"][1]["scene_cut"] is True
+
+
+def test_o5_auto_pareto_resume_preserves_mid_shot_tier_and_full_audit_routing(tmp_path, monkeypatch):
+    """Verify resuming auto-pareto after Chunk 0 preserves mid-shot tier on Chunk 1 and full 3-chunk audit history."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    src_vid = tmp_path / "ep_resume_pareto.mkv"
+    src_vid.write_bytes(b"FAKE_MKV" * 200)
+    out_dir = tmp_path / "out"
+    out_vid = out_dir / "ep_resume_pareto_4K.mkv"
+    work_dir = out_dir / ".temp_ep_resume_pareto"
+    segs_dir = work_dir / "raw_segs"
+    up_segs_dir = work_dir / "upscaled_segs"
+    segs_dir.mkdir(parents=True, exist_ok=True)
+    up_segs_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx in range(3):
+        (segs_dir / f"seg_{idx:04d}.mp4").write_bytes(b"SEG" * 100)
+    (segs_dir / ".split_complete").write_text(
+        json.dumps({"segment_count": 3, "segment_time": 24, "source_file": src_vid.name}),
+        encoding="utf-8",
+    )
+    # Chunk 0 was already completed in a prior run with multipass='qres' and model='detail' (compact 16c).
+    (up_segs_dir / "up_0000.mp4").write_bytes(b"X" * 20000)
+
+    pareto_info = resolve_model_for_video(str(src_vid), cli_model_arg="auto-pareto")
+    (work_dir / "manifest.json").write_text(
+        json.dumps({
+            "model_id": "auto-pareto",
+            "model_name": pareto_info["name"],
+            "sha256": pareto_info["sha256"],
+            "engine": "cuda",
+            "precision": "fp16",
+            "nvenc_multipass": "qres",
+            "model_routing": {
+                "mode": "auto-pareto",
+                "chunk_counts": {"animejanai-hd-v3-compact": 1},
+                "chunks": [
+                    {
+                        "chunk_idx": 0,
+                        "model_id": "animejanai-hd-v3-compact",
+                        "tier": "detail",
+                        "r_unique": 0.25,
+                        "scene_cut": True,
+                    }
+                ],
+            },
+        }),
+        encoding="utf-8",
+    )
+    # Stale unsplit plan.json ([6, 6] != [4, 4, 4]) on dis-auto -> must trigger RollingDedupPlanner instead of blocking scan!
+    (work_dir / "plan.json").write_text(
+        json.dumps({
+            "total_frames": 12,
+            "dedup_policy": "dis-auto",
+            "dedup_params": {"dis_thresh": 0.30},
+            "chunks": [{"total_frames": 6}, {"total_frames": 6}],
+        }),
+        encoding="utf-8",
+    )
+
+    fake_plan = {
+        "total_frames": 12,
+        "total_kept_frames": 9,
+        "dedup_ratio_percent": 25.0,
+        "chunks": [
+            {"chunk_idx": 0, "total_frames": 4, "kept_count": 1, "kept_indices": [0], "runs": [{"frame_idx": 0, "count": 4}], "scene_cut": True},
+            {"chunk_idx": 1, "total_frames": 4, "kept_count": 4, "kept_indices": [0, 1, 2, 3], "runs": [{"frame_idx": i, "count": 1} for i in range(4)], "scene_cut": False},
+            {"chunk_idx": 2, "total_frames": 4, "kept_count": 4, "kept_indices": [0, 1, 2, 3], "runs": [{"frame_idx": i, "count": 1} for i in range(4)], "scene_cut": True},
+        ],
+    }
+
+    resumed_models: list[str] = []
+    resumed_mp: list[str | None] = []
+
+    class _NamedEngine:
+        def __init__(self, tag: str) -> None:
+            self.tag = tag
+
+    class _FakeEnc:
+        def __init__(self, out_mp4: str) -> None:
+            self.out_mp4 = out_mp4
+            self.stdin = None
+
+        def wait(self, timeout=None) -> int:
+            Path(self.out_mp4).write_bytes(b"HEVC_CHUNK" * 2000)
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    class _FakePipeUpscaler:
+        spawn_nvenc_pipe_writer = DoubleBufferedPipeUpscaler.spawn_nvenc_pipe_writer
+
+        def __init__(self, model_or_engine, *args, **kwargs) -> None:
+            self.model = model_or_engine
+            self.output_hw = (32, 48)
+            sample_y = np.full((16, 24), 300 << 6, dtype=np.uint16)
+            sample_uv = np.full((8, 24), 512 << 6, dtype=np.uint16)
+            self.last_first_rgb_small = yuv420_to_rgb_small_u8(np.vstack([sample_y, sample_uv]))
+            self.last_distinct_count = 1
+
+        def ensure_resolution(self, h: int, w: int) -> tuple[int, int]:
+            return self.output_hw
+
+        def open_chunk_encoder(self, out_mp4: str, multipass=None, **kwargs):
+            resumed_mp.append(multipass)
+            return _FakeEnc(out_mp4)
+
+        def process_frames_to_pipe(self, unique_frames, repeat_counts, enc_proc, **kwargs) -> int:
+            resumed_models.append(getattr(self.model, "tag", "unknown"))
+            return sum(repeat_counts)
+
+        def release(self) -> None:
+            pass
+
+    class _FakeCudaWorker:
+        def __init__(self, tag: str) -> None:
+            self.model = _NamedEngine(tag)
+            self.batch_size = 4
+            self.device = torch.device("cpu")
+
+        def restart_if_needed(self, logger=None) -> None:
+            pass
+
+    worker_cache: dict[str, _FakeCudaWorker] = {}
+
+    def _fake_get_cuda_worker(*args, **kwargs):
+        m_id = str(args[0].get("id", "")) if (args and isinstance(args[0], dict)) else str(kwargs.get("model_id", ""))
+        tag = "detail" if ("compact" in m_id and "ultra" not in m_id) else "fast"
+        if tag not in worker_cache:
+            worker_cache[tag] = _FakeCudaWorker(tag)
+        return worker_cache[tag]
+
+    fake_meta = {
+        "size_bytes": 2400, "width": 24, "height": 16, "pix_fmt": "yuv420p10le",
+        "fps": 24.0, "fps_num": 24, "fps_den": 1, "duration": 24.0, "nb_frames": 12,
+        "audio_count": 1, "subtitle_count": 0, "attachment_count": 0, "chapter_count": 0,
+    }
+
+    with (
+        patch.object(pipeline_mod, "validate_environment"),
+        patch.object(pipeline_mod, "acquire_gpu_lock"),
+        patch.object(pipeline_mod, "release_gpu_lock"),
+        patch.object(pipeline_mod, "run_preflight_checks", return_value=True),
+        patch.object(pipeline_mod, "send_system_notification"),
+        patch.object(pipeline_mod, "resolve_model_for_video", return_value=pareto_info),
+        patch.object(pipeline_mod, "probe_video", return_value=fake_meta),
+        patch.object(pipeline_mod, "get_segments_frame_counts", return_value=[4, 4, 4]),
+        patch.object(pipeline_mod, "verify_segment_resume_frames", return_value=True),
+        patch.object(
+            pipeline_mod,
+            "extract_frames_raw_yuv420",
+            side_effect=lambda *a, **kw: [np.vstack([np.full((16, 24), 300 << 6, dtype=np.uint16), np.full((8, 24), 512 << 6, dtype=np.uint16)]) for _ in range(len(kw.get("kept_indices") or [0]))],
+        ),
+        patch.object(pipeline_mod, "mux_segments_directly", side_effect=lambda segs, wd, ip, op: Path(op).write_bytes(b"MKV" * 400)),
+        patch.object(pipeline_mod, "RollingDedupPlanner") as mock_rolling_cls,
+        patch("src.cuda_engine.get_cuda_inference_engine", side_effect=_fake_get_cuda_worker),
+        patch("src.cuda_engine.GPUPersistentWorker", side_effect=_fake_get_cuda_worker),
+        patch("src.build_trt_engine.get_hybrid_engine_or_wrapper", side_effect=lambda m, **kw: m),
+        patch("src.trt_zero_copy_upscaler.DoubleBufferedPipeUpscaler", _FakePipeUpscaler),
+        patch("src.mux_audit.verify_mux_integrity", return_value={"status": "PASS", "source_meta": fake_meta, "output_meta": fake_meta}),
+    ):
+        mock_planner = MagicMock()
+        mock_planner.get_chunk_plan.side_effect = lambda idx: fake_plan["chunks"][idx]
+        mock_planner.get_estimated_dedup_ratio_pct.return_value = 10.0
+        mock_planner.finalize_plan.return_value = fake_plan
+        mock_rolling_cls.return_value = mock_planner
+
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_vid),
+            output_path=str(out_vid),
+            model="auto-pareto",
+            dedup_policy="dis-auto",
+            engine="cuda",
+            precision="fp16",
+            zero_disk=True,
+            use_tensorrt=False,
+            nvenc_multipass="auto",
+            anti_sleep=False,
+            keep_temp=True,
+            resume=True,
+        )
+
+    assert mock_rolling_cls.called
+    # Chunk 1 had scene_cut=False so it MUST preserve Chunk 0's 'detail' tier; Chunk 2 had scene_cut=True -> 'fast'.
+    assert resumed_models == ["detail", "fast"]
+    # Even though estimated dedup_ratio_pct=10% would pick 'fullres' fresh, resume locks to Chunk 0's 'qres'!
+    assert resumed_mp == ["qres", "qres"]
+    audit_json = json.loads((out_dir / "ep_resume_pareto_4K.audit.json").read_text(encoding="utf-8"))
+    assert [c["chunk_idx"] for c in audit_json["model_routing"]["chunks"]] == [0, 1, 2]
+    assert audit_json["model_routing"]["chunk_counts"] == {
+        "animejanai-hd-v3-compact": 2,
+        "animejanai-hd-v3-ultracompact": 1,
+    }
+
