@@ -127,7 +127,11 @@ JA_REGISTER_PATTERNS: List[Tuple[str, str]] = [
     (r"お嬢様|おじょうさま", "HON:ojousama (tiểu thư)"),
     (r"先輩|せんぱい", "HON:senpai (tiền bối/anh/chị)"),
     (r"先生|せんせい", "HON:sensei (thầy/cô/tiên sinh)"),
-    (r"(?<!お疲れ)(?<!ご苦労)(?<!お陰)(?<!おかげ)様|さま", "HON:sama (ngài/đại nhân/tiểu thư)"),
+    (
+        r"(?<!お疲れ)(?<!ご苦労)(?<!お陰)(?<!おかげ)(?<!同)(?<!異)(?<!有)(?<!無)(?<!模)(?<!紋)(?<!文)"
+        r"(?:様(?![子相式態々])|(?<![さざ])さま(?!(?:ざま|よ[うい])))",
+        "HON:sama (ngài/đại nhân/tiểu thư)",
+    ),
     (r"殿下|でんか", "HON:denka (điện hạ)"),
     (r"兄上|姉上|父上|母上", "KIN:noble_kinship (huynh trưởng/tỷ tỷ/phụ thân/mẫu thân)"),
     (r"兄さん|にいさん|お兄ちゃん|兄貴", "KIN:onii (anh trai/huynh)"),

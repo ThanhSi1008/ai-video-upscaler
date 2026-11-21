@@ -1,5 +1,6 @@
 """Four-stage anime subtitle translation pipeline from alignment to QA audit output."""
 
+import os
 import re
 import time
 import logging
@@ -179,7 +180,7 @@ class TranslationPipeline:
                             timeout_ms=self.request_timeout_ms,
                             dry_run=self.dry_run,
                             enable_rag=self.enable_rag,
-                            round_robin=True,
+                            round_robin=False,
                             cache=self.cache,
                             explicit_caching=self.explicit_caching,
                         )
@@ -213,6 +214,7 @@ class TranslationPipeline:
         auto_offset: bool = False,
         sound_cues: str = "drop",
         video_path: Optional[Path] = None,
+        prefer_whisper: bool = False,
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
@@ -301,6 +303,13 @@ class TranslationPipeline:
             try:
                 from subtrans.rag import KnowledgeBase
                 episode_kb = KnowledgeBase(db_path=self.kb_path)
+                if (
+                    self.kb_path is None
+                    and not self.dry_run
+                    and not os.environ.get("PYTEST_CURRENT_TEST")
+                    and episode_kb.get_stats().get("gold_units_count", 0) == 0
+                ):
+                    episode_kb.seed_default_gold_exemplars()
             except Exception as e_kb:
                 logger.debug(f"Could not initialize episode KnowledgeBase: {e_kb}")
 
@@ -388,7 +397,8 @@ class TranslationPipeline:
                 )
                 if cast_glossary and cast_glossary.characters:
                     console.print(f"  • Stage A Cast Sheet: [cyan]{cast_file}[/cyan] ({len(cast_glossary.characters)} characters identified)")
-                    glossary = merge_glossaries(base=glossary, override=cast_glossary)
+                    if not (self.dry_run and glossary and glossary.characters):
+                        glossary = merge_glossaries(base=cast_glossary, override=glossary)
                     if self.require_approved_cast:
                         confirm = typer.confirm(f"Please inspect {cast_file}. Approve and proceed?", default=True)
                         if not confirm:
@@ -409,7 +419,7 @@ class TranslationPipeline:
                     cast_glossary = load_glossary(cp)
                     if cast_glossary and cast_glossary.characters:
                         console.print(f"  • Stage A Cast Sheet Loaded for Local: [cyan]{cp}[/cyan] ({len(cast_glossary.characters)} characters)")
-                        glossary = merge_glossaries(base=glossary, override=cast_glossary)
+                        glossary = merge_glossaries(base=cast_glossary, override=glossary)
                         break
         stage_times["stage_a_cast"] = time.monotonic() - t_sa
 
@@ -600,6 +610,7 @@ class TranslationPipeline:
                 target_m = candidate_gemini_models[curr_gemini_idx] if candidate_gemini_models else "none"
                 is_lower_model = "lite" in target_m.lower()
                 use_batch_cache = isinstance(self.cache, TranslationCache)
+                pre_context_sigs = {cue.id: _cue_context_sig(cue) for cue in batch}
                 cue_keys = [
                     (
                         cue,
@@ -612,16 +623,14 @@ class TranslationPipeline:
                             prompt_version=prompt_version,
                             stage="draft",
                             rag_hash=rag_hash,
-                            context_sig=_cue_context_sig(cue),
+                            context_sig=pre_context_sigs[cue.id],
                         ),
                     )
                     for cue in batch
                 ]
                 for c_item, ck_item in cue_keys:
                     cue_cache_keys_by_id[c_item.id] = ck_item
-                if effective_subs_upgrade and is_lower_model:
-                    cached_map = {}
-                elif use_batch_cache:
+                if use_batch_cache:
                     cached_map = self.cache.get_cues_batch([ck for _, ck in cue_keys])
                 else:
                     cached_map = {}
@@ -629,6 +638,12 @@ class TranslationPipeline:
                         val = self.cache.get_cue(ck)
                         if isinstance(val, str) and val:
                             cached_map[ck] = (val, {})
+                if effective_subs_upgrade and not is_lower_model:
+                    cached_map = {
+                        ck: entry
+                        for ck, entry in cached_map.items()
+                        if "lite" not in str((entry[1] or {}).get("model") or "").lower()
+                    }
                 cached_in_batch: List[Cue] = []
                 for cue, ckey in cue_keys:
                     cached_entry = cached_map.get(ckey)
@@ -758,18 +773,21 @@ class TranslationPipeline:
                         cue.uncertain = True
                         stats["model_counts"]["untranslated"] = stats["model_counts"].get("untranslated", 0) + 1
                     elif not self.dry_run:
-                        ckey = compute_cue_cache_key(
-                            model=model_used,
-                            ja=cue.ja,
-                            en=cue.en,
-                            glossary_hash=glossary_hash,
-                            cast_sheet_hash=cast_sheet_hash,
-                            prompt_version=prompt_version,
-                            stage="draft",
-                            rag_hash=rag_hash,
-                            context_sig=_cue_context_sig(cue),
-                        )
-                        cue_cache_keys_by_id[cue.id] = ckey
+                        if model_used == target_m and cue.id in cue_cache_keys_by_id:
+                            ckey = cue_cache_keys_by_id[cue.id]
+                        else:
+                            ckey = compute_cue_cache_key(
+                                model=model_used,
+                                ja=cue.ja,
+                                en=cue.en,
+                                glossary_hash=glossary_hash,
+                                cast_sheet_hash=cast_sheet_hash,
+                                prompt_version=prompt_version,
+                                stage="draft",
+                                rag_hash=rag_hash,
+                                context_sig=pre_context_sigs.get(cue.id) or _cue_context_sig(cue),
+                            )
+                            cue_cache_keys_by_id[cue.id] = ckey
                         cue_meta = {
                             "speaker": cue.speaker,
                             "addressee": cue.addressee,
@@ -906,6 +924,10 @@ class TranslationPipeline:
                     "ja_path": str(ja_path),
                     "en_path": str(en_path) if en_path else None,
                     "output_dir": str(self.output_dir),
+                    "prefer_whisper": bool(prefer_whisper or str(ja_path).endswith(".whisper_ja.srt")),
+                    "glossary": str(glossary_path) if glossary_path else None,
+                    "subs_quality": str(self.subs_quality),
+                    "sub_offset_ms": int(sub_offset_ms),
                     "real_rate": round(real_rate, 4),
                     "uncertain_rate": round(uncertain_rate, 4),
                     "timestamp": datetime.datetime.now().isoformat()

@@ -49,7 +49,12 @@ def should_skip_cue(style: str, raw_text: str, skip_styles_regex: str = DEFAULT_
 
 
 SOUND_KEYWORDS_REGEX = re.compile(
-    r"(息|せき|咳|ため息|泣き声|笑い声|声|音|足音|鳥|叫び|うめき|喘ぎ|すする|啜り|ハア|ハァ|ゴホ|ケホ|ゲホ|ヒソヒソ|ざわめき|物音|ドア|雷|雨|風|ベル|拍手|歓声|悲鳴|鳴き声|チャイム|電話|爆発|衝撃)",
+    r"(?:^息$|ため息|溜め?息|吐息|寝息|鼻息|息づかい|息切れ|荒い息|せき払い|咳払い|^せき$|^咳$|"
+    r"泣き声|笑い声|歓声|罵声|怒号|悲鳴|鳴き声|話し声|歌声|ざわめき声|うめき声|喘ぎ声|"
+    r"^音$|物音|足音|筆記音|効果音|雑音|騒音|爆発音|衝撃音|打撃音|金属音|水音|雨音|風音|銃声|鐘の音|鈴の音|チャイムの音|ノック音|[^\s、。！？]{1,10}(?:の音|する音|[開閉]\w*音)|"
+    r"鳥の(?:さえずり|鳴き声)|風の音|雨の音|雷鳴|雷の音|ドア(?:の開閉|ノック|が[開閉]\w*)|"
+    r"非常ベル|警報ベル|ベルが鳴る|^チャイム$|電話(?:の音|のベル|が鳴る)|"
+    r"叫び声|^叫び$|うめき|喘ぎ|すする|啜り|ハアハア|ハァハァ|ゴホ|ケホ|ゲホ|ヒソヒソ|ざわめき|拍手|爆発|衝撃)",
     re.IGNORECASE,
 )
 LAUGHTER_TOKENS = (
@@ -376,7 +381,11 @@ def snap_whisper_cues_to_en(
                 if dist < min_dist:
                     min_dist = dist
 
-            if min_dist > 2500 or (len(c.ja) <= 6 and min_dist > 600) or bool(SOUND_KEYWORDS_REGEX.search(c.ja)):
+            if min_dist > 0 and (
+                min_dist > 2500
+                or (len(c.ja) <= 6 and min_dist > 600)
+                or is_pure_sound_cue(c.ja, is_whisper=True)
+            ):
                 c.is_dropped_sound = True
                 c.is_skipped = True
                 c.backend_used = "dropped_sound"

@@ -2,7 +2,7 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `f5352e3` (`perf(harness): isolate offline suite to <45s and harden agent guardrails`)
+> **Commit Baseline:** `52dcb5b` (`fix(video): harden resume isolation, season show routing, open-gop & ring sync`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 

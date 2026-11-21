@@ -242,7 +242,11 @@ def build_episode_system_prompt(
     return prompt_out
 
 
-def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> Dict[str, Any]:
+def filter_relevant_glossary(
+    cues: List[Cue],
+    glossary: Optional[Glossary],
+    include_static_cast: bool = True,
+) -> Dict[str, Any]:
     """Filters glossary to only include terms, characters, pronouns, and honorifics present in the current batch."""
     if not glossary:
         return {}
@@ -311,21 +315,20 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
             relevant_terms.append(item)
 
     relevant_characters = []
-    # Always include all episode cast characters to preserve pronoun continuity across batches,
-    # as Japanese anime dialogues frequently omit subject names (zero-pronouns).
-    for char in glossary.characters:
-        char_entry: Dict[str, Any] = {
-            "name_ja": char.name_ja,
-            "name_vi": char.name_vi,
-            "speaks_to": [s.model_dump(exclude_none=True) for s in char.speaks_to],
-        }
-        if getattr(char, "gender", None):
-            char_entry["gender"] = char.gender
-        if getattr(char, "speaking_style", None):
-            char_entry["register"] = char.speaking_style
-        if getattr(char, "note", None):
-            char_entry["note"] = char.note
-        relevant_characters.append(char_entry)
+    if include_static_cast:
+        for char in glossary.characters:
+            char_entry: Dict[str, Any] = {
+                "name_ja": char.name_ja,
+                "name_vi": char.name_vi,
+                "speaks_to": [s.model_dump(exclude_none=True) for s in char.speaks_to],
+            }
+            if getattr(char, "gender", None):
+                char_entry["gender"] = char.gender
+            if getattr(char, "speaking_style", None):
+                char_entry["register"] = char.speaking_style
+            if getattr(char, "note", None):
+                char_entry["note"] = char.note
+            relevant_characters.append(char_entry)
 
     # Order static keys (characters -> address_guidance) before dynamic per-batch terms for prefix cache hits
     res: Dict[str, Any] = {}
@@ -334,9 +337,9 @@ def filter_relevant_glossary(cues: List[Cue], glossary: Optional[Glossary]) -> D
 
     if glossary.address_rules:
         addr: Dict[str, Any] = {}
-        if glossary.address_rules.principle:
+        if include_static_cast and glossary.address_rules.principle:
             addr["principle"] = glossary.address_rules.principle
-        if glossary.address_rules.relations:
+        if include_static_cast and glossary.address_rules.relations:
             addr["relation_archetypes"] = [
                 {"case": r.case, "self": r.self, "other": r.other}
                 for r in glossary.address_rules.relations
@@ -670,8 +673,25 @@ class GeminiTranslator(BaseTranslator):
                 raise QuotaExhaustedError(f"Stage deadline reached before API call on '{self.model}'.")
 
             curr_kid = self.key_ids[self.current_key_idx] if self.key_ids else "none"
-            if curr_kid in self.rate_limiters:
-                self.rate_limiters[curr_kid].wait_if_needed()
+            curr_limiter = self.rate_limiters.get(curr_kid)
+            if (
+                not getattr(self, "explicit_caching", False)
+                and len(self.api_keys) > 1
+                and curr_limiter is not None
+                and getattr(curr_limiter, "max_rpm", 60) <= 5
+                and curr_limiter.available_slots() == 0
+            ):
+                has_free_other = any(
+                    idx != self.current_key_idx
+                    and not self.cache.is_key_model_exhausted(kid, self.model)
+                    and (self.rate_limiters.get(kid) is None or self.rate_limiters[kid].available_slots() > 0)
+                    for idx, kid in enumerate(self.key_ids)
+                )
+                if has_free_other and self.select_next_round_robin_key(reason="Low-RPM key slot overflow"):
+                    curr_kid = self.key_ids[self.current_key_idx]
+                    curr_limiter = self.rate_limiters.get(curr_kid)
+            if curr_limiter is not None:
+                curr_limiter.wait_if_needed()
 
             explicit_cache_name = self._get_or_create_explicit_cache(curr_kid, system_prompt)
             req_config_kwargs = dict(config_kwargs)
@@ -758,7 +778,12 @@ class GeminiTranslator(BaseTranslator):
                         if curr_limiter is not None:
                             curr_limiter.record_cooldown(wait_sec)
 
-                        if getattr(self, "round_robin", False) and len(self.api_keys) > 1:
+                        can_overflow_rpm = getattr(self, "round_robin", False) or (
+                            not getattr(self, "explicit_caching", False)
+                            and curr_limiter is not None
+                            and getattr(curr_limiter, "max_rpm", 60) <= 5
+                        )
+                        if can_overflow_rpm and len(self.api_keys) > 1:
                             prev_idx = self.current_key_idx
                             if self.select_next_round_robin_key(reason=f"429 PerMinute ({quota_id})") and self.current_key_idx != prev_idx:
                                 next_kid = self.key_ids[self.current_key_idx]
@@ -857,8 +882,8 @@ class GeminiTranslator(BaseTranslator):
         # Order payload keys from most static to most dynamic to maximize Gemini implicit prefix caching
         payload: Dict[str, Any] = {}
 
-        # 1. Glossary (static character/address guidance before per-batch terms)
-        rel_glossary = filter_relevant_glossary(cues, glossary)
+        # 1. Glossary (omit duplicate static cast/archetypes already embedded in system_instruction)
+        rel_glossary = filter_relevant_glossary(cues, glossary, include_static_cast=False)
         if rel_glossary:
             payload["glossary"] = rel_glossary
 

@@ -666,6 +666,8 @@ def main():
         glossary_arg = getattr(args, "glossary", None)
         glossary_path_obj = Path(os.path.expanduser(str(glossary_arg).strip())) if glossary_arg else None
         is_dry_run = bool(getattr(args, "dry_run", False))
+        cli_subs_quality_explicit = "--subs-quality" in sys.argv
+        cli_sub_offset_explicit = "--sub-offset-ms" in sys.argv
         from subtrans.pipeline import TranslationPipeline
         for it in pending_items:
             vid_p = it.get("video_path")
@@ -673,13 +675,38 @@ def main():
             en_s = it.get("en_path")
             base_name_rec = it.get("base_name")
             saved_out_dir = it.get("output_dir")
+            eff_prefer_whisper = bool(getattr(args, "prefer_whisper", False) or it.get("prefer_whisper", False))
+            eff_glossary_obj = glossary_path_obj
+            if eff_glossary_obj is None and it.get("glossary"):
+                cand_g = Path(os.path.expanduser(str(it["glossary"]).strip()))
+                if cand_g.exists():
+                    eff_glossary_obj = cand_g
+            eff_subs_quality = (
+                getattr(args, "subs_quality", "normal")
+                if cli_subs_quality_explicit
+                else str(it.get("subs_quality") or getattr(args, "subs_quality", "normal"))
+            )
+            eff_sub_offset_ms = (
+                args.sub_offset_ms
+                if cli_sub_offset_explicit
+                else int(it.get("sub_offset_ms") if it.get("sub_offset_ms") is not None else args.sub_offset_ms)
+            )
 
             if vid_p and os.path.exists(vid_p):
-                ja_s, en_s = find_or_extract_subtitles(
-                    vid_p,
-                    prefer_whisper_when_no_ja=getattr(args, "prefer_whisper", False),
-                    dry_run=is_dry_run,
-                )
+                if not (ja_s and os.path.exists(ja_s)):
+                    ja_s, en_extract = find_or_extract_subtitles(
+                        vid_p,
+                        prefer_whisper_when_no_ja=eff_prefer_whisper,
+                        dry_run=is_dry_run,
+                    )
+                    if not (en_s and os.path.exists(en_s)):
+                        en_s = en_extract
+                elif not (en_s and os.path.exists(en_s)):
+                    _, en_s = find_or_extract_subtitles(
+                        vid_p,
+                        prefer_whisper_when_no_ja=False,
+                        dry_run=is_dry_run,
+                    )
                 if ja_s == en_s:
                     en_s = None
                 base_vid = os.path.splitext(os.path.basename(vid_p))[0]
@@ -717,7 +744,7 @@ def main():
                 dry_run=is_dry_run,
                 require_approved_cast=False,
                 allow_latest_alias=False,
-                subs_quality=getattr(args, "subs_quality", "normal"),
+                subs_quality=eff_subs_quality,
                 auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
             )
             pending_auto_offset = not getattr(args, "no_auto_offset", False)
@@ -725,16 +752,22 @@ def main():
                 ja_path=Path(ja_s),
                 en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
                 output_basename=out_basename,
-                glossary_path=glossary_path_obj,
+                glossary_path=eff_glossary_obj,
                 subs_upgrade=bool(getattr(args, "subs_upgrade", False)),
-                sub_offset_ms=args.sub_offset_ms,
+                sub_offset_ms=eff_sub_offset_ms,
                 auto_offset=pending_auto_offset,
                 sound_cues=args.sound_cues,
                 video_path=Path(vid_p) if vid_p else None,
+                prefer_whisper=eff_prefer_whisper,
             )
             srt_p = res.get('subtitle_path') or res.get('output_path')
+            is_partial_pending = bool(not srt_p or str(srt_p).endswith(".partial.srt"))
             if vid_p and not is_dry_run:
-                cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(vid_p)), base_vid)
+                cleanup_subtitle_extracts(
+                    os.path.dirname(os.path.abspath(vid_p)),
+                    base_vid,
+                    keep_whisper=is_partial_pending,
+                )
             if not is_dry_run and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
                 remove_pending_sub(base_name_rec or vid_p or out_basename)
                 if os.path.exists(target_4k) and not getattr(args, "no_embed", False):
@@ -839,6 +872,7 @@ def main():
                 auto_offset=use_auto_offset,
                 sound_cues=args.sound_cues,
                 video_path=Path(target_subs_vid),
+                prefer_whisper=bool(getattr(args, "prefer_whisper", False)),
             )
             srt_path = res.get('subtitle_path') or res.get('output_path')
             print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
@@ -848,6 +882,7 @@ def main():
                 continue
 
             # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
+            is_partial_sub = True
             if srt_path and os.path.exists(srt_path):
                 is_partial_sub = str(srt_path).endswith(".partial.srt")
                 if is_partial_sub:
@@ -872,7 +907,7 @@ def main():
                         import shutil
                         shutil.copy2(str(srt_path), raw_side_srt)
                         print(f"📄 Đã đồng bộ file phụ đề cạnh video gốc cho trình phát: {os.path.basename(raw_side_srt)}")
-            cleanup_subtitle_extracts(vid_dir, base_vid_name)
+            cleanup_subtitle_extracts(vid_dir, base_vid_name, keep_whisper=is_partial_sub)
             if not getattr(args, "no_organize_audit", False):
                 organize_output_artifacts(str(sub_out_dir), base_name=base_vid_name)
 
@@ -1255,10 +1290,21 @@ def main():
 
     # DỌN DẸP PHỤ ĐỀ TẠM & GOM GỌN CÁC FILE KỸ THUẬT (AUDIT/CAST) SAU KHI HOÀN TẤT
     if not getattr(args, "no_organize_audit", False) and completed_videos:
+        pending_bases = {str(it.get("base_name") or "") for it in load_pending_subs() if isinstance(it, dict)}
         for src_vid, out_vid in completed_videos:
             sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
             base_vid_name = os.path.splitext(os.path.basename(src_vid))[0]
-            cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(src_vid)), base_vid_name)
+            out_stem = os.path.splitext(os.path.basename(out_vid))[0]
+            has_partial = (
+                os.path.exists(os.path.join(sub_out_dir, f"{out_stem}.vi.partial.srt"))
+                or out_stem in pending_bases
+                or base_vid_name in pending_bases
+            )
+            cleanup_subtitle_extracts(
+                os.path.dirname(os.path.abspath(src_vid)),
+                base_vid_name,
+                keep_whisper=has_partial,
+            )
             organize_output_artifacts(sub_out_dir, base_name=base_vid_name)
 
     # KIỂM ĐỊNH TẤT CẢ CÁC TẬP: NẾU CÒN TẬP CHƯA XONG THÌ THOÁT MÃ ≠ 0 VÀ IN BẢNG

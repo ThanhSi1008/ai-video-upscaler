@@ -146,12 +146,28 @@ def verify_pronoun_cue(cue_spec: Dict[str, Any]) -> Tuple[bool, str]:
         if expected_hint not in hints:
             return False, f"FAIL (missing hint {expected_hint})"
 
+    allowed_pronouns = [str(p) for p in (cue_spec.get("allowed_pronouns") or []) if str(p).strip()]
+    if allowed_pronouns:
+        good_pron_vi = f"{allowed_pronouns[0].capitalize()} ơi, xin hãy cẩn thận."
+        if expected_names:
+            good_pron_vi = f"{', '.join(expected_names)}, {allowed_pronouns[0]} xin hãy cẩn thận."
+        if not check_pronoun_match(good_pron_vi, allowed_pronouns):
+            return False, "FAIL (allowed pronoun match failed)"
+        allowed_lower = {p.strip().lower() for p in allowed_pronouns}
+        disallowed_pool = list(cue_spec.get("disallowed_pronouns") or ["bạn", "quý vị", "đồng chí", "bồ"])
+        disallowed_tok = next((d for d in disallowed_pool if str(d).strip().lower() not in allowed_lower), "đồng chí")
+        bad_pron_vi = f"{disallowed_tok.capitalize()} hãy kiểm tra ngay."
+        if check_pronoun_match(bad_pron_vi, allowed_pronouns):
+            return False, f"FAIL (disallowed pronoun '{disallowed_tok}' falsely matched)"
+
     if expected_names:
         v_missing = lint_cue(
             Cue(id=1, start=0, end=2500, ja=raw_ja, vi="Xin hãy cẩn thận trong chuyện này."),
             glossary=BENCHMARK_GLOSSARY,
         )
         good_vi = f"{', '.join(expected_names)}, xin hãy cẩn thận."
+        if expected_names and not check_romaji_retention(good_vi, expected_names):
+            return False, "FAIL (romaji retention check failed)"
         v_present = lint_cue(
             Cue(id=2, start=0, end=2500, ja=raw_ja, vi=good_vi),
             glossary=BENCHMARK_GLOSSARY,

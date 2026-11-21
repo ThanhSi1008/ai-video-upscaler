@@ -88,3 +88,57 @@ def test_eval_runner_execution():
     assert result["status"] == "ready"
     assert result["regression_count"] == 6
     assert result["pronoun_benchmark_count"] >= 13
+
+
+def test_batch3_dialogue_preservation_and_prompt_dedup():
+    """Verify Batch 3 parser sound-label boundaries, HON:sama guards, Dual Dialogue, and glossary dedup."""
+    from subtrans.cascade import accept_or_reject_repaired_cue
+    from subtrans.cast_sheet import _merge_cast_characters
+    from subtrans.gemini_backend import filter_relevant_glossary
+    from subtrans.ja_morph_tagger import extract_ja_linguistic_hints
+    from subtrans.models import AddressRules, Character, Cue, Glossary, GlossaryTerm
+    from subtrans.parser import is_sound_effect_label
+    from subtrans.writer import optimize_cues_for_playback
+
+    for name in ("ベルナルド", "琴音", "風太郎", "時雨", "ベル"):
+        assert is_sound_effect_label(name) is False
+    for sfx in ("筆記音", "ため息", "扉が開く音", "足音"):
+        assert is_sound_effect_label(sfx) is True
+
+    for non_hon in ("さまざまな様子だ", "同様の様式", "お疲れさまでした"):
+        assert "HON:sama" not in (extract_ja_linguistic_hints(non_hon) or "")
+    assert "HON:sama" in (extract_ja_linguistic_hints("慧月様、フリーレンさま") or "")
+
+    recips = [
+        Cue(id=1, start=1000, end=3000, ja="A", vi="Anh nhớ em nhiều lắm!"),
+        Cue(id=2, start=1050, end=3000, ja="B", vi="Em nhớ anh nhiều lắm!"),
+    ]
+    merged_dual = optimize_cues_for_playback(recips)
+    assert len(merged_dual) == 1 and "\n" in (merged_dual[0].vi or "")
+
+    seq_cues = [
+        Cue(id=1, start=1000, end=1400, ja="A", vi="Câu ngắn một."),
+        Cue(id=2, start=1600, end=3000, ja="B", vi="Câu kế tiếp riêng biệt."),
+    ]
+    opt_seq = optimize_cues_for_playback(seq_cues)
+    assert len(opt_seq) == 2 and "\n" not in (opt_seq[0].vi or "")
+
+    g = Glossary(
+        characters=[Character(name_ja="フラン", name_vi="Fran")],
+        terms=[GlossaryTerm(ja="黒猫族", vi="Hắc Miêu Tộc")],
+        address_rules=AddressRules(principle="Keep hierarchy"),
+    )
+    c_list = [Cue(id=1, start=0, end=1000, ja="黒猫族の誇り")]
+    assert "characters" in filter_relevant_glossary(c_list, g)
+    deduped_g = filter_relevant_glossary(c_list, g, include_static_cast=False)
+    assert "characters" not in deduped_g and "terms" in deduped_g
+
+    cue_num = Cue(id=1, start=0, end=5000, ja="3日後に会おう", vi="3 ngày nữa gặp", draft_vi="3 ngày nữa gặp")
+    ok, code, _ = accept_or_reject_repaired_cue(cue_num, "Hoàn toàn viết lại thành 5 ngày sau chúng ta hội ngộ nhé!")
+    assert ok is True and code == "accepted_digit_mismatch" and cue_num.is_digit_mismatch is True
+
+    merged_cast = _merge_cast_characters(
+        [Character(name_ja="フラン", name_vi="Fran")],
+        [Character(name_ja="ウルシ", name_vi="Urushi")],
+    )
+    assert [c.name_vi for c in merged_cast] == ["Fran", "Urushi"]

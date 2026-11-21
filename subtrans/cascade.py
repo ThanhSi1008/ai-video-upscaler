@@ -245,18 +245,18 @@ def accept_or_reject_repaired_cue(
         return False, "rejected_new_error", list(new.values())
 
     # 4. Semantic drift guards
-    # (a) Large edit distance (> 0.5) -> accepted but flagged for human review queue
-    edit_dist = normalized_char_edit_distance(base, clean_fixed)
-    if edit_dist > 0.5:
-        cue.is_large_edit = True
-        return True, "accepted_large_edit", list(new.values())
-
-    # (b) Number / digit check
+    # (a) Number / digit check (evaluated first so digit drift is never masked by large edits)
     base_numbers = re.findall(r"\d+", base)
     fixed_numbers = re.findall(r"\d+", clean_fixed)
     if base_numbers and base_numbers != fixed_numbers:
         cue.is_digit_mismatch = True
         return True, "accepted_digit_mismatch", list(new.values())
+
+    # (b) Large edit distance (> 0.5) -> accepted but flagged for human review queue
+    edit_dist = normalized_char_edit_distance(base, clean_fixed)
+    if edit_dist > 0.5:
+        cue.is_large_edit = True
+        return True, "accepted_large_edit", list(new.values())
 
     # 5. Accepted improved / valid
     orig_errors = sum(1 for v in orig.values() if v.severity == "ERROR")
@@ -525,8 +525,26 @@ def run_cascade_repair_pass(
                         )
                     curr_kid = repair_translator.key_ids[repair_translator.current_key_idx]
 
-                if curr_kid in rate_limiters:
-                    rate_limiters[curr_kid].wait_if_needed()
+                curr_limiter = rate_limiters.get(curr_kid)
+                if (
+                    not getattr(repair_translator, "explicit_caching", False)
+                    and len(api_keys_list) > 1
+                    and curr_limiter is not None
+                    and getattr(curr_limiter, "max_rpm", 60) <= 5
+                    and curr_limiter.available_slots() == 0
+                    and hasattr(repair_translator, "select_next_round_robin_key")
+                ):
+                    has_free_other = any(
+                        idx != getattr(repair_translator, "current_key_idx", 0)
+                        and not (repair_cache and repair_cache.is_key_model_exhausted(kid, repair_translator.model))
+                        and (rate_limiters.get(kid) is None or rate_limiters[kid].available_slots() > 0)
+                        for idx, kid in enumerate(getattr(repair_translator, "key_ids", []))
+                    )
+                    if has_free_other and repair_translator.select_next_round_robin_key(reason="Cascade low-RPM slot overflow"):
+                        curr_kid = repair_translator.key_ids[repair_translator.current_key_idx]
+                        curr_limiter = rate_limiters.get(curr_kid)
+                if curr_limiter is not None:
+                    curr_limiter.wait_if_needed()
 
                 def _single_cascade_call():
                     return execute_and_log_api_request(
@@ -645,7 +663,7 @@ def run_cascade_repair_pass(
                         if reason_code == "accepted_digit_mismatch" or hallucinated_digits:
                             cue.uncertain = True
                             cue.uncertain_reason = "digit_mismatch"
-                        elif reason_code == "accepted_identical" and has_remaining_errors:
+                        elif has_remaining_errors:
                             cue.uncertain = True
                             if not cue.uncertain_reason or cue.uncertain_reason == "none":
                                 cue.uncertain_reason = "lint_error"

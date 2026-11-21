@@ -135,7 +135,12 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
     return bytes_freed
 
 
-def cleanup_subtitle_extracts(vid_dir: str, base_name: str, logger=None) -> int:
+def cleanup_subtitle_extracts(
+    vid_dir: str,
+    base_name: str,
+    logger=None,
+    keep_whisper: bool = False,
+) -> int:
     """
     Dọn dẹp các tệp phụ đề tạm (extracted_en.ass, extracted_ja.ass, *.whisper_ja.srt)
     được trích xuất trong quá trình xử lý subtrans trong thư mục .temp_<base_name>.
@@ -148,7 +153,7 @@ def cleanup_subtitle_extracts(vid_dir: str, base_name: str, logger=None) -> int:
     freed = 0
     static_names = {"extracted_en.ass", "extracted_ja.ass", "extracted_en.srt", "extracted_ja.srt"}
     candidate_files = list(static_names)
-    if os.path.isdir(tmp_dir):
+    if not keep_whisper and os.path.isdir(tmp_dir):
         try:
             for entry in os.listdir(tmp_dir):
                 if entry.endswith(".whisper_ja.srt") and entry not in static_names:

@@ -2,6 +2,7 @@
 
 import re
 import copy
+import difflib
 import unicodedata
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -198,14 +199,16 @@ def optimize_cues_for_playback(
         common_prefix = norm_curr[:common_len].strip()
         common_words = common_prefix.split()
 
-        # Kiểm tra độ trùng lặp từ vựng (Word overlap):
-        words1 = set(norm_curr.split())
-        words2 = set(norm_next.split())
+        # Order-aware token similarity prevents deleting reciprocal Dual Dialogue ("Anh ... em" vs "Em ... anh")
+        toks1 = norm_curr.split()
+        toks2 = norm_next.split()
         has_high_word_overlap = False
-        if words1 and words2:
-            min_w = min(len(words1), len(words2))
-            if min_w >= 4 and len(words1 & words2) / min_w >= 0.60:
-                has_high_word_overlap = True
+        if toks1 and toks2:
+            min_w = min(len(toks1), len(toks2))
+            if min_w >= 4:
+                seq_ratio = difflib.SequenceMatcher(None, toks1, toks2).ratio()
+                if (seq_ratio >= 0.72 and toks1[0] == toks2[0]) or (min_w >= 5 and seq_ratio >= 0.82):
+                    has_high_word_overlap = True
 
         # Preserve intentional dramatic short repetitions across sequential pauses
         # (e.g. "Subaru..." -> [150ms gap] -> "Subaru!" or "Đợi đã!" -> [200ms gap] -> "Đợi đã!")
@@ -332,13 +335,18 @@ def optimize_cues_for_playback(
                 continue
         deduped_merged.append(c)
 
-    # Giai đoạn 3: Duration Extension (Kéo dài câu ngắn cho kịp đọc)
-    for c in deduped_merged:
+    # Giai đoạn 3: Duration Extension (capped before non-overlapping next_cue.start - 40ms)
+    for idx_m, c in enumerate(deduped_merged):
         txt = (c.vi or "").strip()
         is_dual = "\n" in txt
         base_dur = min_dual_duration_ms if is_dual else min_duration_ms
         needed = max(base_dur, min(6000, int(len(txt) * 42)))
-        c.end = max(c.end, c.start + needed)
+        target_end = max(c.end, c.start + needed)
+        if idx_m + 1 < len(deduped_merged):
+            next_start = deduped_merged[idx_m + 1].start
+            if c.end <= next_start - 40:
+                target_end = min(target_end, max(c.end, next_start - 40))
+        c.end = target_end
 
     # Giai đoạn 4: Strict Zero-Overlap Pass (Tuyệt đối không chồng lấn thời gian)
     k = 0

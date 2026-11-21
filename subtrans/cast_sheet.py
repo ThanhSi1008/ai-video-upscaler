@@ -234,6 +234,46 @@ def check_for_new_characters(cues: List[Cue], existing_characters: List[Characte
     return potential_new
 
 
+def _merge_cast_characters(existing_chars: List[Character], new_chars: List[Character]) -> List[Character]:
+    """Additively merge newly discovered characters into an existing series cast list."""
+    merged: List[Character] = [c.model_copy(deep=True) for c in existing_chars]
+    index_by_key: Dict[str, int] = {}
+    for idx, ch in enumerate(merged):
+        if ch.name_vi:
+            index_by_key[ch.name_vi.strip().lower()] = idx
+        if ch.name_ja:
+            index_by_key[strip_ja_furigana(ch.name_ja).strip().lower()] = idx
+
+    for nc in new_chars:
+        keys = []
+        if nc.name_vi:
+            keys.append(nc.name_vi.strip().lower())
+        if nc.name_ja:
+            keys.append(strip_ja_furigana(nc.name_ja).strip().lower())
+        match_idx = next((index_by_key[k] for k in keys if k and k in index_by_key), None)
+        if match_idx is None:
+            new_idx = len(merged)
+            merged.append(nc.model_copy(deep=True))
+            for k in keys:
+                if k:
+                    index_by_key[k] = new_idx
+        else:
+            existing = merged[match_idx]
+            if not existing.name_ja and nc.name_ja:
+                existing.name_ja = nc.name_ja
+            if not existing.gender and nc.gender:
+                existing.gender = nc.gender
+            if not existing.speaking_style and nc.speaking_style:
+                existing.speaking_style = nc.speaking_style
+            seen_listeners = {s.listener.strip().lower() for s in existing.speaks_to if s.listener}
+            for sp in nc.speaks_to:
+                l_key = (sp.listener or "").strip().lower()
+                if l_key and l_key not in seen_listeners:
+                    existing.speaks_to.append(sp.model_copy(deep=True))
+                    seen_listeners.add(l_key)
+    return merged
+
+
 def load_or_generate_series_cast_sheet(
     cues: List[Cue],
     source_name: str,
@@ -254,6 +294,7 @@ def load_or_generate_series_cast_sheet(
     """
     series_name = extract_series_name(source_name)
     series_cast_file = get_series_cast_path(series_name, output_dir)
+    reusable_existing_chars: List[Character] = []
 
     # 1. Nếu đã có Cast Sheet theo bộ, kiểm tra xem có cần cập nhật không
     if series_cast_file.exists() and not force_update:
@@ -318,6 +359,7 @@ def load_or_generate_series_cast_sheet(
                                 pass
                         return Glossary(characters=characters)
                     else:
+                        reusable_existing_chars = list(characters)
                         logger.info(f"Phát hiện nhân vật mới tiềm năng ({', '.join(new_names)}) trong '{series_name}'. Đang cập nhật Cast Sheet...")
                 else:
                     logger.info(f"Bỏ qua Cast Sheet mẫu Dry-Run cũ của '{series_name}' để sinh Cast Sheet thật từ lời thoại.")
@@ -362,6 +404,16 @@ def load_or_generate_series_cast_sheet(
         timeout_ms=timeout_ms,
         cache=cache,
     )
+    if res_glossary and reusable_existing_chars:
+        merged_chars = _merge_cast_characters(reusable_existing_chars, list(res_glossary.characters))
+        res_glossary = Glossary(characters=merged_chars)
+        _atomic_write_yaml(
+            series_cast_file,
+            {
+                "meta": {"schema": 2, "series": series_name, "description": "Auto-generated Series Cast Sheet"},
+                "characters": [c.model_dump(exclude_none=True) for c in merged_chars],
+            },
+        )
     if res_glossary and episode_cast_path and series_cast_file.exists():
         try:
             _atomic_write_bytes(episode_cast_path, series_cast_file.read_bytes())
