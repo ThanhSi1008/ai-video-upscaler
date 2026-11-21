@@ -871,22 +871,30 @@ def run_upscale_pipeline(
                                             )
 
                                         # Hàm callback kiểm tra lại giữa chunk khi chunk trước chưa encode xong
-                                        def _mid_chunk_bp_check(curr_idx: int, tot_frames: int):
-                                            nonlocal future_encode, total_enc_time, free_mb, last_encode_item, last_ai_result, last_seg_start
+                                        def _mid_chunk_bp_check(
+                                            curr_idx: int,
+                                            tot_frames: int,
+                                            _unit_mb=unit_size_mb,
+                                            _c_idx=c_idx,
+                                            _last_enc=last_encode_item,
+                                            _last_ai=last_ai_result,
+                                            _last_start=last_seg_start,
+                                        ):
+                                            nonlocal future_encode, total_enc_time, free_mb
                                             if future_encode is not None and not future_encode.done():
                                                 cur_free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)
                                                 rem_frames = max(1, tot_frames - curr_idx)
-                                                rem_need_mb = rem_frames * unit_size_mb * 1.2
+                                                rem_need_mb = rem_frames * _unit_mb * 1.2
                                                 if cur_free_mb < rem_need_mb:
                                                     logger.info(
-                                                        f"⚠️ [MID-CHUNK BACKPRESSURE] Giữa chunk {c_idx+1}: RAM Disk trống {cur_free_mb:.0f} MB < "
+                                                        f"⚠️ [MID-CHUNK BACKPRESSURE] Giữa chunk {_c_idx+1}: RAM Disk trống {cur_free_mb:.0f} MB < "
                                                         f"nhu cầu còn lại {rem_need_mb:.0f} MB. Chờ Media Engine hoàn tất chunk trước..."
                                                     )
                                                     prev_enc = future_encode.result()
                                                     total_enc_time += prev_enc
-                                                    prev_c = last_encode_item["target"][0]
-                                                    prev_exp = last_encode_item["extracted"]["expected_frames"]
-                                                    prev_elap = time.time() - last_seg_start
+                                                    prev_c = _last_enc["target"][0]
+                                                    prev_exp = _last_enc["extracted"]["expected_frames"]
+                                                    prev_elap = time.time() - _last_start
                                                     prev_fps = (prev_exp / prev_elap) if prev_elap > 0 else 0.0
                                                     render_progress(
                                                         prev_c + 1, total_segs,
@@ -897,14 +905,14 @@ def run_upscale_pipeline(
                                                         chunk_idx=prev_c,
                                                         total_chunks=total_segs,
                                                         frames=prev_exp,
-                                                        ai_time=last_ai_result["elapsed_seconds"],
-                                                        ai_fps=last_ai_result["fps"],
+                                                        ai_time=_last_ai["elapsed_seconds"],
+                                                        ai_fps=_last_ai["fps"],
                                                         enc_time=prev_enc,
                                                         total_chunk_time=prev_elap,
-                                                        output_seg=last_encode_item["target"][2],
-                                                        t0_seconds=last_ai_result.get("t0_seconds"),
-                                                        steady_fps=last_ai_result.get("steady_fps"),
-                                                        rss_mb=last_ai_result.get("peak_rss_mb")
+                                                        output_seg=_last_enc["target"][2],
+                                                        t0_seconds=_last_ai.get("t0_seconds"),
+                                                        steady_fps=_last_ai.get("steady_fps"),
+                                                        rss_mb=_last_ai.get("peak_rss_mb")
                                                     )
                                                     future_encode = None
                                                     free_mb = shutil.disk_usage(cache_root).free / (1024 * 1024)

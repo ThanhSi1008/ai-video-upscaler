@@ -544,12 +544,16 @@ function bootstrapStudio() {
     if (checkpointList) {
       const cps = Array.isArray(pipeline.checkpoints) ? pipeline.checkpoints : [];
       const cpSig = cps
-        .map((cp) => `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}`)
+        .map(
+          (cp) =>
+            `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}`
+        )
         .join(";;");
       if (cpSig !== lastCheckpointSignature) {
         lastCheckpointSignature = cpSig;
         clearChildren(checkpointList);
         for (const cp of cps) {
+          const resumeHint = cp.source_file || cp.episode_name || cp.path || "";
           checkpointList.append(
             el("div", { className: "checkpoint-chip" }, [
               el("span", {
@@ -559,7 +563,7 @@ function bootstrapStudio() {
                 type: "button",
                 className: "btn btn-ghost",
                 textContent: "Mở Tab Hàng đợi để Tiếp tục →",
-                onClick: () => queueCtrl?.focusWithPath(""),
+                onClick: () => queueCtrl?.focusWithPath(resumeHint),
               }),
             ])
           );
@@ -597,11 +601,16 @@ function bootstrapStudio() {
     }
   };
 
+  const buildChartLivePayload = (pipeline) => ({
+    ...(pipeline?.live || {}),
+    active_source: String(pipeline?.active_source || "idle"),
+  });
+
   const fetchSnapshotFallback = async () => {
     try {
       const snap = await apiFetch("/api/status");
       if (snap.gpu_info) gpuStaticInfo = snap.gpu_info;
-      charts.setSnapshot(snap.history || [], snap.pipeline?.live || {});
+      charts.setSnapshot(snap.history || [], buildChartLivePayload(snap.pipeline));
       applyPipelineAndTelemetry(snap.telemetry, snap.pipeline);
       applySnapshotLogs(snap);
     } catch {
@@ -633,7 +642,7 @@ function bootstrapStudio() {
       try {
         const snap = JSON.parse(ev.data);
         if (snap.gpu_info) gpuStaticInfo = snap.gpu_info;
-        charts.setSnapshot(snap.history || [], snap.pipeline?.live || {});
+        charts.setSnapshot(snap.history || [], buildChartLivePayload(snap.pipeline));
         applyPipelineAndTelemetry(snap.telemetry, snap.pipeline);
         applySnapshotLogs(snap);
       } catch {
@@ -644,7 +653,7 @@ function bootstrapStudio() {
     es.addEventListener("tick", (ev) => {
       try {
         const pkt = JSON.parse(ev.data);
-        charts.pushTick(pkt.telemetry, pkt.pipeline?.live || {});
+        charts.pushTick(pkt.telemetry, buildChartLivePayload(pkt.pipeline));
         applyPipelineAndTelemetry(pkt.telemetry, pkt.pipeline);
         const cur = pkt.log_cursor && typeof pkt.log_cursor === "object" ? pkt.log_cursor : null;
         const nextPath = cur ? String(cur.path || "") : "";

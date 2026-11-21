@@ -714,7 +714,7 @@ class TranslationPipeline:
                                 )
                             else:
                                 translated_texts = call_with_retry(
-                                    fn=lambda: backend.translate_batch(uncached_cues, context, glossary),
+                                    fn=lambda _b=backend, _u=uncached_cues, _ctx=context: _b.translate_batch(_u, _ctx, glossary),
                                     rate_limiter=None if self.dry_run else self.rate_limiter,
                                     max_retries=self.max_retries_per_model,
                                     model_name=target_model,

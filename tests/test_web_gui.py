@@ -2397,5 +2397,143 @@ def test_web_gui_mock_mode_routes_and_sse(tmp_path):
         assert len(audit_data["audits"]) >= 1
         assert audit_data["audits"][0]["status"] == "PASS"
 
+        # --mock without custom popen_factory simulates job start without spawning subprocesses
+        sim_job = client.post("/api/jobs/start", json={"inputs": ["samples/ep01.mkv"], "dry_run": False})
+        assert sim_job.status_code == 200
+        assert sim_job.json()["mock"] is True
+        assert sim_job.json()["job"]["mock"] is True
 
 
+def test_batch4_security_env_parity_scheduler_and_cli_hardening(tmp_path: Path):
+    """Verify Batch 4 Web Studio security, .env slot splitting, per-job log isolation, and scheduler/CLI parity."""
+    import sqlite3
+    import upscale
+    from src.scheduler import compute_overnight_schedule
+    from web.job_manager import JobManager
+    from web.sse_hub import TelemetryHub
+
+    root = _seed_workspace(tmp_path / "b4_ws")
+    ep1 = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    ep2 = root / "anime_season" / "[SubsPlease] Frieren - 01 (1080p).mkv"
+
+    # Seed SQLite cache with success/ok/dry_run rows + 1 active & 1 expired exhaustion row
+    sub_dir = root / "subtrans"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / ".env").write_text(
+        "GEMINI_API_KEY=AIzaSySlotOne111111,AIzaSySlotTwo222222;AIzaSySlotThree333333\n",
+        encoding="utf-8",
+    )
+    cache_dir = sub_dir / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    db_path = cache_dir / "translations.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("CREATE TABLE translations (id INTEGER PRIMARY KEY, pt_date TEXT)")
+        conn.execute(
+            "CREATE TABLE api_requests (id INTEGER PRIMARY KEY, pt_date TEXT, model TEXT, cues_count INTEGER, total_tokens INTEGER, status TEXT)"
+        )
+        conn.execute("CREATE TABLE key_exhaustion (key_id TEXT, model TEXT, reason TEXT, pt_date TEXT)")
+        conn.execute(
+            "CREATE TABLE model_exhaustion (model TEXT, exhausted_until_pt TEXT, reason TEXT)"
+        )
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        today_pt = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        conn.executemany(
+            "INSERT INTO api_requests (pt_date, model, cues_count, total_tokens, status) VALUES (?, ?, ?, ?, ?)",
+            [
+                (today_pt, "gemini-3.5-flash-lite", 100, 1200, "success"),
+                (today_pt, "gemini-3.5-flash-lite", 50, 600, "ok"),
+                (today_pt, "gemini-3.5-flash-lite", 999, 0, "dry_run"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO model_exhaustion (model, exhausted_until_pt, reason) VALUES (?, ?, ?)",
+            [
+                ("gemini-3.8-flash", "2099-12-31T00:00:00-08:00", "RPD"),
+                ("gemini-old-expired", "2020-01-01T00:00:00-08:00", "stale"),
+            ],
+        )
+        conn.commit()
+
+    app_ro = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=88001, running=True),
+        allow_lan=True,
+        allow_lan_control=False,
+    )
+    lan_headers = {"Host": "192.168.1.50:8765"}
+    local_headers = {"Host": "127.0.0.1:8765"}
+
+    with TestClient(app_ro) as local_client:
+        # 1. /api/docs disabled (no broken external-CDN Swagger blank page under strict CSP)
+        assert local_client.get("/api/docs", headers=local_headers).status_code == 404
+
+        # 2. Loopback sees masked keys, excludes dry_run rows, and filters expired exhaustion rows
+        sub_local = local_client.get("/api/subtrans/overview", headers=local_headers).json()
+        assert [s["configured"] for s in sub_local["key_slots"]] == [True, True, True]
+        assert sub_local["key_slots"][0]["masked"].startswith("AIza")
+        reqs = sub_local["cache"]["today_requests"]
+        assert all(r["status"] != "dry_run" for r in reqs)
+        assert all(r["healthy"] is True for r in reqs)
+        assert sum(r["cues"] for r in reqs) == 150
+        ex_models = [m["model"] for m in sub_local["cache"]["exhausted_models"]]
+        assert ex_models == ["gemini-3.8-flash"]
+
+        # 3. Updating slot 2 splits singular GEMINI_API_KEY and syncs subtrans/.env
+        upd = local_client.put(
+            "/api/subtrans/api-keys",
+            json={"key_2": "AIzaSyUpdatedTwo999999"},
+            headers=local_headers,
+        )
+        assert upd.status_code == 200
+        sub_env_txt = (sub_dir / ".env").read_text(encoding="utf-8")
+        assert "GEMINI_API_KEY_1=AIzaSySlotOne111111" in sub_env_txt
+        assert "GEMINI_API_KEY_2=AIzaSyUpdatedTwo999999" in sub_env_txt
+        assert "GEMINI_API_KEY_3=AIzaSySlotThree333333" in sub_env_txt
+
+        # 4. UNC paths rejected across endpoints
+        assert local_client.get("/api/fs/browse", params={"path": r"\\192.168.1.9\share"}, headers=local_headers).status_code == 400
+        assert local_client.get("/api/audits", params={"output_dir": "//192.168.1.9/share"}, headers=local_headers).status_code == 400
+        assert local_client.post(
+            "/api/preview/compare-frames",
+            json={"source_path": r"\\evil\share\a.mkv", "upscaled_path": str(ep1)},
+            headers=local_headers,
+        ).status_code == 422
+
+    with TestClient(app_ro, client=("192.168.1.99", 54321)) as lan_client:
+        # 5. Non-loopback read-only --lan rejects custom ?output_dir= and omits masked API key substrings
+        assert lan_client.get("/api/preview/candidates", params={"output_dir": str(root)}, headers=lan_headers).status_code == 403
+        assert lan_client.get("/api/audits", params={"output_dir": str(root)}, headers=lan_headers).status_code == 403
+        sub_lan = lan_client.get("/api/subtrans/overview", headers=lan_headers).json()
+        assert all(s["masked"] == "" for s in sub_lan["key_slots"])
+
+    # 6. Per-job log isolation + _finalize_locked idempotency
+    jm = JobManager(root, popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=89001, running=False))
+    job_rec = jm.start_upscale_job({"inputs": [str(ep1)], "dry_run": True})
+    per_job_log = root / "logs" / f"web_job_{job_rec['job_id']}.log"
+    assert per_job_log.is_file()
+    hub = TelemetryHub(root, gpu_query_fn=_idle_gpu_metrics, job_state_provider=lambda: {"active_job": job_rec})
+    assert hub._select_active_log_file() == per_job_log.resolve()
+    with jm._lock:
+        jm._finalize_locked(0)
+        jm._finalize_locked(0)
+    assert len(jm.get_state()["history"]) == 1
+
+    # 7. Scheduler parity (no double-subtracted 300s subtitles_overhead) & dynamic --dedup-policy CLI
+    sched_cli = compute_overnight_schedule(
+        queue=[str(ep1), str(ep2)],
+        deadline_str="23:59",
+        fps_median=10.5,
+        fps_p5=8.5,
+        video_overhead_seconds=420.0,
+        subtitles_overhead_seconds=300.0,
+    )
+    ep1_dec = sched_cli["episodes"][0]["decision_eta_seconds"]
+    ep2_dec = sched_cli["episodes"][1]["decision_eta_seconds"]
+    assert abs((ep1_dec + ep2_dec) - (sched_cli["episodes"][0]["eta_p5_seconds"] + sched_cli["episodes"][1]["eta_p5_seconds"]) * 1.07) < 0.5
+
+    parser = upscale.build_arg_parser()
+    assert parser.parse_args(["ep01.mkv", "--dedup-policy", "dis-0.25"]).dedup_policy == "dis-0.25"
+    assert parser.parse_args(["ep01.mkv", "--dedup-policy", "drift-0.6"]).dedup_policy == "drift-0.6"

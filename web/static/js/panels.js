@@ -869,7 +869,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           );
         } else {
           for (const r of reqs) {
-            const tone = r.status === "ok" ? "badge-ok" : "badge-warn";
+            const tone = r.status === "success" || r.status === "ok" ? "badge-ok" : "badge-warn";
             todayUsageBox.append(
               el("span", {
                 className: `badge ${tone}`,

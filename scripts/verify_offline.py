@@ -99,7 +99,7 @@ def snapshot_sources(root: Path, destination: Path) -> int:
             raise ValueError(f"Refusing linked source: {relative}")
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        shutil.copyfile(source, target)
         count += 1
     return count
 
@@ -232,33 +232,126 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=6,
-        help="Parallel isolated snapshot workers for full-suite runs (default: 6; 1 disables sharding)",
+        help="Parallel isolated snapshot workers for full-suite runs (default: 6 P-cores; 1 disables sharding)",
     )
     return parser
 
 
+_MEASURED_FILE_WEIGHT_MS: dict[str, int] = {
+    "tests/e2e/test_tier1_features.py": 53000,
+    "tests/e2e/test_tier2_boundaries.py": 46000,
+    "tests/e2e/test_e2e_group_b.py": 22500,
+    "tests/test_web_gui.py": 15300,
+    "tests/e2e/test_tier4_scenarios.py": 13500,
+    "tests/e2e/test_tier3_pairwise.py": 11500,
+    "tests/test_dedup_policy.py": 9500,
+    "tests/test_dedup.py": 9500,
+    "tests/test_export_review_bundle.py": 7000,
+    "tests/test_output_sanity.py": 5200,
+    "tests/e2e/test_e2e_integration_t3_t4.py": 5000,
+    "tests/test_benchmark_infra.py": 4400,
+    "tests/test_rtx3060_unlocks.py": 4100,
+    "subtrans/tests/test_subtrans_deep_upgrades.py": 3700,
+    "tests/test_mux_audit_regression.py": 3700,
+    "subtrans/tests/test_pipeline_dynamic_batch.py": 3500,
+    "subtrans/tests/test_audit_fixes_subtrans.py": 3500,
+    "tests/test_algorithmic_optimizations.py": 3200,
+    "tests/test_architecture_boundaries.py": 3100,
+    "tests/test_agent_context.py": 3100,
+    "tests/test_nvme_cache_and_input_triton.py": 3000,
+    "tests/test_model_spandrel_and_whisper.py": 2600,
+    "tests/test_cli_lock_and_pipeline_regressions.py": 2400,
+    "tests/e2e/test_e2e_group_a.py": 2100,
+    "tests/test_zero_disk_and_trt_export.py": 1900,
+    "tests/test_agent_setup.py": 1500,
+    "tests/test_gop_rle_and_3stage_overlap.py": 1500,
+    "tests/test_audit_fixes_video.py": 1500,
+    "tests/test_model_selection_and_safety.py": 1400,
+}
+
+
+def _split_e2e_into_n(
+    file_path: Path, rel: str, base_weight: int, parts: int, first_ratio: float | None = None
+) -> list[tuple[int, list[str]]]:
+    """Split pure-function E2E tier files into N balanced nodeid slices."""
+    import ast
+
+    try:
+        tree = ast.parse(file_path.read_text(encoding="utf-8"))
+    except Exception:
+        return [(base_weight, [rel])]
+    has_test_classes = any(isinstance(n, ast.ClassDef) and n.name.startswith("Test") for n in tree.body)
+    test_fns = [
+        n.name
+        for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+    ]
+    if has_test_classes or len(test_fns) < parts * 2:
+        return [(base_weight, [rel])]
+    if parts == 2 and first_ratio is not None:
+        mid = max(1, min(len(test_fns) - 1, int(round(len(test_fns) * first_ratio))))
+        w_half = max(1, base_weight // 2)
+        return [
+            (w_half, [f"{rel}::{fn}" for fn in test_fns[:mid]]),
+            (w_half, [f"{rel}::{fn}" for fn in test_fns[mid:]]),
+        ]
+    slices: list[tuple[int, list[str]]] = []
+    n_total = len(test_fns)
+    for idx in range(parts):
+        lo = (idx * n_total) // parts
+        hi = ((idx + 1) * n_total) // parts
+        fn_slice = test_fns[lo:hi]
+        if fn_slice:
+            w_part = max(1, base_weight // parts)
+            slices.append((w_part, [f"{rel}::{fn}" for fn in fn_slice]))
+    return slices
+
+
+def _lpt_pack(units: list[tuple[int, list[str]]], k: int) -> list[list[str]]:
+    buckets: list[list[str]] = [[] for _ in range(k)]
+    loads = [0] * k
+    for weight, targets in sorted(units, key=lambda item: (-item[0], item[1][0])):
+        idx = min(range(k), key=lambda i: loads[i])
+        buckets[idx].extend(targets)
+        loads[idx] += weight
+    return [sorted(b) for b in buckets if b]
+
+
 def _partition_test_shards(snapshot: Path, num_workers: int) -> list[list[str]]:
-    """Partition all discovered test_*.py files across balanced LPT buckets."""
-    files: list[tuple[int, str]] = []
+    """Keep subtrans isolated in Shard 0 and pack all unit + E2E slices evenly across remaining P-core shards."""
+    subtrans_units: list[tuple[int, list[str]]] = []
+    main_units: list[tuple[int, list[str]]] = []
+    file_count = 0
     for base_rel in ("tests", "subtrans/tests"):
         base = snapshot / base_rel
         if not base.is_dir():
             continue
         for p in sorted(base.rglob("test_*.py")):
+            file_count += 1
             rel = p.relative_to(snapshot).as_posix()
-            mult = 12 if rel.endswith("test_tier1_features.py") else (8 if rel.startswith("tests/e2e/test_tier") else 1)
-            weight = p.stat().st_size * mult
-            files.append((weight, rel))
-    if len(files) < 8 or num_workers <= 1:
+            weight = _MEASURED_FILE_WEIGHT_MS.get(rel, max(600, p.stat().st_size // 10))
+            if rel.startswith("subtrans/tests/") or rel in (
+                "tests/test_export_review_bundle.py",
+                "tests/test_agent_context.py",
+                "tests/test_architecture_boundaries.py",
+            ):
+                subtrans_units.append((weight, [rel]))
+            elif rel == "tests/e2e/test_tier1_features.py":
+                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2, first_ratio=0.42))
+            elif rel == "tests/e2e/test_tier2_boundaries.py":
+                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2, first_ratio=0.58))
+            elif rel == "tests/e2e/test_tier3_pairwise.py":
+                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2))
+            else:
+                main_units.append((weight, [rel]))
+    if file_count < 8 or num_workers <= 1:
         return []
-    k = min(num_workers, len(files))
-    buckets: list[list[str]] = [[] for _ in range(k)]
-    loads = [0] * k
-    for weight, rel in sorted(files, key=lambda item: (-item[0], item[1])):
-        idx = min(range(k), key=lambda i: loads[i])
-        buckets[idx].append(rel)
-        loads[idx] += weight
-    return [sorted(b) for b in buckets if b]
+    if num_workers >= 5 and subtrans_units and main_units:
+        sub_k = 1
+        main_k = num_workers - sub_k
+        return _lpt_pack(subtrans_units, sub_k) + _lpt_pack(main_units, min(main_k, len(main_units)))
+    all_units = subtrans_units + main_units
+    return _lpt_pack(all_units, min(num_workers, len(all_units)))
 
 
 def _merge_junit_files(shard_xmls: list[Path], dest_xml: Path) -> tuple[int, int, int, int]:
@@ -319,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
         (guard_dir / "sitecustomize.py").write_text(GUARD, encoding="utf-8")
         (snapshot / "agent_offline_guard.py").write_text(GUARD, encoding="utf-8")
         base_env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
+        ffmpeg_bin_dir = ROOT / "bin" / "ffmpeg"
+        if ffmpeg_bin_dir.is_dir():
+            cur_path = base_env.get("PATH", "")
+            if str(ffmpeg_bin_dir) not in cur_path.split(os.pathsep):
+                base_env["PATH"] = f"{ffmpeg_bin_dir}{os.pathsep}{cur_path}" if cur_path else str(ffmpeg_bin_dir)
         base_env["TEMP"] = base_env["TMP"] = base_env["TMPDIR"] = str(tmp_dir)
         # Propagate socket guard across child Python subprocesses without exposing live repo paths.
         base_env["PYTHONPATH"] = str(guard_dir)
@@ -358,15 +456,29 @@ def main(argv: list[str] | None = None) -> int:
                         log.write(line)
                     code = process.wait()
         else:
-            shard_dirs: list[Path] = [snapshot]
-            for idx in range(1, len(shards)):
-                w_snap = run_dir / f"repo_w{idx}"
-                shutil.copytree(snapshot, w_snap)
-                shard_dirs.append(w_snap)
-                extra_snapshots.append(w_snap)
+            shard_dirs: list[Path] = []
+            for idx, s_targets in enumerate(shards):
+                needs_own_cwd = any(t.startswith("tests/e2e/test_tier") for t in s_targets)
+                if idx == 0 or not needs_own_cwd:
+                    shard_dirs.append(snapshot)
+                else:
+                    w_snap = run_dir / f"repo_w{idx}"
+                    shard_dirs.append(w_snap)
+                    extra_snapshots.append(w_snap)
+
+            def _link_py_or_copy(src_f: str, dst_f: str) -> None:
+                if src_f.endswith(".py"):
+                    try:
+                        os.link(src_f, dst_f)
+                        return
+                    except OSError:
+                        pass
+                shutil.copyfile(src_f, dst_f)
 
             def _run_shard(idx_targets: tuple[int, list[str]]) -> tuple[int, int, str, Path]:
                 idx, targets = idx_targets
+                if shard_dirs[idx] != snapshot:
+                    shutil.copytree(snapshot, shard_dirs[idx], copy_function=_link_py_or_copy)
                 w_tmp = tmp_dir / f"w{idx}"
                 w_tmp.mkdir(parents=True, exist_ok=True)
                 w_env = dict(base_env)
@@ -405,14 +517,15 @@ def main(argv: list[str] | None = None) -> int:
             code = next((rc for rc in codes if rc != 0), 0)
         print(f"Evidence: {run_dir}\nPytest exit code: {code}")
     finally:
-        for extra_snap in extra_snapshots:
-            if code == 0:
-                _rmtree_force(extra_snap)
+        cleanup_paths: list[Path] = []
+        if code == 0:
+            cleanup_paths.extend(extra_snapshots)
         if is_fast_mode or code == 0:
-            # Always clean heavy snapshot & pytest temp files on fast modes and passing full runs
-            _rmtree_force(snapshot)
-            _rmtree_force(run_dir / "guard")
-            _rmtree_force(tmp_dir)
+            cleanup_paths.extend([snapshot, run_dir / "guard", tmp_dir])
+        if cleanup_paths:
+            with ThreadPoolExecutor(max_workers=min(8, len(cleanup_paths))) as clean_pool:
+                list(clean_pool.map(_rmtree_force, cleanup_paths))
+        if is_fast_mode or code == 0:
             tmp_dir.mkdir(parents=True, exist_ok=True)
             if code == 0:
                 validation_dirs = sorted(

@@ -50,11 +50,17 @@ export class TelemetryChartsController {
     });
   }
 
+  _extractLiveFps(liveData) {
+    if (!liveData || typeof liveData !== "object") return 0;
+    if (String(liveData.active_source || "") === "idle") return 0;
+    return Number(liveData.steady_fps || liveData.latest_fps || 0);
+  }
+
   setSnapshot(historySamples, liveData) {
     const arr = Array.isArray(historySamples) ? historySamples.slice(-this.maxPoints) : [];
     const prevFps = Array.isArray(this.fpsHistory) ? this.fpsHistory.slice() : [];
     this.history = arr;
-    const baseFps = Number(liveData?.steady_fps || liveData?.latest_fps || 0);
+    const baseFps = this._extractLiveFps(liveData);
     if (arr.length === 0) {
       this.fpsHistory = [];
     } else if (prevFps.length > 0) {
@@ -81,7 +87,7 @@ export class TelemetryChartsController {
     if (this.history.length > this.maxPoints) {
       this.history.shift();
     }
-    const fpsVal = Number(liveData?.steady_fps || liveData?.latest_fps || 0);
+    const fpsVal = this._extractLiveFps(liveData);
     this.fpsHistory.push(fpsVal);
     if (this.fpsHistory.length > this.maxPoints) {
       this.fpsHistory.shift();
@@ -164,7 +170,7 @@ export class TelemetryChartsController {
       }
       const curFps =
         liveData !== null
-          ? Number(liveData?.steady_fps || liveData?.latest_fps || 0)
+          ? this._extractLiveFps(liveData)
           : this.fpsHistory[this.fpsHistory.length - 1] || 0;
       const diskRate = Number(latest.ssd_read_mb_s || 0) + Number(latest.ssd_write_mb_s || 0);
       if (this.readouts.io) {

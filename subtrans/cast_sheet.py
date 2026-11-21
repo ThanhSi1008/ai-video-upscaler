@@ -505,19 +505,24 @@ def generate_cast_sheet(
                 rotate_on_rpm = len(key_ids) > 1 and round_idx == 0
 
                 try:
-                    def _single_api_call():
+                    def _single_api_call(
+                        _client=client,
+                        _model=model_name,
+                        _cfg=cfg_args,
+                        _kid=kid,
+                    ):
                         return execute_and_log_api_request(
-                            lambda: client.models.generate_content(
-                                model=model_name,
+                            lambda: _client.models.generate_content(
+                                model=_model,
                                 contents=prompt,
-                                config=types.GenerateContentConfig(**cfg_args),
+                                config=types.GenerateContentConfig(**_cfg),
                             ),
-                            model=model_name,
+                            model=_model,
                             backend="gemini",
                             cues_count=0,
                             request_type="cast_sheet",
                             cache=cache,
-                            key_id=kid,
+                            key_id=_kid,
                         )
 
                     res = call_with_retry(

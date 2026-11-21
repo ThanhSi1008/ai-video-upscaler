@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import urllib.parse
 import yaml
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,8 +32,10 @@ from web.fs_browser import (
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
     is_secret_filename,
+    is_unc_path,
     is_valid_dedup_policy,
     match_show_pattern,
+    match_show_rule,
 )
 from web.job_manager import MODEL_REFERENCE_FPS, JobManager
 from web.sse_hub import TelemetryHub, scan_temp_checkpoints
@@ -47,9 +49,12 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 _DEADLINE_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
 
-def _validate_no_nul_str(val: Optional[str], field_name: str = "path") -> Optional[str]:
-    if val is not None and "\x00" in val:
-        raise ValueError(f"Trường '{field_name}' chứa ký tự NUL (\\x00) không hợp lệ.")
+def _validate_no_nul_str(val: Optional[str], field_name: str = "path", reject_unc: bool = True) -> Optional[str]:
+    if val is not None:
+        if "\x00" in val:
+            raise ValueError(f"Trường '{field_name}' chứa ký tự NUL (\\x00) không hợp lệ.")
+        if reject_unc and is_unc_path(val):
+            raise ValueError(f"Trường '{field_name}' không cho phép đường dẫn mạng UNC (\\\\... hoặc //...).")
     return val
 
 
@@ -193,6 +198,8 @@ class CompareFramesRequest(BaseModel):
     def _reject_null_paths(cls, v: str) -> str:
         if "\x00" in v:
             raise ValueError("Đường dẫn không được chứa ký tự NUL (\\x00).")
+        if is_unc_path(v):
+            raise ValueError("Từ chối đường dẫn mạng UNC (\\\\... hoặc //...).")
         return v
 
     @field_validator("timestamp_sec", "source_offset_sec")
@@ -207,10 +214,15 @@ class TestShowsMatchRequest(BaseModel):
     sample_path: str
     yaml_content: Optional[str] = None
 
-    @field_validator("sample_path", "yaml_content")
+    @field_validator("sample_path")
+    @classmethod
+    def _reject_nul_sample(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "sample_path", reject_unc=True)
+
+    @field_validator("yaml_content")
     @classmethod
     def _reject_nul(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_no_nul_str(v, "sample_path/yaml_content")
+        return _validate_no_nul_str(v, "yaml_content", reject_unc=False)
 
 
 class SaveShowsYamlRequest(BaseModel):
@@ -219,7 +231,7 @@ class SaveShowsYamlRequest(BaseModel):
     @field_validator("yaml_content")
     @classmethod
     def _reject_nul(cls, v: str) -> str:
-        return _validate_no_nul_str(v, "yaml_content") or ""
+        return _validate_no_nul_str(v, "yaml_content", reject_unc=False) or ""
 
 
 class UpdateApiKeysRequest(BaseModel):
@@ -333,8 +345,13 @@ def _resolve_subtrans_key_slots(
     dotenv_path: Path,
     key_id_fn: Optional[Callable[[str], str]] = None,
 ) -> tuple[List[Dict[str, Any]], int]:
-    """Resolve 3 API key slot statuses matching subtrans/config.py precedence (env overrides .env)."""
+    """Resolve 3 API key slot statuses matching subtrans/config.py precedence (env > subtrans/.env > .env)."""
+    sub_dotenv_path = dotenv_path.parent / "subtrans" / ".env"
     dotenv_map = _read_dotenv_map(dotenv_path)
+    if sub_dotenv_path.is_file():
+        for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
+            if sv:
+                dotenv_map[sk] = sv
 
     def _effective_var(name: str) -> tuple[str, str]:
         if os.environ.get(name) and os.environ[name].strip():
@@ -961,7 +978,7 @@ def create_app(
     app = FastAPI(
         title="AI Video Upscaler & Subtrans Studio",
         version="1.0.0",
-        docs_url="/api/docs",
+        docs_url=None,
         redoc_url=None,
         lifespan=_lifespan,
     )
@@ -1033,10 +1050,15 @@ def create_app(
         is_loopback = _is_loopback_request(client_host, host_name)
         if allow_lan and not allow_lan_control and not is_loopback:
             req_path = request.url.path or ""
+            has_custom_outdir = bool((request.query_params.get("output_dir") or "").strip()) and req_path in {
+                "/api/preview/candidates",
+                "/api/audits",
+            }
             if (
                 request.method not in {"GET", "HEAD", "OPTIONS"}
                 or req_path == "/api/fs/browse"
                 or req_path.startswith("/api/fs/")
+                or has_custom_outdir
             ):
                 return _apply_security_headers(
                     JSONResponse(
@@ -1135,8 +1157,30 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    def _build_mock_job_response(job_type: str, queue_items: List[str], options: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "mock": True,
+            "job": {
+                "job_id": f"mock-{job_type}",
+                "job_type": job_type,
+                "status": "running",
+                "pid": 90420,
+                "started_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "finished_at": None,
+                "return_code": None,
+                "queue_items": queue_items,
+                "options": options,
+                "mock": True,
+            },
+        }
+
     @app.post("/api/jobs/start")
     def api_start_upscale(req: StartUpscaleRequest) -> Dict[str, Any]:
+        if is_mock and popen_factory is None:
+            if not req.inputs:
+                raise HTTPException(status_code=400, detail="Vui lòng chọn ít nhất một file video hoặc thư mục nguồn.")
+            return _build_mock_job_response("upscale", list(req.inputs), req.model_dump())
         try:
             job = job_manager.start_upscale_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1147,6 +1191,10 @@ def create_app(
 
     @app.post("/api/jobs/preview")
     def api_start_preview(req: StartPreviewRequest) -> Dict[str, Any]:
+        if is_mock and popen_factory is None:
+            if not (req.video_path or "").strip():
+                raise HTTPException(status_code=400, detail="Thiếu video_path.")
+            return _build_mock_job_response("preview", [req.video_path], req.model_dump())
         try:
             job = job_manager.start_preview_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1158,6 +1206,10 @@ def create_app(
     @app.post("/api/jobs/subtrans")
     def api_start_subtrans(req: StartSubtransRequest) -> Dict[str, Any]:
         """Start standalone subtitle translation job."""
+        if is_mock and popen_factory is None:
+            if not (req.input_path or "").strip():
+                raise HTTPException(status_code=400, detail="Thiếu input_path.")
+            return _build_mock_job_response("subtrans", [req.input_path], req.model_dump())
         try:
             job = job_manager.start_subtrans_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1168,6 +1220,8 @@ def create_app(
 
     @app.post("/api/jobs/subs-pending")
     def api_start_subs_pending(req: StartSubsPendingRequest) -> Dict[str, Any]:
+        if is_mock and popen_factory is None:
+            return _build_mock_job_response("subs_pending", ["state/pending_subs.json"], req.model_dump())
         try:
             job = job_manager.start_subs_pending_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1647,13 +1701,10 @@ def create_app(
                         break
             lower_to_key = {str(k).lower(): str(k) for k in reg.keys()}
 
-            vid_name = os.path.basename(sample.rstrip("\\/"))
-            parent_dir = os.path.basename(os.path.dirname(sample)) if ("/" in sample or "\\" in sample) else ""
             matched_pat = ""
             chosen_mod = default_id
             chosen_pol = "default"
             src_desc = "Mặc định hệ thống (models.yaml)"
-
             matched_model_pat = ""
             matched_dedup_pat = ""
             for r in rules:
@@ -1662,7 +1713,7 @@ def create_app(
                 pat = str(r.get("pattern") or "").strip()
                 if not pat:
                     continue
-                if match_show_pattern(vid_name, pat) or (parent_dir and match_show_pattern(parent_dir, pat)):
+                if match_show_rule(sample, pat):
                     m_target = str(r.get("model") or "").strip().lower()
                     if m_target and m_target in lower_to_key:
                         chosen_mod = lower_to_key[m_target]
@@ -1675,7 +1726,7 @@ def create_app(
                 pat = str(r.get("pattern") or "").strip()
                 if not pat:
                     continue
-                if match_show_pattern(vid_name, pat) or (parent_dir and match_show_pattern(parent_dir, pat)):
+                if match_show_rule(sample, pat):
                     p_target = str(r.get("dedup_policy") or "").strip().lower()
                     if p_target and is_valid_dedup_policy(p_target):
                         chosen_pol = p_target
@@ -1714,7 +1765,7 @@ def create_app(
 
     # 5. SUBTRANS STUDIO & AUDIT VAULT
     @app.get("/api/subtrans/overview")
-    def api_subtrans_overview() -> Dict[str, Any]:
+    def api_subtrans_overview(request: Request) -> Dict[str, Any]:
         now_pt = get_now_pt()
         next_pt, next_vn = get_next_pt_reset(now_pt)
         today_pt_str = now_pt.strftime("%Y-%m-%d")
@@ -1722,6 +1773,12 @@ def create_app(
 
         # Masked API key slot statuses mirroring subtrans/config.py precedence
         key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
+        req_client = getattr(request, "client", None)
+        req_client_host = (getattr(req_client, "host", "") or "").lower()
+        req_host_name, _, _ = _parse_host_header(request.headers.get("host"))
+        if not _is_loopback_request(req_client_host, req_host_name):
+            for s_entry in key_slots:
+                s_entry["masked"] = ""
 
         sub_models_path = root / "subtrans" / "models.yaml"
         sub_models: List[Dict[str, Any]] = []
@@ -1769,7 +1826,7 @@ def create_app(
                         """
                         SELECT model, status, COUNT(*), COALESCE(SUM(cues_count), 0), COALESCE(SUM(total_tokens), 0)
                         FROM api_requests
-                        WHERE pt_date = ?
+                        WHERE pt_date = ? AND LOWER(COALESCE(status, '')) != 'dry_run'
                         GROUP BY model, status
                         ORDER BY COUNT(*) DESC
                         """,
@@ -1779,6 +1836,7 @@ def create_app(
                         {
                             "model": str(r[0] or ""),
                             "status": str(r[1] or ""),
+                            "healthy": str(r[1] or "").strip().lower() in {"success", "ok"},
                             "requests": int(r[2] or 0),
                             "cues": int(r[3] or 0),
                             "tokens": int(r[4] or 0),
@@ -1796,10 +1854,24 @@ def create_app(
                     ]
 
                     cur.execute("SELECT model, exhausted_until_pt, reason FROM model_exhaustion")
-                    cache_stats["exhausted_models"] = [
-                        {"model": str(r[0]), "until_pt": str(r[1] or ""), "reason": str(r[2] or "")}
-                        for r in cur.fetchall()
-                    ]
+                    active_exhausted_models: List[Dict[str, str]] = []
+                    for r in cur.fetchall():
+                        until_raw = str(r[1] or "").strip()
+                        if not until_raw:
+                            continue
+                        is_active_ex = False
+                        try:
+                            until_dt = datetime.fromisoformat(until_raw)
+                            if until_dt.tzinfo is None:
+                                until_dt = until_dt.replace(tzinfo=now_pt.tzinfo)
+                            is_active_ex = until_dt > now_pt
+                        except ValueError:
+                            is_active_ex = until_raw > now_pt.isoformat()
+                        if is_active_ex:
+                            active_exhausted_models.append(
+                                {"model": str(r[0]), "until_pt": until_raw, "reason": str(r[2] or "")}
+                            )
+                    cache_stats["exhausted_models"] = active_exhausted_models
                 finally:
                     conn.close()
             except Exception:
@@ -1811,7 +1883,7 @@ def create_app(
                 "total_cached_cues": 1420,
                 "today_cached_cues": 318,
                 "today_requests": [
-                    {"model": "gemini-3.5-flash-lite", "status": "ok", "requests": 14, "cues": 318, "tokens": 24800}
+                    {"model": "gemini-3.5-flash-lite", "status": "success", "requests": 14, "cues": 318, "tokens": 24800}
                 ],
                 "exhausted_keys": [],
                 "exhausted_models": [],
@@ -1859,7 +1931,12 @@ def create_app(
     def api_update_subtrans_keys(req: UpdateApiKeysRequest) -> Dict[str, Any]:
         """Update or clear GEMINI_API_KEY_1..3 in local .env without logging or returning raw keys."""
         dotenv_path = root / ".env"
+        sub_dotenv_path = root / "subtrans" / ".env"
         existing = _read_dotenv_map(dotenv_path)
+        if sub_dotenv_path.is_file():
+            for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
+                if sv:
+                    existing[sk] = sv
 
         updates: Dict[str, Optional[str]] = {
             "GEMINI_API_KEY_1": req.key_1,
@@ -1867,7 +1944,7 @@ def create_app(
             "GEMINI_API_KEY_3": req.key_3,
         }
 
-        # Split legacy combined GEMINI_API_KEYS into numbered slots when editing individual slots
+        # Split legacy combined GEMINI_API_KEYS or multi-token GEMINI_API_KEY into numbered slots on edit
         has_any_edit = any(v is not None for v in (req.key_1, req.key_2, req.key_3))
         if has_any_edit and existing.get("GEMINI_API_KEYS"):
             old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
@@ -1880,13 +1957,40 @@ def create_app(
                     updates[k_name] = old_multi[idx - 1]
             updates["GEMINI_API_KEYS"] = ""
 
-        # Keep primary GEMINI_API_KEY synchronized with slot 1 so it does not shadow slot 1 edits
-        if req.key_1 is not None:
+        old_prim = _split_gemini_key_tokens(existing.get("GEMINI_API_KEY"))
+        if has_any_edit and len(old_prim) > 1:
+            for idx in range(1, max(4, len(old_prim) + 1)):
+                k_name = f"GEMINI_API_KEY_{idx}"
+                if idx == 1:
+                    if updates[k_name] is None:
+                        updates[k_name] = old_prim[0]
+                elif idx <= 3:
+                    if updates[k_name] is None and not existing.get(k_name) and idx - 1 < len(old_prim):
+                        updates[k_name] = old_prim[idx - 1]
+                elif k_name not in updates and not existing.get(k_name) and idx - 1 < len(old_prim):
+                    updates[k_name] = old_prim[idx - 1]
+            eff_slot_1 = (
+                req.key_1.strip()
+                if req.key_1 is not None
+                else str(updates["GEMINI_API_KEY_1"] or old_prim[0]).strip()
+            )
+            updates["GEMINI_API_KEY"] = eff_slot_1
+        elif req.key_1 is not None:
             clean_1 = req.key_1.strip()
             updates["GEMINI_API_KEY"] = clean_1
 
         try:
             _write_dotenv_keys(dotenv_path, updates)
+            if sub_dotenv_path.is_file():
+                sub_existing = _read_dotenv_map(sub_dotenv_path)
+                has_gemini_in_sub = any(k.startswith("GEMINI_API_KEY") for k in sub_existing)
+                sub_updates = (
+                    updates
+                    if has_gemini_in_sub
+                    else {k: v for k, v in updates.items() if k in sub_existing and v is not None}
+                )
+                if sub_updates:
+                    _write_dotenv_keys(sub_dotenv_path, sub_updates)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
@@ -2126,8 +2230,8 @@ def create_app(
 
     @app.get("/api/audits/detail")
     def api_audit_detail(path: str = Query(...)) -> Any:
-        if "\x00" in path:
-            raise HTTPException(status_code=400, detail="Đường dẫn file audit chứa ký tự NUL (\\x00) không hợp lệ.")
+        if "\x00" in path or is_unc_path(path):
+            raise HTTPException(status_code=400, detail="Đường dẫn file audit không hợp lệ (chứa NUL hoặc UNC).")
         cand = Path(os.path.expanduser(path.strip()))
         if not cand.is_absolute():
             cand = (root / cand).resolve()

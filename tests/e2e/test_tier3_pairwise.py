@@ -34,9 +34,9 @@ from tests.e2e.conftest import create_synthetic_video, run_upscale_cli
 
 def test_t3_01_queue_and_preview_modes(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T3-01: Queue Mode + Preview Mode executes preview for multiple videos without collision."""
-    # Use 72 frames (3.0s at 24fps) so int(duration) >= 2 for preview_seconds=2
-    ep1 = create_synthetic_video(tmp_path / "ep1.mkv", num_frames=72, fps=24, audio_tracks=1)
-    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=72, fps=24, audio_tracks=1)
+    # Use 9 frames at 3fps (3.0s) so int(duration) >= 2 for preview_seconds=2 without 72-frame CPU overhead
+    ep1 = create_synthetic_video(tmp_path / "ep1.mkv", num_frames=9, fps=3, audio_tracks=1)
+    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=9, fps=3, audio_tracks=1)
     out_dir = tmp_path / "out"
 
     exit_code, out, err = run_upscale_cli(

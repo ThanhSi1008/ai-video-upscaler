@@ -117,19 +117,20 @@ def sample_compact2x_weights(tmp_path_factory):
 
 @pytest.fixture
 def sample_sanity_frames(tmp_path):
-    """Tạo một cặp frame 1080p và 4K mẫu với gradient tự nhiên để kiểm thử Output Sanity Guard."""
-    src_img = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    for y in range(1080):
-        src_img[y, :, 0] = int((y / 1080.0) * 200)
-        src_img[y, :, 1] = int(((1080 - y) / 1080.0) * 180)
+    """Create compact 2x synthetic gradient frame pair for Output Sanity Guard checks."""
+    src_h, src_w = 90, 160
+    src_img = np.zeros((src_h, src_w, 3), dtype=np.uint8)
+    ys = np.arange(src_h, dtype=np.float32)
+    src_img[:, :, 0] = ((ys / src_h) * 200.0).astype(np.uint8)[:, None]
+    src_img[:, :, 1] = (((src_h - ys) / src_h) * 180.0).astype(np.uint8)[:, None]
     src_img[:, :, 2] = 120
 
     src_path = str(tmp_path / "src_1080p.png")
-    cv2.imwrite(src_path, src_img)
+    cv2.imwrite(src_path, src_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
 
-    out_img = cv2.resize(src_img, (3840, 2160), interpolation=cv2.INTER_CUBIC)
+    out_img = cv2.resize(src_img, (src_w * 2, src_h * 2), interpolation=cv2.INTER_CUBIC)
     out_path = str(tmp_path / "out_4k_normal.png")
-    cv2.imwrite(out_path, out_img)
+    cv2.imwrite(out_path, out_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
 
     return {"src_path": src_path, "out_path": out_path, "src_img": src_img, "out_img": out_img}
 
@@ -169,13 +170,13 @@ def test_f09_t1_03_bypass_bicubic_downsample():
     inner_model = AnimeJaNaiCompact2x()
     wrapper_2x = SpandrelModelWrapper(inner_model, scale=2, target_scale=2.0)
 
-    dummy_input = torch.randn(1, 3, 32, 32)
+    dummy_input = torch.randn(1, 3, 16, 16)
     output_2x = wrapper_2x(dummy_input)
 
-    # Native 2x outputs directly 64x64 without downsampling
-    assert output_2x.shape == (1, 3, 64, 64)
+    # Native 2x outputs directly 32x32 without downsampling
+    assert output_2x.shape == (1, 3, 32, 32)
 
-    # Comparison: Standard 4x model wrapped with target_scale 2.0 downsamples from 4x (128x128) to 2x (64x64)
+    # Comparison: Standard 4x model wrapped with target_scale 2.0 downsamples from 4x (64x64) to 2x (32x32)
     class Dummy4xModel(nn.Module):
         def forward(self, x):
             return F.interpolate(x, scale_factor=4.0, mode="nearest")
@@ -183,7 +184,7 @@ def test_f09_t1_03_bypass_bicubic_downsample():
     model_4x = Dummy4xModel()
     wrapper_4x = SpandrelModelWrapper(model_4x, scale=4, target_scale=2.0)
     output_4x = wrapper_4x(dummy_input)
-    assert output_4x.shape == (1, 3, 64, 64)
+    assert output_4x.shape == (1, 3, 32, 32)
     # The 2x path executed purely without downsampling
     assert wrapper_2x.scale == 2
 
@@ -202,9 +203,9 @@ def test_f09_t1_04_cuda_engine_spandrel_loader(sample_compact2x_weights):
     assert isinstance(worker.model, (SpandrelModelWrapper, AnimeJaNaiCompact2x))
 
     # Test forward inference on CPU
-    x = torch.randn(1, 3, 32, 32)
+    x = torch.randn(1, 3, 16, 16)
     out = worker.model(x)
-    assert out.shape == (1, 3, 64, 64)
+    assert out.shape == (1, 3, 32, 32)
 
 
 def test_f09_t1_05_spandrel_model_eval_mode():
@@ -216,10 +217,10 @@ def test_f09_t1_05_spandrel_model_eval_mode():
     assert not inner_model.training
 
     wrapper_half = wrapper.half()
-    dummy_half = torch.randn(1, 3, 32, 32, dtype=torch.float16)
+    dummy_half = torch.randn(1, 3, 16, 16, dtype=torch.float16)
     out_half = wrapper_half(dummy_half)
     assert out_half.dtype == torch.float16
-    assert out_half.shape == (1, 3, 64, 64)
+    assert out_half.shape == (1, 3, 32, 32)
 
 
 # --- Tier 2: Boundary & Corner Cases (6 cases) ---
@@ -794,8 +795,6 @@ def test_f12_t2_06_repetitive_scream_loops():
 
 def test_f13_t1_01_benchmark_script_cli_args():
     """F13-T1-01: Verify scripts/benchmark_pipeline.py parses CLI arguments and options cleanly."""
-    from scripts.benchmark_pipeline import TIER_DURATIONS, TIER_START_TIMES
-
     assert "preview" in TIER_DURATIONS
     assert "climax" in TIER_DURATIONS
     assert "full" in TIER_DURATIONS

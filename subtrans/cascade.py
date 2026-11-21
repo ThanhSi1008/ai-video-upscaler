@@ -546,19 +546,25 @@ def run_cascade_repair_pass(
                 if curr_limiter is not None:
                     curr_limiter.wait_if_needed()
 
-                def _single_cascade_call():
+                def _single_cascade_call(
+                    _prompt=prompt_str,
+                    _cfg=config_kwargs,
+                    _n_cues=len(chunk_cues),
+                    _cache=repair_cache,
+                    _kid=curr_kid,
+                ):
                     return execute_and_log_api_request(
                         lambda: repair_translator.client.models.generate_content(
                             model=repair_translator.model,
-                            contents=prompt_str,
-                            config=types.GenerateContentConfig(**config_kwargs),
+                            contents=_prompt,
+                            config=types.GenerateContentConfig(**_cfg),
                         ),
                         model=repair_translator.model,
                         backend="gemini",
-                        cues_count=len(chunk_cues),
+                        cues_count=_n_cues,
                         request_type="cascade_repair",
-                        cache=repair_cache,
-                        key_id=curr_kid,
+                        cache=_cache,
+                        key_id=_kid,
                     )
 
                 try:

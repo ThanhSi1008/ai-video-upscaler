@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     print("  • Nhấn Ctrl+C để đóng máy chủ Web (các tiến trình CLI độc lập không bị ảnh hưởng).")
     print("=" * 72)
 
-    if not args.no_browser:
+    if not args.no_browser and not args.mock:
         def _open_later() -> None:
             time.sleep(0.9)
             try:

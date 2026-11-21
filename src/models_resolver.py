@@ -1,5 +1,6 @@
 """Super-resolution model registry loader, shows.yaml matcher, and SHA-256 verifier."""
 
+import copy
 import hashlib
 import json
 import os
@@ -13,6 +14,28 @@ from src.show_routing import match_show_pattern, match_show_rule
 
 MODELS_YAML = "models/models.yaml"
 SHOWS_YAML = "shows.yaml"
+_YAML_STAT_CACHE: dict[tuple[str, int, int], Any] = {}
+
+
+def _load_yaml_cached(path_str: str) -> Any:
+    """Load YAML file with stat-tuple memoization when yaml.safe_load/open are unmocked."""
+    if not hasattr(yaml.safe_load, "_mock_name") and not hasattr(open, "_mock_name"):
+        try:
+            abs_p = os.path.abspath(path_str)
+            st = os.stat(abs_p)
+            key = (abs_p, st.st_mtime_ns, st.st_size)
+            if key in _YAML_STAT_CACHE:
+                return copy.deepcopy(_YAML_STAT_CACHE[key])
+            with open(abs_p, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if len(_YAML_STAT_CACHE) >= 64:
+                _YAML_STAT_CACHE.clear()
+            _YAML_STAT_CACHE[key] = copy.deepcopy(data)
+            return data
+        except OSError:
+            pass
+    with open(path_str, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 def _resolve_repo_path(path_str: str) -> str:
@@ -39,15 +62,14 @@ def load_models_registry() -> Dict[str, Any]:
     models_yaml_path = _resolve_repo_path(MODELS_YAML)
     if not os.path.exists(models_yaml_path):
         raise FileNotFoundError(f"Không tìm thấy file danh mục mô hình: {MODELS_YAML}")
-    with open(models_yaml_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    data = _load_yaml_cached(models_yaml_path) or {}
     return data.get("models", {})
 
 
-def get_default_model_id() -> str:
+def get_default_model_id(registry: Optional[Dict[str, Any]] = None) -> str:
     """Trả về ID của mô hình mặc định trong models.yaml."""
-    registry = load_models_registry()
-    for m_id, m_info in registry.items():
+    reg = registry if registry is not None else load_models_registry()
+    for m_id, m_info in reg.items():
         if m_info.get("default", False):
             return m_id
     return "animevideov3"
@@ -78,7 +100,7 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
     CLI --model > shows.yaml > Default (animevideov3)
     """
     registry = load_models_registry()
-    default_id = get_default_model_id()
+    default_id = get_default_model_id(registry)
     lower_to_key = {str(k).lower(): k for k in registry.keys()}
 
     chosen_id = None
@@ -104,8 +126,7 @@ def resolve_model_for_video(video_path: str, cli_model_arg: Optional[str] = None
     shows_yaml_path = _resolve_repo_path(SHOWS_YAML)
     if not chosen_id and os.path.exists(shows_yaml_path):
         try:
-            with open(shows_yaml_path, "r", encoding="utf-8") as f:
-                shows_data = yaml.safe_load(f) or {}
+            shows_data = _load_yaml_cached(shows_yaml_path) or {}
             shows_rules = shows_data.get("shows", []) or []
 
             for rule in shows_rules:

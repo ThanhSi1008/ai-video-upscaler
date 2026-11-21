@@ -19,9 +19,10 @@ from subtrans.cascade import (
 
 @pytest.fixture(autouse=True)
 def _fast_isolated_cascade_env(tmp_path, monkeypatch):
-    """Eliminate retry sleep delays and isolate default TranslationCache DB paths."""
+    """Eliminate retry sleep delays, SSL cert-store reloads, and isolate default TranslationCache DB paths."""
     monkeypatch.setattr("subtrans.throttle.time.sleep", lambda _s: None)
     monkeypatch.setattr("subtrans.cache.DB_PATH", tmp_path / "cascade_test.db")
+    monkeypatch.setattr("subtrans.gemini_backend.genai.Client", lambda **_kw: MagicMock())
 
 
 def test_score_cue_difficulty_baseline():

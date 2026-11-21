@@ -182,24 +182,30 @@ def scan_temp_checkpoints(
                             pass
 
             model_id = ""
+            source_file = ""
             if manifest_path.is_file():
                 try:
                     mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
                     model_id = str(mdata.get("model_id") or "")
+                    source_file = str(mdata.get("source_file") or mdata.get("input_path") or "")
                 except Exception:
                     pass
 
             total_chunks = raw_count
-            if plan_path.is_file() and total_chunks == 0:
+            if plan_path.is_file():
                 try:
                     pdata = json.loads(plan_path.read_text(encoding="utf-8"))
-                    total_chunks = len(pdata.get("chunks") or [])
+                    if total_chunks == 0:
+                        total_chunks = len(pdata.get("chunks") or [])
+                    if not source_file and pdata.get("source_file"):
+                        source_file = str(pdata.get("source_file") or "")
                 except Exception:
                     pass
 
             results.append({
                 "name": entry.name,
                 "episode_name": entry.name[len(".temp_"):],
+                "source_file": source_file,
                 "path": str(t_path),
                 "completed_chunks": up_count,
                 "total_chunks": total_chunks,
@@ -659,14 +665,25 @@ class TelemetryHub:
             if isinstance(job_state.get("active_job"), dict)
             else None
         )
-        if (
-            job_state.get("status") in {"running", "pausing"}
-            and active_job is not None
-            and web_job_log.is_file()
-        ):
-            return web_job_log
+        if job_state.get("status") in {"running", "pausing"} and active_job is not None:
+            per_job_candidates: List[Path] = []
+            raw_lp = str(active_job.get("log_path") or "").strip()
+            if raw_lp:
+                per_job_candidates.append(Path(raw_lp))
+            jid = str(active_job.get("job_id") or "").strip()
+            if jid and os.path.basename(jid) == jid:
+                per_job_candidates.append(logs_dir / f"web_job_{jid}.log")
+            per_job_candidates.append(web_job_log)
+            for cand_active in per_job_candidates:
+                if cand_active.is_file():
+                    return cand_active
 
         raw_candidates: List[Path] = []
+        last_hist = (job_state.get("history") or [None])[0]
+        if isinstance(last_hist, dict):
+            hist_lp = str(last_hist.get("log_path") or "").strip()
+            if hist_lp and Path(hist_lp).is_file():
+                raw_candidates.append(Path(hist_lp))
         if web_job_log.is_file():
             raw_candidates.append(web_job_log)
 

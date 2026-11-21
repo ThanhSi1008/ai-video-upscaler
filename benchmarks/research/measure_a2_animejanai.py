@@ -18,8 +18,6 @@ import torch
 import spandrel
 from PIL import Image
 
-from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.models_resolver import load_models_registry

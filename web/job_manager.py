@@ -15,7 +15,7 @@ import threading
 import uuid
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
-from web.fs_browser import SafeLocalFSBrowser
+from web.fs_browser import SafeLocalFSBrowser, is_unc_path
 from web.sse_hub import check_active_gpu_lock
 
 # Tốc độ suy luận khung hình độc nhất tham chiếu trên RTX 3060 TensorRT 10 FP16 Zero-Disk (từ STATE.md R3)
@@ -107,8 +107,11 @@ _VIDEO_FILE_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".avi", ".ts", ".m2ts"}
 
 
 def _validate_no_nul(val: Optional[str], field: str = "path") -> Optional[str]:
-    if val is not None and "\x00" in val:
-        raise ValueError(f"Trường '{field}' chứa ký tự NUL (\\x00) không hợp lệ.")
+    if val is not None:
+        if "\x00" in val:
+            raise ValueError(f"Trường '{field}' chứa ký tự NUL (\\x00) không hợp lệ.")
+        if is_unc_path(val):
+            raise ValueError(f"Từ chối đường dẫn mạng UNC tại trường '{field}' để bảo mật máy chủ cục bộ.")
     return val
 
 
@@ -212,7 +215,7 @@ class JobManager:
         }
 
     def _finalize_locked(self, return_code: int) -> None:
-        if not self._active_job:
+        if not self._active_job or self._active_job.get("finished_at") is not None:
             return
         prev_status = self._active_job.get("status")
         job_pid = self._active_job.get("pid")
@@ -368,10 +371,7 @@ class JobManager:
                 decision = "KỊP HẠN CHÓT" if deadline_dt else "SẴN SÀNG CHẠY"
 
                 if deadline_dt:
-                    prior_done = sum(
-                        1 for e in episodes if e["can_run"] and not e["is_partial"] and not e["already_done"]
-                    )
-                    eff_deadline = deadline_dt - timedelta(seconds=prior_done * sub_overhead)
+                    eff_deadline = deadline_dt
                     if ep_dec_finish <= eff_deadline:
                         decision = "KỊP HẠN CHÓT"
                     elif allow_partial and eff_deadline > sim_p5:
@@ -484,7 +484,6 @@ class JobManager:
         logs_dir.mkdir(parents=True, exist_ok=True)
         pause_flag = logs_dir / ".graceful_pause.flag"
 
-        web_log_path = logs_dir / "web_job.log"
         env = dict(os.environ)
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -518,7 +517,12 @@ class JobManager:
             if proc is None:
                 raise RuntimeError("Không thể khởi tạo tiến trình con (popen_factory trả về None).")
             job_id = uuid.uuid4().hex[:10]
+            web_log_path = logs_dir / f"web_job_{job_id}.log"
             now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            web_log_path.write_text(
+                f"# Web Studio Job {job_id} ({job_type}) started at {now_iso}\n",
+                encoding="utf-8",
+            )
             job_record: Dict[str, Any] = {
                 "job_id": job_id,
                 "job_type": job_type,
@@ -527,19 +531,19 @@ class JobManager:
                 "started_at": now_iso,
                 "finished_at": None,
                 "return_code": None,
+                "log_path": str(web_log_path),
                 "command": cmd,
                 "queue_items": queue_items,
                 "options": options,
             }
             self._proc = proc
             self._active_job = job_record
+            initial_snapshot = dict(job_record)
 
         def _drain_output() -> None:
             rc = -1
             try:
-                with web_log_path.open("w", encoding="utf-8") as wf:
-                    wf.write(f"# Web Studio Job {job_id} ({job_type}) started at {now_iso}\n")
-                    wf.flush()
+                with web_log_path.open("a", encoding="utf-8") as wf:
                     if proc is not None:
                         stdout_pipe = getattr(proc, "stdout", None)
                         if stdout_pipe is not None:
@@ -562,7 +566,7 @@ class JobManager:
 
         t = threading.Thread(target=_drain_output, name=f"WebJobDrain-{job_id}", daemon=True)
         t.start()
-        return dict(job_record)
+        return initial_snapshot
 
     def start_upscale_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Khởi chạy hàng đợi hoặc tập đơn lẻ qua upscale.py."""

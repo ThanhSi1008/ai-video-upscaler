@@ -5,7 +5,7 @@ Verifies without GPU/TensorRT/network:
 1. Synthetic 1s (24 frames, 320x180) video + audio generation with duplicate frames.
 2. Two-way BT.709 color conversion (tv -> pc RGB24 extraction & pc -> tv 10-bit encode).
 3. `src.dedup.deduplicate_cyclic_frames` duplicate reduction & `src.output_sanity.check_frame_sanity_arrays`.
-4. `src.ffmpeg_ops.mux_final_container`, `embed_subtitle_track(..., is_default=True)`,
+4. `src.ffmpeg_ops.mux_segments_directly`, `mux_final_container`, `embed_subtitle_track(..., is_default=True)`,
    and `src.mux_audit.verify_mux_integrity` (`"PASS"`).
 5. `ffprobe -count_frames` confirming exact 24 frames, 10-bit pixel format, and default subtitle disposition.
 """
@@ -31,7 +31,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.dedup import deduplicate_cyclic_frames  # noqa: E402
 from src.env_isolation import configure_e_drive_isolation  # noqa: E402
-from src.ffmpeg_ops import embed_subtitle_track, mux_final_container  # noqa: E402
+from src.ffmpeg_ops import embed_subtitle_track, mux_final_container, mux_segments_directly  # noqa: E402
 from src.mux_audit import verify_mux_integrity  # noqa: E402
 from src.output_sanity import check_frame_sanity_arrays  # noqa: E402
 
@@ -120,22 +120,30 @@ def run_smoke_test() -> dict[str, Any]:
         if not sanity.get("passed"):
             raise AssertionError(f"Output sanity check failed: {sanity}")
 
-        # 4. Encode 24 upscaled frames into 10-bit HEVC with reverse BT.709 matrix & p010le pipeline format
-        enc_cmd = [
-            ffmpeg_bin, "-y", "-v", "error",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{up_w}x{up_h}", "-r", "24", "-i", "pipe:0",
-            "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p10le",
-            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
-            "-pix_fmt", "yuv420p10le",
-            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-            "-tag:v", "hvc1",
-            str(up_vid),
-        ]
-        enc_input = b"".join(np.ascontiguousarray(f).tobytes() for f in upscaled_all)
-        subprocess.run(enc_cmd, input=enc_input, check=True, capture_output=True)
+        # 4. Encode 24 upscaled frames as two 12-frame 10-bit HEVC segments to exercise mux_segments_directly
+        segs_dir = work / "up_segs"
+        segs_dir.mkdir(parents=True, exist_ok=True)
+        seg_files: list[str] = []
+        half = target_frames // 2
+        for seg_idx, seg_frames in enumerate((upscaled_all[:half], upscaled_all[half:])):
+            seg_path = segs_dir / f"up_{seg_idx:04d}.mp4"
+            enc_cmd = [
+                ffmpeg_bin, "-y", "-v", "error",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{up_w}x{up_h}", "-r", "24", "-i", "pipe:0",
+                "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p10le",
+                "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:open-gop=0:keyint=12:min-keyint=12",
+                "-pix_fmt", "yuv420p10le",
+                "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                "-tag:v", "hvc1",
+                str(seg_path),
+            ]
+            enc_input = b"".join(np.ascontiguousarray(f).tobytes() for f in seg_frames)
+            subprocess.run(enc_cmd, input=enc_input, check=True, capture_output=True)
+            seg_files.append(str(seg_path))
 
-        # 5. Bit-exact stream-copy mux + Vietnamese softsub embed + mux audit
-        mux_final_container(str(up_vid), str(src_mkv), str(out_mkv))
+        # 5. Direct multi-segment concat + stream-copy mux + Vietnamese softsub embed + mux audit
+        mux_segments_directly(seg_files, str(work), str(src_mkv), str(out_mkv))
+        mux_final_container(seg_files[0], str(src_mkv), str(up_vid))
         srt_file.write_text(
             "1\n00:00:00,050 --> 00:00:00,900\nKiểm tra phụ đề tiếng Việt.\n",
             encoding="utf-8",

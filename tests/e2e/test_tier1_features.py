@@ -8,6 +8,7 @@ Covers 10 major feature areas (5 test cases per feature = 50 test cases).
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -306,12 +307,13 @@ def test_t1_f05_01_standard_multi_episode_sequential_queue(mock_pipeline_env, tm
 
 
 def test_t1_f05_02_queue_execution_with_generous_deadline(mock_pipeline_env, tmp_path, monkeypatch, capsys):
-    """T1-F05-02: Queue Execution with Generous Deadline (23:59)"""
+    """T1-F05-02: Queue Execution with Generous Deadline (+6h from local wall clock)."""
     v1 = create_synthetic_video(tmp_path / "q_dead.mkv", num_frames=8)
     out_dir = tmp_path / "out"
+    generous_deadline = (datetime.now() + timedelta(hours=6)).strftime("%H:%M")
 
     exit_code, out, err = run_upscale_cli(
-        ["--queue", str(v1), "--deadline", "23:59", "-o", str(out_dir)],
+        ["--queue", str(v1), "--deadline", generous_deadline, "-o", str(out_dir)],
         monkeypatch,
         capsys,
     )
@@ -335,10 +337,11 @@ def test_t1_f05_04_allow_partial_safe_boundary_stopping(mock_pipeline_env, tmp_p
     """T1-F05-04: Allow-Partial Safe Boundary Stopping preserves segment chunks"""
     v1 = create_synthetic_video(tmp_path / "part_ep1.mkv", num_frames=8)
     out_dir = tmp_path / "out"
+    generous_deadline = (datetime.now() + timedelta(hours=6)).strftime("%H:%M")
 
     # Allow-partial flag acceptance
     exit_code, out, err = run_upscale_cli(
-        [str(v1), "--allow-partial", "--deadline", "23:59", "-o", str(out_dir)],
+        [str(v1), "--allow-partial", "--deadline", generous_deadline, "-o", str(out_dir)],
         monkeypatch,
         capsys,
     )

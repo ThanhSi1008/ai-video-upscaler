@@ -45,11 +45,12 @@ from src.pipeline import run_upscale_pipeline, FailedResumableError
 from src.config import is_gpu_lock_held_by_other
 from src.logger import is_graceful_pause_requested, clear_graceful_pause, was_graceful_paused
 from src.ffmpeg_ops import probe_video
-from src.dedup import spawn_background_preflight
+from src.dedup import DEDUP_POLICY_PARAMS, get_dedup_params, spawn_background_preflight
 from src.models_resolver import (
     list_models_formatted,
     resolve_expected_4k_output_path,
     find_existing_4k_output_path,
+    resolve_model_for_video,
 )
 from src.cleanup import (
     cleanup_checkpoint_dir,
@@ -58,7 +59,68 @@ from src.cleanup import (
     clean_all_temporary_data,
 )
 from src.subtitles import find_or_extract_subtitles, transcribe_japanese_audio
-from pathlib import Path
+
+
+_MODEL_TRT_ZERO_DISK_FPS: Dict[str, Tuple[float, float]] = {
+    "animevideov3": (10.5, 8.5),
+    "animejanai-hd-v3-compact": (10.8, 8.8),
+    "animejanai-hd-v3-ultracompact": (18.5, 15.5),
+    "animejanai-hd-v3-sharp1-ultracompact": (18.5, 15.5),
+    "animejanai-hd-v3-superultracompact": (20.8, 17.5),
+    "animejanai-hd-v3-sharp1-superultracompact": (20.8, 17.5),
+    "span-2x": (14.5, 12.0),
+    "2x_animejanai_v3": (14.5, 12.0),
+}
+
+
+def _resolve_model_id_safe(video_path: Optional[str], cli_model: Optional[str]) -> str:
+    try:
+        info = resolve_model_for_video(video_path or "", cli_model_arg=cli_model)
+        return str(info.get("id") or DEFAULT_MODEL).strip().lower()
+    except Exception:
+        return str(cli_model or DEFAULT_MODEL).strip().lower()
+
+
+def _resolve_model_fps_pair(
+    model_id: str,
+    engine: str,
+    has_trt: bool,
+    zero_disk: bool,
+) -> Tuple[float, float]:
+    base_med, base_p5 = _MODEL_TRT_ZERO_DISK_FPS.get(str(model_id or "").lower(), (10.5, 8.5))
+    if engine != "cuda":
+        return (round(1.35 * (base_med / 10.5), 2), round(1.25 * (base_p5 / 8.5), 2))
+    if has_trt and zero_disk:
+        return (base_med, base_p5)
+    if has_trt:
+        return (round(base_med * (8.5 / 10.5), 2), round(base_p5 * (7.0 / 8.5), 2))
+    return (round(base_med * (5.2 / 10.5), 2), round(base_p5 * (4.5 / 8.5), 2))
+
+
+def _validate_dedup_policy_arg(raw_value: str) -> str:
+    norm = str(raw_value or "").strip().lower()
+    if not norm:
+        raise argparse.ArgumentTypeError("Empty --dedup-policy value.")
+    try:
+        get_dedup_params(norm)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return norm
+
+
+class _DedupPolicyChoices(tuple):
+    """Choices tuple preserving canonical keys while accepting dynamic dis-<float>/drift-<float>."""
+
+    def __contains__(self, item: object) -> bool:
+        if super().__contains__(item):
+            return True
+        if not isinstance(item, str):
+            return False
+        try:
+            get_dedup_params(item)
+            return True
+        except ValueError:
+            return False
 
 
 def check_deadline_and_eta(
@@ -269,13 +331,9 @@ def build_arg_parser():
     parser.add_argument(
         "--dedup-policy",
         default=None,
-        choices=[
-            "default", "sensitive", "sensitive-a", "sensitive-b",
-            "motion", "drift", "drift-0.5", "drift-0.75", "drift-1.0",
-            "dis", "dis-0.2", "dis-0.3", "dis-0.4", "dis-0.5",
-            "sakuga", "dis-sakuga", "off",
-        ],
-        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift (độ dịch tích lũy), dis (dòng chảy quang học DIS bắt zoom/lia), sakuga / dis-sakuga (ngưỡng kép bảo vệ đại cảnh hành động), off (giữ tất cả)"
+        type=_validate_dedup_policy_arg,
+        choices=_DedupPolicyChoices(DEDUP_POLICY_PARAMS.keys()),
+        help="Chính sách Deduplication: default (hi=768:lo=320:frac=0.33), sensitive/sensitive-a (512:160:0.15), sensitive-b (384:128:0.10), motion (phase correlation), drift/drift-<float> (độ dịch tích lũy), dis/dis-<float> (dòng chảy quang học DIS bắt zoom/lia), sakuga / dis-sakuga (ngưỡng kép bảo vệ đại cảnh hành động), off (giữ tất cả)"
     )
     parser.add_argument(
         "--drift-delta",
@@ -938,32 +996,23 @@ def main():
         sys.exit(1)
 
     video_overhead = 420.0  # TensorRT FP16 Zero-Disk mặc định
+    has_trt = False
+    use_zero_disk = bool(getattr(args, "zero_disk", True))
     if args.engine == "cuda":
-        has_trt = False
         if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
             import importlib.util
             has_trt = importlib.util.find_spec("tensorrt") is not None
-        if has_trt and getattr(args, "zero_disk", True):
-            # RTX 3060 TensorRT FP16 Zero-Disk (Mặc định): unique inference speed ~10.5 fps (effective ~22.0 fps with ~52% dedup)
-            fps_median = 10.5
-            fps_p5 = 8.5
+        if has_trt and use_zero_disk:
             video_overhead = 420.0
         elif has_trt:
-            # RTX 3060 TensorRT FP16 Standard (--no-zero-disk): unique inference speed ~8.5 fps (effective ~18.0 fps)
-            fps_median = 8.5
-            fps_p5 = 7.0
             video_overhead = 660.0
         else:
-            # RTX 3060 PyTorch CUDA FP16: unique inference speed ~5.2 fps (effective ~11.0 fps)
-            fps_median = 5.2
-            fps_p5 = 4.5
-            if getattr(args, "zero_disk", True):
-                video_overhead = 540.0
-            else:
-                video_overhead = 780.0
-    else:
-        fps_median = 1.35
-        fps_p5 = 1.25
+            video_overhead = 540.0 if use_zero_disk else 780.0
+    first_model_id = _resolve_model_id_safe(videos[0] if videos else None, args.model)
+    fps_median, fps_p5 = _resolve_model_fps_pair(
+        first_model_id, args.engine, has_trt, use_zero_disk
+    )
+    measured_model_fps: Dict[str, Tuple[float, float]] = {}
     subtitles_overhead = 300.0 if args.subs_after_upscale else 0.0
 
     if args.benchmark_mode:
@@ -1074,6 +1123,12 @@ def main():
                 else find_existing_4k_output_path(vid, output_arg=args.output, model_id=args.model)
             )
 
+            ep_model_id = _resolve_model_id_safe(vid, args.model)
+            ep_base_med, ep_base_p5 = _resolve_model_fps_pair(
+                ep_model_id, args.engine, has_trt, use_zero_disk
+            )
+            fps_median, fps_p5 = measured_model_fps.get(ep_model_id, (ep_base_med, ep_base_p5))
+
             # Kiểm tra deadline nếu có (A6), bỏ qua nếu tập đã hoàn tất từ trước
             deadline_dt = None
             if args.deadline and not already_done_path:
@@ -1155,7 +1210,10 @@ def main():
                             adata = json.load(f)
                         measured_fps = adata.get("ai_steady_fps")
                         if measured_fps and measured_fps > 0:
+                            p5_ratio = (ep_base_p5 / ep_base_med) if ep_base_med > 0 else (8.5 / 10.5)
                             fps_median = float(measured_fps)
+                            fps_p5 = round(fps_median * p5_ratio, 2)
+                            measured_model_fps[ep_model_id] = (fps_median, fps_p5)
                     except Exception:
                         pass
 

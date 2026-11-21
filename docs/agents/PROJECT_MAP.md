@@ -4,9 +4,9 @@
 
 ## 1. Entrypoints & Data Flows
 
-- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--queue`, `--preview`, `--dedup-policy` incl. `sakuga`/`dis-sakuga`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
+- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--queue`, `--preview`, `--dedup-policy` incl. `sakuga`/`dis-sakuga` and dynamic `dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) -> [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI (`run`, `batch`, `eval`, `rag`, `check`, `models`). Read [subtrans-anime-ops](../../.agents/skills/subtrans-anime-ops/SKILL.md) before editing.
-- [`web_gui.py`](../../web_gui.py) / [`web_gui.bat`](../../web_gui.bat) -> [`web/app.py`](../../web/app.py): Local Real-Time Web Studio (`http://127.0.0.1:8765`, `--mock` deterministic simulator, FastAPI + Uvicorn + SSE 1Hz), spawns subprocesses without holding static VRAM; bridges `logs/live_status.json` & `logs/.graceful_pause.flag`.
+- [`web_gui.py`](../../web_gui.py) / [`web_gui.bat`](../../web_gui.bat) -> [`web/app.py`](../../web/app.py): Local Real-Time Web Studio (`http://127.0.0.1:8765`, `--mock` implies `--no-browser` & simulated job launches, `docs_url=None`, UNC path rejection, FastAPI + Uvicorn + SSE 1Hz), spawns subprocesses without holding static VRAM; bridges `logs/live_status.json`, `logs/web_job_<id>.log` & `logs/.graceful_pause.flag`.
 
 ```text
 upscale.py:main -> pipeline.run_upscale_pipeline
@@ -50,7 +50,7 @@ subtrans.cli -> TranslationPipeline
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_get_trt_logger`, `resolve_trt_profile_max_batch`, ONNX export, `TRTRuntimeEngineWrapper` (2-slot `_out_ring`, `execute_async_v3`) |
 | [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS`, `deduplicate_cyclic_frames` (`BLAKE2b` + SIMD), `raw_actions_rle`, 1-pass `mpdecimate+DIS`, `run_preflight_worker_cli` |
 | [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays`, `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit` ($|\Delta Y| \le 6/255$, $r \ge 0.98$) |
-| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity`, `get_all_audio_streams_md5` (`-f streamhash`), parallel `check_window_interleaving` |
+| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity`, `get_all_audio_streams_md5` (in-process PyAV demux + `-f streamhash` fallback), parallel `check_window_interleaving` |
 | [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` (physical RAM disk / `scratch/rolling_buffer` on NVMe Gen4), `cleanup_orphan_ramdisks` |
 | [`cleanup.py`](../../src/cleanup.py) | `cleanup_checkpoint_dir`, `cleanup_subtitle_extracts`, `organize_output_artifacts`, `clean_all_temporary_data` |
 | [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos`, AC power & disk checks |

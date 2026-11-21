@@ -795,47 +795,37 @@ class TestFeature5BitExactSubprocessTier2:
 # =============================================================================
 
 def _get_track_defaults_parser():
-    """Helper retrieving CLI parser from set_track_defaults or interface contract fallback."""
-    if hasattr(std, "build_parser"):
-        return std.build_parser()
-    if hasattr(std, "create_parser"):
-        return std.create_parser()
-    parser = argparse.ArgumentParser(description="Batch Track Configuration Utility for MKV Media")
-    parser.add_argument("--raw-dir", "--input", dest="raw_dir", default=getattr(std, "raw_dir", "."))
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--mkvpropedit", dest="mkvpropedit_path", default=getattr(std, "mkvpropedit_path", "mkvpropedit"))
-    parser.add_argument("--mkvmerge", dest="mkvmerge_path", default=getattr(std, "mkvmerge_path", "mkvmerge"))
-    return parser
+    """Retrieve the real CLI parser from scripts/set_track_defaults.py."""
+    return std._build_arg_parser(targets_default=[std.raw_dir])
 
 
 class TestFeature6TrackDefaultsCLITier1:
     """Tier 1: Feature Coverage for Feature 6 (Track Defaults CLI Parameterization)."""
 
     def test_f6_cli_argparse_interface(self):
-        """1. Verify CLI argument parser defines expected arguments."""
-        parser = _get_track_defaults_parser()
-        args = parser.parse_args(["--raw-dir", "custom/dir", "--dry-run"])
-        assert args.raw_dir == "custom/dir"
+        """1. Verify real set_track_defaults.parse_args parses positional targets and --dry-run."""
+        args = std.parse_args(["custom/dir", "--dry-run"])
+        assert args.targets == ["custom/dir"]
         assert args.dry_run is True
 
     def test_f6_custom_directory_flag(self):
-        """2. Verify --raw-dir flag customizes input scanning directory."""
-        parser = _get_track_defaults_parser()
-        args = parser.parse_args(["--raw-dir", "E:/Anime/Fate"])
-        assert args.raw_dir == "E:/Anime/Fate"
+        """2. Verify positional target customizes input scanning directory and bare main([]) rejects accidental mutation."""
+        args = std.parse_args(["E:/Anime/Fate"])
+        assert args.targets == ["E:/Anime/Fate"]
+        assert std.main([]) == 2
 
     def test_f6_dry_run_flag(self):
-        """3. Verify --dry-run flag is parsed and disables live edits."""
-        parser = _get_track_defaults_parser()
-        args = parser.parse_args(["--dry-run"])
+        """3. Verify --dry-run flag is parsed and defaults targets safely when omitted."""
+        args = std.parse_args(["--dry-run"])
         assert args.dry_run is True
+        assert args.targets == [std.raw_dir]
 
     def test_f6_executable_path_fallback(self):
-        """4. Verify custom --mkvpropedit and --mkvmerge paths are accepted."""
-        parser = _get_track_defaults_parser()
-        args = parser.parse_args(["--mkvpropedit", "C:/Tools/mkvpropedit.exe", "--mkvmerge", "C:/Tools/mkvmerge.exe"])
-        assert args.mkvpropedit_path == "C:/Tools/mkvpropedit.exe"
-        assert args.mkvmerge_path == "C:/Tools/mkvmerge.exe"
+        """4. Verify custom --mkvpropedit and --mkvmerge paths resolve through std.resolve_tools."""
+        args = std.parse_args(["--mkvpropedit", "C:/Tools/mkvpropedit.exe", "--mkvmerge", "C:/Tools/mkvmerge.exe"])
+        merge_exe, propedit_exe = std.resolve_tools(args.mkvmerge, args.mkvpropedit)
+        assert propedit_exe == "C:/Tools/mkvpropedit.exe"
+        assert merge_exe == "C:/Tools/mkvmerge.exe"
 
     def test_f6_track_selection_logic(self):
         """5. Verify Japanese audio and Vietnamese sub classification logic."""
@@ -853,10 +843,10 @@ class TestFeature6TrackDefaultsCLITier2:
     """Tier 2: Boundary & Corner Cases for Feature 6."""
 
     def test_f6_bva_non_existent_directory(self):
-        """1. Verify non-existent directory path handling."""
-        parser = _get_track_defaults_parser()
-        args = parser.parse_args(["--raw-dir", "Z:/non_existent_path_xyz"])
-        assert not os.path.exists(args.raw_dir)
+        """1. Verify real collect_files skips non-existent directory paths without crashing."""
+        args = std.parse_args(["Z:/non_existent_path_xyz"])
+        assert not os.path.exists(args.targets[0])
+        assert std.collect_files(args.targets, ["Fate.Strange.Fake"]) == []
 
     def test_f6_bva_directory_zero_mkvs(self, tmp_path):
         """2. Verify scanning directory with zero MKV files handles cleanly."""

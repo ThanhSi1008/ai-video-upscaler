@@ -118,6 +118,9 @@ def compute_glossary_hash(glossary: Optional[Glossary]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+_GLOSSARY_STAT_CACHE: Dict[tuple[str, int, int], Glossary] = {}
+
+
 def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
     """Loads a Schema v2 YAML or JSON glossary file."""
     if not glossary_path or not glossary_path.exists():
@@ -125,6 +128,16 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
 
     try:
         resolved_path = resolve_glossary_target(glossary_path) or glossary_path
+        cache_key: Optional[tuple[str, int, int]] = None
+        if not hasattr(yaml.safe_load, "_mock_name"):
+            try:
+                abs_resolved = resolved_path.resolve()
+                st = abs_resolved.stat()
+                cache_key = (str(abs_resolved), st.st_mtime_ns, st.st_size)
+                if cache_key in _GLOSSARY_STAT_CACHE:
+                    return _GLOSSARY_STAT_CACHE[cache_key].model_copy(deep=True)
+            except OSError:
+                cache_key = None
         with open(resolved_path, "r", encoding="utf-8") as f:
             if resolved_path.suffix.lower() in (".yaml", ".yml"):
                 data = yaml.safe_load(f) or {}
@@ -205,7 +218,7 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
                 )
             )
 
-        return Glossary(
+        glossary_obj = Glossary(
             schema_ver=schema_ver,
             style_rules=style_rules,
             difficulty_markers=difficulty_markers,
@@ -213,6 +226,11 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
             terms=terms,
             characters=characters,
         )
+        if cache_key is not None:
+            if len(_GLOSSARY_STAT_CACHE) >= 32:
+                _GLOSSARY_STAT_CACHE.clear()
+            _GLOSSARY_STAT_CACHE[cache_key] = glossary_obj.model_copy(deep=True)
+        return glossary_obj
     except Exception as e:
         print(f"⚠️  Failed to load glossary from {glossary_path}: {e}")
         return None

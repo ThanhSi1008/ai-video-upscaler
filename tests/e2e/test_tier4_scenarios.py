@@ -34,11 +34,13 @@ def test_t4_01_tv_episode_preview_workflow(mock_pipeline_env, tmp_path, monkeypa
     Scenario 1: TV Episode 2s Preview with DIS Dedup and NVENC Mux Check.
     Validates preview seeking, temporary clip lifecycle, and 4K container muxing.
     """
-    # 72 frames at 24fps = 3.0s duration, seeking to 30% (t=0.9s), cutting 2.0s
+    # 12 frames at 4fps = 3.0s duration, seeking to 30% (t=0.9s), cutting 2.0s
     src_vid = create_synthetic_video(
         tmp_path / "tv_ep01.mkv",
-        num_frames=72,
-        fps=24,
+        num_frames=12,
+        fps=4,
+        width=320,
+        height=180,
         audio_tracks=1,
         chapters=2,
     )

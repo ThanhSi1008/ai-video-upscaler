@@ -73,6 +73,14 @@ def is_secret_filename(name: str) -> bool:
     return low == ".env" or low.startswith(".env.")
 
 
+def is_unc_path(raw: Optional[str]) -> bool:
+    """Return True if raw string targets a Windows/POSIX UNC network share (\\\\... or //...)." """
+    if not raw:
+        return False
+    s = str(raw).strip()
+    return s.startswith("\\\\") or s.startswith("//")
+
+
 def is_upscaled_output_stem(stem: str) -> bool:
     """Return True if filename stem already denotes a rendered 4K output."""
     low = stem.lower()
@@ -257,6 +265,8 @@ class SafeLocalFSBrowser:
         cleaned = raw_path.strip()
         if "\x00" in cleaned:
             raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
+        if is_unc_path(cleaned):
+            raise ValueError("Từ chối truy cập đường dẫn mạng UNC (\\\\... hoặc //...).")
 
         cand = Path(os.path.expanduser(cleaned))
         if not cand.is_absolute():
@@ -380,6 +390,8 @@ class SafeLocalFSBrowser:
             item = str(raw).strip()
             if "\x00" in item:
                 raise ValueError("Đường dẫn chứa ký tự không hợp lệ.")
+            if is_unc_path(item):
+                raise ValueError("Từ chối truy cập đường dẫn mạng UNC (\\\\... hoặc //...).")
             cand = Path(os.path.expanduser(item))
             if not cand.is_absolute():
                 cand = (self.workspace_root / cand).resolve()

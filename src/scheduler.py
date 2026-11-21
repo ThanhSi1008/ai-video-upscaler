@@ -232,6 +232,8 @@ class BackgroundQueuePreflightManager:
                     evt = self._video_events.setdefault(vkey, threading.Event())
 
                 try:
+                    if not os.path.isfile(vid):
+                        continue
                     eff_pol = resolve_dedup_policy(vid, self.dedup_policy)
                     cached = find_cached_plan(vid, self.output_dir, expected_policy=eff_pol)
                     if cached:
@@ -438,13 +440,8 @@ def compute_overnight_schedule(
             is_partial = False
 
             if deadline_dt:
-                # Dành thời gian cho giai đoạn phụ đề của các tập đã xong trước đó
-                prior_completed_count = sum(
-                    1 for ep in episodes_meta
-                    if ep["can_run"] and not ep.get("is_partial") and not ep.get("is_already_completed")
-                )
-                reserved_subs_sec = prior_completed_count * float(subtitles_overhead_seconds)
-                effective_deadline_dt = deadline_dt - timedelta(seconds=reserved_subs_sec)
+                # subtitles_overhead_seconds is already accumulated inside sim_time_conservative per episode
+                effective_deadline_dt = deadline_dt
 
                 if ep_decision_finish_time <= effective_deadline_dt:
                     decision = "KỊP"

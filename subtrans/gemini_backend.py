@@ -699,11 +699,11 @@ class GeminiTranslator(BaseTranslator):
                 req_config_kwargs.pop("system_instruction", None)
                 req_config_kwargs["cached_content"] = explicit_cache_name
 
-            def _send():
+            def _send(_cfg=req_config_kwargs):
                 return self.client.models.generate_content(
                     model=self.model,
                     contents=prompt_text,
-                    config=types.GenerateContentConfig(**req_config_kwargs)
+                    config=types.GenerateContentConfig(**_cfg)
                 )
 
             try:

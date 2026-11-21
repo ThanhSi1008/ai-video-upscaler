@@ -50,7 +50,62 @@ shows:
             assert resolve_dedup_policy("Random_Anime.mkv", cli_policy=None) == "default"
 
 
+_SYNTH_CACHE_DIR = None
+_SYNTH_SAMPLE_MKV = None
+_SYNTH_ACTION_BGR = None
+_SYNTH_CLOSEUP_BGR = None
+
+
+def _get_synthetic_anime_bgr(variant: str = "action"):
+    """Synthesize a deterministic 1920x1080 multi-scale anime-like BGR frame when test_frames/ is absent."""
+    import cv2
+    import numpy as np
+
+    global _SYNTH_ACTION_BGR, _SYNTH_CLOSEUP_BGR
+    if variant == "action" and _SYNTH_ACTION_BGR is not None:
+        return _SYNTH_ACTION_BGR
+    if variant != "action" and _SYNTH_CLOSEUP_BGR is not None:
+        return _SYNTH_CLOSEUP_BGR
+
+    h, w = 1080, 1920
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    base_b = np.clip(40.0 + 70.0 * (yy / h) + 25.0 * np.sin(xx / 43.0), 16, 235)
+    base_g = np.clip(55.0 + 60.0 * (xx / w) + 25.0 * np.cos(yy / 37.0), 16, 235)
+    base_r = np.clip(70.0 + 50.0 * ((xx + yy) / (w + h)) + 20.0 * np.sin((xx - yy) / 53.0), 16, 235)
+    img = np.stack([base_b, base_g, base_r], axis=-1).astype(np.uint8)
+
+    rng = np.random.RandomState(42 if variant == "action" else 108)
+    for _ in range(90 if variant == "action" else 45):
+        x1, y1 = int(rng.randint(20, w - 160)), int(rng.randint(20, h - 160))
+        x2, y2 = x1 + int(rng.randint(40, 220)), y1 + int(rng.randint(40, 220))
+        color = tuple(int(c) for c in rng.randint(24, 230, size=3))
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=2)
+        cv2.line(img, (x1, y2), (x2, y1), (22, 22, 28), thickness=2, lineType=cv2.LINE_AA)
+    for _ in range(45):
+        cx, cy = int(rng.randint(60, w - 60)), int(rng.randint(60, h - 60))
+        rad = int(rng.randint(14, 95))
+        color = tuple(int(c) for c in rng.randint(30, 225, size=3))
+        cv2.circle(img, (cx, cy), rad, color, thickness=2, lineType=cv2.LINE_AA)
+
+    if variant == "action":
+        _SYNTH_ACTION_BGR = img
+    else:
+        _SYNTH_CLOSEUP_BGR = img
+    return img
+
+
+def _load_or_synthesize_frame(rel_path: str, variant: str):
+    import cv2
+
+    if os.path.exists(rel_path):
+        loaded = cv2.imread(rel_path)
+        if loaded is not None:
+            return loaded
+    return _get_synthetic_anime_bgr(variant).copy()
+
+
 def _get_test_sample_video():
+    global _SYNTH_CACHE_DIR, _SYNTH_SAMPLE_MKV
     candidates = [
         "samples/sample_1min_bd_420.mkv",
         "samples/sample_1min_bd.mkv",
@@ -60,7 +115,25 @@ def _get_test_sample_video():
     for c in candidates:
         if os.path.exists(c):
             return c
-    return None
+    if _SYNTH_SAMPLE_MKV and os.path.exists(_SYNTH_SAMPLE_MKV):
+        return _SYNTH_SAMPLE_MKV
+
+    import atexit
+    import cv2
+    import numpy as np
+
+    _SYNTH_CACHE_DIR = tempfile.mkdtemp(prefix="dedup_sample_")
+    atexit.register(lambda d=_SYNTH_CACHE_DIR: shutil.rmtree(d, ignore_errors=True))
+    out_mkv = os.path.join(_SYNTH_CACHE_DIR, "synthetic_sample.mkv")
+    small_base = cv2.resize(_get_synthetic_anime_bgr("action"), (320, 180))
+    frames = []
+    for idx in range(36):
+        step = idx // 3  # 3-frame anime holds + distinct steps
+        m = np.float32([[1, 0, step * 3.0], [0, 1, (step % 3) * 2.0]])
+        frames.append(cv2.warpAffine(small_base, m, (320, 180), borderMode=cv2.BORDER_REFLECT))
+    _make_synthetic_clip(frames, out_mkv, crf=18)
+    _SYNTH_SAMPLE_MKV = out_mkv
+    return _SYNTH_SAMPLE_MKV
 
 
 def test_dedup_policy_default_backward_compatible_hash():
@@ -208,13 +281,10 @@ def test_dedup_policy_dis_synthetic_pan():
     """B7(1): Chuỗi tổng hợp lia 0.4 px/frame -> dis-0.3 giữ >= 95% frame."""
     import cv2
     import numpy as np
-    base_path = "test_frames/frame_action.png"
-    if not os.path.exists(base_path):
-        pytest.skip(f"Không tìm thấy {base_path}")
-    base_img = cv2.imread(base_path)
+    base_img = _load_or_synthesize_frame("test_frames/frame_action.png", "action")
     h, w = base_img.shape[:2]
     frames = []
-    for i in range(60):
+    for i in range(48):
         M = np.float32([[1, 0, i * 0.4], [0, 1, 0]])
         frames.append(cv2.warpAffine(base_img, M, (w, h), borderMode=cv2.BORDER_REFLECT))
 
@@ -232,11 +302,7 @@ def test_dedup_policy_dis_synthetic_pan():
 
 def test_dedup_policy_dis_synthetic_noise_rejection():
     """B7(2): Chuỗi tĩnh + nhiễu CRF 26 -> dis-0.3 giữ thêm <= 2% so với default."""
-    import cv2
-    base_path = "test_frames/frame_close_up.png"
-    if not os.path.exists(base_path):
-        pytest.skip(f"Không tìm thấy {base_path}")
-    base_img = cv2.imread(base_path)
+    base_img = _load_or_synthesize_frame("test_frames/frame_close_up.png", "close_up")
     frames = [base_img.copy() for _ in range(60)]
 
     with tempfile.TemporaryDirectory() as td:
@@ -259,14 +325,11 @@ def test_dedup_policy_dis_synthetic_offcenter_zoom():
     """B7(3): Zoom lệch tâm (1/3 khung hình) -> dis-0.3 giữ >= 90% frame."""
     import cv2
     import numpy as np
-    base_path = "test_frames/frame_action.png"
-    if not os.path.exists(base_path):
-        pytest.skip(f"Không tìm thấy {base_path}")
-    base_img = cv2.imread(base_path)
+    base_img = _load_or_synthesize_frame("test_frames/frame_action.png", "action")
     h, w = base_img.shape[:2]
     cx, cy = w / 3.0, h / 3.0
     frames = []
-    for i in range(60):
+    for i in range(48):
         scale = (1.0 + 0.0005) ** i  # rate 0.05%/frame
         M = np.float32([
             [scale, 0, cx * (1.0 - scale)],

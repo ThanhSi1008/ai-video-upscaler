@@ -128,10 +128,9 @@ def resolve_dedup_policy(video_path: str, cli_policy: Optional[str] = None) -> s
         shows_yaml = "shows.yaml"
     if os.path.exists(shows_yaml):
         try:
-            import yaml
+            from src.models_resolver import _load_yaml_cached
             from src.show_routing import match_show_rule
-            with open(shows_yaml, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+            data = _load_yaml_cached(shows_yaml) or {}
             rules = data.get("shows", []) or []
             for r in rules:
                 pat = r.get("pattern", "")
@@ -409,7 +408,6 @@ def deduplicate_cyclic_frames(
     """
     import cv2
     import numpy as np
-    import hashlib
 
     n = len(frames)
     if n <= 1:
