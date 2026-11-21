@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 # Add repo root to sys.path
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.models_resolver import resolve_model_for_video, load_models_registry

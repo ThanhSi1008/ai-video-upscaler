@@ -291,6 +291,38 @@ def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_p
     assert "6dae441" in warn and "0d6e3b6" in warn and "2 runtime path(s)" in warn
 
 
+def test_freshness_same_commit_state_update_is_fresh(tmp_path):
+    # Real Git same-commit STATE.md + runtime update (where Commit Baseline holds parent SHA) is fresh
+    git_repo = tmp_path / "same_commit_repo"
+    git_repo.mkdir()
+    make_memory(git_repo)
+    subprocess.run(["git", "init", "-q", str(git_repo)], check=True)
+    (git_repo / "src").mkdir()
+    (git_repo / "src/a.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(git_repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-qm", "c1"],
+        check=True,
+    )
+    c1_sha = subprocess.check_output(["git", "-C", str(git_repo), "rev-parse", "--short", "HEAD"], text=True).strip()
+    (git_repo / "src/a.py").write_text("x = 2\n", encoding="utf-8")
+    (git_repo / "docs/agents/STATE.md").write_text(f"> **Commit Baseline:** `{c1_sha}`\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(git_repo), "add", "src/a.py", "docs/agents/STATE.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-qm", "c2"],
+        check=True,
+    )
+    assert agent_context.check_freshness(git_repo) is None
+    # Subsequent runtime commit without updating STATE.md reports stale
+    (git_repo / "src/a.py").write_text("x = 3\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(git_repo), "add", "src/a.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-qm", "c3"],
+        check=True,
+    )
+    assert agent_context.check_freshness(git_repo) is not None
+
+
 def test_rules_and_subagents_validation_enforces_frontmatter_and_flatness(tmp_path):
     assert "repo-scout.md" in agent_context.EXPECTED_SUBAGENTS
     make_memory(tmp_path)

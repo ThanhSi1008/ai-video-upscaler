@@ -18,7 +18,7 @@ import numpy as np
 from pathlib import Path
 
 # Đảm bảo import được module từ thư mục gốc
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.cuda_engine import RealESRAnimeVideoV3
 from src.config import DEVICE_NAME

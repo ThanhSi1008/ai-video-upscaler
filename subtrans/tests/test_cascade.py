@@ -6,7 +6,8 @@ Comprehensive unit tests for Smart Cloud Cascade (subtrans/cascade.py).
 
 from unittest.mock import MagicMock
 import pytest
-from subtrans.models import Cue, Glossary
+from subtrans.cache import TranslationCache
+from subtrans.models import Cue, Glossary, GlossaryTerm
 from subtrans.linter import LintViolation
 from subtrans.gemini_backend import GeminiTranslator
 from subtrans.cascade import (
@@ -14,6 +15,13 @@ from subtrans.cascade import (
     find_cues_needing_repair,
     run_cascade_repair_pass,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fast_isolated_cascade_env(tmp_path, monkeypatch):
+    """Eliminate retry sleep delays and isolate default TranslationCache DB paths."""
+    monkeypatch.setattr("subtrans.throttle.time.sleep", lambda _s: None)
+    monkeypatch.setattr("subtrans.cache.DB_PATH", tmp_path / "cascade_test.db")
 
 
 def test_score_cue_difficulty_baseline():
@@ -140,7 +148,6 @@ def test_run_cascade_repair_pass_api_failure_fallback():
 
 
 def test_run_cascade_repair_pass_with_glossary():
-    from subtrans.models import Glossary, GlossaryTerm
     cues = [
         Cue(id=1, start=0, end=2000, ja="魔剣を使う", vi="Dùng kiếm ma", uncertain=True),
     ]

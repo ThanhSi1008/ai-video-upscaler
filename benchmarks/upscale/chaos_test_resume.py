@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 
 # Add project root
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.pipeline import run_upscale_pipeline
 from src.ffmpeg_ops import probe_video

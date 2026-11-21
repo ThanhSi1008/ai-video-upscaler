@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
+HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 RUNTIME_PATHS = ("upscale.py", "subtrans.py", "web_gui.py", "src", "subtrans", "scripts", "web")
 
 
@@ -55,9 +56,36 @@ def _state_freshness(root: Path, head_short: str) -> str:
     head = head_short.lower()
     if head.startswith(baseline) or baseline.startswith(head):
         return "fresh"
+    effective_ref = baseline
+    state_dirty = _git(root, "status", "--porcelain", "--", "docs/agents/STATE.md")
+    if not state_dirty:
+        log_info = _git(root, "log", "-1", "--format=%H %P", "--", "docs/agents/STATE.md")
+        tokens = log_info.split() if log_info else []
+        if tokens and all(HEX_SHA_RE.fullmatch(t) for t in tokens):
+            state_sha = tokens[0].lower()
+            parents = [p.lower() for p in tokens[1:]]
+            is_parent_or_same = (
+                state_sha.startswith(baseline)
+                or baseline.startswith(state_sha)
+                or any(p.startswith(baseline) or baseline.startswith(p) for p in parents)
+            )
+            if not is_parent_or_same:
+                try:
+                    anc = subprocess.run(
+                        ["git", "--no-optional-locks", "merge-base", "--is-ancestor", baseline, state_sha],
+                        cwd=root,
+                        capture_output=True,
+                        timeout=2,
+                        check=False,
+                    )
+                    is_parent_or_same = anc.returncode == 0
+                except Exception:
+                    is_parent_or_same = False
+            if is_parent_or_same:
+                effective_ref = state_sha
     try:
         res = subprocess.run(
-            ["git", "--no-optional-locks", "diff", "--name-only", f"{baseline}..HEAD", "--", *RUNTIME_PATHS],
+            ["git", "--no-optional-locks", "diff", "--name-only", f"{effective_ref}..HEAD", "--", *RUNTIME_PATHS],
             cwd=root,
             capture_output=True,
             text=True,

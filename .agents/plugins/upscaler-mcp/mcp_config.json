@@ -1,10 +1,12 @@
 {
   "mcpServers": {
     "upscaler-inspector": {
-      "command": "python",
+      "command": "cmd",
       "args": [
-        "-c",
-        "import os, runpy; root = os.environ.get('PLUGIN_ROOT') or os.path.join(os.getcwd(), '.agents', 'plugins', 'upscaler-mcp'); runpy.run_path(os.path.join(root, 'server', 'upscaler_mcp.py'), run_name='__main__')"
+        "/d",
+        "/s",
+        "/c",
+        "if exist ..\\..\\..\\.venv\\Scripts\\python.exe (..\\..\\..\\.venv\\Scripts\\python.exe -u server\\upscaler_mcp.py) else if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe -u .agents\\plugins\\upscaler-mcp\\server\\upscaler_mcp.py) else if exist server\\upscaler_mcp.py (python -u server\\upscaler_mcp.py) else (python -u .agents\\plugins\\upscaler-mcp\\server\\upscaler_mcp.py)"
       ],
       "env": {
         "PYTHONUTF8": "1",

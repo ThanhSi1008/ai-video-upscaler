@@ -11,14 +11,20 @@ Chạy 3 lần lặp (3 trials) cho mỗi cấu hình:
 - Xác nhận các lỗi đặc trưng (chị-em, tớ-cậu, anh) có xuất hiện hay không.
 """
 
+import argparse
 import os
 import sys
 import time
 import json
+from pathlib import Path
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from subtrans.config import get_gemini_api_key
 
@@ -117,7 +123,12 @@ class SubtitleItem(BaseModel):
     vi: str
     uncertain: bool = False
 
-def run_test():
+def run_test(dry_run: bool = False) -> int:
+    if dry_run:
+        assert len(GOLDEN_SET) == 10
+        assert all(item.get("ja") and item.get("speaker") and item.get("listener") for item in GOLDEN_SET)
+        print(f"DRY-RUN PASS: eval_golden_pronouns validated {len(GOLDEN_SET)} golden cues (0 API calls).")
+        return 0
     api_key = get_gemini_api_key()
     if not api_key:
         print("Error: GEMINI_API_KEY is not available!")
@@ -201,5 +212,15 @@ def run_test():
                 if match:
                     print(f"    Trial {t['trial']}: {match['vi']}")
 
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Golden pronoun stability evaluator.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate golden fixture offline with zero API calls")
+    args = parser.parse_args(argv)
+    return run_test(dry_run=args.dry_run)
+
+
 if __name__ == "__main__":
-    run_test()
+    raise SystemExit(main())

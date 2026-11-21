@@ -8,7 +8,7 @@ description: "Vanilla HTML/CSS/JS local dashboard conventions, FastAPI + SSE res
 
 - **Zero-VRAM & Zero-Build Stack:**
   - `web/` and `web_gui.py` MUST never import `torch`, `tensorrt`, or `src.config` (preserve zero-VRAM studio isolation).
-  - Keep `web/static/` pure Vanilla HTML5, CSS3 (`light-dark()`, custom properties, responsive grid/flex), and ES modules (`app.js`, `ui.js`, `panels.js`, `charts.js`, `compare_stage.js`) per [modern-web-guidance](../skills/modern-web-guidance/SKILL.md).
+  - Keep `web/static/` pure Vanilla HTML5, CSS3 (`light-dark()`, custom properties, responsive grid/flex), and ES modules (`app.js`, `ui.js`, `panels.js`, `charts.js`, `compare_stage.js`) per [local-web-guidance](../skills/modern-web-guidance/SKILL.md).
   - Never introduce Node/npm bundlers, React/Vue/Tailwind build toolchains, or external CDN scripts (preserve strict self-hosted `_CSP_HEADER_VALUE` and `web/static/index.html` inline script SHA-256).
 - **FastAPI, SSE & Telemetry Contract (`web/app.py`, `web/sse_hub.py`, `web/job_manager.py`):**
   - Bind `127.0.0.1:8765` by default with loopback/Origin anti-DNS-rebinding guards.

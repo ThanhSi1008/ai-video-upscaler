@@ -15,19 +15,21 @@ Gồm 4 cảnh thuộc 4 thể loại/bối cảnh khác nhau (đáp ứng P3):
 - Không tự hạ cấp xuống Lite/local
 """
 
+import argparse
 import os
 import sys
 import time
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
 from pathlib import Path
 
-# Add project root
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from subtrans.config import get_gemini_api_key
 
@@ -206,7 +208,11 @@ class SubtitleItem(BaseModel):
     vi: str
     uncertain: bool = False
 
-def main():
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Multi-genre golden pronoun specification validator.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate golden set offline without writing out/")
+    args = parser.parse_args(argv)
+
     print("=" * 80)
     print("📜 BẢNG QUY CHUẨN XƯNG HÔ ĐA THỂ LOẠI (P3 GOLDEN SET SPECIFICATION)")
     print("=" * 80)
@@ -218,12 +224,18 @@ def main():
         print(f"{item['scene']:<18} | {item['id']:<4} | {speaker_rel:<20} | {item['pronoun_pair']:<20} | {forbidden_str}")
     print("=" * 80)
 
-    # Xuất ra file JSON tham chiếu để người dùng phê duyệt
+    if args.dry_run:
+        assert len(EXPANDED_GOLDEN_SET) == 13
+        print(f"DRY-RUN PASS: eval_golden_pronouns_multigenre validated {len(EXPANDED_GOLDEN_SET)} cues (0 writes).")
+        return 0
+
     out_spec = "out/golden_pronouns_specification.json"
     os.makedirs("out", exist_ok=True)
     with open(out_spec, "w", encoding="utf-8") as f:
         json.dump(EXPANDED_GOLDEN_SET, f, ensure_ascii=False, indent=2)
     print(f"✅ Đã xuất bảng đặc tả xưng hô ra: {out_spec}")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

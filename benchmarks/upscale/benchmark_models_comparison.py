@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 
 # Add project root to sys.path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from subtrans.pipeline import TranslationPipeline
 from subtrans.cache import DB_PATH

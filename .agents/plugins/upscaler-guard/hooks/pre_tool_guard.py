@@ -3,9 +3,9 @@
 Enforces GEMINI.md, .agents/rules/*.md, and VALIDATION.md boundaries automatically:
 1. Allows free local .env reading; prompts (force_ask) on .env writes/edits; hard-denies git add/commit of .env.
 2. Enforces Context-Window & Full-Rewrite Firewall: blocks reading scratch/review_bundles/, blocks full-file
-   write_file/write_to_file on existing > 250-line files, requires <= 280-line bounded ranges on view_file for
+   write_file/write_to_file on existing > 250-line files, requires <= 280-line bounded ranges on read_file/view_file for
    > 350-line files, and blocks unbounded shell dumps on > 350-line files.
-3. Hard-denies unapproved environment mutations (pip/uv/conda install/uninstall) protecting requirements.lock.
+3. Hard-denies unapproved environment mutations (pip/uv/conda install/uninstall) protecting locked .venv ABI (and local untracked snapshot requirements.lock).
 4. Prompts (force_ask) before deleting .temp_* checkpoints.
 5. Hard-denies unapproved build_trt_engine.py or unflagged full-episode upscale/benchmark runs.
 6. Prompts (force_ask) before invoking live paid Gemini API commands or concurrent GPU runs.
@@ -58,7 +58,11 @@ BUILD_TRT_EXEC_RE = re.compile(
     re.IGNORECASE,
 )
 SUBTRANS_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py)\b",
+    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py|benchmarks[/\\]subtrans[/\\](?!validate_pronouns_regex\.py)[\w.-]+\.py)\b",
+    re.IGNORECASE,
+)
+LOCAL_SUBTRANS_SUBCMD_RE = re.compile(
+    r"\bsubtrans(?:\.py|\.bat|\.cli)\s+(?:eval\b|compare\b|rag\s+stats\b)",
     re.IGNORECASE,
 )
 UPSCALE_SUBS_EXEC_RE = re.compile(
@@ -70,14 +74,27 @@ UPSCALE_GPU_EXEC_RE = re.compile(
     re.IGNORECASE,
 )
 BARE_PYTEST_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+-m\s+)?pytest\b",
+    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+-m\s+)?pytest(?:\.exe)?\b",
     re.IGNORECASE,
 )
 
 SAFE_SUBTRANS_FLAGS_RE = re.compile(
-    r"(?:^|\s)(?:--help|-h|--dry-run|--offline|--version|--mock|--test)(?:\s|$)",
+    r"(?:^|\s)(?:--help|-h|--dry-run|--version|--mock|--test)(?:\s|$)",
     re.IGNORECASE,
 )
+SAFE_DIRECT_PYTEST_FILES = frozenset({
+    "tests/test_agent_context.py",
+    "tests/test_agent_setup.py",
+    "tests/test_verify_offline.py",
+    "tests/test_smoke_pipeline.py",
+    "tests/test_web_gui.py",
+    "tests/test_architecture_boundaries.py",
+    "tests/test_export_review_bundle.py",
+})
+_PYTEST_VALUE_OPTS = frozenset({
+    "-k", "-m", "-o", "-c", "-p", "-r", "--maxfail", "--basetemp", "--rootdir",
+    "--confcutdir", "--import-mode", "--tb", "--capture", "--junitxml", "--durations",
+})
 SAFE_UPSCALE_FLAGS_RE = re.compile(
     r"(?:^|\s)(?:--preview|--dry-run|--help|-h|--list-models|--clean-temp|--cleanup|--version|--subs-only|--subs-upgrade|--smoke)(?:\s|$)",
     re.IGNORECASE,
@@ -296,6 +313,67 @@ def _shell_write_targets_secret_env(cmd: str) -> bool:
     return False
 
 
+def _first_present(args: dict, keys: tuple[str, ...]) -> object:
+    for key in keys:
+        if args.get(key) is not None:
+            return args.get(key)
+    return None
+
+
+def _is_safe_pytest_invocation(cmd: str, root: Path) -> bool:
+    """Return True only when every pytest segment uses isolated snapshot flags or strictly safe test files."""
+    saw_pytest = False
+    for seg in _split_shell_segments(cmd):
+        if not BARE_PYTEST_RE.search(seg):
+            continue
+        saw_pytest = True
+        tokens = _shlex_tokens(seg)
+        p_idx = -1
+        for idx, tok in enumerate(tokens):
+            base = Path(tok.strip("'\"")).name.lower()
+            if base in {"pytest", "pytest.exe"}:
+                p_idx = idx
+                break
+        if p_idx < 0:
+            return False
+        tail = tokens[p_idx + 1:]
+        if any(t in {"--help", "-h", "--version"} for t in tail) and not any(
+            not t.startswith("-") and (".py" in t or "/" in t or "\\" in t) for t in tail
+        ):
+            continue
+        has_guard_plugin = any(
+            t == "agent_offline_guard" and i > 0 and tail[i - 1] == "-p"
+            for i, t in enumerate(tail)
+        ) or ("-pagent_offline_guard" in tail)
+        if has_guard_plugin and "CUDA_VISIBLE_DEVICES=-1" in cmd:
+            continue
+        targets: list[str] = []
+        i = 0
+        while i < len(tail):
+            tok = tail[i]
+            if tok == "--":
+                targets.extend(tail[i + 1:])
+                break
+            if tok.startswith("-"):
+                opt_name = tok.split("=", 1)[0]
+                if opt_name in _PYTEST_VALUE_OPTS and "=" not in tok:
+                    i += 2
+                else:
+                    i += 1
+                continue
+            targets.append(tok)
+            i += 1
+        if not targets:
+            return False
+        for raw_t in targets:
+            file_part = raw_t.strip("'\"").split("::", 1)[0]
+            _, rel_posix = _resolve_repo_path(root, file_part)
+            norm = (rel_posix or file_part.replace("\\", "/").lstrip("./")).lower()
+            if norm not in SAFE_DIRECT_PYTEST_FILES:
+                return False
+    return saw_pytest
+
+
 def _coerce_optional_int(val: object) -> tuple[bool, int | None]:
     if val is None:
         return True, None
@@ -361,29 +439,39 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                     ),
                 }
 
-        # 1d. Unbounded view_file firewall (> 350 lines; only applies to view_file, never read_file)
-        if tool_name == "view_file" and resolved is not None and resolved.is_file():
+        # 1d. Unbounded read_file / view_file firewall (> 350 lines requires <= 280-line bounded range)
+        if tool_name in READ_TOOLS and resolved is not None and resolved.is_file():
             total_lines = _count_lines(resolved)
             if total_lines > MAX_VIEW_UNBOUNDED_LINES:
-                raw_start = (
-                    args.get("StartLine")
-                    if args.get("StartLine") is not None
-                    else (args.get("start_line") if args.get("start_line") is not None else args.get("startLine"))
-                )
-                raw_end = (
-                    args.get("EndLine")
-                    if args.get("EndLine") is not None
-                    else (args.get("end_line") if args.get("end_line") is not None else args.get("endLine"))
-                )
-                ok_s, s_val = _coerce_optional_int(raw_start)
-                ok_e, e_val = _coerce_optional_int(raw_end)
+                raw_start = _first_present(args, ("StartLine", "start_line", "startLine"))
+                raw_end = _first_present(args, ("EndLine", "end_line", "endLine"))
+                raw_offset = _first_present(args, ("offset", "Offset"))
+                raw_limit = _first_present(args, ("limit", "Limit"))
                 suffix = resolved.suffix.lower()
                 hint = (
-                    "Run scripts/agent_context.py --pack / --symbols / --slice first for .py/.js/.css, or pass bounded StartLine..EndLine (<= 280 lines)."
+                    f"Run scripts/agent_context.py --pack / --symbols / --slice first for .py/.js/.css, or pass bounded StartLine..EndLine (<= {MAX_VIEW_SPAN} lines) on {tool_name}."
                     if suffix in {".py", ".js", ".css"}
-                    else "Pass bounded StartLine..EndLine (<= 280 lines) directly on view_file."
+                    else f"Pass bounded StartLine..EndLine (<= {MAX_VIEW_SPAN} lines) directly on {tool_name}."
                 )
-                if not ok_s or not ok_e or (s_val is None and e_val is None):
+                eff_start: int | None = None
+                eff_end: int | None = None
+                if raw_start is not None or raw_end is not None:
+                    ok_s, s_val = _coerce_optional_int(raw_start)
+                    ok_e, e_val = _coerce_optional_int(raw_end)
+                    if ok_s and ok_e and not (s_val is None and e_val is None):
+                        eff_start = max(1, s_val if s_val is not None else 1)
+                        eff_end = min(total_lines, e_val if e_val is not None else total_lines)
+                elif raw_offset is not None or raw_limit is not None:
+                    ok_o, o_val = _coerce_optional_int(raw_offset)
+                    ok_l, l_val = _coerce_optional_int(raw_limit)
+                    if ok_o and ok_l and not (o_val is None and l_val is None):
+                        if l_val is not None and l_val <= 0:
+                            eff_start, eff_end = 2, 1
+                        else:
+                            eff_start = max(1, o_val if (o_val is not None and o_val >= 1) else 1)
+                            eff_end = min(total_lines, (eff_start + l_val - 1) if l_val is not None else total_lines)
+
+                if eff_start is None or eff_end is None:
                     return {
                         "decision": "deny",
                         "reason": (
@@ -391,8 +479,6 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                             f"Missing bounded line range. {hint}"
                         ),
                     }
-                eff_start = max(1, s_val if s_val is not None else 1)
-                eff_end = min(total_lines, e_val if e_val is not None else total_lines)
                 if eff_end < eff_start or (eff_end - eff_start + 1) > MAX_VIEW_SPAN:
                     span = max(0, eff_end - eff_start + 1)
                     return {
@@ -460,7 +546,7 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
         if ENV_MUTATION_RE.search(cmd):
             return {
                 "decision": "deny",
-                "reason": "Blocked (GEMINI.md §2): Environment mutations (pip/uv/conda install) are prohibited to protect locked ABI (requirements.lock).",
+                "reason": "Blocked (GEMINI.md §2): Environment mutations (pip/uv/conda install) are prohibited to protect locked .venv ABI (local untracked snapshot requirements.lock).",
             }
 
         if TEMP_DELETE_RE.search(cmd) or UPSCALE_CLEAN_RE.search(cmd):
@@ -475,9 +561,10 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "reason": "Blocked (video-gpu.md): Running build_trt_engine.py requires explicit user approval.",
             }
 
-        # Live Gemini API quota guard
+        # Live Gemini API quota guard (allow purely local subcommands eval / compare / rag stats)
         is_subtrans_cmd = bool(SUBTRANS_EXEC_RE.search(cmd) or UPSCALE_SUBS_EXEC_RE.search(cmd))
-        if is_subtrans_cmd and not SAFE_SUBTRANS_FLAGS_RE.search(cmd):
+        is_local_subtrans_only = bool(LOCAL_SUBTRANS_SUBCMD_RE.search(cmd)) and not UPSCALE_SUBS_EXEC_RE.search(cmd)
+        if is_subtrans_cmd and not is_local_subtrans_only and not SAFE_SUBTRANS_FLAGS_RE.search(cmd):
             return {
                 "decision": "force_ask",
                 "reason": "Gemini Quota Guard (GEMINI.md §4 & subtrans.md): Command may consume live Gemini API RPD; confirm intent.",
@@ -501,26 +588,11 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
             }
 
         # Bare pytest on production repo guard
-        if BARE_PYTEST_RE.search(cmd):
-            safe_pytest_markers = (
-                "verify_offline.py",
-                "smoke_test_pipeline.py",
-                "agent_offline_guard",
-                "test_agent_context.py",
-                "test_agent_setup.py",
-                "test_verify_offline.py",
-                "test_smoke_pipeline.py",
-                "test_web_gui.py",
-                "test_architecture_boundaries.py",
-                "test_export_review_bundle.py",
-                "--version",
-                "--help",
-            )
-            if not any(tok in cmd for tok in safe_pytest_markers):
-                return {
-                    "decision": "ask",
-                    "reason": "Test Isolation Guard (VALIDATION.md): Run .\\.venv\\Scripts\\python.exe scripts/verify_offline.py instead of bare pytest.",
-                }
+        if BARE_PYTEST_RE.search(cmd) and not _is_safe_pytest_invocation(cmd, root):
+            return {
+                "decision": "ask",
+                "reason": "Test Isolation Guard (VALIDATION.md): Run .\\.venv\\Scripts\\python.exe scripts/verify_offline.py instead of bare pytest.",
+            }
 
     return {"decision": "allow"}
 

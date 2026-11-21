@@ -54,7 +54,8 @@ def test_workspace_skills_have_valid_frontmatter():
         match = re.match(r"^---\n(.*?)\n---\n", text, flags=re.DOTALL)
         assert match is not None, f"Malformed YAML frontmatter in {skill_name}/SKILL.md"
         fm = match.group(1)
-        assert f"name: {skill_name}" in fm
+        expected_fm_name = "local-web-guidance" if skill_name == "modern-web-guidance" else skill_name
+        assert f"name: {expected_fm_name}" in fm
         assert "description:" in fm
 
     guides_dir = skills_dir / "modern-web-guidance" / "guides"
@@ -186,23 +187,30 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res_rw["decision"] == "deny"
 
-    res_view_unbounded = mod.evaluate_tool_call(
-        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py)}}},
-        repo_root=tmp_path,
-    )
-    assert res_view_unbounded["decision"] == "deny"
+    for r_tool in ("read_file", "view_file"):
+        res_view_unbounded = mod.evaluate_tool_call(
+            {"toolCall": {"name": r_tool, "args": {"AbsolutePath": str(big_py)}}},
+            repo_root=tmp_path,
+        )
+        assert res_view_unbounded["decision"] == "deny"
 
-    res_view_eof_span = mod.evaluate_tool_call(
-        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py), "StartLine": 50}}},
-        repo_root=tmp_path,
-    )
-    assert res_view_eof_span["decision"] == "deny"
+        res_view_eof_span = mod.evaluate_tool_call(
+            {"toolCall": {"name": r_tool, "args": {"AbsolutePath": str(big_py), "StartLine": 50}}},
+            repo_root=tmp_path,
+        )
+        assert res_view_eof_span["decision"] == "deny"
 
-    res_view_bounded = mod.evaluate_tool_call(
-        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py), "StartLine": 100, "EndLine": 250}}},
-        repo_root=tmp_path,
-    )
-    assert res_view_bounded["decision"] == "allow"
+        res_view_bounded = mod.evaluate_tool_call(
+            {"toolCall": {"name": r_tool, "args": {"AbsolutePath": str(big_py), "StartLine": 100, "EndLine": 250}}},
+            repo_root=tmp_path,
+        )
+        assert res_view_bounded["decision"] == "allow"
+
+        res_offset_limit = mod.evaluate_tool_call(
+            {"toolCall": {"name": r_tool, "args": {"Path": str(big_py), "offset": 20, "limit": 200}}},
+            repo_root=tmp_path,
+        )
+        assert res_offset_limit["decision"] == "allow"
 
     res_dump = mod.evaluate_tool_call(
         {"toolCall": {"name": "run_command", "args": {"CommandLine": "Get-Content src/big_mod.py"}}},
@@ -224,8 +232,13 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res["decision"] == "force_ask", f"Expected force_ask for: {cp_cmd}"
 
-    # 4. Guard live Gemini API calls vs dry-run / linter commands
-    for live_cmd in ("python subtrans.py check", ".\\subtrans.bat run ep.ja.srt -o out/"):
+    # 4. Guard live Gemini API calls vs dry-run / local commands
+    for live_cmd in (
+        "python subtrans.py check",
+        ".\\subtrans.bat run ep.ja.srt -o out/",
+        "python benchmarks/subtrans/eval_golden_pronouns.py",
+        "python subtrans.py run ep.ja.srt --offline",
+    ):
         res = mod.evaluate_tool_call(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": live_cmd}}},
             repo_root=tmp_path,
@@ -234,6 +247,11 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
 
     for safe_cmd in (
         "python subtrans.py run ep.ja.srt -o scratch/dry/ --dry-run",
+        "python subtrans.py eval",
+        "python subtrans.py compare a.srt b.srt",
+        "python subtrans.py rag stats",
+        "python benchmarks/subtrans/eval_golden_pronouns.py --dry-run",
+        "python benchmarks/subtrans/validate_pronouns_regex.py",
         "python subtrans.py --help",
         "ruff check upscale.py subtrans.py src subtrans",
         ".\\.venv\\Scripts\\python.exe scripts/verify_offline.py",
@@ -244,12 +262,22 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res["decision"] == "allow", f"Expected allow for: {safe_cmd}"
 
-    # 5. Bare pytest asks; safe targeted pytest allowed; GPU lock triggers force_ask
-    res_pytest = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": "pytest"}}},
+    # 5. Bare or mixed-unsafe pytest asks; strictly safe targeted pytest allowed; GPU lock triggers force_ask
+    for ask_pytest in (
+        "pytest",
+        "pytest tests/test_agent_context.py tests/test_subtitle_guardrails.py",
+    ):
+        res_pytest = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": ask_pytest}}},
+            repo_root=tmp_path,
+        )
+        assert res_pytest["decision"] == "ask"
+
+    res_safe_pytest = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "pytest tests/test_agent_context.py tests/test_agent_setup.py -q"}}},
         repo_root=tmp_path,
     )
-    assert res_pytest["decision"] == "ask"
+    assert res_safe_pytest["decision"] == "allow"
 
     res_smoke = mod.evaluate_tool_call(
         {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/smoke_test_pipeline.py"}}},
@@ -445,6 +473,14 @@ def test_hooks_json_and_lifecycle_post_tool_and_stop(tmp_path):
     res_stray = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)
     assert res_stray.get("decision") == "continue"
     assert "stray.tmp" in res_stray.get("reason", "")
+    (stop_repo / "stray.tmp").unlink()
+
+    # Modified broken YAML or JSON triggers Stop block
+    (stop_repo / "shows.yaml").write_text("shows:\n  - [unclosed\n", encoding="utf-8")
+    res_yaml_stop = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)
+    assert res_yaml_stop.get("decision") == "continue"
+    assert "YAML" in res_yaml_stop.get("reason", "")
+    (stop_repo / "shows.yaml").unlink()
 
 
 def test_upscaler_mcp_server_jsonrpc_handlers():

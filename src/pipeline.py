@@ -413,6 +413,15 @@ def run_upscale_pipeline(
                     total_ai_time = 0.0
                     total_enc_time = 0.0
                     total_ext_time = 0.0
+                    sanity_checks_history = []
+                    last_pipeline_micro_timings = None
+                    accumulated_micro_timings = {
+                        "num_batches": 0,
+                        "total_h2d_ms": 0.0,
+                        "total_trt_ms": 0.0,
+                        "total_triton_ms": 0.0,
+                        "total_d2h_ms": 0.0,
+                    }
 
                     # Lọc các phân đoạn cần xử lý (bỏ qua những đoạn đã xong nếu bật resume và kiểm tra frame khớp)
                     chunks_to_process = []
@@ -715,15 +724,6 @@ def run_upscale_pipeline(
                                 throttling_warned = False
                                 partial_paused = False
                                 chunk_png_unit_sizes = []
-                                sanity_checks_history = []
-                                last_pipeline_micro_timings = None
-                                accumulated_micro_timings = {
-                                    "num_batches": 0,
-                                    "total_h2d_ms": 0.0,
-                                    "total_trt_ms": 0.0,
-                                    "total_triton_ms": 0.0,
-                                    "total_d2h_ms": 0.0,
-                                }
 
                                 for i, target_chunk in enumerate(chunks_to_process):
                                     c_idx, c_seg_file, c_seg_out = target_chunk

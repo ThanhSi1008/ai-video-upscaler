@@ -34,18 +34,19 @@ from subtrans.cast_sheet import extract_series_name, get_series_cast_path, load_
 class TestGeminiQuotaManagement(unittest.TestCase):
 
     def setUp(self):
-        cache = TranslationCache()
-        with sqlite3.connect(cache.db_path) as conn:
-            conn.execute("DELETE FROM model_exhaustion WHERE model = 'unit-test-model'")
-            conn.execute("DELETE FROM api_requests WHERE model = 'unit-test-model'")
-            conn.commit()
+        self._td = tempfile.TemporaryDirectory()
+        self._tmp_dir = Path(self._td.name)
+        self.cache = TranslationCache(db_path=self._tmp_dir / "test_quota.db")
+        import subtrans.config as sub_cfg
+        self._orig_runtime_quota_path = getattr(sub_cfg, "RUNTIME_QUOTA_PATH", None)
+        if self._orig_runtime_quota_path is not None:
+            sub_cfg.RUNTIME_QUOTA_PATH = self._tmp_dir / "models_runtime_quota.yaml"
 
     def tearDown(self):
-        cache = TranslationCache()
-        with sqlite3.connect(cache.db_path) as conn:
-            conn.execute("DELETE FROM model_exhaustion WHERE model = 'unit-test-model'")
-            conn.execute("DELETE FROM api_requests WHERE model = 'unit-test-model'")
-            conn.commit()
+        import subtrans.config as sub_cfg
+        if self._orig_runtime_quota_path is not None:
+            sub_cfg.RUNTIME_QUOTA_PATH = self._orig_runtime_quota_path
+        self._td.cleanup()
 
     def test_1_models_yaml_and_chain(self):
         """Kiểm tra cấu hình models.yaml và chuỗi model không có preview."""
@@ -97,7 +98,6 @@ class TestGeminiQuotaManagement(unittest.TestCase):
 
     def test_2b_dst_transitions_pt_reset(self):
         """Kiểm tra chính xác ngày chuyển giờ mùa hè/đông (1/11 và 14/3) của get_next_pt_reset."""
-        import datetime
         # 1. Mùa hè PDT (ví dụ 2026-07-15 10:00 PT) -> reset hôm sau 00:00 PDT = 14:00 VN
         dt_summer = datetime.datetime(2026, 7, 15, 10, 0, 0, tzinfo=PT_TZ)
         next_pt, next_vn = get_next_pt_reset(now_pt=dt_summer)
@@ -197,15 +197,11 @@ class TestGeminiQuotaManagement(unittest.TestCase):
             raise MockPerDayError()
 
         with self.assertRaises(DailyQuotaExhaustedError) as ctx:
-            call_with_retry(dummy_api, model_name="unit-test-model", max_retries=3)
+            call_with_retry(dummy_api, model_name="unit-test-model", max_retries=3, cache=self.cache)
 
         self.assertEqual(calls, 1, "PerDay phải kết thúc ngay ở lần gọi đầu tiên, tuyệt đối không pause/retry")
         self.assertIn("GenerateContentRequestsPerDay", ctx.exception.quota_id)
         self.assertEqual(ctx.exception.quota_value, "20")
-
-        # Dọn dẹp cache
-        cache = TranslationCache()
-        cache.clear_model_exhaustion = lambda m: None
 
     def test_5_series_cast_sheet_caching(self):
         """Kiểm tra tính năng lưu Cast Sheet theo bộ (<series>.cast.yaml) và tái sử dụng 0 API calls."""
@@ -249,6 +245,7 @@ class TestGeminiQuotaManagement(unittest.TestCase):
         translator = GeminiTranslator(
             api_keys=["test_key_111111", "test_key_222222"],
             model="gemini-3.8-flash",
+            cache=self.cache,
             dry_run=True
         )
         self.assertEqual(len(translator.api_keys), 2)

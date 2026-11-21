@@ -18,7 +18,9 @@ import torch
 import spandrel
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.models_resolver import load_models_registry
 from src.cuda_engine import AnimeJaNaiCompact2x

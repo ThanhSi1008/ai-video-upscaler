@@ -41,6 +41,38 @@ def _ruff_command(root: Path) -> list[str]:
     return [sys.executable, "-m", "ruff"]
 
 
+def _validate_yaml_file(root: Path, resolved: Path) -> str:
+    text = resolved.read_text(encoding="utf-8-sig")
+    try:
+        import yaml  # type: ignore
+
+        yaml.safe_load(text)
+        return ""
+    except ImportError:
+        for cand in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
+            if cand.is_file():
+                try:
+                    res = subprocess.run(
+                        [str(cand), "-c", "import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding='utf-8-sig'))", str(resolved)],
+                        cwd=str(root),
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=0.8,
+                        check=False,
+                    )
+                    if res.returncode == 0:
+                        return ""
+                    err = (res.stderr or res.stdout or "YAML parse error").strip().splitlines()[-1]
+                    return f"YAML ({resolved.relative_to(root).as_posix()}): {err[:160]}"
+                except (OSError, subprocess.TimeoutExpired):
+                    return ""
+        return ""
+    except Exception as exc:
+        return f"YAML ({resolved.relative_to(root).as_posix()}): {str(exc).splitlines()[0][:160]}"
+
+
 def _is_stray_root_temp(rel_posix: str) -> bool:
     p = Path(rel_posix)
     if p.parent != Path("."):
@@ -126,6 +158,23 @@ def evaluate_stop(payload: dict, repo_root: Path | None = None) -> dict[str, str
         ]
         if stray:
             issues.append(f"Stray root temp file(s): {', '.join(stray[:3])}")
+
+        for status, rel in changed:
+            if "D" in status:
+                continue
+            target = root / rel
+            if not target.is_file():
+                continue
+            low = rel.lower()
+            if low.endswith(".json"):
+                try:
+                    json.loads(target.read_text(encoding="utf-8-sig"))
+                except Exception as exc:
+                    issues.append(f"JSON ({rel}): {str(exc)[:160]}")
+            elif low.endswith((".yaml", ".yml")):
+                yaml_err = _validate_yaml_file(root, target)
+                if yaml_err:
+                    issues.append(yaml_err)
 
         modified_py = [
             str(root / rel)

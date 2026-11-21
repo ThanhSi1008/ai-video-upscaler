@@ -69,10 +69,13 @@ def test_output_sanity_monkeypatch_bug_injection(tmp_path):
     for p in model.body.parameters():
         p.data.zero_()
     
-    # Tạo tensor ảnh 1080p
+    # Use compact 320x180 frame on CPU so zeroed-weight forward passes complete in <0.1s
     img = cv2.imread("test_frames/frame_close_up.png")
     if img is None:
-        img = np.full((1080, 1920, 3), 128, dtype=np.uint8)
+        grad_y = np.linspace(40, 210, 180, dtype=np.uint8)[:, None]
+        img = np.broadcast_to(np.stack([grad_y, 250 - grad_y, np.full_like(grad_y, 128)], axis=-1), (180, 320, 3)).copy()
+    else:
+        img = cv2.resize(img, (320, 180), interpolation=cv2.INTER_AREA)
     
     src_file = str(tmp_path / "src.png")
     cv2.imwrite(src_file, img)

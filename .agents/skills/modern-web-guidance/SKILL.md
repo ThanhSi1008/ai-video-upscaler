@@ -1,5 +1,5 @@
 ---
-name: modern-web-guidance
+name: local-web-guidance
 description: >-
   Local HTML/CSS/JS best-practice guides for web/static/ monitoring dashboard UI.
   Trigger when editing web/static/ (CSS layout, dark mode, responsive tables, dialogs,

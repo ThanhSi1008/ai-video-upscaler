@@ -4,9 +4,10 @@ import os
 import sys
 import subprocess
 import numpy as np
+from pathlib import Path
 import cv2
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.dedup import scan_dedup_plan
 
 def test_windows(video_path):

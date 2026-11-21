@@ -6,6 +6,7 @@ This is isolation for the reviewed test suite, not a sandbox for untrusted code.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs", "web"}
@@ -26,7 +28,7 @@ SUFFIXES = {
     ".py", ".bat", ".yaml", ".yml", ".toml", ".ini", ".md", ".txt", ".json",
     ".ass", ".srt", ".html", ".css", ".js", ".svg",
 }
-GUARD = '''"""Offline guard loaded before test collection in the source snapshot."""
+GUARD = '''"""Offline guard loaded before test collection and inherited by child Python processes."""
 import _socket
 import socket
 import sys
@@ -38,6 +40,7 @@ def deny_network(*args, **kwargs):
 
 socket.socket.connect = deny_network
 socket.socket.connect_ex = deny_network
+socket.socket.sendto = deny_network
 socket.create_connection = deny_network
 socket.getaddrinfo = deny_network
 '''
@@ -74,7 +77,7 @@ def isolated_environment(
     resolved_tmp = str(Path(tmp_dir) if tmp_dir is not None else (ROOT / "scratch" / "tmp"))
     clean.update(CUDA_VISIBLE_DEVICES="-1", RUN_GPU_TESTS="0", PYTHON_DOTENV_DISABLED="1",
                  SUBTRANS_DISABLE_DOTENV="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
-                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", UPSCALER_HEVC_ENCODER="libx265",
                  TEMP=resolved_tmp, TMP=resolved_tmp, TMPDIR=resolved_tmp)
     return clean
 
@@ -166,12 +169,27 @@ def resolve_impacted_tests(root: Path, changed_paths: list[str] | None = None) -
         if added_sys_path and sys.path and sys.path[0] == root_str:
             sys.path.pop(0)
 
-    candidates: set[str] = set(impacted)
+    candidates: set[str] = set()
+    for item in impacted:
+        norm_item = item.replace("\\", "/")
+        if norm_item.endswith("/") or (root / norm_item).is_dir():
+            candidates.add(norm_item)
+        elif norm_item.endswith(".py"):
+            if Path(norm_item).name.startswith("test_"):
+                candidates.add(norm_item)
+            else:
+                parent_dir = Path(norm_item).parent.as_posix()
+                if parent_dir and parent_dir != "." and (root / parent_dir).is_dir():
+                    candidates.add(parent_dir.rstrip("/") + "/")
     for rel in dirty:
         norm = rel.replace("\\", "/")
         if (norm.startswith("tests/") or norm.startswith("subtrans/tests/")) and norm.endswith(".py"):
             if Path(norm).name.startswith("test_") and (root / norm).is_file():
                 candidates.add(norm)
+            elif (root / norm).is_file():
+                parent_dir = Path(norm).parent.as_posix()
+                if parent_dir and parent_dir != "." and (root / parent_dir).is_dir():
+                    candidates.add(parent_dir.rstrip("/") + "/")
 
     # Deduplicate files already covered by an impacted directory (e.g. subtrans/tests/)
     dirs = [c.rstrip("/") + "/" for c in candidates if c.endswith("/") or (root / c).is_dir()]
@@ -210,7 +228,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable pytest failure stdout/stderr capture (overrides default --show-capture=no)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=6,
+        help="Parallel isolated snapshot workers for full-suite runs (default: 6; 1 disables sharding)",
+    )
     return parser
+
+
+def _partition_test_shards(snapshot: Path, num_workers: int) -> list[list[str]]:
+    """Partition all discovered test_*.py files across balanced LPT buckets."""
+    files: list[tuple[int, str]] = []
+    for base_rel in ("tests", "subtrans/tests"):
+        base = snapshot / base_rel
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("test_*.py")):
+            rel = p.relative_to(snapshot).as_posix()
+            mult = 12 if rel.endswith("test_tier1_features.py") else (8 if rel.startswith("tests/e2e/test_tier") else 1)
+            weight = p.stat().st_size * mult
+            files.append((weight, rel))
+    if len(files) < 8 or num_workers <= 1:
+        return []
+    k = min(num_workers, len(files))
+    buckets: list[list[str]] = [[] for _ in range(k)]
+    loads = [0] * k
+    for weight, rel in sorted(files, key=lambda item: (-item[0], item[1])):
+        idx = min(range(k), key=lambda i: loads[i])
+        buckets[idx].append(rel)
+        loads[idx] += weight
+    return [sorted(b) for b in buckets if b]
+
+
+def _merge_junit_files(shard_xmls: list[Path], dest_xml: Path) -> tuple[int, int, int, int]:
+    """Combine per-shard JUnit XML files into a single root <testsuites> report."""
+    root = ET.Element("testsuites")
+    total_tests = total_failures = total_errors = total_skipped = 0
+    for xml_path in shard_xmls:
+        if not xml_path.is_file():
+            continue
+        suite_root = ET.parse(xml_path).getroot()
+        suites = [suite_root] if suite_root.tag == "testsuite" else list(suite_root.findall("testsuite"))
+        for st in suites:
+            root.append(st)
+            total_tests += int(st.attrib.get("tests", 0))
+            total_failures += int(st.attrib.get("failures", 0))
+            total_errors += int(st.attrib.get("errors", 0))
+            total_skipped += int(st.attrib.get("skipped", 0))
+    ET.ElementTree(root).write(dest_xml, encoding="utf-8", xml_declaration=True)
+    return total_tests, total_failures, total_errors, total_skipped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,49 +311,108 @@ def main(argv: list[str] | None = None) -> int:
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     code = 1
+    extra_snapshots: list[Path] = []
     try:
         count = snapshot_sources(ROOT, snapshot)
+        guard_dir = run_dir / "guard"
+        guard_dir.mkdir(parents=True, exist_ok=True)
+        (guard_dir / "sitecustomize.py").write_text(GUARD, encoding="utf-8")
         (snapshot / "agent_offline_guard.py").write_text(GUARD, encoding="utf-8")
-        env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
-        env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(tmp_dir)
+        base_env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
+        base_env["TEMP"] = base_env["TMP"] = base_env["TMPDIR"] = str(tmp_dir)
+        # Propagate socket guard across child Python subprocesses without exposing live repo paths.
+        base_env["PYTHONPATH"] = str(guard_dir)
         # Pytest may inspect Git for tests of the context helper; snapshot has no parent repository.
-        env["GIT_CEILING_DIRECTORIES"] = str(run_dir)
+        base_env["GIT_CEILING_DIRECTORIES"] = str(run_dir)
 
-        command = [
-            sys.executable, "-m", "pytest", "-m", "not gpu", "-q", "--tb=short",
-            "-p", "agent_offline_guard", "--basetemp", str(tmp_dir / "pytest"),
-            "--junitxml", str(run_dir / "junit.xml"),
-        ]
+        base_flags = [sys.executable, "-m", "pytest", "-m", "not gpu", "-q", "--tb=short", "-p", "agent_offline_guard"]
         if not args.capture:
-            command.append("--show-capture=no")
+            base_flags.append("--show-capture=no")
         maxfail = args.maxfail if args.maxfail is not None else (3 if args.impacted else None)
         if maxfail is not None and maxfail > 0:
-            command.extend(["--maxfail", str(maxfail)])
-        if test_targets:
-            command.extend(test_targets)
+            base_flags.extend(["--maxfail", str(maxfail)])
+
+        shards = _partition_test_shards(snapshot, int(args.workers)) if not test_targets else []
 
         print(
             f"Snapshot: {snapshot}\nSource files: {count}\n"
             "CPU only; Python sockets blocked; no production cache/weights copied.",
             flush=True,
         )
-        with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:
-            with subprocess.Popen(
-                command, cwd=snapshot, env=env, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                errors="replace",
-            ) as process:
-                assert process.stdout is not None
-                for line in process.stdout:
-                    print(line, end="", flush=True)
-                    log.write(line)
-                code = process.wait()
+        if not shards:
+            command = [
+                *base_flags,
+                "--basetemp", str(tmp_dir / "pytest"),
+                "--junitxml", str(run_dir / "junit.xml"),
+                *test_targets,
+            ]
+            with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:
+                with subprocess.Popen(
+                    command, cwd=snapshot, env=base_env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                    errors="replace",
+                ) as process:
+                    assert process.stdout is not None
+                    for line in process.stdout:
+                        print(line, end="", flush=True)
+                        log.write(line)
+                    code = process.wait()
+        else:
+            shard_dirs: list[Path] = [snapshot]
+            for idx in range(1, len(shards)):
+                w_snap = run_dir / f"repo_w{idx}"
+                shutil.copytree(snapshot, w_snap)
+                shard_dirs.append(w_snap)
+                extra_snapshots.append(w_snap)
+
+            def _run_shard(idx_targets: tuple[int, list[str]]) -> tuple[int, int, str, Path]:
+                idx, targets = idx_targets
+                w_tmp = tmp_dir / f"w{idx}"
+                w_tmp.mkdir(parents=True, exist_ok=True)
+                w_env = dict(base_env)
+                w_env["TEMP"] = w_env["TMP"] = w_env["TMPDIR"] = str(w_tmp)
+                w_xml = run_dir / f"junit_w{idx}.xml"
+                cmd = [*base_flags, "--basetemp", str(w_tmp / "pytest"), "--junitxml", str(w_xml), *targets]
+                with subprocess.Popen(
+                    cmd, cwd=shard_dirs[idx], env=w_env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                ) as proc:
+                    assert proc.stdout is not None
+                    out = proc.stdout.read()
+                    rc = proc.wait()
+                return idx, rc, out, w_xml
+
+            with ThreadPoolExecutor(max_workers=len(shards)) as pool:
+                shard_results = sorted(pool.map(_run_shard, enumerate(shards)), key=lambda r: r[0])
+
+            shard_xmls: list[Path] = []
+            codes: list[int] = []
+            with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:
+                for idx, rc, out, w_xml in shard_results:
+                    header = f"=== Shard {idx + 1}/{len(shards)} (exit={rc}) ===\n"
+                    log.write(header + out + "\n")
+                    if rc != 0:
+                        print(header + out, end="", flush=True)
+                    codes.append(rc)
+                    shard_xmls.append(w_xml)
+                tot, fails, errs, skips = _merge_junit_files(shard_xmls, run_dir / "junit.xml")
+                passed = max(0, tot - fails - errs - skips)
+                summary = f"Shards ({len(shards)} workers): {passed} passed, {skips} skipped, {fails} failed, {errs} errors\n"
+                print(summary, end="", flush=True)
+                log.write(summary)
+            for w_xml in shard_xmls:
+                w_xml.unlink(missing_ok=True)
+            code = next((rc for rc in codes if rc != 0), 0)
         print(f"Evidence: {run_dir}\nPytest exit code: {code}")
     finally:
+        for extra_snap in extra_snapshots:
+            if code == 0:
+                _rmtree_force(extra_snap)
         if is_fast_mode or code == 0:
             # Always clean heavy snapshot & pytest temp files on fast modes and passing full runs
             _rmtree_force(snapshot)
-            _rmtree_force(tmp_dir / "pytest")
+            _rmtree_force(run_dir / "guard")
+            _rmtree_force(tmp_dir)
             tmp_dir.mkdir(parents=True, exist_ok=True)
             if code == 0:
                 validation_dirs = sorted(

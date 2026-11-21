@@ -312,6 +312,12 @@ def get_hevc_rate_args(bitrate: str = "28M") -> list:
             "-bf", str(HEVC_BF),
             "-b_ref_mode", HEVC_B_REF_MODE,
         ]
+    if HEVC_ENCODER == "libx265":
+        return [
+            "-preset", "ultrafast",
+            "-crf", str(HEVC_CQ_LEVEL),
+            "-x265-params", "log-level=error",
+        ]
     return [
         "-b:v", bitrate,
         "-spatial_aq", "1"

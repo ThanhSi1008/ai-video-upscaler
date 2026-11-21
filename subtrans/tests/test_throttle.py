@@ -15,7 +15,8 @@ def test_rate_limiter_timing():
     assert (t1 - t0) < 1.0
 
 
-def test_call_with_retry_quota_exhausted():
+def test_call_with_retry_quota_exhausted(monkeypatch):
+    monkeypatch.setattr("subtrans.throttle.time.sleep", lambda _s: None)
     mock_fn = MagicMock(side_effect=Exception("Resource has been exhausted (e.g. check quota)."))
     with pytest.raises(QuotaExhaustedError):
         call_with_retry(mock_fn, max_retries=1, base_delay=0.01)

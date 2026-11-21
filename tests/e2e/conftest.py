@@ -7,10 +7,14 @@ for the opaque-box E2E test suite of ai-video-upscaler.
 
 from __future__ import annotations
 
+import atexit
+import hashlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +22,7 @@ from unittest.mock import MagicMock, patch
 os.environ["SUBTRANS_DISABLE_DOTENV"] = "1"
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("UPSCALER_HEVC_ENCODER", "libx265")
 
 import cv2
 import numpy as np
@@ -30,6 +35,11 @@ import upscale
 # -----------------------------------------------------------------------------
 # 1. Synthetic Media Generator Helper
 # -----------------------------------------------------------------------------
+
+_SYNTHETIC_CACHE_DIR = Path(tempfile.mkdtemp(prefix="e2e_synth_tpl_"))
+atexit.register(lambda: shutil.rmtree(_SYNTHETIC_CACHE_DIR, ignore_errors=True))
+_SYNTHETIC_CACHE_MAP: dict[tuple, Path] = {}
+
 
 def create_synthetic_video(
     dest_path: Path | str,
@@ -53,6 +63,27 @@ def create_synthetic_video(
     """
     dest_path = Path(dest_path).resolve()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_key: Optional[tuple] = None
+    if not attachments:
+        cache_key = (
+            dest_path.suffix.lower(),
+            num_frames,
+            fps,
+            width,
+            height,
+            audio_tracks,
+            tuple(subtitles or ()),
+            open_gop,
+            is_mp4,
+            chapters,
+            video_filter,
+            is_hevc,
+            keyint,
+        )
+        cached = _SYNTHETIC_CACHE_MAP.get(cache_key)
+        if cached is not None and cached.exists():
+            shutil.copy2(cached, dest_path)
+            return dest_path
     duration = max(0.1, num_frames / fps)
 
     v_filter = video_filter or f"testsrc=size={width}x{height}:rate={fps}"
@@ -108,9 +139,13 @@ def create_synthetic_video(
         cmd.extend(["-map_metadata", str(chap_input_idx)])
 
     if is_hevc:
-        cmd.extend(["-vframes", str(num_frames), "-c:v", "hevc_nvenc", "-pix_fmt", "p010le", "-tag:v", "hvc1"])
+        cmd.extend([
+            "-vframes", str(num_frames),
+            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+            "-pix_fmt", "p010le", "-tag:v", "hvc1",
+        ])
     else:
-        cmd.extend(["-vframes", str(num_frames), "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        cmd.extend(["-vframes", str(num_frames), "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
 
     if keyint:
         cmd.extend(["-g", str(keyint)])
@@ -147,6 +182,12 @@ def create_synthetic_video(
                 chap_file.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    if cache_key is not None and dest_path.exists():
+        digest = hashlib.sha1(repr(cache_key).encode("utf-8")).hexdigest()[:12]
+        tpl_file = _SYNTHETIC_CACHE_DIR / f"tpl_{digest}{dest_path.suffix.lower()}"
+        shutil.copy2(dest_path, tpl_file)
+        _SYNTHETIC_CACHE_MAP[cache_key] = tpl_file
 
     return dest_path
 
@@ -229,7 +270,7 @@ class FastMockWorker:
             if im is None:
                 im = np.zeros((180, 320, 3), dtype=np.uint8)
             im_up = cv2.resize(im, (im.shape[1] * 2, im.shape[0] * 2))
-            cv2.imwrite(os.path.join(output_dir, f), im_up)
+            cv2.imwrite(os.path.join(output_dir, f), im_up, [cv2.IMWRITE_PNG_COMPRESSION, 0])
         return {
             "elapsed_seconds": 0.05,
             "fps": 100.0,
@@ -262,7 +303,7 @@ class FastMockPipeUpscaler:
 
     def spawn_nvenc_pipe_writer(self, output_mp4_path: str, fps_str: str = "24/1", width: int = 640, height: int = 360):
         from src.config import (
-            HEVC_ENCODER, HEVC_PROFILE, HEVC_PIX_FMT, HEVC_TAG,
+            HEVC_PROFILE, HEVC_PIX_FMT, HEVC_TAG,
             HEVC_COLOR_RANGE, HEVC_COLORSPACE, HEVC_COLOR_PRIMARIES, HEVC_COLOR_TRC,
         )
         cmd = [
@@ -271,13 +312,12 @@ class FastMockPipeUpscaler:
             "-color_range", HEVC_COLOR_RANGE, "-colorspace", HEVC_COLORSPACE,
             "-color_primaries", HEVC_COLOR_PRIMARIES, "-color_trc", HEVC_COLOR_TRC,
             "-r", fps_str, "-i", "pipe:0",
-            "-c:v", HEVC_ENCODER, "-profile:v", HEVC_PROFILE, "-pix_fmt", HEVC_PIX_FMT,
-            "-preset", "p6", "-cq", "18", "-tag:v", HEVC_TAG,
+            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+            "-profile:v", HEVC_PROFILE, "-pix_fmt", HEVC_PIX_FMT,
+            "-crf", "18", "-tag:v", HEVC_TAG,
             output_mp4_path,
         ]
-        sub_env = os.environ.copy()
-        sub_env.pop("CUDA_VISIBLE_DEVICES", None)
-        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=sub_env)
+        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
     def process_frames_to_pipe(self, unique_frames_rgb, repeat_counts, enc_proc, **kwargs) -> int:
         out_h, out_w = self.output_hw
@@ -310,27 +350,76 @@ def mock_pipeline_env(request, monkeypatch, tmp_path):
         return
 
     orig_run = subprocess.run
-    def safe_subprocess_run(cmd, *args, **kwargs):
-        # Chặn Stage B spawn recursive whisper subprocesses ngoài tầm kiểm soát
-        if isinstance(cmd, list):
-            if any("upscale.py" in str(x) for x in cmd) and any("--subs-only" in str(x) for x in cmd):
-                return subprocess.CompletedProcess(cmd, 0, stdout="Mock Stage B Subtitle Success", stderr="")
-            # Cho phép FFmpeg sử dụng phần cứng NVENC mà không ảnh hưởng tới cô lập PyTorch CPU
-            if len(cmd) > 0 and str(cmd[0]).lower() in ("ffmpeg", "ffprobe"):
-                sub_env = kwargs.get("env")
-                if sub_env is None:
-                    sub_env = os.environ.copy()
-                else:
-                    sub_env = sub_env.copy()
-                sub_env.pop("CUDA_VISIBLE_DEVICES", None)
-                kwargs["env"] = sub_env
+    orig_popen = subprocess.Popen
 
+    def _is_stage_b_subs_cmd(cmd: Any) -> bool:
+        return (
+            isinstance(cmd, list)
+            and any("upscale.py" in str(x) for x in cmd)
+            and any("--subs-only" in str(x) for x in cmd)
+        )
+
+    class _MockStageBPopen:
+        def __init__(self, args: Any) -> None:
+            self.args = args
+            self.pid = 99999
+            self.returncode = 0
+            self.stdin = None
+            self.stdout = None
+            self.stderr = None
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: Optional[float] = None) -> int:
+            return 0
+
+        def communicate(self, input: Any = None, timeout: Optional[float] = None) -> Tuple[str, str]:
+            return ("Mock Stage B Subtitle Success", "")
+
+        def kill(self) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+        def __enter__(self) -> "_MockStageBPopen":
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    def safe_subprocess_run(cmd, *args, **kwargs):
+        if _is_stage_b_subs_cmd(cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout="Mock Stage B Subtitle Success", stderr="")
+        if isinstance(cmd, list) and cmd and "nvidia-smi" in str(cmd[0]).lower():
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="offline cpu mode")
         return orig_run(cmd, *args, **kwargs)
+
+    def safe_subprocess_popen(cmd, *args, **kwargs):
+        if _is_stage_b_subs_cmd(cmd):
+            return _MockStageBPopen(cmd)
+        return orig_popen(cmd, *args, **kwargs)
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake_test_key_e2e_isolated")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
+    monkeypatch.setenv("UPSCALER_HEVC_ENCODER", "libx265")
     monkeypatch.setenv("SUBTRANS_DISABLE_DOTENV", "1")
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    monkeypatch.setattr("src.config.HEVC_ENCODER", "libx265", raising=False)
+    monkeypatch.setattr("src.dedup.HEVC_ENCODER", "libx265", raising=False)
+    monkeypatch.setattr("src.ffmpeg_ops.HEVC_ENCODER", "libx265", raising=False)
+    monkeypatch.setattr("src.pipeline.HEVC_ENCODER", "libx265", raising=False)
+    monkeypatch.setattr("src.trt_zero_copy_upscaler.HEVC_ENCODER", "libx265", raising=False)
+    monkeypatch.setattr(subprocess, "run", safe_subprocess_run)
+    monkeypatch.setattr(subprocess, "Popen", safe_subprocess_popen)
+    monkeypatch.setattr("gc.collect", lambda *a, **kw: 0)
+    monkeypatch.setattr("src.pipeline.get_thermal_state", lambda: "Nominal", raising=False)
+    monkeypatch.setattr(
+        "src.pipeline.get_swap_usage",
+        lambda: "RAM: 50% used (8192MB/16384MB) | Pagefile: 10% used (1024MB/10240MB)",
+        raising=False,
+    )
 
     with patch("src.cuda_engine.GPUPersistentWorker", FastMockWorker), \
          patch("src.cuda_engine.get_cuda_inference_engine", return_value=FastMockWorker()), \
@@ -342,24 +431,30 @@ def mock_pipeline_env(request, monkeypatch, tmp_path):
          patch("src.config.release_gpu_lock"), \
          patch("src.preflight.AntiSleepContext"), \
          patch("google.genai.Client"), \
-         patch("subprocess.run", side_effect=safe_subprocess_run), \
          patch("os.startfile", create=True, return_value=None):
         yield
 
 
-# -----------------------------------------------------------------------------
-# 4. Standard Reusable Media Fixtures
-# -----------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def _synthetic_clip_templates(tmp_path_factory) -> dict[str, Path]:
+    base = tmp_path_factory.mktemp("e2e_clip_templates")
+    return {
+        "10s": create_synthetic_video(base / "tpl_10s.mkv", num_frames=4, fps=24, width=320, height=180, audio_tracks=1),
+        "30s": create_synthetic_video(base / "tpl_30s.mkv", num_frames=8, fps=24, width=320, height=180, audio_tracks=1),
+    }
+
 
 @pytest.fixture
-def synthetic_10s_mkv(tmp_path: Path) -> Path:
-    """Tạo video mẫu 10s (4 frames, 320x180, AAC stereo)."""
+def synthetic_10s_mkv(tmp_path: Path, _synthetic_clip_templates: dict[str, Path]) -> Path:
+    """Copy reusable 4-frame synthetic MKV into test-local tmp_path."""
     p = tmp_path / "sample_10s.mkv"
-    return create_synthetic_video(p, num_frames=4, fps=24, width=320, height=180, audio_tracks=1)
+    shutil.copy2(_synthetic_clip_templates["10s"], p)
+    return p
 
 
 @pytest.fixture
-def synthetic_30s_mkv(tmp_path: Path) -> Path:
-    """Tạo video mẫu 30s (8 frames, 320x180, AAC stereo)."""
+def synthetic_30s_mkv(tmp_path: Path, _synthetic_clip_templates: dict[str, Path]) -> Path:
+    """Copy reusable 8-frame synthetic MKV into test-local tmp_path."""
     p = tmp_path / "sample_30s.mkv"
-    return create_synthetic_video(p, num_frames=8, fps=24, width=320, height=180, audio_tracks=1)
+    shutil.copy2(_synthetic_clip_templates["30s"], p)
+    return p

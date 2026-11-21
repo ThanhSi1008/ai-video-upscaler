@@ -15,13 +15,12 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from subtrans.models import Cue
-from subtrans.models import Cue
 from subtrans.writer import write_srt_subtitles, clean_and_normalize_vietnamese
 from subtrans.parser import parse_and_align_subtitles, is_pure_sound_cue
+import src.config as app_config
 from src.config import (
     acquire_gpu_lock,
     release_gpu_lock,
-    GPU_LOCK_FILE,
     PENDING_SUBS_FILE,
     add_pending_sub,
     load_pending_subs,
@@ -29,19 +28,23 @@ from src.config import (
 )
 
 
-def test_gpu_lock_blocks_during_upscale_and_frees_during_subs(tmp_path):
-    """Test Item 5: GPU lock acquires during upscale, and frees before subtitle stage."""
-    # Release any existing lock
-    release_gpu_lock()
-    assert not os.path.exists(GPU_LOCK_FILE), "GPU lock should not exist initially"
+def test_gpu_lock_blocks_during_upscale_and_frees_during_subs(tmp_path, monkeypatch):
+    """Verify GPU lock acquires during upscale and frees cleanly inside isolated tmp_path."""
+    isolated_lock = str(tmp_path / ".gpu_active.lock")
+    monkeypatch.setattr(app_config, "GPU_LOCK_FILE", isolated_lock)
+    if hasattr(app_config, "_GPU_LOCK_OWNED"):
+        monkeypatch.setattr(app_config, "_GPU_LOCK_OWNED", False)
+    if hasattr(app_config, "_GPU_LOCK_DEPTH"):
+        monkeypatch.setattr(app_config, "_GPU_LOCK_DEPTH", 0)
 
-    # Simulate upscale starting: acquire lock
+    release_gpu_lock()
+    assert not os.path.exists(isolated_lock), "GPU lock should not exist initially"
+
     acquire_gpu_lock()
-    assert os.path.exists(GPU_LOCK_FILE), "GPU lock file should exist when held"
+    assert os.path.exists(isolated_lock), "GPU lock file should exist when held"
 
-    # Simulate upscale finished before subtitle stage: release lock
     release_gpu_lock()
-    assert not os.path.exists(GPU_LOCK_FILE), "GPU lock file should be removed upon release"
+    assert not os.path.exists(isolated_lock), "GPU lock file should be removed upon release"
 
 
 def test_sound_cues_drop_mode(tmp_path):

@@ -13,7 +13,7 @@ Always invoke the repository `.venv` interpreter from the repo root (system `PAT
 git diff --check
 ```
 
-- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), strips API keys/tokens, disables `.env`, blocks Python sockets before collection, and executes `pytest -m "not gpu"` (with `--show-capture=no` by default).
+- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), forces CPU software HEVC encoding (`UPSCALER_HEVC_ENCODER=libx265`), strips API keys/tokens, disables `.env`, blocks external Python sockets across the entire subprocess tree via `sitecustomize.py` + `agent_offline_guard` (preserving loopback/socketpair for local ASGI/EventLoop tests), and executes `pytest -m "not gpu"` (with `--show-capture=no` by default).
 - Fast iteration modes (`< 5s`, always clean up `repo/` snapshot even on failure): `scripts/verify_offline.py --target <PATH_OR_NODEID>` and `scripts/verify_offline.py --impacted` (auto-resolving dirty paths via `agent_context.py` 2-hop + cross-boundary contracts, `--maxfail=3` default). Use `agent_context.py --pack`, `--symbols`, `--slice`, and `--impact` to inspect code cleanly before testing.
 - Logs (`pytest.log`, `junit.xml`) remain under `scratch/agent-validation-*/` (up to 2 recent passing runs retained); snapshot `repo/` and `tmp/pytest/` are deleted automatically on pass.
 
@@ -26,7 +26,7 @@ git diff --check
 
 ## Module -> Targeted Test Command
 
-Run targeted tests directly ONLY for pure stdlib agent-tooling tests, or inside a disposable snapshot (with `CUDA_VISIBLE_DEVICES=-1 -p agent_offline_guard`) for runtime modules:
+Run targeted tests directly ONLY for pure stdlib/web/smoke allowlisted suites, or inside a disposable snapshot via `scripts/verify_offline.py --target` / `--impacted` for runtime modules (`src/`, `subtrans/`, `tests/e2e/`):
 
 | Subsystem / Module | Targeted Command |
 | :--- | :--- |

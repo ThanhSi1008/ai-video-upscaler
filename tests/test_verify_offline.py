@@ -69,16 +69,19 @@ def test_snapshot_copies_working_changes_and_untracked_source_not_state(tmp_path
 def test_resolve_impacted_tests_uses_2hop_and_cross_boundary_contracts(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "web").mkdir()
-    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "e2e").mkdir(parents=True)
     (tmp_path / "src/logger.py").write_text("def log_msg():\n    pass\n", encoding="utf-8")
     (tmp_path / "web/sse_hub.py").write_text("from src import logger\n", encoding="utf-8")
     (tmp_path / "web/app.py").write_text("import web.sse_hub\n", encoding="utf-8")
     (tmp_path / "tests/test_web_gui.py").write_text("def test_ok(): pass\n", encoding="utf-8")
     (tmp_path / "tests/test_edited.py").write_text("def test_ed(): pass\n", encoding="utf-8")
+    (tmp_path / "tests/e2e/conftest.py").write_text("import src.logger\n", encoding="utf-8")
 
-    impacted = resolve_impacted_tests(tmp_path, ["src/logger.py", "tests/test_edited.py"])
+    impacted = resolve_impacted_tests(tmp_path, ["src/logger.py", "tests/test_edited.py", "tests/e2e/conftest.py"])
     assert "tests/test_web_gui.py" in impacted
     assert "tests/test_edited.py" in impacted
+    assert "tests/e2e/" in impacted
+    assert not any(p.endswith("conftest.py") for p in impacted)
 
 
 def test_verify_offline_target_impacted_flags_and_cleanup(tmp_path, monkeypatch, capsys):
@@ -159,13 +162,30 @@ def test_verify_offline_target_impacted_flags_and_cleanup(tmp_path, monkeypatch,
     assert snap_full_fail.exists()
 
 
-def test_guard_rejects_network_before_connection(monkeypatch):
+def test_guard_rejects_network_before_connection(tmp_path, monkeypatch):
+    import os
     import socket
+    import sys
     # Register restoration before executing the standalone pytest plugin source.
-    for name in ("connect", "connect_ex"):
+    for name in ("connect", "connect_ex", "sendto"):
         monkeypatch.setattr(socket.socket, name, getattr(socket.socket, name))
     for name in ("create_connection", "getaddrinfo"):
         monkeypatch.setattr(socket, name, getattr(socket, name))
     exec(GUARD, {})
     with pytest.raises(RuntimeError, match="Network disabled"):
         socket.create_connection(("example.invalid", 443))
+
+    # Child Python subprocesses also inherit the guard via sitecustomize.py on PYTHONPATH.
+    guard_dir = tmp_path / "guard"
+    guard_dir.mkdir()
+    (guard_dir / "sitecustomize.py").write_text(GUARD, encoding="utf-8")
+    child_env = isolated_environment(dict(os.environ), tmp_dir=tmp_path)
+    child_env["PYTHONPATH"] = str(guard_dir)
+    res = subprocess.run(
+        [sys.executable, "-c", "import socket; socket.create_connection(('example.invalid', 443))"],
+        capture_output=True,
+        text=True,
+        env=child_env,
+    )
+    assert res.returncode != 0
+    assert "Network disabled by verify_offline.py" in (res.stderr or "")

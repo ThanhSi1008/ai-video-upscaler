@@ -656,9 +656,11 @@ def test_t4_scenario_1_native_2x_zero_disk_pipeline(tmp_path: Path):
     Verifies zero intermediate PNG files on disk, in-memory repeat expansion,
     and batch 0 Sanity Guard validation.
     """
-    # 1. Simulate 24 input frames (1 second @ 24fps)
+    # 1. Simulate 24 input frames (1 second @ 24fps) at compact 160x90 -> 320x180 2x geometry
+    in_h, in_w = 90, 160
+    out_h, out_w = in_h * 2, in_w * 2
     np.random.seed(123)
-    frame_base = np.random.randint(60, 200, (1080, 1920, 3), dtype=np.uint8)
+    frame_base = np.random.randint(60, 200, (in_h, in_w, 3), dtype=np.uint8)
     frames = [frame_base.copy() for _ in range(24)]
 
     # 2. Simulate Dedup engine: 8 distinct unique frames, repeated 3x each = 24 frames
@@ -674,7 +676,7 @@ def test_t4_scenario_1_native_2x_zero_disk_pipeline(tmp_path: Path):
         model_or_engine=model_2x,
         batch_size=8,
         device=torch.device("cpu"),
-        input_hw=(1080, 1920),
+        input_hw=(in_h, in_w),
         scale=2,
     )
 
@@ -706,8 +708,7 @@ def test_t4_scenario_1_native_2x_zero_disk_pipeline(tmp_path: Path):
     )
 
     assert written_count == 24
-    # Expected p010le frame byte size for 3840x2160: 3840 * (2160 * 3 // 2) * 2 bytes = 24,883,200 bytes
-    expected_frame_bytes = 3840 * (2160 * 3 // 2) * 2
+    expected_frame_bytes = out_w * (out_h * 3 // 2) * 2
     assert bytes_written == expected_frame_bytes * 24
 
     # Verify zero disk PNG files were created

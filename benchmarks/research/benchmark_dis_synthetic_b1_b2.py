@@ -29,10 +29,11 @@ import json
 import time
 import subprocess
 import tempfile
+from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.dedup import scan_dedup_plan, DEFAULT_DEDUP_HI, DEFAULT_DEDUP_LO, DEFAULT_DEDUP_FRAC
 
 DIS_PRESET = cv2.DISOPTICAL_FLOW_PRESET_FAST

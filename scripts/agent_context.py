@@ -39,6 +39,7 @@ MAX_RULE_LINES = 60
 COMBINED_BUDGET = 32 * 1024
 LINK_RE = re.compile(r"!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+[^)]+)?\)")
 BASELINE_RE = re.compile(r"Commit Baseline:\*{0,2}\s*`([0-9a-fA-F]{7,40})`")
+HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 DOC_ECHO_RE = re.compile(r"^(?:Module:\s*)?[\w./\\-]+(?:\.py)?\s*$")
 SAFE_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
 BLOCKED_RELATIVE_PATHS = frozenset({"benchmarks/upscale/ab_test/key_answer.json"})
@@ -312,7 +313,34 @@ def check_freshness(root: Path, head_short: str | None = None) -> str | None:
     head = (head_short or git_output(root, "rev-parse", "--short", "HEAD") or "").lower()
     if not head or head.startswith(baseline) or baseline.startswith(head):
         return None
-    changed_raw = git_output(root, "diff", "--name-only", f"{baseline}..HEAD", "--", *RUNTIME_PATHS)
+    effective_ref = baseline
+    state_dirty = git_output(root, "status", "--porcelain", "--", "docs/agents/STATE.md")
+    if state_dirty == "":
+        log_info = git_output(root, "log", "-1", "--format=%H %P", "--", "docs/agents/STATE.md")
+        tokens = log_info.split() if log_info else []
+        if tokens and all(HEX_SHA_RE.fullmatch(t) for t in tokens):
+            state_sha = tokens[0].lower()
+            parents = [p.lower() for p in tokens[1:]]
+            is_parent_or_same = (
+                state_sha.startswith(baseline)
+                or baseline.startswith(state_sha)
+                or any(p.startswith(baseline) or baseline.startswith(p) for p in parents)
+            )
+            if not is_parent_or_same:
+                try:
+                    anc = subprocess.run(
+                        ["git", "--no-optional-locks", "merge-base", "--is-ancestor", baseline, state_sha],
+                        cwd=root,
+                        capture_output=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    is_parent_or_same = anc.returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    is_parent_or_same = False
+            if is_parent_or_same:
+                effective_ref = state_sha
+    changed_raw = git_output(root, "diff", "--name-only", f"{effective_ref}..HEAD", "--", *RUNTIME_PATHS)
     if changed_raw is None:
         return f"STATE.md baseline `{baseline}` differs from HEAD `{head}` (commit range unavailable)."
     changed = [line for line in changed_raw.splitlines() if line.strip()]

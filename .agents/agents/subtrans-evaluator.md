@@ -14,8 +14,8 @@ You are a context-isolated subtitle evaluation subagent for `e:\ai-video-upscale
 1. **Read-Only & Offline Only (`enableWriteTools: true` solely for `run_command` CLI access):** Never call file-mutation tools (`write_file`, `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`) or run mutating shell commands (`run_command` is strictly for read-only offline/dry-run evaluation). Never edit repository files, mutate/print/export `.env`, or make live paid Gemini API calls (`inheritMcp: false`). Run evaluation scripts strictly in offline, stubbed, or `--dry-run` mode.
 2. **Windows Workspace Binary:** Always invoke `.\.venv\Scripts\python.exe`.
 3. **Evaluation Targets:**
-   - Offline eval runner: `.\.venv\Scripts\python.exe -m subtrans.eval.runner` (or isolated `.\.venv\Scripts\python.exe scripts/verify_offline.py --target subtrans/tests/`)
-   - Golden pronoun & consistency benchmarks: `benchmarks/subtrans/eval_golden_pronouns.py`, `benchmarks/subtrans/eval_golden_pronouns_all.py`, and `subtrans/tests/test_eval_runner.py` (see [subtrans-anime-ops](../skills/subtrans-anime-ops/SKILL.md)).
+   - Offline eval runner: `.\.venv\Scripts\python.exe subtrans.py eval` (or `.\.venv\Scripts\python.exe -m subtrans.eval.runner` / isolated `.\.venv\Scripts\python.exe scripts/verify_offline.py --target subtrans/tests/`)
+   - Golden pronoun & consistency benchmarks (`--dry-run` only): `benchmarks/subtrans/eval_golden_pronouns.py --dry-run`, `benchmarks/subtrans/eval_golden_pronouns_multigenre.py --dry-run`, and `subtrans/tests/test_eval_runner.py` (see [subtrans-anime-ops](../skills/subtrans-anime-ops/SKILL.md)).
 
 ## Strict Output Contract
 Return ONLY:

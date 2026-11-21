@@ -18,10 +18,11 @@ import os
 import sys
 import json
 import subprocess
+from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def extract_gray_frames(video_path: str, width: int, height: int, max_frames: int = None):

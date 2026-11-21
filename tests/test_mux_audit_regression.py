@@ -38,9 +38,9 @@ def test_mux_audit_catches_bugged_audio():
         # 1. Tạo file nguồn 60 giây có video testsrc và audio sine wave 440Hz
         cmd_src = [
             "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "testsrc=duration=60:size=640x360:rate=24",
+            "-f", "lavfi", "-i", "testsrc=duration=60:size=160x90:rate=8",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=60",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             src_mkv
         ]
@@ -99,13 +99,13 @@ def test_mux_audit_catches_bugged_audio_track_2():
         # 1. Tạo file nguồn 60 giây có video và 2 track audio (440Hz và 880Hz)
         cmd_src = [
             "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "testsrc=duration=60:size=640x360:rate=24",
+            "-f", "lavfi", "-i", "testsrc=duration=60:size=160x90:rate=8",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=60",
             "-f", "lavfi", "-i", "sine=frequency=880:duration=60",
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-map", "2:a:0",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             src_mkv
         ]
