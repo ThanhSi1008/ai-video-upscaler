@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-web_gui.py - Khởi chạy giao diện Web Studio thời gian thực cho AI Video Upscaler & Subtrans.
-
-Cách dùng:
-  python web_gui.py                      # Chạy trên http://127.0.0.1:8765 và tự mở trình duyệt
-  python web_gui.py --no-browser         # Chạy máy chủ không tự mở tab trình duyệt
-  python web_gui.py --lan --port 8765    # Cho phép xem từ điện thoại/máy tính bảng cùng mạng LAN
-"""
+"""CLI entrypoint launching the Local Real-Time Web Studio FastAPI server."""
 
 from __future__ import annotations
 

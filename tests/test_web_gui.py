@@ -651,11 +651,51 @@ def test_models_shows_yaml_validation_subtrans_keys_and_audits(studio_env):
     assert r_match.json()["model_id"] == "animevideov3"
     assert r_match.json()["dedup_policy"] == "sakuga"
 
-    # Reject invalid model ID or invalid dedup_policy on save
+    # Dynamic dis-<thr> and drift-<thr> dedup policies are accepted everywhere
+    dynamic_yaml = """shows:
+  - pattern: "*Frieren*"
+    model: animevideov3
+    dedup_policy: dis-0.25
+  - pattern: "*Sakamoto*"
+    model: animejanai-hd-v3-ultracompact
+    dedup_policy: drift-0.6
+"""
+    r_dyn_match = client.post(
+        "/api/config/test-match",
+        json={"sample_path": "Frieren_Ep01.mkv", "yaml_content": dynamic_yaml},
+    )
+    assert r_dyn_match.status_code == 200
+    assert r_dyn_match.json()["dedup_policy"] == "dis-0.25"
+
+    r_dyn_save = client.put("/api/config/shows", json={"yaml_content": dynamic_yaml})
+    assert r_dyn_save.status_code == 200
+    assert r_dyn_save.json()["rules_count"] == 2
+
+    from web.fs_browser import SafeLocalFSBrowser
+    browser = SafeLocalFSBrowser(root)
+    routed_drift = browser.resolve_routing_for_path("Sakamoto_Ep02.mkv")
+    assert routed_drift["model_id"] == "animejanai-hd-v3-ultracompact"
+    assert routed_drift["dedup_policy"] == "drift-0.6"
+
+    # Reject invalid model ID or invalid dedup_policy on save (including non-positive / non-finite thresholds)
     assert (
         client.put(
             "/api/config/shows",
             json={"yaml_content": "shows:\n  - pattern: '*A*'\n    model: unknown_model\n"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/api/config/shows",
+            json={"yaml_content": "shows:\n  - pattern: '*A*'\n    dedup_policy: dis-0\n"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/api/config/shows",
+            json={"yaml_content": "shows:\n  - pattern: '*A*'\n    dedup_policy: drift-nan\n"},
         ).status_code
         == 400
     )
@@ -2328,6 +2368,12 @@ def test_web_gui_mock_mode_routes_and_sse(tmp_path):
         assert status_data["pipeline"]["effective_stage"] == "upscaling"
         assert status_data["pipeline"]["mock_mode"] is True
         assert status_data["pipeline"]["live"]["steady_fps"] > 0
+        live_mock = status_data["pipeline"]["live"]
+        completed_mock = live_mock["completed_chunks"]
+        assert len(live_mock["chunks"]) == completed_mock
+        assert [c["chunk_idx"] for c in live_mock["chunks"]] == list(range(completed_mock))
+        assert live_mock["active_chunk"] == completed_mock
+        assert live_mock["resumed_chunks"] == [0, 1]
         assert status_data["pipeline"]["job"]["active_job"]["job_type"] == "upscale"
         history_types = {h["job_type"] for h in status_data["pipeline"]["job"]["history"]}
         assert {"upscale", "subtrans"}.issubset(history_types)

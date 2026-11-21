@@ -1,8 +1,4 @@
-"""
-Module: src/cleanup.py
-Chức năng: Quản lý tự động dọn dẹp các artifact tạm thời sau khi hoàn tất upscale,
-giải phóng dung lượng SSD và sắp xếp thư mục xuất xưởng ngăn nắp, tinh tươm.
-"""
+"""Temporary checkpoint cleanup and final output artifact organization helpers."""
 
 import os
 import shutil

@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/glossary.py
-Loader and merger for Schema v2 anime translation glossaries.
-Supports style_rules, address_rules, terms filtering, and per-series overriding.
-"""
+"""Schema v2 anime glossary loader, pointer resolver, and per-series merger."""
 
 from pathlib import Path
 from typing import Optional, List, Dict, Any

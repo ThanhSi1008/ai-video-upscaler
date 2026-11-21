@@ -4,7 +4,7 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "python hooks/session_start.py",
+        "command": "if exist ..\\..\\..\\.venv\\Scripts\\python.exe (..\\..\\..\\.venv\\Scripts\\python.exe hooks\\session_start.py) else if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe .agents\\plugins\\upscaler-guard\\hooks\\session_start.py) else if exist ..\\..\\..\\.venv\\bin\\python (..\\..\\..\\.venv\\bin\\python hooks\\session_start.py) else if exist .venv\\bin\\python (.venv\\bin\\python .agents\\plugins\\upscaler-guard\\hooks\\session_start.py) else if exist hooks\\session_start.py (python hooks\\session_start.py) else (python .agents\\plugins\\upscaler-guard\\hooks\\session_start.py)",
         "timeout": 5
       }
     ]
@@ -13,11 +13,11 @@
     "enabled": true,
     "PreToolUse": [
       {
-        "matcher": "run_command|read_file|write_file|edit_file|view_file",
+        "matcher": "run_command|read_file|write_file|edit_file|view_file|write_to_file|replace_file_content|multi_replace_file_content",
         "hooks": [
           {
             "type": "command",
-            "command": "python hooks/pre_tool_guard.py",
+            "command": "if exist ..\\..\\..\\.venv\\Scripts\\python.exe (..\\..\\..\\.venv\\Scripts\\python.exe hooks\\pre_tool_guard.py) else if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe .agents\\plugins\\upscaler-guard\\hooks\\pre_tool_guard.py) else if exist ..\\..\\..\\.venv\\bin\\python (..\\..\\..\\.venv\\bin\\python hooks\\pre_tool_guard.py) else if exist .venv\\bin\\python (.venv\\bin\\python .agents\\plugins\\upscaler-guard\\hooks\\pre_tool_guard.py) else if exist hooks\\pre_tool_guard.py (python hooks\\pre_tool_guard.py) else (python .agents\\plugins\\upscaler-guard\\hooks\\pre_tool_guard.py)",
             "timeout": 5
           }
         ]
@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python hooks/post_tool_lint.py",
-            "timeout": 2
+            "command": "if exist ..\\..\\..\\.venv\\Scripts\\python.exe (..\\..\\..\\.venv\\Scripts\\python.exe hooks\\post_tool_lint.py) else if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe .agents\\plugins\\upscaler-guard\\hooks\\post_tool_lint.py) else if exist ..\\..\\..\\.venv\\bin\\python (..\\..\\..\\.venv\\bin\\python hooks\\post_tool_lint.py) else if exist .venv\\bin\\python (.venv\\bin\\python .agents\\plugins\\upscaler-guard\\hooks\\post_tool_lint.py) else if exist hooks\\post_tool_lint.py (python hooks\\post_tool_lint.py) else (python .agents\\plugins\\upscaler-guard\\hooks\\post_tool_lint.py)",
+            "timeout": 3
           }
         ]
       }
@@ -44,8 +44,8 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python hooks/stop_audit.py",
-        "timeout": 2
+        "command": "if exist ..\\..\\..\\.venv\\Scripts\\python.exe (..\\..\\..\\.venv\\Scripts\\python.exe hooks\\stop_audit.py) else if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe .agents\\plugins\\upscaler-guard\\hooks\\stop_audit.py) else if exist ..\\..\\..\\.venv\\bin\\python (..\\..\\..\\.venv\\bin\\python hooks\\stop_audit.py) else if exist .venv\\bin\\python (.venv\\bin\\python .agents\\plugins\\upscaler-guard\\hooks\\stop_audit.py) else if exist hooks\\stop_audit.py (python hooks\\stop_audit.py) else (python .agents\\plugins\\upscaler-guard\\hooks\\stop_audit.py)",
+        "timeout": 3
       }
     ]
   }

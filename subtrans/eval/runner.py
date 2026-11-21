@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/eval/runner.py
-Evaluation Harness Runner:
-Evaluates subtitle outputs against regression_suite.yaml and pronoun_suite.yaml,
-computing deterministic metrics and rendering a clean terminal report table.
-"""
+"""Offline subtitle evaluation suite runner against regression and pronoun fixtures."""
 
 from pathlib import Path
 import tempfile

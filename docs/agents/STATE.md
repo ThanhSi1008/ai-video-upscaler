@@ -2,19 +2,19 @@
 
 > **Updated:** 2026-11-21
 >
-> **Commit Baseline:** `b996a09` (`feat(agent): add Antigravity scoped rules, isolated subagents, lifecycle hooks, smoke pipeline, and web mock mode`)
+> **Commit Baseline:** `80207bf` (`feat: enforce zero-copy p010le/dtw hotpath optimizations, web studio mock parity & harness guards`)
 >
 > **Related:** [GEMINI](../../GEMINI.md) | [PROJECT_MAP](PROJECT_MAP.md) | [DECISIONS](DECISIONS.md) | [VALIDATION](VALIDATION.md)
 
 ## 1. Current Baseline Summary
 
-- **Offline Verification Baseline (`2026-11-21`):** **100% PASS** (`810 passed, 14 skipped, 0 failed/errors` out of `824` executed tests, `264.94s`, `Source files: 284`; `ruff check .` = `0` errors; `smoke_test_pipeline.py` = `PASS` in `0.40s`; `agent_context.py --check` = `PASS`; `git diff --check` = `0` errors) via `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-_9tdf66l`).
-- **Pass-2 Antigravity-Native Architecture & Fast Verification (2026-11-21):**
-  - Exported local `requirements.lock` (`pip freeze`, ignored in Git/Antigravity) and tagged `pass1-clean-95621e7`; trimmed root `GEMINI.md` to 27 lines / 3,451 bytes (`<= 45 lines / 4,500 bytes`).
-  - Added flat glob-scoped rules in `.agents/rules/` (`video-gpu.md`, `subtrans.md`, `web-ui.md`) and context-isolated read-only custom subagents in `.agents/agents/` (`test-verifier.md`, `subtrans-evaluator.md` with `inheritMcp: false`, `enableWriteTools: false`); enforced rule/subagent validation in `scripts/agent_context.py`.
-  - Upgraded `upscaler-guard`: hardened `pre_tool_guard.py` (`pip`/`uv`/`conda`, `build_trt_engine.py`, unflagged `upscale.py`, live Gemini APIs), added `post_tool_lint.py` (`PostToolUse` <1.5s Ruff fix), and added `stop_audit.py` (`Stop` <2s git/Ruff/memory check).
-  - Added `scripts/smoke_test_pipeline.py` (<5s CPU-safe 24f 10-bit dedup/mux/audit pipeline) + `@pytest.mark.smoke`, `web_gui.py --mock` (`create_app(..., mock_mode=True)` + SSE/job mocks), and `pytest.ini` strict markers (`web`, `smoke`, `addopts`).
-- **Pass-1 Cleanup Baseline (`e117af6`):** Consolidated root `GEMINI.md`, removed `CLAUDE.md`/`AGENTS.md`/`subtrans/AGENTS.md`/`START_HERE.md`, migrated Subtrans rules to `subtrans-anime-ops`, compacted `upscaler-mcp`, pruned `modern-web-guidance` (209 -> 39 guides), archived legacy tasks/reports (`docs/archive/`), converted glossary symlinks to text pointers, and organized tests (`tests/`, `tests/e2e/`, `subtrans/tests/`).
+- **Offline Verification Baseline (`2026-11-21`):** **100% PASS** (`828 passed, 14 skipped, 0 failed/errors` out of `842` collected tests, `269.79s`, `Source files: 294`; `ruff check .` = `0` errors; `smoke_test_pipeline.py` = `PASS` in `0.89s`; `subtrans.eval.runner` = `6/6` regression + `22/22` pronoun PASS in `0.52s`; `agent_context.py --check` = `PASS`; `git diff --check` = `0` errors) via `scripts/verify_offline.py` (`E:\ai-video-upscaler\scratch\agent-validation-npz3v5l_`).
+- **Unified Stabilization, Context Tooling & Harness Upgrade (`2026-11-21`):**
+  - **Tiered AST Context & Bundling (`scripts/`):** Upgraded `agent_context.py` with `_first_meaningful_doc_line`, `BaseModel`/`@dataclass` fields, depth-2 nested AST & JS/CSS discovery, batched `--symbols`/`--pack`, bounded `--slice`, 2-hop + 8 `CROSS_BOUNDARY_CONTRACTS` `--impact`, and independent `pre-commit` + `post-commit` hooks; added `scripts/export_review_bundle.py --sync-latest` writing 5 prefix-cache-ordered bundles atomically in `scratch/review_bundles/`; added `--target` & `--impacted` to `scripts/verify_offline.py`.
+  - **Guardrails & MCP (`upscaler-guard`, `upscaler-mcp`, `repo-scout`):** Allowed local `.env` reads (`write/edit` = `force_ask`, `git add/commit` = `deny`), enforced Context/Rewrite Firewall (`scratch/review_bundles/` read `deny`, `>250`L overwrite `deny`, bounded `<=280`L `view_file` & capped shell reads for `>350`L files), `.venv`-first Windows `cmd /c` hook dispatch, `.json`/`.yaml` fast lint, `out/.temp_*` + `STATE` freshness checks, workspace-relative `upscaler_mcp.py`, and `.agents/agents/repo-scout.md`.
+  - **Code Quality & Cleanup:** Unified `is_valid_dedup_policy` in `web/fs_browser.py` and fixed 0-based mock `chunks` in `web/app.py`; added `DoubleBufferedPipeUpscaler.release()` and removed dead `_compiled_fn`; consolidated `src/config.py` queue re-exports + re-entrant GPU lock; hardened `src/logger.py` thermal `SW_HIDE`/2s timeout + `latest.log` mirroring; added PID-aware GPU lock fallback in `src/subtitles.py`; extracted `subtrans/prompts.py` verbatim; factored DP forward pass in `subtrans/dtw_auto_align.py`; purged legacy `# -*- coding` / banners across 64 runtime `.py` + 6 `.js` files and cleaned docstrings/comments to English.
+  - **Boundary & Harness Tests:** Added `tests/test_architecture_boundaries.py` & `tests/test_export_review_bundle.py`; expanded `tests/test_{agent_context,agent_setup,verify_offline,web_gui,zero_disk_ring_buffers_and_cel}.py`.
+- **Pass-2 & Pass-1 Baselines (`b996a09`, `e117af6`):** Exported `requirements.lock`, pruned `GEMINI.md` (27L) and `modern-web-guidance` (209 -> 39 guides), added glob rules, `scripts/smoke_test_pipeline.py`, `web_gui.py --mock`, and archived legacy docs (`docs/archive/`).
 - **Hardware Calibration & 3-Regime Silicon Baseline (`Fate/Apocrypha Ep 22`, RTX 3060 12GB `GA106`):**
   - Silicon ceilings: `cublasGemmEx(16F)` = `38.84 TFLOPS`, GDDR6 STREAM Triad = `302.61 GB/s`, Triton input norm = `0.513 ms/batch` (`290.88 GB/s`), 7th-Gen NVENC 4K Main10 `-multipass fullres` = `22.70 fps` (`44.05 ms/frame`).
   - Canonical regimes: `animevideov3` (`10.13 fps` E2E / `11.00 fps` TRT, 170W TGP bound) | `animejanai-hd-v3-sharp1-ultracompact` (`18.52 fps` E2E / `22.83 fps` TRT) | `animejanai-hd-v3-sharp1-superultracompact` (`20.80 fps` E2E / `44.91 fps` TRT, NVENC-bound).
@@ -23,14 +23,14 @@
 
 | Subsystem | Key Modules | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| **E-Drive 100% Isolation** | `src/env_isolation.py`, `.venv/`, `*.bat`, `scripts/verify_offline.py` | PASS | Isolates Python 3.11.9, FFmpeg, Ruff, `TEMP`, and all AI/compiler caches onto `E:` |
-| **Real-Time Web Studio** | `web_gui.py`, `web/`, `tests/test_web_gui.py` | PASS | FastAPI + SSE 1Hz, `--mock` deterministic simulator, `--lan` read-only default + `--lan-control`, strict CSP `sha256`, 0 `innerHTML`, 1080p vs 4K compare |
+| **E-Drive 100% Isolation** | `src/env_isolation.py`, `.venv/`, `*.bat`, `scripts/verify_offline.py` | PASS | Isolates Python 3.11.9, FFmpeg, Ruff, `TEMP`, and compiler caches on `E:`; `--target` / `--impacted` fast snapshotting |
+| **Real-Time Web Studio** | `web_gui.py`, `web/`, `tests/test_web_gui.py` | PASS | FastAPI + SSE 1Hz, `--mock` 0-based chunks simulator, `--lan` RO + `--lan-control`, strict CSP `sha256`, 0 VRAM imports |
 | **PyAV & 1-Pass Concat-Mux** | `src/ffmpeg_ops.py`, `src/mux_audit.py` | PASS | PyAV 18.1.0 probing, `-max_interleave_delta 0`, parallel `-f streamhash` MD5 audit |
-| **Triton Kernels & Zero-Disk TRT** | `src/trt_zero_copy_upscaler.py`, `src/build_trt_engine.py`, `src/pipeline.py` | PASS | `--zero-disk=True` default, pinned `NHWC`, `@triton.jit` norm & `p010le`, 2-slot VRAM rings, 3-stage overlap |
-| **Spandrel Native 2x & Whisper** | `src/cuda_engine.py`, `src/models_resolver.py`, `src/subtitles.py` | PASS | Spandrel `0.4.2`, SHA-256 weight verification, `faster-whisper` `large-v3-turbo` 5.1 FC + Silero VAD |
-| **Dedup, GOP-RLE & Queue** | `src/dedup.py`, `src/scheduler.py`, `shows.yaml` | PASS | 1-pass `mpdecimate+DIS`, Cyclic Cel (`A->B->A`), `<1ms` `raw_actions_rle`, Unique-FPS ETA |
-| **Subtrans V2.5 Engine** | `subtrans/*.py`, `glossaries/*.yaml` | PASS | Gemini 3-key rotation, >4K context cache, MeCab `fugashi`, Linter V2, Flash Cascade, FTS5 2/3-gram RAG, DTW align |
-| **Agent Tooling & Guards** | `scripts/agent_context.py`, `scripts/smoke_test_pipeline.py`, `.agents/` | PASS | Compact `GEMINI.md` (27L), glob rules, `test-verifier`/`subtrans-evaluator` (`inheritMcp: false`), `PreToolUse`/`PostToolUse`/`Stop` hooks, <1s smoke pipeline |
+| **Triton Kernels & Zero-Disk TRT** | `src/trt_zero_copy_upscaler.py`, `src/cuda_engine.py`, `src/pipeline.py` | PASS | `--zero-disk=True` default, pinned `NHWC`, `@triton.jit` norm & `p010le`, 2-slot VRAM rings + `.release()`, 3-stage overlap |
+| **Spandrel Native 2x & Whisper** | `src/cuda_engine.py`, `src/models_resolver.py`, `src/subtitles.py` | PASS | Spandrel `0.4.2`, SHA-256 weight verification, PID-aware GPU lock + CPU int8 fallback `faster-whisper` `large-v3-turbo` |
+| **Dedup, GOP-RLE & Queue** | `src/dedup.py`, `src/scheduler.py`, `src/config.py`, `src/logger.py` | PASS | 1-pass `mpdecimate+DIS`, Cyclic Cel, `<1ms` `raw_actions_rle`, re-entrant GPU lock, `SW_HIDE` thermal query |
+| **Subtrans V2.5 Engine** | `subtrans/*.py`, `subtrans/prompts.py`, `glossaries/*.yaml` | PASS | Verbatim prompt module, 3-key rotation, >4K context cache, MeCab `fugashi`, Linter V2, Flash Cascade, RAG, shared DTW DP |
+| **Agent Tooling & Guards** | `scripts/{agent_context,export_review_bundle}.py`, `.agents/`, `tests/test_architecture_boundaries.py` | PASS | Compact `GEMINI.md` (27L), glob rules, 3 subagents (`inheritMcp: false`), Context/Rewrite Firewall hooks, atomic review bundles |
 
 ## 3. Operational Caveats
 - **Daytime Gemini Quota Guard:** Never invoke live Gemini API calls (including `subtrans.py check`/`models`) from `14:00` until overnight runs; use `--dry-run` or stubs.

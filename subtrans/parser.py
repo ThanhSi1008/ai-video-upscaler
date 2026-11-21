@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/parser.py
-Stage 1: Parse, clean, and align Japanese and English subtitles.
-"""
+"""ASS/SRT subtitle parser, CC multi-speaker splitter, and Whisper hallucination filter."""
 
 import re
 import copy

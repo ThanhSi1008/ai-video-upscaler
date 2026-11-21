@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/ai_engine.py
-Điều phối việc suy luận AI Super-Resolution bằng realesrgan-ncnn-vulkan trên GPU (Vulkan).
-Đo lường chính xác thời gian suy luận và tốc độ FPS thực tế cho từng phân đoạn.
-"""
+"""Vulkan realesrgan-ncnn-vulkan fallback runner for non-CUDA video upscaling."""
 
 import os
 import time

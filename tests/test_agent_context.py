@@ -249,7 +249,24 @@ def test_worktree_uses_common_git_hooks_directory(tmp_path):
     subprocess.run(["git", "-C", str(main), "worktree", "add", "--detach", "-q", str(worktree)], check=True)
     assert (worktree / ".git").is_file()
     assert agent_context.install_git_hooks(worktree)
+    # Worktree must install both pre-commit and post-commit into common hooks directory
     assert (main / ".git/hooks/pre-commit").read_bytes() == agent_context.MANAGED_HOOK.encode("utf-8")
+    assert (main / ".git/hooks/post-commit").read_bytes() == agent_context.MANAGED_POST_COMMIT_HOOK.encode("utf-8")
+
+
+def test_install_git_hooks_installs_post_commit_even_when_pre_commit_exists(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    hooks_dir = tmp_path / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    pre_hook = hooks_dir / "pre-commit"
+    pre_hook.write_bytes(agent_context.MANAGED_HOOK.encode("utf-8"))
+
+    assert agent_context.install_git_hooks(tmp_path) is True
+    post_hook = hooks_dir / "post-commit"
+    assert post_hook.is_file()
+    post_text = post_hook.read_text(encoding="utf-8")
+    assert "export_review_bundle.py --sync-latest" in post_text
+    assert "|| true" in post_text
 
 
 def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_path, monkeypatch):
@@ -275,6 +292,7 @@ def test_freshness_warns_only_when_runtime_code_drifts_past_state_baseline(tmp_p
 
 
 def test_rules_and_subagents_validation_enforces_frontmatter_and_flatness(tmp_path):
+    assert "repo-scout.md" in agent_context.EXPECTED_SUBAGENTS
     make_memory(tmp_path)
     assert agent_context.check_memory(tmp_path) == []
 
@@ -298,4 +316,120 @@ def test_rules_and_subagents_validation_enforces_frontmatter_and_flatness(tmp_pa
     bad_agent.write_text("---\nname: test-verifier\ndescription: x\nsubagent: true\ninheritMcp: true\n---\n", encoding="utf-8")
     errors_agent = agent_context.check_memory(tmp_path)
     assert any("inheritMcp: false" in e for e in errors_agent)
+
+
+def test_first_meaningful_doc_line_model_fields_nested_ast_and_frontend_discovery(tmp_path, capsys):
+    assert agent_context._first_meaningful_doc_line("\n\nsrc/pipeline.py\nReal pipeline summary.\n") == "Real pipeline summary."
+    assert agent_context._first_meaningful_doc_line("Module: web/app.py\nServe dashboard routes.") == "Serve dashboard routes."
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/models_demo.py").write_text(
+        '"""\n\nsrc/models_demo.py\nSchema and nested workers.\n"""\n'
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class JobCfg:\n"
+        "    model: str = 'animevideov3'\n"
+        "    scale: int = 2\n\n"
+        "def helper_fn() -> int:\n"
+        "    return 1\n\n"
+        "def create_app():\n"
+        "    if True:\n"
+        "        @route('/api/status')\n"
+        "        def nested_endpoint(x: int) -> dict:\n"
+        "            a = helper_fn()\n"
+        "            b = a + x\n"
+        "            return {'ok': b}\n"
+        "    return nested_endpoint\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "web/static/js").mkdir(parents=True)
+    (tmp_path / "web/static/js/ui.js").write_text(
+        "export async function initQueuePanel({\n  root,\n  statusUrl = '/api/status',\n} = {}) {\n  return root;\n}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "web/static/styles.css").write_text(
+        "/* === QUEUE PANEL === */\n@media (min-width: 860px) {\n  .grid { display: grid; }\n}\n",
+        encoding="utf-8",
+    )
+
+    assert agent_context.main(
+        ["--root", str(tmp_path), "--symbols", "src/models_demo.py", "web/static/js/ui.js", "web/static/styles.css"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "Schema and nested workers." in out
+    assert "model: str = 'animevideov3'" in out
+    assert "nested_endpoint" in out
+    assert "@route('/api/status')" in out
+    assert "export async function initQueuePanel" in out
+    assert "/* QUEUE PANEL */" in out
+    assert "@media (min-width: 860px)" in out
+
+
+def test_slice_pack_and_two_hop_cross_boundary_impact(tmp_path, capsys):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "web/static/js").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "benchmarks/upscale/ab_test").mkdir(parents=True)
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (tmp_path / "benchmarks/upscale/ab_test/KEY_ANSWER.json").write_text('{"k": 1}\n', encoding="utf-8")
+
+    (tmp_path / "src/mod_a.py").write_text(
+        "def leaf_helper() -> str:\n    return 'ok'\n", encoding="utf-8"
+    )
+    (tmp_path / "src/mod_b.py").write_text(
+        "from src.mod_a import leaf_helper\n\n"
+        "def _local_helper() -> str:\n    return 'h'\n\n"
+        "def outer_api() -> str:\n"
+        "    def inner_worker() -> str:\n"
+        "        a = _local_helper()\n"
+        "        b = leaf_helper()\n"
+        "        return a + b\n"
+        "    return inner_worker()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/mod_c.py").write_text("from src.mod_b import outer_api\n", encoding="utf-8")
+    (tmp_path / "tests/test_chain.py").write_text("import src.mod_b\n", encoding="utf-8")
+    (tmp_path / "src/logger.py").write_text("def log_event(): pass\n", encoding="utf-8")
+    (tmp_path / "web/sse_hub.py").write_text("def emit(): pass\n", encoding="utf-8")
+    (tmp_path / "tests/test_web_gui.py").write_text("def test_gui(): pass\n", encoding="utf-8")
+    (tmp_path / "web/static/js/panels.js").write_text(
+        "export function initPanels(cfg) {\n  return cfg;\n}\n", encoding="utf-8"
+    )
+
+    # Bounded slice on Python nested fn & JS fn; reject KEY_ANSWER.json & .env
+    assert agent_context.main(["--root", str(tmp_path), "--slice", "src/mod_b.py", "inner_worker"]) == 0
+    slice_out = capsys.readouterr().out
+    assert "# src/mod_b.py [L7-L10]" in slice_out
+    assert "return a + b" in slice_out
+    assert agent_context.main(["--root", str(tmp_path), "--slice", "web/static/js/panels.js", "initPanels"]) == 0
+    assert "initPanels" in capsys.readouterr().out
+    assert agent_context.main(["--root", str(tmp_path), "--slice", "benchmarks/upscale/ab_test/KEY_ANSWER.json", "L1-L2"]) == 1
+    assert agent_context.main(["--root", str(tmp_path), "--slice", ".env", "L1-L2"]) == 1
+    capsys.readouterr()
+
+    # 2-hop impact: mod_a -> mod_b (hop 1) -> mod_c & tests/test_chain.py (hop 2)
+    ops_a, tests_a = agent_context.compute_impact(tmp_path, ["src/mod_a.py"])
+    assert "src/mod_b.py" in ops_a and "src/mod_c.py" in ops_a
+    assert "tests/test_chain.py" in tests_a
+
+    # Cross-boundary contract lookup (all 8 contracts defined + bidirectional test on logger -> web/sse_hub)
+    assert len(agent_context.CROSS_BOUNDARY_CONTRACTS) == 8
+    ops_log, tests_log = agent_context.compute_impact(tmp_path, ["src/logger.py"])
+    assert "web/sse_hub.py" in ops_log
+    assert "tests/test_web_gui.py" in tests_log
+
+    # Batched --pack across Python nested fn + JS fn; rejects > 4 targets
+    assert agent_context.main(
+        ["--root", str(tmp_path), "--pack", "src/mod_b.py:outer_api", "web/static/js/panels.js:initPanels"]
+    ) == 0
+    pack_out = capsys.readouterr().out
+    assert "# Same-file helpers referenced:" in pack_out
+    assert "_local_helper" in pack_out
+    assert "# Impact operational" in pack_out
+    assert "# Impact tests" in pack_out
+    assert "tests/test_chain.py" in pack_out
+    assert agent_context.main(
+        ["--root", str(tmp_path), "--pack", "a", "b", "c", "d", "e"]
+    ) == 1
+
 

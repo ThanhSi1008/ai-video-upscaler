@@ -1,14 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/writer.py
-Stage 4: Subtitle generation adhering strictly to ADDENDUM 6 specifications:
-- Exact format fidelity to ReZERO_S04E19_Vietsub_Chuan.srt
-- UTF-8 without BOM, LF (\n), 1-based indexing, HH:MM:SS,mmm --> HH:MM:SS,mmm
-- Exactly ONE line per cue by default (no hard wrapping; up to 107 chars accepted)
-- Wrap only when --wrap N is explicitly passed
-- Strip HTML/ASS tags, speaker dashes, music symbols, bracketed sound cues
-- Punctuation: '...' (three ASCII dots), '—' for interruptions, max two ! or ?
-"""
+"""Playback-optimized SRT/ASS subtitle writer with Dual Dialogue merging and smart-wrap."""
 
 import re
 import copy
@@ -247,9 +237,7 @@ def optimize_cues_for_playback(
             )
         )
 
-        # -------------------------------------------------------------
         # Ca A: Trùng lặp nội dung hoặc bao hàm nhau (Duplicate / Roll-up Fragments)
-        # -------------------------------------------------------------
         if is_same_content:
             chosen_text = clean_curr if len(clean_curr) >= len(clean_next) else clean_next
             curr.start = min(curr.start, next_cue.start)
@@ -259,9 +247,7 @@ def optimize_cues_for_playback(
             i += 2
             continue
 
-        # -------------------------------------------------------------
         # Ca B: Hai người nói cùng lúc hoặc gần như cùng lúc (Dual Dialogue)
-        # -------------------------------------------------------------
         if is_simultaneous and not is_same_content:
             line1 = f"- {clean_curr.lstrip('-—– ')}"
             line2 = f"- {clean_next.lstrip('-—– ')}"
@@ -280,9 +266,7 @@ def optimize_cues_for_playback(
             i += 2
             continue
 
-        # -------------------------------------------------------------
         # Ca C: Một câu bị tách làm 2 mảnh nói quá nhanh (Chained Rapid Fragments)
-        # -------------------------------------------------------------
         is_close_gap = (-150 <= gap <= 350)
         is_too_fast = (dur1 < 1200 or dur2 < 1200)
         total_len = len(clean_curr) + len(clean_next)

@@ -1,15 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-web/fs_browser.py
-Trình duyệt ổ đĩa & thư mục nội bộ an toàn cho Web Studio trên Windows:
-- Liệt kê các ổ đĩa hiện hữu (C:, D:, E:...) kèm dung lượng trống.
-- Duyệt thư mục, lọc file video/phụ đề, sắp xếp tự nhiên (Tập 2 trước Tập 10).
-- Tự động phân giải trước Model SR & Dedup Policy theo shows.yaml cho từng file/thư mục.
-- Tuyệt đối ẩn và chặn truy cập các file nhạy cảm (.env, .env.*, khóa bí mật).
-"""
+"""Safe local filesystem browser and show-routing resolver for Web Studio."""
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 import re
@@ -22,7 +15,7 @@ import yaml
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
 
-# Bản sao thuần stdlib của DEDUP_POLICY_PARAMS (tránh nạp src.config -> torch._C._cuda_init() trong tiến trình Web)
+# Pure-stdlib mirror of src.dedup.DEDUP_POLICY_PARAMS to avoid importing torch in the web process.
 _DEDUP_HI = 768
 _DEDUP_LO = 320
 _DEDUP_FRAC = 0.33
@@ -47,8 +40,26 @@ DEDUP_POLICY_PARAMS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def is_valid_dedup_policy(policy: str) -> bool:
+    """Validate static dedup policies and dynamic dis-<float>/drift-<float> variants."""
+    pol = str(policy or "").strip().lower()
+    if not pol:
+        return False
+    if pol in DEDUP_POLICY_PARAMS:
+        return True
+    for prefix in ("dis-", "drift-"):
+        if pol.startswith(prefix):
+            val_str = pol[len(prefix):]
+            try:
+                val = float(val_str)
+            except ValueError:
+                return False
+            return math.isfinite(val) and val > 0.0
+    return False
+
+
 def match_show_pattern(text: str, pattern: str) -> bool:
-    """Khớp mẫu tên file/thư mục anime từ shows.yaml không phân biệt hoa thường (an toàn với '[SubsPlease]')."""
+    """Case-insensitive glob matcher for shows.yaml patterns (safe with square brackets)."""
     if not text or not pattern:
         return False
     t_low = str(text).lower()
@@ -70,12 +81,12 @@ def match_show_pattern(text: str, pattern: str) -> bool:
 
 
 def natural_sort_key(name: str) -> List[Any]:
-    """Khóa sắp xếp tự nhiên theo số tập (Tập 2 đứng trước Tập 10)."""
+    """Return a numeric-aware sort key so episode numbers sort naturally."""
     return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", str(name))]
 
 
 def is_secret_filename(name: str) -> bool:
-    """Chặn tuyệt đối mọi file .env chứa khóa API (cho phép .env.example)."""
+    """Block access to secret .env files over HTTP/LAN while permitting templates."""
     low = name.strip().lower()
     if low in {".env.example", ".env.sample", ".env.template"}:
         return False
@@ -83,13 +94,13 @@ def is_secret_filename(name: str) -> bool:
 
 
 def is_upscaled_output_stem(stem: str) -> bool:
-    """Kiểm tra tên file đã là bản thành phẩm 4K để tránh đưa ngược vào hàng đợi nguồn."""
+    """Return True if filename stem already denotes a rendered 4K output."""
     low = stem.lower()
     return low.endswith("_4k") or low.endswith("_4k_animejanai")
 
 
 class SafeLocalFSBrowser:
-    """Bộ duyệt file cục bộ phục vụ chọn video và thư mục anime trên giao diện Web."""
+    """Sandboxed local directory browser and routing resolver for Web Studio."""
 
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = Path(workspace_root).resolve()
@@ -126,7 +137,7 @@ class SafeLocalFSBrowser:
         override_dedup: Optional[str] = None,
         routing_tables: Optional[tuple[Dict[str, Any], str, List[Dict[str, Any]]]] = None,
     ) -> Dict[str, str]:
-        """Phân giải model_id, model_name, dedup_policy và nguồn khớp cho một đường dẫn video."""
+        """Resolve model_id, model_name, dedup_policy, and matched rule metadata for a video path."""
         registry, default_id, shows_rules = (
             routing_tables if routing_tables is not None else self._load_routing_tables()
         )
@@ -159,8 +170,8 @@ class SafeLocalFSBrowser:
         matched_dedup_pattern = ""
         dedup_source = "Mặc định hệ thống (default)"
 
-        # Tách 2 vòng khớp độc lập để đồng bộ với src/models_resolver.py và src/dedup.py
-        # (một bộ anime có thể khai báo model và dedup_policy ở 2 rule riêng biệt trong shows.yaml).
+        # Match model and dedup_policy in two passes to mirror src/models_resolver.py + src/dedup.py
+        # (a show may declare model and dedup_policy on separate shows.yaml rules).
         for rule in shows_rules:
             if not isinstance(rule, dict):
                 continue
@@ -184,7 +195,7 @@ class SafeLocalFSBrowser:
                 continue
             if match_show_pattern(vid_name, pat) or match_show_pattern(parent_dir, pat):
                 pol_target = str(rule.get("dedup_policy", "")).strip().lower()
-                if pol_target and pol_target in DEDUP_POLICY_PARAMS:
+                if pol_target and is_valid_dedup_policy(pol_target):
                     rule_dedup = pol_target
                     dedup_source = f"shows.yaml ('{pat}')"
                     matched_dedup_pattern = pat
@@ -196,7 +207,7 @@ class SafeLocalFSBrowser:
             chosen_model = default_id
 
         norm_override_dedup = override_dedup.strip().lower() if override_dedup else ""
-        if norm_override_dedup and norm_override_dedup in DEDUP_POLICY_PARAMS:
+        if norm_override_dedup and is_valid_dedup_policy(norm_override_dedup):
             chosen_dedup = norm_override_dedup
             dedup_source = f"Chỉ định thủ công ({norm_override_dedup})"
         elif rule_dedup:
@@ -217,7 +228,7 @@ class SafeLocalFSBrowser:
         }
 
     def list_drives(self) -> List[Dict[str, Any]]:
-        """Liệt kê các ổ đĩa khả dụng trên Windows (hoặc gốc '/' trên POSIX)."""
+        """Enumerate available local drives with free/total GiB metadata."""
         drives: List[Dict[str, Any]] = []
         if sys.platform == "win32":
             for letter in string.ascii_uppercase:
@@ -255,7 +266,7 @@ class SafeLocalFSBrowser:
         return drives
 
     def browse(self, raw_path: Optional[str] = None, include_subtitles: bool = False) -> Dict[str, Any]:
-        """Duyệt nội dung thư mục hoặc danh sách ổ đĩa."""
+        """List directory contents or drive roots while blocking NUL bytes and secret files."""
         if not raw_path or raw_path.strip().lower() == "drives":
             return {
                 "current_path": "",
@@ -268,10 +279,7 @@ class SafeLocalFSBrowser:
         cleaned = raw_path.strip()
         if "\x00" in cleaned:
             raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
-        if "\x00" in cleaned:
-            raise ValueError("Đường dẫn không hợp lệ.")
 
-        # Hỗ trợ đường dẫn tương đối tính từ workspace_root
         cand = Path(os.path.expanduser(cleaned))
         if not cand.is_absolute():
             cand = (self.workspace_root / cand).resolve()
@@ -377,10 +385,7 @@ class SafeLocalFSBrowser:
         }
 
     def expand_inputs(self, raw_inputs: Sequence[str]) -> List[str]:
-        """
-        Mở rộng danh sách file/thư mục đầu vào theo thứ tự tập tự nhiên,
-        bỏ qua file ẩn và bản thành phẩm *_4K / *_4K_animejanai.
-        """
+        """Expand file/directory inputs in natural order, skipping hidden and *_4K outputs."""
         expanded: List[str] = []
         seen: set[str] = set()
 

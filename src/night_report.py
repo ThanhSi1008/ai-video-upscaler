@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/night_report.py
-Tạo báo cáo tổng kết phiên chạy qua đêm từ log, telemetry CSV, audit.json và SQLite database.
-Chế độ CHỈ ĐỌC, không gọi GPU hay API.
-"""
+"""Read-only overnight run reporter aggregating logs, telemetry CSV, audits, and SQLite."""
 
 import glob
 import os

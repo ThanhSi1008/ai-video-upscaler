@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/subtitles.py
-Quản lý phụ đề đầu vào cho quy trình upscale:
-- Tìm kiếm hoặc trích xuất phụ đề JA và EN từ file rời hoặc container video (.mkv, .mp4).
-- Cơ chế Whisper Speech-to-Text dự phòng tạo phụ đề .ja.srt khi video gốc thiếu track tiếng Nhật.
-"""
+"""Subtitle discovery, container extraction, and Whisper 5.1 FC STT fallback."""
 
 import os
 import sys
@@ -14,10 +8,7 @@ from typing import Optional, Tuple, List
 
 
 def _build_whisper_initial_prompt(video_path: str) -> str:
-    """
-    Trích xuất danh sách tên nhân vật (Kanji/Katakana) và thuật ngữ đặc thù từ Glossary của bộ anime
-    làm initial_prompt cho Whisper STT, giúp nhận diện chính xác tên riêng thay vì từ đồng âm.
-    """
+    """Build a Japanese character/term Whisper initial_prompt from the matched anime glossary."""
     try:
         from subtrans.glossary import find_matching_glossary, load_glossary_file
         from subtrans.ja_morph_tagger import strip_ja_furigana
@@ -45,17 +36,11 @@ def _build_whisper_initial_prompt(video_path: str) -> str:
 
 
 def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str = "large-v3-turbo") -> bool:
-    """
-    Trích xuất audio tiếng Nhật và chạy Whisper Speech-to-Text để tạo file phụ đề .ja.srt dự phòng.
-    Ưu tiên tự động dùng `faster-whisper` (CTranslate2 + Silero VAD) nếu đã cài đặt và không bị mock,
-    fallback mượt về `openai-whisper` để bảo toàn 100% tương thích ngược.
-    Mặc định sử dụng model 'large-v3-turbo' tối ưu cho anime, hỗ trợ override qua biến môi trường WHISPER_MODEL.
-    """
+    """Extract center-weighted Japanese dialogue and transcribe via faster-whisper/openai-whisper."""
     try:
         import pysubs2
         import torch
 
-        # Cho phép ghi đè mô hình qua biến môi trường WHISPER_MODEL
         env_model = os.environ.get("WHISPER_MODEL")
         if env_model:
             model_size = env_model.strip()
@@ -63,7 +48,6 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         print(f"\n🎙️ [WHISPER STT] Không tìm thấy track phụ đề tiếng Nhật. Đang trích xuất audio và nhận diện giọng nói (Whisper {model_size})...")
         audio_tmp = os.path.splitext(output_srt)[0] + ".temp.wav"
 
-        # 1. Thăm dò stream âm thanh qua ffprobe: ưu tiên track tiếng Nhật và kiểm tra số kênh
         chosen_stream_map = "0:a:0"
         channels = 2
         try:
@@ -92,7 +76,6 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         except Exception as probe_err:
             print(f"⚠️ [WHISPER STT] Lỗi probe audio streams: {probe_err}")
 
-        # 2. Áp dụng bộ lọc âm thanh tối ưu dải tần giọng nói / tách kênh thoại trung tâm FC
         if channels >= 6:
             af_filter = "pan=mono|c0=0.7*FC+0.15*FL+0.15*FR,highpass=f=80,lowpass=f=8000,afftdn=nf=-25"
         else:
@@ -108,7 +91,6 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         ]
         res = subprocess.run(ext_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if res.returncode != 0 or not os.path.exists(audio_tmp) or os.path.getsize(audio_tmp) == 0:
-            # Fallback an toàn nếu -af thất bại: giữ nguyên track đã chọn qua -map
             ext_cmd_basic = [
                 "ffmpeg", "-y", "-i", video_path,
                 "-map", chosen_stream_map,
@@ -120,9 +102,10 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
             if res.returncode != 0 or not os.path.exists(audio_tmp) or os.path.getsize(audio_tmp) == 0:
                 return False
 
-        from src.config import is_gpu_lock_held_by_other
+        import src.config as _app_config
+
         force_cpu = os.environ.get("UPSCALER_FORCE_WHISPER_CPU", "").strip().lower() in ("1", "true", "yes")
-        gpu_busy_pid = is_gpu_lock_held_by_other()
+        gpu_busy_pid = _app_config.is_gpu_lock_held_by_other()
         if force_cpu or gpu_busy_pid is not None:
             reason = (
                 "UPSCALER_FORCE_WHISPER_CPU=1 (--async-subs)"
@@ -134,13 +117,22 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        lock_acquired = False
+        if device == "cuda" and not getattr(_app_config, "_GPU_LOCK_OWNED", False):
+            try:
+                _app_config.acquire_gpu_lock()
+                lock_acquired = True
+            except RuntimeError as lock_err:
+                print(f"ℹ️ [WHISPER STT] {lock_err} -> Fallback sang CPU (int8).")
+                device = "cpu"
+
         glossary_prompt = _build_whisper_initial_prompt(video_path)
         raw_segments = []
         fw_model = None
         model = None
 
         try:
-            # Nếu môi trường test đang inject mock `whisper` vào sys.modules, dùng trực tiếp nhánh `whisper`
+            # Prefer openai-whisper mock branch whenever a test injects sys.modules["whisper"].
             whisper_mod_in_sys = sys.modules.get("whisper")
             use_faster_whisper = whisper_mod_in_sys is None
             if use_faster_whisper:
@@ -199,6 +191,8 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
                     torch.cuda.empty_cache()
                 except Exception:
                     pass
+            if lock_acquired:
+                _app_config.release_gpu_lock()
             try:
                 if os.path.exists(audio_tmp):
                     os.remove(audio_tmp)
@@ -213,7 +207,7 @@ def transcribe_japanese_audio(video_path: str, output_srt: str, model_size: str 
             if not text:
                 continue
 
-            # Lọc các segment có dấu hiệu là tạp âm hoặc ảo giác
+            # Filter segments with likely background noise or Whisper hallucination
             no_speech = seg.get("no_speech_prob", 0.0)
             comp_ratio = seg.get("compression_ratio", 0.0)
             avg_logprob = seg.get("avg_logprob", 0.0)
@@ -249,19 +243,14 @@ def find_or_extract_subtitles(
     prefer_whisper_when_no_ja: bool = False,
     dry_run: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Tìm hoặc trích xuất phụ đề tiếng Nhật (ja) và tiếng Anh (en) cho video:
-    1. Quét các file phụ đề sẵn có cùng thư mục video hoặc trong subtrans/samples.
-    2. Nếu thiếu và dry_run=False, dùng ffprobe/ffmpeg trích xuất track tương ứng từ container video.
-    3. Nếu hoàn toàn không có track JA và dry_run=False, chạy Whisper STT dự phòng.
-    """
+    """Locate sidecar JA/EN subtitles, extract text streams via FFmpeg, or fall back to Whisper STT."""
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     vid_dir = os.path.dirname(os.path.abspath(video_path))
 
     ja_sub = None
     en_sub = None
 
-    # 1. Tìm các file phụ đề sẵn có cùng thư mục
+    # 1. Probe existing sidecar subtitle files alongside the video
     candidates_ja = [
         os.path.join(vid_dir, f"{base_name}.ja.ass"),
         os.path.join(vid_dir, f"{base_name}_ja.ass"),
@@ -296,7 +285,7 @@ def find_or_extract_subtitles(
             en_sub = c
             break
 
-    # 2. Kiểm tra container video qua ffprobe để trích xuất nếu thiếu file rời
+    # 2. Probe container subtitle tracks with ffprobe and extract missing streams
     safe_base = base_name.rstrip('. ')
     tmp_dir = os.path.join(vid_dir, f".temp_{safe_base}")
     bitmap_sub_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub", "pgssub", "vobsub"}
@@ -313,7 +302,7 @@ def find_or_extract_subtitles(
             out_file = os.path.join(tmp_dir, f"{stem_prefix}.srt")
             codec_args = ["-c:s", "copy"]
         else:
-            # mov_text, webvtt, text, ... -> chuẩn hóa sang SRT văn bản thuần
+            # Normalize mov_text/webvtt/text codecs to plain SRT
             out_file = os.path.join(tmp_dir, f"{stem_prefix}.srt")
             codec_args = ["-c:s", "srt"]
         ext_cmd = ["ffmpeg", "-y", "-i", video_path, "-map", f"0:{s_idx}", *codec_args, out_file]
@@ -332,7 +321,7 @@ def find_or_extract_subtitles(
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         raw_sub_info = json.loads(r.stdout).get("streams", [])
-        # Loại bỏ các luồng phụ đề ảnh bitmap (PGS/VOBSUB trên Blu-ray) để không chặn trích xuất text hoặc Whisper fallback
+        # Skip bitmap tracks (PGS/VOBSUB) so they do not block text extraction or Whisper fallback
         sub_info = [
             s for s in raw_sub_info
             if (s.get("codec_name") or "").lower() not in bitmap_sub_codecs
@@ -341,10 +330,10 @@ def find_or_extract_subtitles(
         if sub_info and not dry_run:
             os.makedirs(tmp_dir, exist_ok=True)
 
-            # 2a. Trích xuất stream EN từ container video nếu chưa có file EN rời
+            # 2a. Extract EN stream if no sidecar EN file was found
             if not en_sub:
                 chosen_en_stream = None
-                # Phân loại và ưu tiên track hội thoại (Dialogue / Full Subtitles), tránh Signs & Songs
+                # Rank full dialogue tracks ahead of Signs & Songs tracks
                 dialogue_candidates = []
                 other_en_candidates = []
                 for s in sub_info:
@@ -355,7 +344,6 @@ def find_or_extract_subtitles(
                     if is_en:
                         is_signs = any(k in title for k in ("s&s", "signs", "songs", "[signs]", "s/s"))
                         if not is_signs:
-                            # Điểm ưu tiên: default=1 được 10 điểm, có chữ 'dialog' được 5 điểm, 'full' được 3 điểm
                             score = (10 if is_def else 0) + (5 if "dialog" in title else 0) + (3 if "full" in title else 0)
                             dialogue_candidates.append((score, s))
                         else:
@@ -374,7 +362,7 @@ def find_or_extract_subtitles(
                 if chosen_en_stream is not None:
                     en_sub = _extract_text_stream(chosen_en_stream, "extracted_en")
 
-            # 2b. Trích xuất stream JA từ container video nếu chưa có file JA rời
+            # 2b. Extract JA stream if no sidecar JA file was found
             if not ja_sub:
                 chosen_ja_stream = None
                 for s in sub_info:
@@ -401,12 +389,11 @@ def find_or_extract_subtitles(
             ja_sub = en_sub
         return ja_sub, en_sub
 
-    # 3. Cơ chế dự phòng: Nếu không có track phụ đề tiếng Nhật dạng text
+    # 3. Fall back when no text JA subtitle track is available
     if not ja_sub:
         whisper_ja = os.path.join(tmp_dir, f"{base_name}.whisper_ja.srt")
         if prefer_whisper_when_no_ja:
-            # Ưu tiên chạy Whisper STT trước để giữ trọn vẹn ngữ cảnh đại từ xưng hô / kính ngữ tiếng Nhật
-            # và sau đó có thể kết hợp với snap_whisper_cues_to_en
+            # Run Whisper STT first to capture JA honorifics/pronouns for downstream alignment
             if os.path.exists(whisper_ja) and os.path.getsize(whisper_ja) > 100:
                 ja_sub = whisper_ja
             else:
@@ -421,16 +408,15 @@ def find_or_extract_subtitles(
                     except Exception:
                         pass
 
-            # Chỉ fallback về ja_sub = en_sub nếu Whisper thất bại
+            # Only fall back to EN timing if Whisper fails
             if not ja_sub and en_sub and os.path.exists(en_sub) and os.path.getsize(en_sub) > 100:
                 ja_sub = en_sub
         else:
-            # Mặc định: Ưu tiên 3a: Nếu có sẵn track tiếng Anh phòng thu (EN), ưu tiên dùng trực tiếp mốc thời gian chuẩn phòng thu
-            # để đảm bảo đồng bộ từng khung hình (frame-perfect, 0ms sai lệch) và triệt tiêu câu rác Whisper
+            # Default: prefer frame-accurate studio EN track over Whisper when JA text is missing
             if en_sub and os.path.exists(en_sub) and os.path.getsize(en_sub) > 100:
                 ja_sub = en_sub
             else:
-                # Ưu tiên 3b: Chạy Whisper STT nhận diện giọng nói tiếng Nhật nếu hoàn toàn không có track nào
+                # Run Whisper STT when neither JA nor EN subtitle track exists
                 if os.path.exists(whisper_ja) and os.path.getsize(whisper_ja) > 100:
                     ja_sub = whisper_ja
                 else:

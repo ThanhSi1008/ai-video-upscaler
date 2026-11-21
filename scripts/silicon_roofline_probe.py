@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-scripts/silicon_roofline_probe.py
-Standalone empirical silicon ceiling micro-benchmark for NVIDIA Ampere GA106 (RTX 3060 12GB).
-
-Measures physical hardware ceilings directly on local silicon (~30-35s total):
-1. Sustained IEEE FP32 CUDA Core GEMM TFLOPS (4096^3, allow_tf32=False) + live clock/power.
-2. Sustained Dense 3rd-Gen Tensor Core FP16 GEMM TFLOPS (NVIDIA GA10x Whitepaper verified):
-   - FP32 accumulate (HMMA.16816.F32, GeForce half-rate 256 FMAs/SM/clk = 25.48 TFLOPS @ 1777 MHz):
-     measured via torch.matmul(allow_fp16_reduced_precision_reduction=False/True) & cublasGemmEx(32F).
-   - FP16 accumulate (HMMA.16816.F16, GeForce full-rate 512 FMAs/SM/clk = 50.95 TFLOPS @ 1777 MHz;
-     101.90 TFLOPS requires 2:4 structured sparsity): measured via cublasGemmEx(CUBLAS_COMPUTE_16F)
-     with numerical cosine-similarity verification, plus isolated 8x1080p Conv2d(64->64, 3x3) FP16
-     throughput showing activation-DRAM + N=64 tile efficiency (~28 TFLOPS realized in SR convs).
-3. Sustained GDDR6 VRAM Bandwidth (GB/s) via 256 MiB clone/copy & STREAM triad (a = b + s * c)
-   vs theoretical 360.0 GB/s @ 7,501 MHz (192-bit bus).
-4. Sustained PCIe 4.0 x16 Pinned DMA Host->Device (8x 1080p RGB24 = 49.77 MB) and
-   Device->Host (8x 4K P010LE = 199.07 MB) latency (ms) and bandwidth (GB/s).
-5. Isolated @triton.jit Input Norm (8x 1080p uint8 NHWC -> float16 NCHW) and Output BT.709
-   P010LE (8x 4K float16 NCHW -> int16 P010LE) kernel latencies (ms/batch) and effective GB/s.
-6. Isolated 7th-Gen NVENC 4K HEVC Main10 (p010le, preset p6, CQ 18, lookahead 32, spatial/temporal AQ)
-   raw stdin pipe ceiling FPS (production -multipass fullres 2-pass vs single-pass -multipass disabled).
-
-Safety:
-- Never initializes CUDA or runs GPU workloads on import (safe for AST/pytest collection).
-- Acquires exclusive .gpu_active.lock via src.config.gpu_exclusivity_lock.
-- Never calls any external/cloud API.
-"""
+"""Empirical Ampere silicon ceiling micro-benchmark (cuBLAS, STREAM, Triton, NVENC)."""
 
 from __future__ import annotations
 
@@ -402,9 +375,7 @@ def run_silicon_probe(
         }
 
         try:
-            # =================================================================
             # 1. SUSTAINED IEEE FP32 CUDA CORE GEMM (4096^3, allow_tf32=False)
-            # =================================================================
             n_gemm = 4096
             flops_4096 = 2.0 * (n_gemm ** 3)  # 137,438,953,472 FLOPs
             torch.backends.cuda.matmul.allow_tf32 = False
@@ -454,9 +425,7 @@ def run_silicon_probe(
             del a_f32, b_f32, c_f32
             torch.cuda.empty_cache()
 
-            # =================================================================
             # 2. DENSE TENSOR CORE FP16 GEMM (FP32-ACCUM VS FP16-ACCUM) + SR CONV
-            # =================================================================
             # Scale by 1/sqrt(4096)=1/64 so dot products stay well inside FP16 range without Inf
             a_f16 = torch.randn((n_gemm, n_gemm), dtype=torch.float16, device=device) * 0.125
             b_f16 = torch.randn((n_gemm, n_gemm), dtype=torch.float16, device=device) * 0.125
@@ -592,9 +561,7 @@ def run_silicon_probe(
                 },
             }
 
-            # =================================================================
             # 3. SUSTAINED GDDR6 VRAM BANDWIDTH (256 MiB COPY & STREAM TRIAD)
-            # =================================================================
             num_elems = 67_108_864
             tensor_bytes = num_elems * 4  # 268,435,456 B (256 MiB)
             t_a = torch.ones(num_elems, dtype=torch.float32, device=device)
@@ -696,9 +663,7 @@ def run_silicon_probe(
             del t_a, t_b, t_c
             torch.cuda.empty_cache()
 
-            # =================================================================
             # 4. SUSTAINED PCIe 4.0 x16 PINNED H2D (49.77 MB) & D2H (199.07 MB)
-            # =================================================================
             batch_sz = 8
             in_h, in_w = 1080, 1920
             out_h, out_w = 2160, 3840
@@ -778,9 +743,7 @@ def run_silicon_probe(
                 },
             }
 
-            # =================================================================
             # 5. ISOLATED @triton.jit INPUT NORM & OUTPUT BT.709 P010LE KERNELS
-            # =================================================================
             gpu_nchw_fp16 = torch.empty((batch_sz, 3, in_h, in_w), dtype=torch.float16, device=device)
             in_norm_bytes = h2d_bytes + (batch_sz * 3 * in_h * in_w * 2)  # 149,299,200 B (149.30 MB)
 
@@ -883,9 +846,7 @@ def run_silicon_probe(
                 },
             }
 
-            # =================================================================
             # 6. ISOLATED 7th-GEN NVENC 4K HEVC MAIN10 STDIN PIPE CEILING FPS
-            # =================================================================
             frame_np_0 = host_d2h_pin[0].numpy()
             frame_np_1 = host_d2h_pin[1].numpy()
             frame_bytes = int(frame_np_0.nbytes)

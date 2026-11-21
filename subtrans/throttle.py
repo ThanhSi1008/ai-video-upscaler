@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/throttle.py
-Stage 3: Rate limiting, exponential backoff with jitter, and quota exhaustion handling.
-Phân loại lỗi 429 bằng trường chi tiết của phản hồi (quotaId, quotaValue, retryDelay):
-- Nếu quotaId chứa PerDay -> đánh dấu model hết hạn mức đến 00:00 giờ Thái Bình Dương (PT),
-  CHUYỂN model ngay, không pause/thử lại. Ghi quotaValue vào log và tự cập nhật models.yaml.
-- Nếu PerMinute -> chờ retryDelay và thử lại.
-"""
+"""Gemini rate limiter, exponential backoff with jitter, and PerDay quota failover."""
 
 import os
 import time

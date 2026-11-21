@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Fast (< 5s) CPU-safe end-to-end smoke test for e:\\ai-video-upscaler.
 
 Verifies without GPU/TensorRT/network:

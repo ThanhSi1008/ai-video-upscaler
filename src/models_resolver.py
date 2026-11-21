@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/models_resolver.py
-Hệ thống quản lý và phân giải mô hình Super-Resolution cho từng bộ anime:
-Thứ tự ưu tiên (D2):
-1. Tham số CLI: --model <id>
-2. Cấu hình shows.yaml (khớp mẫu regex/glob tên file hoặc thư mục do người dùng khai báo)
-3. Mặc định trong models/models.yaml (animevideov3)
-"""
+"""Super-resolution model registry loader, shows.yaml matcher, and SHA-256 verifier."""
 
 import hashlib
 import json

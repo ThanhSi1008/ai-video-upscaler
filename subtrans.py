@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 subtrans - Anime Subtitle Translator CLI
 Entry point wrapper.

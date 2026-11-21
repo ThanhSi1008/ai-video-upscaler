@@ -1,13 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/ffmpeg_ops.py
-Bộ công cụ tương tác FFmpeg / FFprobe chuẩn tham chiếu phòng thu:
-- Trích xuất metadata chuyên sâu (độ phân giải, fps, audio, subs, font attachments)
-- Phân đoạn video không giải mã (Lossless Stream Copy)
-- Trích xuất khung hình PNG Lossless với chuyển đổi ma trận màu BT.709 chuẩn xác
-- Nén phần cứng NVIDIA NVENC HEVC 10-bit (Main 10, p010le, BT.709 TV Limited Range, Spatial AQ)
-- Ghép nối phân đoạn và Muxing bảo toàn 100% dữ liệu gốc
-"""
+"""PyAV probing, BT.709 RGB24 extraction, NVENC piping, and 1-pass MKV muxing helpers."""
 
 import collections
 import os

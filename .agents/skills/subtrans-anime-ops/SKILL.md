@@ -17,7 +17,7 @@ description: >-
    - Fallback chain in `subtrans/models.yaml:chain` (`gemini-3.8/3.7/3.6/3.5-flash`). Never default to `gemini-2.*`, never use `gemini-flash-latest` without `--allow-latest-alias`, and never enable Ollama/TranslateGemma (`--local`/`--review` are rejected with non-zero exit).
    - All GenAI calls (`gemini_backend.py`, `cast_sheet.py`, `cascade.py`) attach `get_anime_safety_settings()` (`BLOCK_NONE`), `extract_genai_response_text()`, and `max_output_tokens=16384`.
 2. **Protect `.env` & Daytime Quota:**
-   - Never read, print, or log `.env` or `GEMINI_API_KEY*`.
+   - Local reading of `.env` / `subtrans/.env` is allowed; modifying requires user confirmation; never commit, export, or print `GEMINI_API_KEY*` to logs.
    - Never call live Gemini APIs between **14:00 and overnight runs** (including `subtrans.py check` and `subtrans.py models`, which perform live requests!).
 3. **3-Key Round-Robin & 429 Handling:**
    - Rotates across `GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3` (modulo + least-loaded).
@@ -40,7 +40,7 @@ description: >-
 
 ## 3. Authoring a Per-Series Glossary (`glossaries/glossary.<series>.yaml`)
 1. Inspect [glossaries/README.md](../../../glossaries/README.md) and a reference glossary (`glossaries/glossary.fate.yaml` or `glossaries/glossary.tenken.yaml`). Note: `glossaries/base.yaml` is a cross-platform text pointer to `subtrans/glossary.yaml`.
-2. Define `address_rules` (`self_pronoun` / `target_pronoun` per speaker -> addressee & register), `characters` (including `aliases`), and canonical `terms` (avoiding unwanted Han-Viet calques).
+2. Define `address_rules` (`self` / `other` per speaker -> addressee & register), `characters` (including `aliases`), and canonical `terms` (avoiding unwanted Han-Viet calques).
 
 ## 4. Whisper Fallback, CC Splitting & DTW Alignment
 - **5.1 FC Extraction & STT:** Multi-channel Japanese audio extracts center dialogue via `pan=mono|c0=0.7*FC+0.15*FL+0.15*FR,highpass=f=80,lowpass=f=8000,afftdn=nf=-25` (`src/subtitles.py`) using `faster-whisper` (`large-v3-turbo`) + Silero VAD + Glossary `initial_prompt` (plus `audio_diarization.py` 8kHz CMS timbre + F0 `audio_turn` hints for plain `.srt`).
@@ -52,7 +52,7 @@ description: >-
 | Module | Responsibility |
 | :--- | :--- |
 | `cli.py`, `pipeline.py`, `config.py` | Typer CLI (`run`, `batch`, `eval`, `rag`), 4-stage pipeline, scene-cut clamp `>= 4500ms`, `StageAPrefetchWorker` |
-| `gemini_backend.py`, `translator.py`, `throttle.py`, `cache.py` | `> 4096`-token static prefix Implicit & `--explicit-cache`, CoT `p1`/`p2`, Contextual Cache `v2.2`, 3-key rotation & RPD tracking |
+| `prompts.py`, `gemini_backend.py`, `translator.py`, `throttle.py`, `cache.py` | `> 4096`-token static prefix Implicit & `--explicit-cache`, CoT `p1`/`p2`, Contextual Cache `v2.2`, 3-key rotation & RPD tracking |
 | `cast_sheet.py`, `dynamic_cast.py`, `ja_morph_tagger.py`, `glossary.py` | Stage A `.cast.yaml`, `HysteresisCastManager`, MeCab `fugashi`+`unidic-lite` (zero Kanji-compound false positives), glossary merger |
 | `parser.py`, `dtw_auto_align.py`, `audio_diarization.py`, `writer.py` | ASS/SRT parsing, CC split, DTW alignment, Dual Dialogue, smart-wrap, zero-overlap |
 | `linter.py`, `cascade.py`, `rag.py`, `report.py`, `eval/` | Linter V2 (CJK, CPS, NFC, Romaji vocative, glossary/pronoun), Flash cascade w/ digit quarantine, Hybrid BM25 + FTS5 2/3-gram RAG |

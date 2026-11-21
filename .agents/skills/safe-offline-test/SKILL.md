@@ -34,15 +34,20 @@ git diff --check
 
 ## 2. Fast Targeted Test Iteration
 
-- **Pure stdlib agent-tooling tests** (`tests/test_agent_context.py`, `tests/test_agent_setup.py`) do not import `src/` or `subtrans/` and may be run directly:
+- **Pure stdlib / web / smoke tests** (`test_agent_context.py`, `test_agent_setup.py`, `test_verify_offline.py`, `test_architecture_boundaries.py`, `test_export_review_bundle.py`, `smoke_test_pipeline.py`, `test_web_gui.py`) may be run directly:
   ```powershell
-  .\.venv\Scripts\python.exe -m pytest tests/test_agent_context.py tests/test_agent_setup.py -q
+  .\.venv\Scripts\python.exe -m pytest tests/test_agent_context.py tests/test_agent_setup.py tests/test_verify_offline.py tests/test_architecture_boundaries.py tests/test_export_review_bundle.py tests/test_web_gui.py -q
+  .\.venv\Scripts\python.exe scripts/smoke_test_pipeline.py
   ```
-- **Targeted `src/`, `subtrans/`, or `e2e` tests**: Consult the `Module -> Test Command` table in [VALIDATION.md](../../../docs/agents/VALIDATION.md) and run inside a disposable snapshot directory with `CUDA_VISIBLE_DEVICES=-1` and `-p agent_offline_guard` so production caches remain untouched.
+- **Targeted `src/`, `subtrans/`, or `e2e` iteration (`< 5s`)**: Run inside a disposable snapshot (auto-cleaned on exit) via:
+  ```powershell
+  .\.venv\Scripts\python.exe scripts/verify_offline.py --target tests/test_zero_disk_ring_buffers_and_cel.py
+  .\.venv\Scripts\python.exe scripts/verify_offline.py --impacted
+  ```
 
 ## 3. Reporting Evidence
 
-Record in the active task handoff (`docs/agents/tasks/YYYY-MM-DD-<slug>.md`) or final summary:
+Record in [STATE.md](../../../docs/agents/STATE.md) and the Git commit message (create `docs/agents/tasks/YYYY-MM-DD-<slug>.md` only when explicitly requested by the user):
 - Exact command & interpreter (`.\.venv\Scripts\python.exe`).
 - Counts: `passed`, `failed`, `skipped`, wall-clock duration, and `scratch/agent-validation-*` evidence path.
 - If no video was rendered/muxed in the task, record Mux Audit / Frame Count / FPS as **`N/A — no media artifact produced`** (never claim `PASS` without real media verification).

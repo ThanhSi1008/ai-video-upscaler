@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-web/job_manager.py
-Bộ điều phối tiến trình Upscale, Preview, Hàng đợi ca đêm và Dịch phụ đề Subtrans:
-- Cho phép vận hành bình thường mọi tác vụ (Upscale, Preview, Subtrans, Subs-Pending) vào bất kỳ thời điểm nào.
-- Chống xung đột 2 tiến trình GPU qua khóa .gpu_active.lock.
-- Hỗ trợ Dừng êm sau Chunk hiện tại (Graceful Pause) và Hủy khẩn cấp (Force Stop).
-- Tính toán trước bảng ETA ca đêm theo từng model SR từ shows.yaml & plan.json.
-"""
+"""Subprocess job queue manager for 24/7 upscale, preview, and subtrans studio tasks."""
 
 from __future__ import annotations
 

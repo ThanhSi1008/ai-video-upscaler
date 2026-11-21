@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/preflight.py
-Hệ thống kiểm tra an toàn trước khi chạy (Pre-flight Health Checks) và quản lý năng lượng:
-1. Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState) & khóa P-Core HighQoS cho Intel Gen 12+
-2. Kiểm tra nguồn điện sạc (AC Power vs Battery)
-3. Kiểm tra dung lượng ổ đĩa trống an toàn (Free Disk Space)
-4. Gửi thông báo hệ thống và âm báo khi hoàn thành
-"""
+"""Pre-flight system health checks, AC power verification, AntiSleep, and P-Core QoS."""
 
 import os
 import sys

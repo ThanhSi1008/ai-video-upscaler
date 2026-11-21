@@ -64,7 +64,5 @@ subtrans/samples/sample_3min_*
 # 6. Blind benchmark ground truth (prevent answer leakage into agent context)
 benchmarks/upscale/ab_test/KEY_ANSWER.json
 
-# 7. Secrets & credentials
-.env*
-!.env.example
-subtrans/.env
+# 7. Swap temp files for local .env (reading .env / subtrans/.env locally is allowed; Git ignores secrets)
+.env.*.tmp

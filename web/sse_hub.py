@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-web/sse_hub.py
-Trung tâm thu thập viễn trắc thời gian thực 1.0 Hz & phát luồng Server-Sent Events (SSE):
-- Tái sử dụng default_gpu_query() (SW_HIDE) từ scripts/telemetry_collector.py.
-- Kết hợp psutil đo CPU %, System RAM GB, tốc độ đọc/ghi NVMe MB/s và dung lượng trống ổ đĩa.
-- Đồng bộ hai chiều CLI <-> Web GUI qua logs/live_status.json, .gpu_active.lock, .temp_* và logs/latest.log.
-"""
+"""1 Hz telemetry collector and Server-Sent Events hub synchronizing CLI and Web UI."""
 
 from __future__ import annotations
 

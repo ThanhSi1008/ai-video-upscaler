@@ -1,14 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/build_trt_engine.py
-Biên dịch và quản lý TensorRT 10.x / 8.x FP16 Engine & Triton Compiler cho Super-Resolution:
-- Mở khóa 100% tốc độ nhân Tensor Core Ampere HMMA.16816.F16 (51 TFLOPS dense trên RTX 3060),
-  lách hoàn toàn giới hạn half-rate FP32-accumulate trên dòng GeForce và gộp cứng (kernel fusion)
-  17 cặp Conv2d + PReLU ngay trong SRAM để xóa 72 GB băng thông GDDR6 thừa mỗi batch.
-- Tương thích kép với cả TensorRT 10.x (set_tensor_address + execute_async_v3) và TensorRT 8.x (execute_async_v2).
-- Định danh cache .engine an toàn theo (model_id, input_hw, max_batch, GPU, TRT version).
-- Hỗ trợ fallback sang Triton torch.compile hoặc PyTorch channels_last FP16 khi cần thiết.
-"""
+"""TensorRT FP16 engine builder and runtime wrapper for SRVGGNetCompact architectures."""
 
 import hashlib
 import json

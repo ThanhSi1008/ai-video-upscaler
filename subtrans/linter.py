@@ -1,14 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/linter.py
-Linter V1 for Vietnamese anime subtitle quality assurance:
-- CJK character leakage detection (Kanji, Hiragana, Katakana)
-- Reading speed (CPS) validation & duration stretching
-- Unicode NFC normalization
-- Romaji proper name retention in vocatives
-- Banned machine translationese / Sino-Vietnamese calques
-- Strict zero-overlap timing compliance (40ms inter-cue gap)
-"""
+"""Vietnamese anime subtitle linter checking CJK leaks, CPS, NFC, vocatives, and terms."""
 
 import re
 import unicodedata

@@ -1,14 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/report.py
-Stage C: Audit report generation (out/<name>.audit.md) and optional [?] review file.
-Adheres to ADDENDUM 6 specifications:
-- Audits uncertain cues ([?])
-- Audits single-line compliance and line lengths (soft cap 80, max 107)
-- Audits leftover Japanese characters
-- Audits glossary compliance
-- Produces review file when --review-file is requested
-"""
+"""Stage C markdown audit report and optional uncertain-cue review generator."""
 
 import re
 from pathlib import Path

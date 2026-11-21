@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/panels.js
  * Controllers for:

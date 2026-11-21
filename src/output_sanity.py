@@ -1,8 +1,4 @@
-"""
-src/output_sanity.py - Chốt chặn kiểm định chất lượng hình ảnh đầu ra (Output Sanity Guard)
-Ngăn chặn hoàn toàn lỗi mô hình xuất video đen, suy biến màu hoặc sai lệch cấu trúc.
-Tuân thủ yêu cầu C3 (sau chunk đầu tiên và mỗi 10 chunk sau).
-"""
+"""Frame sanity guard verifying brightness delta and Pearson correlation against baseline."""
 
 import os
 import time

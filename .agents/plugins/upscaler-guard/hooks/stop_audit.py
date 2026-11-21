@@ -17,6 +17,14 @@ import subprocess
 import sys
 
 STRAY_ROOT_EXACT = frozenset({"temp_sub.ass", "vid_probe.json"})
+SAFE_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
+
+
+def _is_secret_env_rel(rel_posix: str) -> bool:
+    name = Path(rel_posix).name.lower()
+    if name in SAFE_ENV_TEMPLATES:
+        return False
+    return name == ".env" or name.startswith(".env.")
 
 
 def _repo_root() -> Path:
@@ -70,6 +78,30 @@ def evaluate_stop(payload: dict, repo_root: Path | None = None) -> dict[str, str
         return {}
 
     root = (repo_root or _repo_root()).resolve()
+    issues: list[str] = []
+
+    try:
+        staged_res = subprocess.run(
+            ["git", "--no-optional-locks", "diff", "--cached", "--name-only"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=0.6,
+            check=False,
+        )
+        if staged_res.returncode == 0 and staged_res.stdout.strip():
+            staged_secrets = [
+                ln.strip().replace("\\", "/")
+                for ln in staged_res.stdout.splitlines()
+                if ln.strip() and _is_secret_env_rel(ln.strip())
+            ]
+            if staged_secrets:
+                issues.append(f"Staged .env secret(s): {', '.join(staged_secrets[:3])}")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     try:
         status_res = subprocess.run(
             ["git", "--no-optional-locks", "status", "--porcelain"],
@@ -82,67 +114,64 @@ def evaluate_stop(payload: dict, repo_root: Path | None = None) -> dict[str, str
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return {}
+        status_res = None
 
-    if status_res.returncode != 0 or not status_res.stdout.strip():
-        return {}
+    if status_res is not None and status_res.returncode == 0 and status_res.stdout.strip():
+        changed = _parse_porcelain_paths(status_res.stdout)
 
-    changed = _parse_porcelain_paths(status_res.stdout)
-    issues: list[str] = []
+        stray = [
+            rel
+            for status, rel in changed
+            if "D" not in status and _is_stray_root_temp(rel) and (root / rel).exists()
+        ]
+        if stray:
+            issues.append(f"Stray root temp file(s): {', '.join(stray[:3])}")
 
-    stray = [
-        rel
-        for status, rel in changed
-        if "D" not in status and _is_stray_root_temp(rel) and (root / rel).exists()
-    ]
-    if stray:
-        issues.append(f"Stray root temp file(s): {', '.join(stray[:3])}")
+        modified_py = [
+            str(root / rel)
+            for status, rel in changed
+            if "D" not in status and rel.lower().endswith(".py") and (root / rel).is_file()
+        ]
+        if modified_py:
+            try:
+                ruff_res = subprocess.run(
+                    [*_ruff_command(root), "check", "--output-format=concise", *modified_py],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=0.9,
+                    check=False,
+                )
+                if ruff_res.returncode != 0:
+                    raw_err = ruff_res.stdout.strip() or ruff_res.stderr.strip()
+                    first_line = raw_err.splitlines()[0].strip() if raw_err else "lint errors"
+                    issues.append(f"Ruff: {first_line[:180]}")
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
-    modified_py = [
-        str(root / rel)
-        for status, rel in changed
-        if "D" not in status and rel.lower().endswith(".py") and (root / rel).is_file()
-    ]
-    if modified_py:
-        try:
-            ruff_res = subprocess.run(
-                [*_ruff_command(root), "check", "--output-format=concise", *modified_py],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=0.9,
-                check=False,
-            )
-            if ruff_res.returncode != 0:
-                raw_err = ruff_res.stdout.strip() or ruff_res.stderr.strip()
-                first_line = raw_err.splitlines()[0].strip() if raw_err else "lint errors"
-                issues.append(f"Ruff: {first_line[:180]}")
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        memory_touched = any(
+            rel == "GEMINI.md" or rel.startswith("docs/agents/") or rel.startswith(".agents/")
+            for _, rel in changed
+        )
+        if memory_touched:
+            root_str = str(root)
+            added_sys_path = False
+            if root_str not in sys.path:
+                sys.path.insert(0, root_str)
+                added_sys_path = True
+            try:
+                from scripts.agent_context import check_memory
 
-    memory_touched = any(
-        rel == "GEMINI.md" or rel.startswith("docs/agents/") or rel.startswith(".agents/")
-        for _, rel in changed
-    )
-    if memory_touched:
-        root_str = str(root)
-        added_sys_path = False
-        if root_str not in sys.path:
-            sys.path.insert(0, root_str)
-            added_sys_path = True
-        try:
-            from scripts.agent_context import check_memory
-
-            mem_errors = check_memory(root)
-            if mem_errors:
-                issues.append(f"agent_context: {mem_errors[0][:160]}")
-        except Exception:
-            pass
-        finally:
-            if added_sys_path and sys.path and sys.path[0] == root_str:
-                sys.path.pop(0)
+                mem_errors = check_memory(root)
+                if mem_errors:
+                    issues.append(f"agent_context: {mem_errors[0][:160]}")
+            except Exception:
+                pass
+            finally:
+                if added_sys_path and sys.path and sys.path[0] == root_str:
+                    sys.path.pop(0)
 
     if not issues:
         return {}

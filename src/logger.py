@@ -1,11 +1,4 @@
-"""
-src/logger.py
-Terminal display management and structured log file generation:
-- Automatically creates dedicated log files by video title and timestamp: logs/<name>_<timestamp>.log
-- Automatically maintains logs/latest.log symlink pointing to the most recent run
-- Records per-chunk telemetry details (extract time, AI FPS, NVENC encode)
-- Collects and saves empirical benchmark summary tables
-"""
+"""Terminal telemetry, structured run logs, and atomic logs/live_status.json updates."""
 
 import json
 import os
@@ -86,7 +79,7 @@ def read_live_status() -> Dict[str, Any]:
 
 
 def format_time(seconds: float) -> str:
-    """Định dạng thời gian sang chuỗi trực quan: mm:ss hoặc hh:mm:ss"""
+    """Format duration as mm:ss or hh:mm:ss."""
     seconds = max(0, int(seconds))
     if seconds >= 3600:
         h = seconds // 3600
@@ -99,7 +92,7 @@ def format_time(seconds: float) -> str:
 
 
 def format_bytes(bytes_count: int) -> str:
-    """Định dạng dung lượng bytes sang MB hoặc GB"""
+    """Format byte size into MB or GB."""
     mb = bytes_count / (1024 * 1024)
     if mb >= 1024:
         return f"{mb / 1024:.2f} GB"
@@ -107,7 +100,7 @@ def format_bytes(bytes_count: int) -> str:
 
 
 def render_progress(current: int, total: int, prefix: str = "", suffix: str = "", length: int = 25):
-    """Vẽ thanh tiến trình terminal mượt mà"""
+    """Render an inline terminal progress bar."""
     percent = (current / total) * 100 if total > 0 else 0
     filled = int(length * current // total) if total > 0 else 0
     bar = "█" * filled + "░" * (length - filled)
@@ -119,7 +112,7 @@ import subprocess
 import shutil
 
 def get_swap_usage() -> str:
-    """Lấy thông số bộ nhớ RAM và swap/pagefile hiện tại"""
+    """Return formatted host RAM and swap/pagefile utilization."""
     try:
         import psutil
         v = psutil.virtual_memory()
@@ -129,12 +122,24 @@ def get_swap_usage() -> str:
         pass
     return "Memory/Swap: N/A"
 
+
 def get_thermal_state() -> str:
-    """Lấy trạng thái nhiệt và throttle từ phần cứng NVIDIA GPU"""
+    """Query GPU temperature from nvidia-smi with bounded timeout and hidden console window."""
     try:
+        run_kwargs: Dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 2.0,
+            "check": True,
+        }
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            run_kwargs["startupinfo"] = startupinfo
         res = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, check=True
+            **run_kwargs,
         )
         temp = res.stdout.strip()
         if temp:
@@ -145,10 +150,7 @@ def get_thermal_state() -> str:
 
 
 class RunLogger:
-    """
-    Quản lý luồng log song song ra Console và File log có cấu trúc.
-    Tự động cập nhật file logs/latest.log để dễ dàng kiểm tra.
-    """
+    """Manage structured console/log-file output and atomic Web Studio telemetry JSON."""
 
     def __init__(self, video_name: str):
         os.makedirs(LOGS_DIR, exist_ok=True)
@@ -192,13 +194,12 @@ class RunLogger:
             "log_file": self.log_filename,
         }
 
-        # Khởi tạo file log
         with open(self.log_filepath, "w", encoding="utf-8") as f:
             f.write("# AI Video Upscaler 4K - Execution Log\n")
             f.write(f"# Started: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Video: {video_name}\n\n")
 
-        # Tạo/cập nhật symlink hoặc file copy latest.log
+        # Update latest.log via symlink when permitted, falling back to regular copy on Windows.
         try:
             if os.path.lexists(self.latest_symlink):
                 os.remove(self.latest_symlink)
@@ -212,7 +213,7 @@ class RunLogger:
         self._flush_live_status()
 
     def _flush_live_status(self) -> None:
-        """Ghi nguyên tử trạng thái hiện tại ra logs/live_status.json (< 0.2ms, không ảnh hưởng FPS)."""
+        """Atomically write logs/live_status.json (< 0.2ms)."""
         try:
             os.makedirs(os.path.dirname(self.live_status_path), exist_ok=True)
             self._live_state["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -224,7 +225,7 @@ class RunLogger:
             pass
 
     def update_live_context(self, **kwargs: Any) -> None:
-        """Cập nhật siêu dữ liệu phiên chạy trên live_status.json."""
+        """Update run-level metadata fields in live_status.json."""
         for k, v in kwargs.items():
             if v is not None:
                 self._live_state[k] = v
@@ -236,7 +237,7 @@ class RunLogger:
         detail: str = "",
         active_chunk: Optional[int] = None,
     ) -> None:
-        """Cập nhật chặng pipeline hiện tại (probing | preflight_dedup | upscaling | muxing | auditing | subtrans | completed | paused | error)."""
+        """Update active pipeline stage and preserve last active stage on pause/error."""
         prev_stage = str(self._live_state.get("stage") or "")
         non_step_stages = {"", "idle", "starting", "initializing", "completed", "paused", "error"}
         if stage in {"error", "paused"}:
@@ -256,7 +257,7 @@ class RunLogger:
 
     @contextmanager
     def stage_guard(self) -> Iterator[None]:
-        """Đảm bảo mọi ngoại lệ hoặc Ctrl+C đều cập nhật trạng thái dừng/lỗi lên live_status.json."""
+        """Ensure KeyboardInterrupt, ENOSPC pauses, and errors update live_status.json."""
         try:
             yield
         except KeyboardInterrupt:
@@ -274,30 +275,33 @@ class RunLogger:
                     self._flush_live_status()
             raise
 
-    def _write_file(self, message: str):
-        """Ghi dòng log kèm timestamp vào file"""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def _append_log_and_mirror(self, raw_text: str) -> None:
+        """Append raw_text to log_filepath and mirror to latest.log when it is a regular file."""
         try:
             with open(self.log_filepath, "a", encoding="utf-8") as f:
-                f.write(f"[{now}] {message}\n")
-            # Đồng bộ sang latest.log nếu latest.log là regular file (Windows không có symlink)
+                f.write(raw_text)
             if os.path.exists(self.latest_symlink) and not os.path.islink(self.latest_symlink):
                 try:
                     with open(self.latest_symlink, "a", encoding="utf-8") as lf:
-                        lf.write(f"[{now}] {message}\n")
+                        lf.write(raw_text)
                 except Exception:
                     pass
         except Exception:
             pass
 
+    def _write_file(self, message: str):
+        """Append a timestamped log line to the log file."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._append_log_and_mirror(f"[{now}] {message}\n")
+
     def info(self, message: str, to_console: bool = False):
-        """Ghi log mức INFO"""
+        """Log an INFO message."""
         self._write_file(f"[INFO] {message}")
         if to_console:
             print(f"ℹ️  {message}")
 
     def warn(self, message: str, to_console: bool = True):
-        """Ghi log mức WARNING"""
+        """Log a WARNING message."""
         self._write_file(f"[WARN] {message}")
         if to_console:
             print(f"⚠️  {message}")
@@ -305,7 +309,7 @@ class RunLogger:
     warning = warn
 
     def error(self, message: str, to_console: bool = True):
-        """Ghi log mức ERROR"""
+        """Log an ERROR message and update last_error in live_status.json."""
         self._write_file(f"[ERROR] {message}")
         self._live_state["last_error"] = message
         self._flush_live_status()
@@ -313,7 +317,7 @@ class RunLogger:
             print(f"❌ {message}")
 
     def print_banner(self, info: Dict[str, Any]):
-        """In banner ra Terminal và ghi đầy đủ vào file log"""
+        """Print run startup banner to console and append to the log file."""
         banner_lines = [
             "=" * 72,
             f"🎬  AI VIDEO UPSCALER 4K — {DEVICE_NAME.upper()} & {HEVC_ENCODER.upper()}",
@@ -331,12 +335,8 @@ class RunLogger:
             "=" * 72
         ]
 
-        # In ra console
         print("\n" + "\n".join(banner_lines) + "\n")
-
-        # Ghi vào file log
-        with open(self.log_filepath, "a", encoding="utf-8") as f:
-            f.write("\n".join(banner_lines) + "\n\n")
+        self._append_log_and_mirror("\n".join(banner_lines) + "\n\n")
 
         self.update_live_context(
             output_path=info.get("output_path", ""),
@@ -362,7 +362,7 @@ class RunLogger:
         steady_fps: Optional[float] = None,
         rss_mb: Optional[float] = None
     ):
-        """Ghi lại chi tiết viễn trắc của từng phân đoạn hoàn thành"""
+        """Record per-chunk telemetry to log and live_status.json."""
         seg_size = os.path.getsize(output_seg) if os.path.exists(output_seg) else 0
         extra_info = []
         if t0_seconds is not None:
@@ -371,7 +371,7 @@ class RunLogger:
             extra_info.append(f"Steady: {steady_fps:.2f} fps")
         if rss_mb is not None and rss_mb > 0:
             extra_info.append(f"Peak RSS: {rss_mb:.1f} MB")
-        
+
         extra_str = f" | {', '.join(extra_info)}" if extra_info else ""
         log_entry = (
             f"[CHUNK {chunk_idx + 1:02d}/{total_chunks:02d}] Hoàn tất {frames} frames "
@@ -415,7 +415,7 @@ class RunLogger:
         self._flush_live_status()
 
     def print_benchmark_summary(self, stats: Dict[str, Any]):
-        """In bảng tổng kết Benchmark ra console và lưu vĩnh viễn vào file log"""
+        """Print final benchmark summary table to console and append to the log file."""
         dev_name = stats.get('device_name') or DEVICE_NAME
         summary_lines = [
             "=" * 72,
@@ -438,22 +438,17 @@ class RunLogger:
             summary_lines.append("⏱️  Thời gian theo Stage:")
             for s_name, s_sec in stats["stage_timings"].items():
                 summary_lines.append(f"   • {s_name}: {s_sec:.2f}s")
-                
+
         summary_lines.extend([
             f"📝 Nhật ký chi tiết:     logs/{self.log_filename}",
             "=" * 72
         ])
 
         print("\n" + "\n".join(summary_lines))
-        if sys.platform == "win32":
-            print("\n💡 Thưởng thức ngay video 4K chất lượng cao:")
-            print(f"   start \"\" \"{stats['output_path']}\"\n")
-        else:
-            print("\n💡 Thưởng thức ngay với màn hình Liquid Retina XDR / Mini-LED:")
-            print(f"   open -a IINA \"{stats['output_path']}\"\n")
+        print("\n💡 Thưởng thức ngay video 4K chất lượng cao:")
+        print(f"   start \"\" \"{stats['output_path']}\"\n")
 
-        with open(self.log_filepath, "a", encoding="utf-8") as f:
-            f.write("\n" + "\n".join(summary_lines) + "\n")
+        self._append_log_and_mirror("\n" + "\n".join(summary_lines) + "\n")
 
         self._live_state["stage"] = "completed"
         self._live_state["stage_detail"] = "Hoàn tất xuất xưởng 4K thành công!"

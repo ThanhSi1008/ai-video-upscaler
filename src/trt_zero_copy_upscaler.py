@@ -1,17 +1,4 @@
-"""
-src/trt_zero_copy_upscaler.py
-Next-generation Zero-Disk and Zero-Copy inference architecture:
-1. GPUColorConverterP010LE:
-   - Directly converts RGB FP16 tensor [B, 3, H, W] to rawvideo 'p010le'
-     (YUV420P 10-bit Little-Endian, MSB-aligned) per BT.709 TV Limited Range in GPU VRAM.
-   - Eliminates 100% of PNG compress/decompress overhead and CPU swscale, halving PCIe D2H bandwidth.
-2. SRVGGNetCompactTRTWrapper:
-   - Wrapper preserving 100% realesr-animevideov3 weights with FP16 feature extraction
-     while computing Residual Add and Bicubic interpolation in FP32 to avoid precision loss.
-3. DoubleBufferedPipeUpscaler:
-   - Overlaps 3 independent CUDA streams (H2D, Compute, D2H) with pinned host memory buffers.
-   - Pipes p010le raw frames directly to FFmpeg NVENC (in-memory deduplication re-expansion, zero disk I/O).
-"""
+"""Zero-disk, zero-copy GPU inference pipeline using Triton P010LE conversion and 3-stream CUDA overlap."""
 
 import collections
 import os
@@ -205,12 +192,7 @@ def _nhwc_u8_to_nchw_fp16_norm(
     out_nchw_fp16: Optional[torch.Tensor] = None,
     use_triton: Optional[bool] = None,
 ) -> torch.Tensor:
-    """
-    Chuyển đổi và chuẩn hóa 1-pass (B, H, W, 3) uint8 -> (B, 3, H, W) float16 * (1/255)
-    trực tiếp vào vùng đệm cố định out_nchw_fp16 (bảo toàn địa chỉ con trỏ cho TensorRT).
-    Ưu tiên kernel @triton.jit trên CUDA (~150 MB VRAM traffic/batch thay vì ~350 MB của 2-kernel PyTorch),
-    với nhánh fallback PyTorch sạch sẽ khi chạy trên CPU hoặc không có Triton.
-    """
+    """Convert (B, H, W, 3) uint8 to (B, 3, H, W) fp16 [0, 1] directly into out_nchw_fp16."""
     if nhwc_u8.ndim != 4 or nhwc_u8.shape[-1] != 3:
         raise ValueError(f"Kỳ vọng tensor NHWC (B, H, W, 3), nhận được shape={tuple(nhwc_u8.shape)}")
 
@@ -264,26 +246,19 @@ def _nhwc_u8_to_nchw_fp16_norm(
     return out_buf
 
 
-# =============================================================================
 # 1. GPU COLOR CONVERTER P010LE (BT.709 10-BIT LIMITED RANGE)
-# =============================================================================
 
 class GPUColorConverterP010LE:
-    """
-    Chuyển đổi trực tiếp Tensor RGB [B, 3, H, W] (miền giá trị [0.0, 1.0])
-    sang định dạng rawvideo 'p010le' (YUV420P Semi-Planar 10-bit Little-Endian)
-    theo chuẩn ITU-R BT.709 Limited Range (TV range) trực tiếp trên GPU VRAM qua Triton JIT kernel.
-    """
+    """Convert RGB [B, 3, H, W] tensors in [0.0, 1.0] to ITU-R BT.709 limited-range P010LE."""
+
     def __init__(self, device: Optional[torch.device] = None):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
-        self._compiled_fn = None
         self._p010_ring: List[torch.Tensor] = []
         self._p010_ring_slot: int = 0
         self._has_triton = False
 
-        # Phát hiện Triton JIT kernel khả dụng trên GPU CUDA
         if device.type == "cuda" and HAS_TRITON and _rgb_to_p010le_triton_kernel is not None:
             self._has_triton = True
 
@@ -305,22 +280,21 @@ class GPUColorConverterP010LE:
     @staticmethod
     def _p010le_core(rgb_slice: torch.Tensor) -> torch.Tensor:
         B, _, H, W = rgb_slice.shape
-        # Clamp RGB overshoots/NaNs về miền hợp lệ [0.0, 1.0] trước phép nhân ma trận có dấu ITU-R BT.709
-        # (khớp tuyệt đối với out_tensor.clamp(0.0, 1.0) của chế độ PNG và tránh rò rỉ sắc độ Cb/Cr vùng chói)
+        # Clamp RGB overshoots and NaNs to [0, 1] before BT.709 matrix transform to avoid chroma leak
         out_fp16 = torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0)
         rgb_clamped = out_fp16.clamp_(0.0, 1.0)
         r = rgb_clamped[:, 0]
         g = rgb_clamped[:, 1]
         b = rgb_clamped[:, 2]
 
-        # 1. Kênh Luma Y [B, H, W] theo chuẩn ITU-R BT.709 Limited Range [64..940]
+        # 1. BT.709 limited-range luma Y [64..940]
         y = torch.empty_like(r).fill_(64.0)
         y.add_(r, alpha=186.2376)
         y.add_(g, alpha=626.5152)
         y.add_(b, alpha=63.2472)
         y_p010 = (torch.clamp(torch.round(y), 64.0, 940.0).to(torch.int32) << 6).to(torch.int16)
 
-        # 2. Lấy mẫu xuống 4:2:0 Chroma Subsampling trước khi tính UV [64..960]
+        # 2. 4:2:0 chroma subsampling before BT.709 UV transform [64..960]
         rgb_sub = F.avg_pool2d(rgb_clamped, kernel_size=2, stride=2)
         rs = rgb_sub[:, 0]
         gs = rgb_sub[:, 1]
@@ -339,26 +313,17 @@ class GPUColorConverterP010LE:
         u_p010 = (torch.clamp(torch.round(u), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
         v_p010 = (torch.clamp(torch.round(v), 64.0, 960.0).to(torch.int32) << 6).to(torch.int16)
 
-        # 3. Đan xen Semi-Planar UV [B, H/2, W] và nối với Y [B, H, W]
+        # 3. Interleave semi-planar UV [B, H/2, W] after Y [B, H, W]
         uv_p010 = torch.stack((u_p010, v_p010), dim=-1).view(B, H // 2, W)
         return torch.cat((y_p010, uv_p010), dim=1).contiguous()
 
     @torch.inference_mode()
     def _convert_slice(self, rgb_slice: torch.Tensor) -> torch.Tensor:
-        if self._compiled_fn is not None:
-            try:
-                return self._compiled_fn(rgb_slice)
-            except Exception:
-                self._compiled_fn = None
         return self._p010le_core(rgb_slice)
 
     @torch.inference_mode()
     def rgb_to_p010le(self, rgb_tensor: torch.Tensor, slot: Optional[int] = None) -> torch.Tensor:
-        """
-        Input:  rgb_tensor: [B, 3, H, W] (float16 hoặc float32, miền [0.0, 1.0])
-        Output: p010_frame: [B, H * 3 // 2, W] (int16/uint16, chuẩn Semi-Planar P010LE)
-        Tối ưu Triton JIT kernel cho GPU CUDA hoặc micro-slice CPU fallback kết hợp vòng đệm đôi (2-slot VRAM ring).
-        """
+        """Convert RGB [B, 3, H, W] into 2-slot ring-buffered Semi-Planar P010LE [B, 3*H//2, W]."""
         B, _, H, W = rgb_tensor.shape
         self._ensure_ring(B, H, W, rgb_tensor.device)
         ring_slot = self._p010_ring_slot if slot is None else (slot % len(self._p010_ring))
@@ -367,7 +332,7 @@ class GPUColorConverterP010LE:
 
         out_buf = self._p010_ring[ring_slot][:B]
 
-        # 1. Chạy trực tiếp qua Triton JIT kernel khi có CUDA + Triton (0 micro-slicing loop, 0 alloc mới)
+        # Prefer Triton kernel on CUDA for single-pass conversion
         if self._has_triton and rgb_tensor.is_cuda and _rgb_to_p010le_triton_kernel is not None:
             BLOCK_X = 16
             BLOCK_Y = 16
@@ -381,7 +346,7 @@ class GPUColorConverterP010LE:
             )
             return out_buf
 
-        # 2. Nhánh Fallback cho CPU / non-CUDA hoặc khi Triton không khả dụng
+        # CPU / non-Triton fallback
         if B <= 2:
             out_buf.copy_(self._convert_slice(rgb_tensor))
             return out_buf
@@ -392,22 +357,12 @@ class GPUColorConverterP010LE:
         return out_buf
 
 
-# =============================================================================
-# 2. HYBRID PRECISION WRAPPER CHO REALESR-ANIMEAVIDEOV3
-# =============================================================================
-
 class SRVGGNetCompactTRTWrapper(nn.Module):
-    """
-    Wrapper giữ nguyên 100% trọng số của realesr-animevideov3 / AnimeJaNaiCompact2x:
-    - Backbone trích xuất đặc trưng (16 Conv2d + PReLU) chạy FP16 để tối ưu Tensor Cores.
-    - Nhánh cộng dư (Residual Add) và phép nội suy Bicubic được ép tính toán ở FP32
-      để triệt tiêu hoàn toàn sai số làm tròn, bảo đảm |ΔY| < 0.3/255 và r > 0.9998.
-    """
+    """Hybrid-precision wrapper running conv backbone in FP16 and residual/bicubic tail in FP32."""
     def __init__(self, base_srvgg_model: nn.Module, scale: Optional[float] = None):
         super().__init__()
         self.body = base_srvgg_model.body
         self.upsampler = base_srvgg_model.upsampler
-        # Xác định hệ số phóng đại gốc của PixelShuffle (2 hoặc 4)
         if hasattr(base_srvgg_model, "upscale"):
             self.upscale = base_srvgg_model.upscale
         else:
@@ -437,8 +392,7 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
             feat = layer(feat)
 
         B, _, H, W = x.shape
-        # Khi không đang trace ONNX và batch lớn trên ảnh Full HD, cắt lát đuôi 8K mỗi 2 frames
-        # giúp giảm ~75% đỉnh VRAM trung gian (~4.5 GB tiết kiệm) mà kết quả khớp bit-exact 100%.
+        # Micro-slice 8K tail across 2 frames on Full HD+ batches outside ONNX export
         if (not torch.onnx.is_in_onnx_export()) and B > 2 and self.upscale >= 4 and (H * W) >= (540 * 960):
             out_h = int(round(H * self.target_scale))
             out_w = int(round(W * self.target_scale))
@@ -451,12 +405,8 @@ class SRVGGNetCompactTRTWrapper(nn.Module):
         return self._tail_upsample(feat, x, out_dtype)
 
 
-# =============================================================================
-# 3. DOUBLE-BUFFERED TRIPLE CUDA STREAMS ZERO-DISK PIPE UPSCALER
-# =============================================================================
-
 def _extract_proc_stderr(encoder_proc: Any) -> str:
-    """Đọc an toàn thông báo stderr từ daemon drain tail hoặc pipe stderr thô của FFmpeg."""
+    """Read buffered stderr tail lines or pipe stderr from an FFmpeg subprocess."""
     if encoder_proc is None:
         return ""
     try:
@@ -615,11 +565,7 @@ class _PipeDrainWorker:
 
 
 class DoubleBufferedPipeUpscaler:
-    """
-    Hệ thống suy luận gối đầu 3 CUDA Streams (Stream H2D, Stream Compute, Stream D2H)
-    kết hợp Double-Buffered Pinned Memory và xuất trực tiếp vào FFmpeg NVENC pipe.
-    Triệt tiêu 100% file ảnh PNG trung gian và giải phóng CPU khỏi tác vụ swscale.
-    """
+    """Three-stream overlapped H2D/Compute/D2H upscaler writing directly to an FFmpeg NVENC pipe."""
     def __init__(
         self,
         model_or_engine: Any,
@@ -663,10 +609,7 @@ class DoubleBufferedPipeUpscaler:
             self.warmup(batch_size=min(2, self.batch_size))
 
     def _ensure_cuda_event_pools(self, num_batches: int, record_micro: bool) -> None:
-        """
-        Cấp phát trước và tái sử dụng các CUDA Event theo lô bên ngoài vòng lặp nóng,
-        loại bỏ hoàn toàn 8*N lệnh gọi driver cudaEventCreate giữa chừng.
-        """
+        """Pre-allocate reusable CUDA events outside the hot loop."""
         if self.device.type != "cuda":
             return
         while len(self._sync_event_pool) < num_batches:
@@ -678,7 +621,7 @@ class DoubleBufferedPipeUpscaler:
                 )
 
     def ensure_resolution(self, in_h: int, in_w: int) -> Tuple[int, int]:
-        """Đảm bảo bộ đệm Pinned Memory khớp độ phân giải khung hình thực tế (hỗ trợ tái sử dụng xuyên suốt tập)."""
+        """Resize pinned host and VRAM ring buffers when chunk frame dimensions change."""
         out_h = in_h * self.scale
         out_w = in_w * self.scale
         if (out_h % 2 != 0) or (out_w % 2 != 0):
@@ -712,10 +655,7 @@ class DoubleBufferedPipeUpscaler:
         return self.output_hw
 
     def warmup(self, batch_size: int = 2) -> None:
-        """
-        Khởi động sớm (Warm-up) 1-batch qua Triton JIT Input Norm + Color Converter và Engine Context
-        trước khi bắt đầu đo đạc pipeline video, triệt tiêu hoàn toàn 3-4s độ trễ biên dịch cold-start.
-        """
+        """Warm up Triton input norm, color converter, and TRT execution context before timing."""
         if self.device.type != "cuda" or not torch.cuda.is_available():
             return
         if os.environ.get("PYTEST_CURRENT_TEST"):
@@ -764,10 +704,7 @@ class DoubleBufferedPipeUpscaler:
         width: int = 3840,
         height: int = 2160,
     ) -> subprocess.Popen:
-        """
-        Khởi tạo tiến trình FFmpeg NVENC nhận trực tiếp luồng rawvideo p010le từ stdin pipe.
-        Áp dụng toàn bộ cấu hình tối ưu của Giai đoạn 1 (CQ 18 + fullres + lookahead 32 + AQ kép).
-        """
+        """Spawn FFmpeg NVENC receiving rawvideo P010LE over stdin pipe."""
         rate_args = get_hevc_rate_args(bitrate="28M")
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -788,8 +725,7 @@ class DoubleBufferedPipeUpscaler:
             "-tag:v", HEVC_TAG,
             output_mp4_path
         ]
-        # Dùng pipe unbuffered (bufsize=0) kèm daemon drain stderr để tránh khóa trang MDL 64MB / deadlock 4KB stderr
-        # và trích xuất chính xác thông báo lỗi NVENC nếu FFmpeg đóng pipe đột ngột.
+        # Unbuffered stdin + daemon stderr drain avoid 64 MiB MDL lock / 4 KiB stderr deadlock
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         if getattr(proc, "stderr", None) is not None:
             stderr_tail: collections.deque[str] = collections.deque(maxlen=64)
@@ -819,16 +755,13 @@ class DoubleBufferedPipeUpscaler:
 
     @staticmethod
     def _write_frame_to_pipe(encoder_proc: Any, buf_arr: np.ndarray, repeats: int = 1) -> None:
-        """
-        Ghi khung hình p010le vào stdin pipe theo từng lát 8 MiB để tránh lỗi khóa trang MDL lớn trên Windows,
-        hỗ trợ xuất lặp khung hình (repeats) với 1 lần cast memoryview duy nhất,
-        và báo cáo đầy đủ stderr của FFmpeg nếu gặp BrokenPipeError / OSError(errno=22 EINVAL).
-        """
+        """Write repeated P010LE frame buffers to stdin in 8 MiB chunks to avoid Windows MDL exhaustion."""
         if repeats <= 0:
             return
         mv = memoryview(buf_arr).cast("B")
         total_len = len(mv)
-        write_step = 8 * 1024 * 1024  # 8 MiB (giảm 50% syscall mà vẫn an toàn dưới ngưỡng 64MB)
+        # 8 MiB slices stay safely below the Windows 64 MiB pipe MDL page-lock limit
+        write_step = 8 * 1024 * 1024
         try:
             for _ in range(repeats):
                 offset = 0
@@ -864,18 +797,7 @@ class DoubleBufferedPipeUpscaler:
         enable_micro_timings: Optional[bool] = None,
         precomputed_dedup: Optional[Tuple[List[np.ndarray], List[int]]] = None,
     ) -> int:
-        """
-        Xử lý danh sách các unique frames của 1 phân đoạn và nhân bản trực tiếp trong RAM Pipe
-        theo repeat_counts (kết quả từ Deduplication Engine).
-        - Tích hợp Cyclic Cel Memoization + Belady's Optimal Liveness Eviction:
-          Khử trùng lặp các khung hình chu kỳ không liên tiếp (nhép miệng A->B->A, chớp mắt, cắt cảnh)
-          trong cùng chunk 8s, chỉ chạy TensorRT + P010LE trên tập distinct frames thực sự.
-        - Tích hợp thu mẫu Sanity 270x480 trực tiếp trên GPU ở Batch 0 (0 lượt infer phụ).
-        - Tích hợp worker nền ghi pipe bất đồng bộ (_PipeDrainWorker) triệt tiêu GPU bubble.
-        - Tích hợp thu thập vi trễ GPU CUDA Event bất đồng bộ không gây stall đường ống.
-        Returns:
-            Tổng số khung hình 4K đã được ghi thành công vào encoder pipe.
-        """
+        """Upscale deduplicated segment frames with cyclic memoization and stream them as P010LE into encoder_proc."""
         self.last_first_rgb_small = None
         num_unique = len(unique_frames_rgb)
         if num_unique == 0:
@@ -939,7 +861,7 @@ class DoubleBufferedPipeUpscaler:
                     del memo_p010[req_d]
                 next_u_idx += 1
 
-            # Chỉ sao lưu sang RAM những frame chu kỳ còn xuất hiện lại ở các batch tương lai (Belady's OPT)
+            # Only retain frames still referenced by future batches (Belady OPT eviction)
             for d_idx, view_arr in slot_views.items():
                 if remaining_refs[d_idx] > 0 and d_idx not in memo_p010:
                     memo_p010[d_idx] = view_arr.copy()
@@ -951,7 +873,6 @@ class DoubleBufferedPipeUpscaler:
         ok = False
         try:
             if self.device.type == "cuda":
-                # Xây dựng danh sách batch slicing trên tập distinct_frames đã cô đặc
                 batches = []
                 for start_idx in range(0, num_distinct, self.batch_size):
                     end_idx = min(start_idx + self.batch_size, num_distinct)
@@ -984,7 +905,7 @@ class DoubleBufferedPipeUpscaler:
                         evt_tri_s = evt_tri_e = None
                         evt_d2h_s = evt_d2h_e = None
 
-                    # 1. Nạp dữ liệu tuần tự NHWC vào Pinned Memory (0 transpose trên DDR4 CPU) và truyền H2D bất đồng bộ
+                    # 1. Stage NHWC input to pinned memory and enqueue async H2D copy
                     with torch.cuda.stream(self.stream_h2d):
                         if record_micro and evt_h2d_s is not None:
                             evt_h2d_s.record(self.stream_h2d)
@@ -1003,8 +924,7 @@ class DoubleBufferedPipeUpscaler:
                             if record_micro and evt_h2d_dma_e is not None:
                                 evt_h2d_dma_e.record(self.stream_h2d)
                             if self.gpu_in_ring:
-                                # Fused 1-pass @triton.jit NHWC uint8 -> NCHW float16 * (1/255) trực tiếp vào self.gpu_in_ring[slot][:cur_B]
-                                # (~150 MB VRAM traffic/batch, bảo toàn tuyệt đối địa chỉ con trỏ cố định cho TensorRT execute_async_v3)
+                                # Fused Triton NHWC u8->NCHW fp16 directly into fixed gpu_in_ring slot for TRT execute_async_v3
                                 in_buf = self.gpu_in_ring[slot][:cur_B]
                                 gpu_tensor = _nhwc_u8_to_nchw_fp16_norm(gpu_nhwc, out_nchw_fp16=in_buf)
                             else:
@@ -1030,7 +950,7 @@ class DoubleBufferedPipeUpscaler:
                         if record_micro and evt_h2d_e is not None:
                             evt_h2d_e.record(self.stream_h2d)
 
-                    # 2. Chờ H2D xong, chạy suy luận + chuyển màu P010LE trực tiếp trên VRAM
+                    # 2. Wait for H2D transfer, run SR inference, and convert to P010LE in VRAM
                     self.stream_compute.wait_stream(self.stream_h2d)
                     with torch.cuda.stream(self.stream_compute):
                         gpu_tensor.record_stream(self.stream_compute)
@@ -1060,7 +980,7 @@ class DoubleBufferedPipeUpscaler:
                         if record_micro and evt_tri_e is not None:
                             evt_tri_e.record(self.stream_compute)
 
-                    # 3. Chờ _PipeDrainWorker xả xong slot cũ (kiểm tra lỗi worker/encoder mỗi 0.25s, tối đa 120s)
+                    # 3. Wait for _PipeDrainWorker to finish draining prior slot before D2H overwrite
                     drain_worker.check_error()
                     wait_start = time.monotonic()
                     while not slot_drain_events[slot].wait(timeout=0.25):
@@ -1109,10 +1029,10 @@ class DoubleBufferedPipeUpscaler:
                         )
                     return evt, sanity_cpu
 
-                # PROLOGUE: Phát lệnh Batch 0
+                # Prologue: dispatch batch 0
                 curr_event, curr_sanity_cpu = _dispatch_batch_cuda(0)
 
-                # STEADY-STATE: Gối đầu bất đồng bộ H2D(b+1) & Compute(b+1) với D2H(b) & Host Pipe Write(b)
+                # Steady-state: overlap H2D/Compute(b+1) with D2H/pipe write(b)
                 for b in range(num_batches):
                     next_event, next_sanity_cpu = (None, None)
                     if b + 1 < num_batches:
@@ -1245,6 +1165,19 @@ class DoubleBufferedPipeUpscaler:
 
         return total_frames_written
 
+    def release(self) -> None:
+        """Release pinned host buffers, VRAM ring buffers, and pooled CUDA events."""
+        self.host_in_pins.clear()
+        self.host_out_pins.clear()
+        self.gpu_in_ring.clear()
+        self.gpu_nhwc_ring.clear()
+        if getattr(self, "color_conv", None) is not None:
+            self.color_conv._p010_ring.clear()
+        self._micro_event_pool.clear()
+        self._sync_event_pool.clear()
+        self.last_first_rgb_small = None
+        self.input_hw = (0, 0)
+        self.output_hw = (0, 0)
 
-# Alias cho hợp đồng giao diện TRTZeroCopyUpscaler
+
 TRTZeroCopyUpscaler = DoubleBufferedPipeUpscaler

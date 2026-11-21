@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-scripts/compare_benchmarks.py
-Automated comparative delta analyzer for ai-video-upscaler benchmark runs.
-
-Compares baseline_summary.json vs optimized_summary.json:
-- Computes FPS, VRAM, and Latency deltas.
-- Validates safety invariants (frame count preservation, mux audit pass, zero frame drops).
-- Formats a detailed Markdown comparison table.
-- Returns exit code 0 if safety invariants hold and metrics satisfy regression tolerance,
-  or non-zero (1) if safety invariants fail or severe regressions occur.
-"""
+"""Comparative delta analyzer for baseline vs optimized pipeline benchmark runs."""
 
 from __future__ import annotations
 
@@ -21,10 +10,8 @@ from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-# ----------------------------------------------------------------------
 # Repository Root Bootstrap
 # Ensure repository root is on sys.path for direct CLI invocation from any cwd
-# ----------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))

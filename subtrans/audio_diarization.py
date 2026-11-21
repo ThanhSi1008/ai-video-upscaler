@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/audio_diarization.py
-Phân tích đặc trưng âm sắc giọng nói (Timbre Spectral Envelope + Fundamental Pitch F0)
-thuần CPU trên kênh thoại trung tâm 5.1 FC (0 MB VRAM, 0 file tạm trên đĩa) để phát hiện
-thời điểm đổi người nói (`speaker_changed` / `same_speaker`) cho phụ đề `.srt` trần
-không gắn nhãn nhân vật.
-"""
+"""CPU-only 5.1 FC timbre and F0 pitch turn detector for unlabeled SRT dialogue."""
 
 from __future__ import annotations
 

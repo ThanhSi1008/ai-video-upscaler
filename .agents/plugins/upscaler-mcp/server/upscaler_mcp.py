@@ -142,9 +142,18 @@ def call_tool(name: str, arguments: dict) -> tuple[str, bool]:
     if name == "upscaler_list_checkpoints":
         gpu_lock = (REPO_ROOT / ".gpu_active.lock").exists()
         rows = [f"gpu_active_lock: {gpu_lock}"]
-        for cp in sorted(REPO_ROOT.glob(".temp_*")):
-            if not cp.is_dir():
+        seen_cps: set[Path] = set()
+        checkpoint_dirs: list[Path] = []
+        for base in (REPO_ROOT, REPO_ROOT / "out"):
+            if not base.is_dir():
                 continue
+            for cp in sorted(base.glob(".temp_*")):
+                if cp.is_dir():
+                    res = cp.resolve()
+                    if res not in seen_cps:
+                        seen_cps.add(res)
+                        checkpoint_dirs.append(cp)
+        for cp in checkpoint_dirs:
             manifest_file = cp / "manifest.json"
             up_segs = list((cp / "upscaled_segs").glob("up_*.mp4")) if (cp / "upscaled_segs").is_dir() else []
             model_id = "unknown"
@@ -154,7 +163,8 @@ def call_tool(name: str, arguments: dict) -> tuple[str, bool]:
                     model_id = str(data.get("model_id", "unknown"))
                 except Exception:
                     model_id = "unreadable"
-            rows.append(f"- {cp.name}: model={model_id}, completed_segments={len(up_segs)}")
+            rel_cp = cp.relative_to(REPO_ROOT).as_posix()
+            rows.append(f"- {rel_cp}: model={model_id}, completed_segments={len(up_segs)}")
         if len(rows) == 1:
             rows.append("No .temp_* checkpoints present.")
         return "\n".join(rows), False

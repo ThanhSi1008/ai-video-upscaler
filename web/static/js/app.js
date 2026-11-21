@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/app.js
  * Main Real-Time Web Studio Orchestrator:

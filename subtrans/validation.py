@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/validation.py
-Validation rules shared across all translation backends.
-"""
+"""Structured output schema and batch translation validators."""
 
 import re
 from typing import List, Dict, Any, Tuple

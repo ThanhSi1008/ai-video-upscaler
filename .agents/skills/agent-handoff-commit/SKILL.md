@@ -11,29 +11,34 @@ description: >-
 ## 1. Start / Resume & Daily Handoff Protocol
 
 ```powershell
-# Read-only bootstrap (Git branch, HEAD, dirty tree, STATE, freshness check):
+# Read-only bootstrap (only needed when SessionStart does not report STATE=fresh):
 .\.venv\Scripts\python.exe scripts/agent_context.py
 
-# Fast AST symbol discovery (saves context tokens vs reading entire large modules):
-.\.venv\Scripts\python.exe scripts/agent_context.py --find <symbol_name>
-.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/pipeline.py
+# Tiered AST context discovery & impact lookup (saves tokens vs reading >350-line files):
+.\.venv\Scripts\python.exe scripts/agent_context.py --pack src/pipeline.py:worker_extract web/app.py:api_subtrans_overview
+.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/pipeline.py web/fs_browser.py
+.\.venv\Scripts\python.exe scripts/agent_context.py --slice src/logger.py RunLogger.log_chunk_done
+.\.venv\Scripts\python.exe scripts/agent_context.py --impact src/logger.py
 ```
 
 For daily development handoffs, update [STATE.md](../../../docs/agents/STATE.md) (and [DECISIONS.md](../../../docs/agents/DECISIONS.md) when an architectural decision changes) **in place**, keeping `Commit Baseline` aligned with the latest runtime commit so `agent_context.py --check` reports 0 freshness warnings. Do **not** generate new dated task files in `docs/agents/tasks/` unless explicitly requested by the user (use [TEMPLATE.md](../../../docs/agents/tasks/TEMPLATE.md) only when requested).
 
-## 2. Pre-Commit Verification Gate
+## 2. Pre-Commit Verification & Doc-Sync Gate
 
-Before staging or committing, verify all Definition of Done gates:
+- **Mandatory Same-Commit Doc-Sync Checklist:** Whenever module layout, symbols, CLI flags, schemas, hooks, or runtime invariants change, sync affected docs (`docs/agents/STATE.md`, `PROJECT_MAP.md`, `VALIDATION.md`, `DECISIONS.md`, `docs/*.md`, `README.md`, `.agents/`) in the same commit (leave unrelated docs untouched on internal fixes).
+- **Hooks & Post-Commit Bundle Sync:** Run `--install-hooks` once to install both managed `pre-commit` (`agent_context.py --check`) and non-blocking `post-commit` (`scripts/export_review_bundle.py --sync-latest` -> `scratch/review_bundles/`). Never read `scratch/review_bundles/` into agent context.
 
 ```powershell
-# 1. Instruction budgets (GEMINI.md <= 4.5 KB & <= 45 lines, scoped .agents/rules/*.md <= 4 KB, GEMINI + subtrans skill <= 32 KiB) & relative links:
+# 1. Instruction budgets, links, and hook setup:
 .\.venv\Scripts\python.exe scripts/agent_context.py --check
+.\.venv\Scripts\python.exe scripts/agent_context.py --install-hooks
 
-# 2. Isolated offline test suite & linter:
+# 2. Fast targeted iteration & final isolated offline test suite + linter:
+.\.venv\Scripts\python.exe scripts/verify_offline.py --impacted
 .\.venv\Scripts\python.exe scripts/verify_offline.py
 .\.venv\Scripts\ruff.exe check .
 
-# 3. Ensure no secrets, checkpoints, caches, or scratch files are staged:
+# 3. Ensure no secrets (.env), checkpoints, caches, or scratch files are staged:
 git status --short
 git diff --cached --check
 ```

@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/ramdisk.py
-Quản lý thư mục đệm khung hình trung gian (Rolling Buffer Directory).
-Tự động dọn dẹp ngay cả khi gặp lỗi hoặc người dùng bấm Ctrl+C.
-"""
+"""Rolling frame buffer directory and orphan RAMDisk cleanup manager."""
 
 import os
 import sys

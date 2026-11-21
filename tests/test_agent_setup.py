@@ -77,27 +77,42 @@ def test_workspace_plugins_manifests_and_logos():
         assert logo.is_file()
 
 
-def test_session_start_hook_emits_valid_inject_steps(tmp_path):
+def test_session_start_hook_emits_valid_inject_steps(tmp_path, monkeypatch):
     mod = _load_module(
         AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "session_start.py",
         "upscaler_session_start",
     )
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     (tmp_path / ".env").write_text("GEMINI_API_KEY=TOP_SECRET_VALUE", encoding="utf-8")
     (tmp_path / ".temp_ep01").mkdir()
+    (tmp_path / "out" / ".temp_ep02").mkdir(parents=True)
 
-    # Empty tasks dir omits Latest_Task=none noise
+    # Empty tasks dir omits Latest_Task=none noise; scans both root and out/.temp_* + STATE/Dirty
     msg_no_task = mod.build_status_message(tmp_path)
     assert "[upscaler-guard]" in msg_no_task
-    assert "Checkpoints(.temp_*)=1" in msg_no_task
+    assert "Checkpoints(.temp_*)=2" in msg_no_task
+    assert "Dirty=0" in msg_no_task
+    assert "STATE=stale" in msg_no_task
     assert "TOP_SECRET_VALUE" not in msg_no_task
     assert "Latest_Task=none" not in msg_no_task
 
-    # Active task file appends Task=...
-    tasks_dir = tmp_path / "docs" / "agents" / "tasks"
-    tasks_dir.mkdir(parents=True)
-    (tasks_dir / "TEMPLATE.md").write_text("# Template\n", encoding="utf-8")
-    (tasks_dir / "2026-11-21-sample-task.md").write_text("# Active\n", encoding="utf-8")
+    # Matching STATE baseline in git repo emits STATE=fresh and Dirty=count
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "docs" / "agents" / "tasks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "docs" / "agents" / "tasks" / "TEMPLATE.md").write_text("# Template\n", encoding="utf-8")
+    (tmp_path / "docs" / "agents" / "STATE.md").write_text("Baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "docs/agents/STATE.md", "docs/agents/tasks/TEMPLATE.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", "commit", "-qm", "init"],
+        check=True,
+    )
+    head_sha = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"], text=True).strip()
+    (tmp_path / "docs" / "agents" / "STATE.md").write_text(f"> **Commit Baseline:** `{head_sha}`\n", encoding="utf-8")
+    (tmp_path / "docs" / "agents" / "tasks" / "2026-11-21-sample-task.md").write_text("# Active\n", encoding="utf-8")
     msg_with_task = mod.build_status_message(tmp_path)
+    assert "STATE=fresh" in msg_with_task
+    assert "Dirty=" in msg_with_task
     assert "Task=docs/agents/tasks/2026-11-21-sample-task.md" in msg_with_task
 
 
@@ -107,28 +122,99 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         "upscaler_pre_tool_guard",
     )
 
-    # 1. Block reading .env, allow reading .env.example
-    res_env = mod.evaluate_tool_call(
-        {"toolCall": {"name": "read_file", "args": {"Path": "e:/ai-video-upscaler/.env"}}},
-        repo_root=tmp_path,
-    )
-    assert res_env["decision"] == "deny"
-    assert "GEMINI.md" in res_env["reason"]
-    assert "AGENTS.md" not in res_env["reason"]
-
-    res_example = mod.evaluate_tool_call(
-        {"toolCall": {"name": "read_file", "args": {"Path": "e:/ai-video-upscaler/.env.example"}}},
-        repo_root=tmp_path,
-    )
-    assert res_example["decision"] == "allow"
-
-    # 2. Block shell printing .env or GEMINI_API_KEY
-    for bad_cmd in ("Get-Content .env", "cat subtrans/.env", "echo $env:GEMINI_API_KEY"):
-        res = mod.evaluate_tool_call(
-            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_cmd}}},
+    # 1. Local .env reads are allowed; writes prompt (force_ask); git add/commit on .env is denied
+    for read_tool in ("read_file", "view_file"):
+        res_env_read = mod.evaluate_tool_call(
+            {"toolCall": {"name": read_tool, "args": {"Path": "e:/ai-video-upscaler/.env"}}},
             repo_root=tmp_path,
         )
-        assert res["decision"] == "deny", f"Expected deny for: {bad_cmd}"
+        assert res_env_read["decision"] == "allow"
+
+    for write_tool in ("write_file", "edit_file", "replace_file_content"):
+        res_env_write = mod.evaluate_tool_call(
+            {"toolCall": {"name": write_tool, "args": {"TargetFile": ".env"}}},
+            repo_root=tmp_path,
+        )
+        assert res_env_write["decision"] == "force_ask"
+
+    for bad_git in ("git add .env", "git commit subtrans/.env -m 'oops'"):
+        res = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_git}}},
+            repo_root=tmp_path,
+        )
+        assert res["decision"] == "deny", f"Expected deny for: {bad_git}"
+
+    res_safe_commit = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": 'git commit -m "Document .env policy"'}}},
+        repo_root=tmp_path,
+    )
+    assert res_safe_commit["decision"] == "allow"
+
+    res_shell_env_write = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "Set-Content .env 'KEY=1'"}}},
+        repo_root=tmp_path,
+    )
+    assert res_shell_env_write["decision"] == "force_ask"
+
+    # 2. Context-Window & Rewrite Firewall checks
+    big_py = tmp_path / "src" / "big_mod.py"
+    big_py.parent.mkdir(parents=True, exist_ok=True)
+    big_py.write_text("\n".join(f"x_{i} = {i}" for i in range(380)) + "\n", encoding="utf-8")
+
+    res_bundle_read = mod.evaluate_tool_call(
+        {"toolCall": {"name": "read_file", "args": {"Path": "scratch/review_bundles/latest_diff.txt"}}},
+        repo_root=tmp_path,
+    )
+    assert res_bundle_read["decision"] == "deny"
+
+    res_bundle_cat = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "cat scratch/review_bundles/focus_web.txt"}}},
+        repo_root=tmp_path,
+    )
+    assert res_bundle_cat["decision"] == "deny"
+
+    res_bundle_gen = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/export_review_bundle.py --sync-latest"}}},
+        repo_root=tmp_path,
+    )
+    assert res_bundle_gen["decision"] == "allow"
+
+    for full_w in ("write_file", "write_to_file"):
+        res_rw = mod.evaluate_tool_call(
+            {"toolCall": {"name": full_w, "args": {"Path": "src/big_mod.py"}}},
+            repo_root=tmp_path,
+        )
+        assert res_rw["decision"] == "deny"
+
+    res_view_unbounded = mod.evaluate_tool_call(
+        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py)}}},
+        repo_root=tmp_path,
+    )
+    assert res_view_unbounded["decision"] == "deny"
+
+    res_view_eof_span = mod.evaluate_tool_call(
+        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py), "StartLine": 50}}},
+        repo_root=tmp_path,
+    )
+    assert res_view_eof_span["decision"] == "deny"
+
+    res_view_bounded = mod.evaluate_tool_call(
+        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(big_py), "StartLine": 100, "EndLine": 250}}},
+        repo_root=tmp_path,
+    )
+    assert res_view_bounded["decision"] == "allow"
+
+    res_dump = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "Get-Content src/big_mod.py"}}},
+        repo_root=tmp_path,
+    )
+    assert res_dump["decision"] == "deny"
+
+    res_dump_bounded = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "Get-Content src/big_mod.py -TotalCount 50"}}},
+        repo_root=tmp_path,
+    )
+    assert res_dump_bounded["decision"] == "allow"
 
     # 3. Guard deleting .temp_* checkpoints
     for cp_cmd in ("Remove-Item -Recurse -Force .temp_ep01", "python upscale.py --clean-temp"):
@@ -217,6 +303,18 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
     )
     assert res_full["decision"] == "deny"
 
+    for extra_gpu_cmd in (
+        ".\\upscale_turbo.bat ep1.mkv",
+        "python scripts/benchmark_pipeline.py",
+        "python scripts/silicon_roofline_probe.py",
+        "python scripts/upscale_x4_single.py ep1.mkv",
+    ):
+        res_gpu_extra = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": extra_gpu_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res_gpu_extra["decision"] == "deny", f"Expected deny for: {extra_gpu_cmd}"
+
     for bounded_up in (
         "python upscale.py ep1.mkv --preview 10",
         "python upscale.py ep1.mkv --dry-run",
@@ -248,7 +346,7 @@ def test_workspace_scoped_rules_and_custom_subagents():
         assert "trigger: glob" in text
         assert "globs:" in text and "description:" in text
 
-    for agent_name in ("test-verifier.md", "subtrans-evaluator.md"):
+    for agent_name in ("test-verifier.md", "subtrans-evaluator.md", "repo-scout.md"):
         agent_path = agents_dir / agent_name
         assert agent_path.is_file(), f"Missing subagent spec: {agent_name}"
         text = agent_path.read_text(encoding="utf-8")
@@ -256,11 +354,19 @@ def test_workspace_scoped_rules_and_custom_subagents():
         assert "inheritMcp: false" in text
         assert "enableWriteTools: false" in text
 
+    subtrans_rule = (rules_dir / "subtrans.md").read_text(encoding="utf-8")
+    assert "subtrans/**/*" in subtrans_rule and "glossaries/*.yaml" in subtrans_rule
+
 
 def test_hooks_json_and_lifecycle_post_tool_and_stop(tmp_path):
     hooks_cfg = json.loads((AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks.json").read_text(encoding="utf-8"))
     assert "upscaler-post-tool-lint" in hooks_cfg
     assert "upscaler-stop-audit" in hooks_cfg
+    pre_hook = hooks_cfg["upscaler-pre-tool-guard"]["PreToolUse"][0]
+    assert "view_file" in pre_hook["matcher"] and "write_to_file" in pre_hook["matcher"]
+    assert "..\\..\\..\\.venv\\Scripts\\python.exe" in pre_hook["hooks"][0]["command"]
+    assert hooks_cfg["upscaler-post-tool-lint"]["PostToolUse"][0]["hooks"][0]["timeout"] == 3
+    assert hooks_cfg["upscaler-stop-audit"]["Stop"][0]["timeout"] == 3
 
     post_mod = _load_module(
         AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "post_tool_lint.py",
@@ -283,6 +389,23 @@ def test_hooks_json_and_lifecycle_post_tool_and_stop(tmp_path):
     assert res_bad["ok"] is False
     assert res_bad["lintErrors"]
 
+    # Fast JSON and YAML validation via FilePath argument
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{bad", encoding="utf-8")
+    res_bad_json = post_mod.run_post_tool_lint(
+        {"toolCall": {"name": "write_to_file", "args": {"FilePath": str(bad_json)}}},
+        repo_root=tmp_path,
+    )
+    assert res_bad_json["ok"] is False and "JSON:" in str(res_bad_json["lintErrors"])
+
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("shows:\n  - [unclosed\n", encoding="utf-8")
+    res_bad_yaml = post_mod.run_post_tool_lint(
+        {"toolCall": {"name": "replace_file_content", "args": {"FilePath": str(bad_yaml)}}},
+        repo_root=tmp_path,
+    )
+    assert res_bad_yaml["ok"] is False and "YAML:" in str(res_bad_yaml["lintErrors"])
+
     stop_mod = _load_module(
         AGENTS_DIR / "plugins" / "upscaler-guard" / "hooks" / "stop_audit.py",
         "upscaler_stop_audit",
@@ -293,6 +416,14 @@ def test_hooks_json_and_lifecycle_post_tool_and_stop(tmp_path):
     subprocess.run(["git", "init", "-q", str(stop_repo)], check=True)
     # Clean repo -> empty dict (0 token overhead)
     assert stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo) == {}
+    # Staged .env secret triggers Stop block
+    (stop_repo / ".env").write_text("GEMINI_API_KEY=SECRET\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(stop_repo), "add", "-f", ".env"], check=True)
+    res_env_staged = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)
+    assert res_env_staged.get("decision") == "continue"
+    assert "Staged .env secret" in res_env_staged.get("reason", "")
+    subprocess.run(["git", "-C", str(stop_repo), "rm", "--cached", "-f", "-q", ".env"], check=True)
+    (stop_repo / ".env").unlink()
     # Modified broken Python triggers Stop block
     (stop_repo / "broken_stop.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
     res_ruff = stop_mod.evaluate_stop({"terminationReason": "NO_TOOL_CALL"}, repo_root=stop_repo)

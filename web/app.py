@@ -1,13 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-web/app.py
-Ứng dụng FastAPI trung tâm cho AI Video Upscaler & Subtrans Real-Time Studio:
-- Phục vụ giao diện Web hiện đại (web/static/) và luồng SSE 1.0 Hz (/api/events).
-- Cung cấp đầy đủ REST API cho Live Monitor, Queue & Scheduler, Preview 1080p vs 4K,
-  Models & shows.yaml Configurator, Subtrans & Audit Vault.
-- Cho phép vận hành bình thường mọi tác vụ (Upscale, Preview, Subtrans, Subs-Pending,
-  cấu hình shows.yaml & quản lý API Key cục bộ) ở bất kỳ khung giờ nào.
-"""
+"""FastAPI application and REST/SSE routes for Local Real-Time Web Studio."""
 
 from __future__ import annotations
 
@@ -41,6 +32,7 @@ from web.fs_browser import (
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
     is_secret_filename,
+    is_valid_dedup_policy,
     match_show_pattern,
 )
 from web.job_manager import MODEL_REFERENCE_FPS, JobManager
@@ -50,9 +42,7 @@ ALLOWED_OPEN_MEDIA_EXTS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-# =====================================================================
 # PYDANTIC PAYLOAD SCHEMAS
-# =====================================================================
 
 _DEADLINE_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
@@ -245,9 +235,7 @@ class UpdateApiKeysRequest(BaseModel):
         return v
 
 
-# =====================================================================
 # HELPER UTILITIES
-# =====================================================================
 
 def _mask_secret(raw: str) -> str:
     val = (raw or "").strip()
@@ -259,7 +247,7 @@ def _mask_secret(raw: str) -> str:
 
 
 def _read_dotenv_map(dotenv_path: Path) -> Dict[str, str]:
-    """Đọc các cặp KEY=VALUE từ file .env cục bộ mà không bao giờ in hoặc log giá trị thô."""
+    """Read KEY=VALUE entries from a local .env file without logging secret values."""
     result: Dict[str, str] = {}
     if not dotenv_path.is_file():
         return result
@@ -283,14 +271,14 @@ def _read_dotenv_map(dotenv_path: Path) -> Dict[str, str]:
 
 
 def _validate_dotenv_value(raw_val: str, key_name: str = "API key") -> str:
-    """Chống chèn dòng mới (CR/LF) hoặc ký tự NUL khi ghi tệp .env."""
+    """Reject CR/LF newlines or NUL bytes before writing .env entries."""
     if any(ch in raw_val for ch in ("\r", "\n", "\x00")):
         raise ValueError(f"Giá trị '{key_name}' chứa ký tự xuống dòng (CR/LF) hoặc NUL không hợp lệ.")
     return raw_val.strip()
 
 
 def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> None:
-    """Cập nhật an toàn các biến API key vào .env cục bộ, chống CR/LF injection và bảo toàn mọi dòng khác."""
+    """Safely update specified keys in local .env while preserving unrelated entries."""
     sanitized_updates: Dict[str, Optional[str]] = {}
     for key_name, raw_val in updates.items():
         if raw_val is None:
@@ -319,7 +307,7 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
             handled.add(key_name)
             if val:
                 new_lines.append(f"{key_name}={val}")
-            # Nếu chuỗi rỗng -> xóa dòng khóa cũ đó
+            # Empty string deletes the existing key line
         else:
             new_lines.append(raw_line)
 
@@ -345,13 +333,7 @@ def _resolve_subtrans_key_slots(
     dotenv_path: Path,
     key_id_fn: Optional[Callable[[str], str]] = None,
 ) -> tuple[List[Dict[str, Any]], int]:
-    """
-    Giải mã trạng thái 3 khe API Key & tổng số khóa hoạt động khớp logic ưu tiên của subtrans/config.py:
-    1) os.environ luôn thắng file .env cục bộ của workspace (hành vi load_dotenv(..., override=False)).
-       Lưu ý: luôn đọc file workspace dotenv_path truyền vào (kể cả khi pytest cô lập đặt SUBTRANS_DISABLE_DOTENV=1
-       để chặn python-dotenv tự đọc .env gốc của repo).
-    2) Hỗ trợ GEMINI_API_KEYS (phân tách ',' hoặc ';'), GEMINI_API_KEY và GEMINI_API_KEY_1..N.
-    """
+    """Resolve 3 API key slot statuses matching subtrans/config.py precedence (env overrides .env)."""
     dotenv_map = _read_dotenv_map(dotenv_path)
 
     def _effective_var(name: str) -> tuple[str, str]:
@@ -377,7 +359,7 @@ def _resolve_subtrans_key_slots(
         chosen_src = ""
         chosen_var = slot_key_name
 
-        # Ưu tiên tuyệt đối: biến từ process env (override=False) theo thứ tự GEMINI_API_KEYS -> GEMINI_API_KEY -> GEMINI_API_KEY_N
+        # Process env always wins over .env (matching load_dotenv(override=False))
         if multi_src == "env" and idx - 1 < len(multi_tokens):
             chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "env", "GEMINI_API_KEYS"
         elif idx == 1 and prim_src == "env" and prim_tokens:
@@ -386,7 +368,7 @@ def _resolve_subtrans_key_slots(
             chosen_val, chosen_src, chosen_var = slot_tokens[0], "env", slot_key_name
         elif idx >= 2 and prim_src == "env" and idx - 1 < len(prim_tokens):
             chosen_val, chosen_src, chosen_var = prim_tokens[idx - 1], "env", "GEMINI_API_KEY"
-        # Kế đến: biến từ .env theo đúng thứ tự ưu tiên của subtrans/config.py
+        # Next check local .env entries in subtrans/config.py precedence order
         elif multi_src == "dotenv" and idx - 1 < len(multi_tokens):
             chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "dotenv", "GEMINI_API_KEYS"
         elif idx == 1 and prim_src == "dotenv" and prim_tokens:
@@ -427,7 +409,7 @@ def _resolve_subtrans_key_slots(
 
 
 def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
-    """Đọc nhanh thời lượng (giây) và kích thước khung hình qua PyAV (hoặc fallback mặc định)."""
+    """Read video duration and pixel dimensions via PyAV, returning zeros on failure."""
     try:
         import av
         with av.open(str(video_path)) as container:
@@ -445,7 +427,7 @@ def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
 
 
 def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path) -> None:
-    """Trích xuất 1 khung hình PNG chuẩn ma trận màu BT.709 (YUV Limited -> RGB Full)."""
+    """Extract a single PNG frame using BT.709 limited->full color range conversion."""
     out_png.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg",
@@ -480,7 +462,7 @@ def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path
 
 
 def _default_open_media(target_path: Path, prefer_mpv: bool = True) -> str:
-    """Mở file media trên máy cục bộ Windows qua mpv (nếu có) hoặc trình phát mặc định."""
+    """Open local media file with mpv if installed or via Windows os.startfile fallback."""
     if prefer_mpv:
         import shutil
         mpv_bin = shutil.which("mpv")
@@ -493,9 +475,7 @@ def _default_open_media(target_path: Path, prefer_mpv: bool = True) -> str:
     raise RuntimeError("Môi trường hiện tại không hỗ trợ mở trình phát media trực tiếp.")
 
 
-# =====================================================================
 # APPLICATION FACTORY
-# =====================================================================
 
 _INLINE_THEME_SCRIPT_SHA256 = "sha256-uwuIZqV9D8DaFdBXlW9a6ICGWbLeDFMqwRUM1xF0W04="
 _CSP_HEADER_VALUE = (
@@ -578,7 +558,7 @@ def _collect_known_output_dirs(
     job_manager: JobManager,
     extra_dir: Optional[str] = None,
 ) -> List[Path]:
-    """Gom và khử trùng lặp mọi thư mục xuất (-o) hiện hữu từ out/, live_status.json, JobManager và query param."""
+    """Collect deduplicated existing output directories from out/, live_status.json, and JobManager."""
     candidates: List[Path] = []
     if extra_dir is not None and str(extra_dir).strip():
         resolved_extra = _resolve_dir_from_raw(root, extra_dir, strict_secret=True)
@@ -636,7 +616,7 @@ def _collect_known_source_dirs(
     out_dirs: Sequence[Path],
     job_manager: JobManager,
 ) -> List[Path]:
-    """Gom các thư mục video nguồn đã biết từ workspace, out_dirs, live_status.json và hàng đợi JobManager."""
+    """Collect known source video directories from workspace, out_dirs, live_status.json, and JobManager."""
     candidates: List[Path] = [root, *out_dirs]
 
     live_data = _read_live_status_dict(root)
@@ -872,15 +852,19 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
         tick_counter["n"] += 1
         completed_chunks = min(total_chunks - 1, 4 + (n % 5))
         done_frames = min(total_frames, completed_chunks * (total_frames // total_chunks) + (n % 6) * 120)
-        chunks = []
-        for idx in range(total_chunks):
-            if idx < completed_chunks:
-                st = "done"
-            elif idx == completed_chunks:
-                st = "running"
-            else:
-                st = "pending"
-            chunks.append({"idx": idx, "chunk_id": idx + 1, "status": st})
+        chunk_frames = total_frames // total_chunks
+        # Mirror RunLogger: emit 0-based entries solely for completed chunks.
+        chunks = [
+            {
+                "chunk_idx": idx,
+                "frames": chunk_frames,
+                "ai_fps": round(40.8 + (idx % 3) * 0.4, 2),
+                "steady_fps": 41.2,
+                "effective_fps": round(41.1 + (idx % 3) * 0.3, 2),
+                "size_mb": round(28.5 + (idx % 4) * 1.8, 2),
+            }
+            for idx in range(completed_chunks)
+        ]
         latest_fps = round(41.2 + (n % 4) * 0.4, 1)
         return {
             "active_source": "web",
@@ -906,8 +890,8 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
                 "total_chunks": total_chunks,
                 "completed_chunks": completed_chunks,
                 "chunks": chunks,
-                "resumed_chunks": [1, 2],
-                "active_chunk": completed_chunks + 1,
+                "resumed_chunks": [0, 1],
+                "active_chunk": completed_chunks,
                 "steady_fps": 41.2,
                 "latest_fps": latest_fps,
                 "effective_fps": 41.5,
@@ -950,7 +934,7 @@ def create_app(
     allow_lan_control: bool = False,
     mock_mode: bool = False,
 ) -> FastAPI:
-    """Khởi tạo FastAPI app gắn với thư mục gốc dự án (hỗ trợ cô lập hoàn toàn khi test)."""
+    """Create the FastAPI monitoring app bound to workspace_root."""
     root = Path(workspace_root or Path(__file__).resolve().parent.parent).resolve()
     is_mock = bool(mock_mode)
     effective_gpu_query = gpu_query_fn if gpu_query_fn is not None else (_build_mock_gpu_query() if is_mock else None)
@@ -1078,9 +1062,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Chưa tìm thấy giao diện web/static/index.html.")
         return FileResponse(str(index_file), media_type="text/html; charset=utf-8")
 
-    # -----------------------------------------------------------------
     # 1. LIVE MONITOR & TELEMETRY SSE
-    # -----------------------------------------------------------------
     @app.get("/api/status")
     def api_status() -> Dict[str, Any]:
         return telemetry_hub.build_snapshot()
@@ -1102,9 +1084,7 @@ def create_app(
     def api_recent_logs(lines: int = Query(default=120, ge=10, le=1000)) -> Dict[str, Any]:
         return {"lines": telemetry_hub.read_recent_logs(max_lines=lines)}
 
-    # -----------------------------------------------------------------
     # 2. FILE SYSTEM BROWSER, QUEUE & JOB CONTROLS
-    # -----------------------------------------------------------------
     @app.get("/api/fs/browse")
     def api_fs_browse(
         path: Optional[str] = Query(default=None),
@@ -1177,7 +1157,7 @@ def create_app(
 
     @app.post("/api/jobs/subtrans")
     def api_start_subtrans(req: StartSubtransRequest) -> Dict[str, Any]:
-        """Khởi chạy dịch phụ đề trực tiếp ở mọi khung giờ không bị khóa cứng."""
+        """Start standalone subtitle translation job."""
         try:
             job = job_manager.start_subtrans_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1238,7 +1218,7 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     def _iter_out_search_dirs(out_dir: Path) -> List[Path]:
-        """Quét out/, out/audit và các thư mục con cấp 1 hợp lệ (vd: out/Season1, out/benchmark_*)."""
+        """Collect out_dir, out_dir/audit, and valid level-1 subdirectories."""
         if not out_dir.is_dir():
             return []
         dirs: List[Path] = [out_dir]
@@ -1257,9 +1237,7 @@ def create_app(
             pass
         return dirs
 
-    # -----------------------------------------------------------------
     # 3. PREVIEW 1080p vs 4K SPLIT-COMPARE
-    # -----------------------------------------------------------------
     @app.get("/api/preview/candidates")
     def api_preview_candidates(output_dir: Optional[str] = Query(default=None)) -> Dict[str, Any]:
         try:
@@ -1290,7 +1268,7 @@ def create_app(
                 seen_src_dirs.add(norm)
                 known_source_dirs.append(rp)
 
-        # Lập bản đồ từ audit.json để biết chính xác source_file & output_file gốc across all out_dirs
+        # Index audit records to resolve canonical source_file and output_file across all out_dirs
         audit_source_map: Dict[str, str] = {}
         audited_outputs: Dict[str, Path] = {}
         for base_out in out_dirs:
@@ -1379,7 +1357,7 @@ def create_app(
             norm_up = os.path.normcase(str(up_resolved))
             src_path = audit_source_map.get(norm_up) or audit_source_map.get(stem.lower()) or ""
 
-            # Đoán tên file gốc nếu là bản preview (vd: Ep01_preview_10s_4K -> Ep01)
+            # Infer base stem when output filename is a preview clip
             preview_match = re.match(r"^(.*)_preview_(\d+)s_4K(?:_animejanai)?$", stem, flags=re.IGNORECASE)
             is_preview_clip = bool(preview_match)
             preview_seconds = int(preview_match.group(2)) if preview_match else 0
@@ -1491,7 +1469,7 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        # Giữ tối đa 24 ảnh tạm mới nhất để tiết kiệm dung lượng ổ đĩa
+        # Retain at most the 24 most recent temporary comparison frames
         try:
             pngs = sorted(compare_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
             for old_f in pngs[24:]:
@@ -1522,9 +1500,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Không tìm thấy khung hình trích xuất.")
         return FileResponse(str(frame_file), media_type="image/png")
 
-    # -----------------------------------------------------------------
     # 4. MODELS REGISTRY & SHOWS.YAML CONFIGURATOR
-    # -----------------------------------------------------------------
     @app.get("/api/config/models-and-shows")
     def api_models_and_shows() -> Dict[str, Any]:
         models_file = root / "models" / "models.yaml"
@@ -1636,10 +1612,10 @@ def create_app(
                     f"Rule '{pat}' trỏ tới model '{mod}' không tồn tại trong models/models.yaml."
                 )
             pol = str(item.get("dedup_policy") or "").strip()
-            if pol and pol.lower() not in DEDUP_POLICY_PARAMS:
+            if pol and not is_valid_dedup_policy(pol):
                 raise ValueError(
                     f"Rule '{pat}' dùng dedup_policy '{pol}' không hợp lệ "
-                    f"(chấp nhận: {', '.join(DEDUP_POLICY_PARAMS.keys())})."
+                    f"(chấp nhận: {', '.join(DEDUP_POLICY_PARAMS.keys())}, dis-<float>, drift-<float>)."
                 )
             validated.append(item)
         return validated
@@ -1701,7 +1677,7 @@ def create_app(
                     continue
                 if match_show_pattern(vid_name, pat) or (parent_dir and match_show_pattern(parent_dir, pat)):
                     p_target = str(r.get("dedup_policy") or "").strip().lower()
-                    if p_target and p_target in DEDUP_POLICY_PARAMS:
+                    if p_target and is_valid_dedup_policy(p_target):
                         chosen_pol = p_target
                         matched_dedup_pat = pat
                         break
@@ -1736,9 +1712,7 @@ def create_app(
         os.replace(tmp_path, shows_path)
         return {"ok": True, "rules_count": len(rules)}
 
-    # -----------------------------------------------------------------
     # 5. SUBTRANS STUDIO & AUDIT VAULT
-    # -----------------------------------------------------------------
     @app.get("/api/subtrans/overview")
     def api_subtrans_overview() -> Dict[str, Any]:
         now_pt = get_now_pt()
@@ -1746,10 +1720,9 @@ def create_app(
         today_pt_str = now_pt.strftime("%Y-%m-%d")
         reset_seconds = max(0, int((next_pt - now_pt).total_seconds()))
 
-        # Kiểm tra trạng thái các khe API Key khớp 100% subtrans/config.py (chỉ trả dạng che, tuyệt đối không lộ khóa thật)
+        # Masked API key slot statuses mirroring subtrans/config.py precedence
         key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
 
-        # Đọc subtrans/models.yaml
         sub_models_path = root / "subtrans" / "models.yaml"
         sub_models: List[Dict[str, Any]] = []
         chain: List[str] = []
@@ -1768,20 +1741,7 @@ def create_app(
                         })
             except Exception:
                 pass
-        elif is_mock:
-            cache_stats = {
-                "db_exists": True,
-                "mock_mode": True,
-                "total_cached_cues": 1420,
-                "today_cached_cues": 318,
-                "today_requests": [
-                    {"model": "gemini-3.5-flash-lite", "status": "ok", "requests": 14, "cues": 318, "tokens": 24800}
-                ],
-                "exhausted_keys": [],
-                "exhausted_models": [],
-            }
-
-        # Đọc thống kê SQLite ở chế độ CHỈ ĐỌC (không bao giờ tạo/ghi vào DB production khi GET)
+        # Query SQLite strictly read-only (?mode=ro) so GET never creates or mutates production DBs.
         cache_stats: Dict[str, Any] = {
             "db_exists": False,
             "total_cached_cues": 0,
@@ -1857,7 +1817,6 @@ def create_app(
                 "exhausted_models": [],
             }
 
-        # Danh sách glossaries/*.yaml
         glossaries_dir = root / "glossaries"
         glossaries: List[Dict[str, str]] = []
         if glossaries_dir.is_dir():
@@ -1898,7 +1857,7 @@ def create_app(
 
     @app.put("/api/subtrans/api-keys")
     def api_update_subtrans_keys(req: UpdateApiKeysRequest) -> Dict[str, Any]:
-        """Cập nhật hoặc xóa các khe GEMINI_API_KEY_1..3 vào .env cục bộ (không bao giờ trả hay log khóa thô)."""
+        """Update or clear GEMINI_API_KEY_1..3 in local .env without logging or returning raw keys."""
         dotenv_path = root / ".env"
         existing = _read_dotenv_map(dotenv_path)
 
@@ -1908,8 +1867,7 @@ def create_app(
             "GEMINI_API_KEY_3": req.key_3,
         }
 
-        # Nếu .env cũ đang dùng GEMINI_API_KEYS gộp (comma/semicolon-separated) và người dùng sửa/xóa slot,
-        # tách các khe còn lại sang GEMINI_API_KEY_1..3 và gỡ GEMINI_API_KEYS để không che bóng bản cập nhật mới.
+        # Split legacy combined GEMINI_API_KEYS into numbered slots when editing individual slots
         has_any_edit = any(v is not None for v in (req.key_1, req.key_2, req.key_3))
         if has_any_edit and existing.get("GEMINI_API_KEYS"):
             old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
@@ -1922,8 +1880,7 @@ def create_app(
                     updates[k_name] = old_multi[idx - 1]
             updates["GEMINI_API_KEYS"] = ""
 
-        # Luôn đồng bộ GEMINI_API_KEY chính với slot 1 khi slot 1 được cập nhật hoặc xóa
-        # để subtrans/config.py (vốn ưu tiên GEMINI_API_KEY trước GEMINI_API_KEY_1) không bị khóa cũ che mất.
+        # Keep primary GEMINI_API_KEY synchronized with slot 1 so it does not shadow slot 1 edits
         if req.key_1 is not None:
             clean_1 = req.key_1.strip()
             updates["GEMINI_API_KEY"] = clean_1
@@ -1933,9 +1890,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
-        # Không chép khóa từ .env vào os.environ của tiến trình Web Studio: tiến trình con upscale/subtrans
-        # tự gọi load_dotenv(override=False) khi khởi chạy, còn giữ os.environ sạch giúp các khe còn lại
-        # không bị gắn nhãn nhầm [ENV] và vẫn giữ nguyên nút Xóa / chỉnh sửa trực tiếp trong UI.
+        # Leave Web Studio os.environ untouched so subprocesses load .env cleanly and UI slot controls stay accurate
         slots_summary, active_key_count = _resolve_subtrans_key_slots(dotenv_path, key_id_fn=compute_key_id)
         return {
             "ok": True,
@@ -2187,7 +2142,7 @@ def create_app(
         ):
             raise HTTPException(status_code=400, detail="Loại tệp báo cáo không hợp lệ.")
 
-        # Cho phép đọc biên bản trong workspace_root hoặc bất kỳ thư mục xuất (-o) đã biết
+        # Permit reading audit artifacts within workspace_root or any known output directory
         allowed_roots = [root, *_collect_known_output_dirs(root, job_manager)]
         is_allowed = False
         for ar in allowed_roots:

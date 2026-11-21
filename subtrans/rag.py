@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/rag.py
-Stage P3: Lightweight Subtitle RAG & Error Bank.
-- SQLite storage for verified gold subtitle units (.cache/knowledge.db)
-- Auto-seeding of Error Bank from regression suite
-- Triplet alignment importer for (JA, EN, VI) archive subtitles
-- Contextual few-shot retrieval and error prevention prompt injection
-"""
+"""Hybrid BM25 and SQLite FTS5 2/3-gram subtitle RAG and error bank manager."""
 
 import os
 import re

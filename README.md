@@ -127,7 +127,7 @@ ai-video-upscaler/
 ├── src/                        # Video core (TRT 10, Zero-Disk, Triton, Dedup, NVENC, Mux Audit)
 ├── subtrans/                   # Subtitle translation engine, eval harness & subtrans/tests/
 ├── web/                        # Web Studio backend (app, sse_hub, job_manager) & static UI
-├── scripts/                    # Tooling, benchmarks, hardware unlock & scripts/oneoff/
+├── scripts/                    # Tooling (agent_context, export_review_bundle, verify_offline), benchmarks & scripts/oneoff/
 ├── glossaries/                 # Per-series anime glossaries & base.yaml pointer
 ├── models/                     # Video SR model registry (models/models.yaml)
 ├── state/                      # Runtime mutable state (state/pending_subs.json, gitignored)

@@ -13,7 +13,8 @@ Always invoke the repository `.venv` interpreter from the repo root (system `PAT
 git diff --check
 ```
 
-- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), strips API keys/tokens, disables `.env`, blocks Python sockets before collection, and executes `pytest -m "not gpu"`.
+- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), strips API keys/tokens, disables `.env`, blocks Python sockets before collection, and executes `pytest -m "not gpu"` (with `--show-capture=no` by default).
+- Fast iteration modes (`< 5s`, always clean up `repo/` snapshot even on failure): `scripts/verify_offline.py --target <PATH_OR_NODEID>` and `scripts/verify_offline.py --impacted` (auto-resolving dirty paths via `agent_context.py` 2-hop + cross-boundary contracts, `--maxfail=3` default). Use `agent_context.py --pack`, `--symbols`, `--slice`, and `--impact` to inspect code cleanly before testing.
 - Logs (`pytest.log`, `junit.xml`) remain under `scratch/agent-validation-*/` (up to 2 recent passing runs retained); snapshot `repo/` and `tmp/pytest/` are deleted automatically on pass.
 
 ## Why Bare `pytest` on Live Repo Is Prohibited
@@ -29,9 +30,10 @@ Run targeted tests directly ONLY for pure stdlib agent-tooling tests, or inside 
 
 | Subsystem / Module | Targeted Command |
 | :--- | :--- |
-| **Agent Context & Setup** (`scripts/agent_context.py`, `.agents/`) | `.\.venv\Scripts\python.exe -m pytest tests/test_agent_context.py tests/test_agent_setup.py tests/test_verify_offline.py -q` |
+| **Agent Context & Setup** (`scripts/agent_context.py`, `.agents/`) | `.\.venv\Scripts\python.exe -m pytest tests/test_agent_context.py tests/test_agent_setup.py tests/test_verify_offline.py tests/test_architecture_boundaries.py tests/test_export_review_bundle.py -q` |
 | **Fast Video/Mux Smoke** (`< 5s` CPU-safe 24f pipeline) | `.\.venv\Scripts\python.exe scripts/smoke_test_pipeline.py` *(or `.\.venv\Scripts\python.exe -m pytest -m smoke`)* |
 | **Web Studio Offline & Mock** (`web/`, `web_gui.py --mock`) | `.\.venv\Scripts\python.exe -m pytest tests/test_web_gui.py -q` *(or `.\.venv\Scripts\python.exe web_gui.py --mock` on `127.0.0.1`)* |
+| **Impacted / Targeted Snapshot** (`< 5s` `src/` & `subtrans/`) | `.\.venv\Scripts\python.exe scripts/verify_offline.py --impacted` *(or `--target <PATH_OR_NODEID>`)* |
 | **Full Offline Suite** (All non-GPU modules, final gate) | `.\.venv\Scripts\python.exe scripts/verify_offline.py` |
 | **E2E Acceptance Suite** (`tests/e2e/`, Group A/B, T1-T4) | `pytest -m "e2e and not gpu" -q` *(inside `verify_offline` snapshot)* |
 | **Subtrans Engine** (`subtrans/*.py`, `glossaries/`) | `pytest -m "subtrans and not gpu" -q` *(inside `verify_offline` snapshot; delegate evals to [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md))* |
@@ -39,8 +41,8 @@ Run targeted tests directly ONLY for pure stdlib agent-tooling tests, or inside 
 | **Static Linter** | `.\.venv\Scripts\ruff.exe check .` |
 
 ## Subagent Delegation & Pytest Markers
-- **Custom Subagents (`inheritMcp: false`):** [test-verifier](../../.agents/agents/test-verifier.md) (pytest, lint, `smoke_test_pipeline.py`, `verify_offline.py`) | [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md) (`subtrans/eval/runner.py`, pronoun benchmarks).
-- **`pytest.ini` Markers (`--strict-markers`):** `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`. During iteration use targeted commands or `smoke_test_pipeline.py`; run `verify_offline.py` **once** at the final regression gate.
+- **Custom Subagents (`inheritMcp: false`):** [repo-scout](../../.agents/agents/repo-scout.md) (read-only `>= 3`-module AST/pack exploration) | [test-verifier](../../.agents/agents/test-verifier.md) (pytest, lint, `smoke_test_pipeline.py`, `verify_offline.py`) | [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md) (`subtrans/eval/runner.py`, pronoun benchmarks).
+- **`pytest.ini` Markers (`--strict-markers`):** `unit`, `subtrans`, `e2e`, `gpu`, `web`, `smoke`. During iteration use `verify_offline.py --target` / `--impacted` or `smoke_test_pipeline.py`; run full `verify_offline.py` **once** at the final regression gate.
 
 ## Acceptance & Reporting Rules
 - Record exact commands, interpreter (`.venv`), `passed`/`failed`/`skipped`/`deselected` counts, wall-clock duration, and `scratch/agent-validation-*` evidence path.

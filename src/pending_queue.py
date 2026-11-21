@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/pending_queue.py
-Manages the pending subtitle translation queue (state/pending_subs.json).
-Stdlib-only module so subtrans/pipeline.py can import it without loading
-torch, CUDA, or video hardware probing.
-"""
+"""Stdlib-only pending subtitle queue manager backed by state/pending_subs.json."""
 
 import json
 import os

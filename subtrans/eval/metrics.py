@@ -1,13 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/eval/metrics.py
-Deterministic metrics for evaluation harness:
-- Characters Per Second (CPS)
-- CJK character leakage
-- Romaji name retention in vocatives
-- Pronoun relationship conformance
-- Strict zero-overlap & gap compliance
-"""
+"""Deterministic evaluation metrics for CPS, CJK leaks, vocatives, and pronouns."""
 
 import re
 import unicodedata

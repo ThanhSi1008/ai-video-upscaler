@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/scheduler.py
-Bộ lập lịch hàng đợi qua đêm (Overnight Batch Scheduler):
-1. Preflight toàn bộ hàng đợi ngay đầu phiên (chạy nền song song với tập đầu).
-2. Tính toán ETA chuẩn xác từng tập: ETA = n_unique / fps đo gần nhất + ~6 phút overhead.
-3. Đối chiếu hạn chót (--deadline HH:MM) và đưa ra quyết định (KỊP / BỎ QUA).
-4. Xuất bảng quyết định viễn trắc chi tiết phục vụ giám sát phiên chạy đêm.
-"""
+"""Overnight batch queue scheduler with background preflight and unique-FPS ETA modeling."""
 
 import os
 import sys

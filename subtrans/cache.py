@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/cache.py
-Stage 3: SQLite cache for translated items.
-Keyed by SHA-256 hash of input text, context, glossary, and model.
-Hỗ trợ đếm request và cue theo giờ Thái Bình Dương (Pacific Time - PT / UTC-7),
-không bao giờ cache chuỗi [Chưa dịch].
-"""
+"""SQLite WAL contextual translation cache and Pacific Time Gemini quota ledger."""
 
 import os
 import sqlite3

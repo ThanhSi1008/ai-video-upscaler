@@ -1,5 +1,1 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/eval
-Evaluation harness, deterministic quality metrics, and regression benchmarks.
-"""
+"""Deterministic offline subtitle translation evaluation harness package."""

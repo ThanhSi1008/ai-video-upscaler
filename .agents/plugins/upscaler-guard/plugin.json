@@ -2,7 +2,7 @@
   "name": "upscaler-guard",
   "displayName": "AI Video Upscaler Safety Guard",
   "version": "1.0.0",
-  "description": "Enforces project safety invariants via lifecycle hooks: blocks .env/API-key leaks, guards .temp_* checkpoints, protects daytime Gemini RPD quota, and warns against unisolated pytest or concurrent GPU runs.",
+  "description": "Enforces project safety invariants via lifecycle hooks: gates .env edits/commits, enforces context and full-rewrite firewalls, validates .py/.json/.yaml edits, guards .temp_* checkpoints, protects daytime Gemini RPD quota, and blocks unisolated pytest or concurrent GPU runs.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Run agent context check and isolated offline test suite across the repo",

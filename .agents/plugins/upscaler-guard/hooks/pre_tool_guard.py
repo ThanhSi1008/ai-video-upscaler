@@ -1,12 +1,14 @@
-"""PreToolUse safety hook for e:\\ai-video-upscaler.
+"""PreToolUse safety & context-firewall hook for e:\\ai-video-upscaler.
 
 Enforces GEMINI.md, .agents/rules/*.md, and VALIDATION.md boundaries automatically:
-1. Hard-denies reading/editing/printing .env or GEMINI_API_KEY values.
-2. Hard-denies unapproved environment mutations (pip/uv/conda install/uninstall) protecting requirements.lock.
-3. Prompts (force_ask) before deleting .temp_* checkpoints.
-4. Hard-denies unapproved build_trt_engine.py or unflagged full-episode upscale runs.
-5. Prompts (force_ask) before invoking live paid Gemini API commands.
-6. Prompts (ask / force_ask) before running bare pytest or concurrent GPU jobs.
+1. Allows free local .env reading; prompts (force_ask) on .env writes/edits; hard-denies git add/commit of .env.
+2. Enforces Context-Window & Full-Rewrite Firewall: blocks reading scratch/review_bundles/, blocks full-file
+   write_file/write_to_file on existing > 250-line files, requires <= 280-line bounded ranges on view_file for
+   > 350-line files, and blocks unbounded shell dumps on > 350-line files.
+3. Hard-denies unapproved environment mutations (pip/uv/conda install/uninstall) protecting requirements.lock.
+4. Prompts (force_ask) before deleting .temp_* checkpoints.
+5. Hard-denies unapproved build_trt_engine.py or unflagged full-episode upscale/benchmark runs.
+6. Prompts (force_ask) before invoking live paid Gemini API commands or concurrent GPU runs.
 """
 
 from __future__ import annotations
@@ -14,16 +16,29 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 
 SAFE_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
+MAX_REWRITE_LINES = 250
+MAX_VIEW_UNBOUNDED_LINES = 350
+MAX_VIEW_SPAN = 280
 
-ENV_CAT_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:cat|type|get-content|gc|more|head|tail)\s+['\"]?(?:[\w./\\:-]+[/\\])?(\.env(?:\.[\w-]+)?)(?:['\"]|\s|$)",
+READ_TOOLS = frozenset({"read_file", "view_file"})
+FULL_WRITE_TOOLS = frozenset({"write_file", "write_to_file"})
+EDIT_TOOLS = frozenset({"edit_file", "replace_file_content", "multi_replace_file_content"})
+ALL_FILE_TOOLS = READ_TOOLS | FULL_WRITE_TOOLS | EDIT_TOOLS
+
+BUNDLE_SHELL_READ_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:cat|type|get-content|gc|more|head|tail|sed)\b[^;&|\n]*scratch[/\\]review_bundles\b",
     re.IGNORECASE,
 )
-KEY_PRINT_RE = re.compile(
-    r"\b(?:echo|write-output|write-host|printf|printenv|dir\s+env:|get-childitem\s+env:)\b.*GEMINI_API_KEY",
+SHELL_DUMP_CMD_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:cat|type|get-content|gc)\s+(.+)$",
+    re.IGNORECASE,
+)
+SHELL_BOUND_RE = re.compile(
+    r"(?:-TotalCount\b|-Head\b|-Tail\b|-First\b|-Last\b|\bSelect-Object\b|\bhead\b|\btail\b|\bsed\s+-n\b)",
     re.IGNORECASE,
 )
 ENV_MUTATION_RE = re.compile(
@@ -51,7 +66,7 @@ UPSCALE_SUBS_EXEC_RE = re.compile(
     re.IGNORECASE,
 )
 UPSCALE_GPU_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b",
+    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?(?:[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)|scripts[/\\](?:benchmark_pipeline|silicon_roofline_probe|upscale_x4_single)\.py)\b",
     re.IGNORECASE,
 )
 BARE_PYTEST_RE = re.compile(
@@ -82,42 +97,364 @@ def _is_secret_env_path(raw_path: str) -> bool:
     return name == ".env" or name.startswith(".env.")
 
 
+def _resolve_repo_path(root: Path, raw_path: str) -> tuple[Path | None, str]:
+    cleaned = str(raw_path or "").strip()
+    if not cleaned:
+        return None, ""
+    cand = Path(cleaned)
+    if not cand.is_absolute():
+        cand = root / cand
+    try:
+        resolved = cand.resolve()
+        root_res = root.resolve()
+    except OSError:
+        return None, ""
+    if not resolved.is_relative_to(root_res):
+        return None, ""
+    return resolved, resolved.relative_to(root_res).as_posix()
+
+
+def _is_review_bundle_path(rel_posix: str, raw_path: str) -> bool:
+    norm_raw = str(raw_path or "").replace("\\", "/").lower()
+    norm_rel = rel_posix.lower()
+    return (
+        norm_rel == "scratch/review_bundles"
+        or norm_rel.startswith("scratch/review_bundles/")
+        or "/scratch/review_bundles/" in norm_raw
+        or norm_raw.startswith("scratch/review_bundles/")
+    )
+
+
+def _count_lines(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+    except OSError:
+        return 0
+
+
+def _split_shell_segments(cmd: str) -> list[str]:
+    """Split a command string on unquoted ;, &&, ||, |, or newlines."""
+    segments: list[str] = []
+    cur: list[str] = []
+    in_quote: str | None = None
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if in_quote is not None:
+            cur.append(ch)
+            if ch == "\\" and in_quote == '"' and i + 1 < n:
+                cur.append(cmd[i + 1])
+                i += 2
+                continue
+            if ch == in_quote:
+                in_quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch in (";", "\n", "|"):
+            seg = "".join(cur).strip()
+            if seg:
+                segments.append(seg)
+            cur = []
+            if ch == "|" and i + 1 < n and cmd[i + 1] == "|":
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch == "&" and i + 1 < n and cmd[i + 1] == "&":
+            seg = "".join(cur).strip()
+            if seg:
+                segments.append(seg)
+            cur = []
+            i += 2
+            continue
+        cur.append(ch)
+        i += 1
+    tail = "".join(cur).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _shlex_tokens(seg: str) -> list[str]:
+    try:
+        return shlex.split(seg, posix=True)
+    except ValueError:
+        try:
+            return shlex.split(seg, posix=False)
+        except ValueError:
+            return seg.split()
+
+
+_GIT_GLOBAL_VALUE_OPTS = frozenset({"-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"})
+_GIT_COMMIT_VALUE_OPTS = frozenset({
+    "-m", "--message", "-f", "--file", "-c", "--reedit-message", "--reuse-message",
+    "--author", "--date", "-t", "--template", "-s", "--gpg-sign", "--cleanup",
+    "--fixup", "--squash", "-u", "--untracked-files", "--trailer", "--pathspec-from-file",
+})
+
+
+def _git_cmd_targets_secret_env(cmd: str) -> bool:
+    """Return True if any git add/commit segment passes a secret .env path argument."""
+    for seg in _split_shell_segments(cmd):
+        tokens = _shlex_tokens(seg)
+        i = 0
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+        if i >= len(tokens):
+            continue
+        if Path(tokens[i]).name.lower() not in {"git", "git.exe"}:
+            continue
+        i += 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            opt = tokens[i]
+            if opt.lower() in _GIT_GLOBAL_VALUE_OPTS or opt in {"-C", "-c"}:
+                i += 2
+            else:
+                i += 1
+        if i >= len(tokens):
+            continue
+        subcmd = tokens[i].lower()
+        if subcmd not in {"add", "commit"}:
+            continue
+        i += 1
+        after_ddash = False
+        while i < len(tokens):
+            tok = tokens[i]
+            if not after_ddash and tok == "--":
+                after_ddash = True
+                i += 1
+                continue
+            if not after_ddash and tok.startswith("-"):
+                low_opt = tok.lower()
+                if subcmd == "commit" and (low_opt in _GIT_COMMIT_VALUE_OPTS or tok in {"-F", "-C"}):
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if _is_secret_env_path(tok):
+                return True
+            i += 1
+    return False
+
+
+_SHELL_WRITE_CMDS = frozenset({"set-content", "sc", "add-content", "ac", "out-file", "tee"})
+
+
+def _shell_write_targets_secret_env(cmd: str) -> bool:
+    """Return True if an unquoted shell redirection or file-writing cmdlet targets secret .env."""
+    for seg in _split_shell_segments(cmd):
+        # Scan unquoted > / >> redirection targets inside the segment
+        in_q: str | None = None
+        i = 0
+        n = len(seg)
+        while i < n:
+            ch = seg[i]
+            if in_q is not None:
+                if ch == "\\" and in_q == '"' and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == in_q:
+                    in_q = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                in_q = ch
+                i += 1
+                continue
+            if ch == ">":
+                j = i + 1 + (1 if i + 1 < n and seg[i + 1] == ">" else 0)
+                while j < n and seg[j].isspace():
+                    j += 1
+                k = j
+                while k < n and not seg[k].isspace() and seg[k] not in "&|;":
+                    k += 1
+                target = seg[j:k].strip("'\"")
+                if _is_secret_env_path(target):
+                    return True
+                i = k
+                continue
+            i += 1
+
+        tokens = _shlex_tokens(seg)
+        if not tokens:
+            continue
+        cmd_name = Path(tokens[0]).name.lower()
+        if cmd_name in _SHELL_WRITE_CMDS:
+            for tok in tokens[1:]:
+                if not tok.startswith("-") and _is_secret_env_path(tok):
+                    return True
+        elif cmd_name == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens[1:]):
+            for tok in tokens[1:]:
+                if not tok.startswith("-") and _is_secret_env_path(tok):
+                    return True
+    return False
+
+
+def _coerce_optional_int(val: object) -> tuple[bool, int | None]:
+    if val is None:
+        return True, None
+    if isinstance(val, bool):
+        return False, None
+    if isinstance(val, int):
+        return True, val
+    if isinstance(val, str) and val.strip():
+        try:
+            return True, int(val.strip())
+        except ValueError:
+            return False, None
+    return False, None
+
+
 def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
-    root = repo_root or _repo_root()
+    root = (repo_root or _repo_root()).resolve()
     tool_call = payload.get("toolCall") or {}
     tool_name = (tool_call.get("name") or "").lower()
     args = tool_call.get("args") or {}
 
-    # 1. File read/write/edit checks for .env
-    if tool_name in {"read_file", "write_file", "edit_file", "view_file"}:
-        target = (
+    # 1. File read / write / edit checks
+    if tool_name in ALL_FILE_TOOLS:
+        target = str(
             args.get("Path")
             or args.get("AbsolutePath")
             or args.get("TargetFile")
+            or args.get("FilePath")
             or ""
         )
-        if _is_secret_env_path(str(target)):
+        resolved, rel_posix = _resolve_repo_path(root, target)
+
+        # 1a. Block reading generated review bundles into agent context
+        if tool_name in READ_TOOLS and _is_review_bundle_path(rel_posix, target):
             return {
                 "decision": "deny",
-                "reason": "Blocked (GEMINI.md §4): Never read, edit, or expose .env secrets; use .env.example.",
+                "reason": "Blocked (Context Firewall): Do not read scratch/review_bundles/ into context; use scripts/agent_context.py --pack / --slice instead.",
             }
+
+        # 1b. Local .env read is allowed; writes/edits prompt via force_ask
+        if _is_secret_env_path(target):
+            if tool_name in READ_TOOLS:
+                return {"decision": "allow"}
+            return {
+                "decision": "force_ask",
+                "reason": "Env Write Guard (GEMINI.md §4): Modifying .env secrets requires user confirmation.",
+            }
+
+        # 1c. Full-file overwrite firewall (> 250 lines)
+        if (
+            tool_name in FULL_WRITE_TOOLS
+            and resolved is not None
+            and resolved.is_file()
+            and not rel_posix.lower().startswith("scratch/")
+        ):
+            total_lines = _count_lines(resolved)
+            if total_lines > MAX_REWRITE_LINES:
+                return {
+                    "decision": "deny",
+                    "reason": (
+                        f"Blocked (Rewrite Firewall): Refusing full-file {tool_name} on existing {total_lines}-line file "
+                        f"'{rel_posix}' (> {MAX_REWRITE_LINES} lines). Use surgical replace_file_content or multi_replace_file_content."
+                    ),
+                }
+
+        # 1d. Unbounded view_file firewall (> 350 lines; only applies to view_file, never read_file)
+        if tool_name == "view_file" and resolved is not None and resolved.is_file():
+            total_lines = _count_lines(resolved)
+            if total_lines > MAX_VIEW_UNBOUNDED_LINES:
+                raw_start = (
+                    args.get("StartLine")
+                    if args.get("StartLine") is not None
+                    else (args.get("start_line") if args.get("start_line") is not None else args.get("startLine"))
+                )
+                raw_end = (
+                    args.get("EndLine")
+                    if args.get("EndLine") is not None
+                    else (args.get("end_line") if args.get("end_line") is not None else args.get("endLine"))
+                )
+                ok_s, s_val = _coerce_optional_int(raw_start)
+                ok_e, e_val = _coerce_optional_int(raw_end)
+                suffix = resolved.suffix.lower()
+                hint = (
+                    "Run scripts/agent_context.py --pack / --symbols / --slice first for .py/.js/.css, or pass bounded StartLine..EndLine (<= 280 lines)."
+                    if suffix in {".py", ".js", ".css"}
+                    else "Pass bounded StartLine..EndLine (<= 280 lines) directly on view_file."
+                )
+                if not ok_s or not ok_e or (s_val is None and e_val is None):
+                    return {
+                        "decision": "deny",
+                        "reason": (
+                            f"Blocked (Context Firewall): '{rel_posix}' has {total_lines} lines (> {MAX_VIEW_UNBOUNDED_LINES}). "
+                            f"Missing bounded line range. {hint}"
+                        ),
+                    }
+                eff_start = max(1, s_val if s_val is not None else 1)
+                eff_end = min(total_lines, e_val if e_val is not None else total_lines)
+                if eff_end < eff_start or (eff_end - eff_start + 1) > MAX_VIEW_SPAN:
+                    span = max(0, eff_end - eff_start + 1)
+                    return {
+                        "decision": "deny",
+                        "reason": (
+                            f"Blocked (Context Firewall): '{rel_posix}' has {total_lines} lines (> {MAX_VIEW_UNBOUNDED_LINES}); "
+                            f"effective span L{eff_start}-L{eff_end} ({span} lines) exceeds {MAX_VIEW_SPAN} lines or is empty. {hint}"
+                        ),
+                    }
+
         return {"decision": "allow"}
 
     # 2. Shell command checks
     if tool_name == "run_command":
         cmd = str(args.get("CommandLine") or "")
 
-        env_match = ENV_CAT_RE.search(cmd)
-        if env_match and _is_secret_env_path(env_match.group(1)):
+        # 2a. Block shell reads targeting scratch/review_bundles/ (allow export_review_bundle.py execution)
+        if BUNDLE_SHELL_READ_RE.search(cmd) and "export_review_bundle.py" not in cmd:
             return {
                 "decision": "deny",
-                "reason": "Blocked (GEMINI.md §4): Printing .env contents to stdout is prohibited.",
+                "reason": "Blocked (Context Firewall): Do not dump scratch/review_bundles/ via shell; use scripts/agent_context.py --pack / --slice.",
             }
 
-        if KEY_PRINT_RE.search(cmd):
+        # 2b. Block unbounded shell dumps on existing repo files > 350 lines
+        if not SHELL_BOUND_RE.search(cmd):
+            for seg in re.split(r"[;&|]+", cmd):
+                m_dump = SHELL_DUMP_CMD_RE.match(seg.strip())
+                if not m_dump:
+                    continue
+                tail_str = m_dump.group(1)
+                try:
+                    tokens = shlex.split(tail_str, posix=False)
+                except ValueError:
+                    tokens = tail_str.split()
+                for tok in tokens:
+                    cleaned = tok.strip("'\"")
+                    if not cleaned or cleaned.startswith("-"):
+                        continue
+                    resolved, rel_posix = _resolve_repo_path(root, cleaned)
+                    if resolved is not None and resolved.is_file():
+                        total_lines = _count_lines(resolved)
+                        if total_lines > MAX_VIEW_UNBOUNDED_LINES:
+                            return {
+                                "decision": "deny",
+                                "reason": (
+                                    f"Blocked (Context Firewall): Unbounded shell dump on {total_lines}-line file '{rel_posix}' "
+                                    f"(> {MAX_VIEW_UNBOUNDED_LINES}). Use scripts/agent_context.py --slice / --pack or bounded view_file."
+                                ),
+                            }
+
+        # 2c. Hard-deny git add / git commit targeting .env or subtrans/.env
+        if _git_cmd_targets_secret_env(cmd):
             return {
                 "decision": "deny",
-                "reason": "Blocked (GEMINI.md §4): Printing GEMINI_API_KEY to stdout/logs is prohibited.",
+                "reason": "Blocked (GEMINI.md §4): Never stage or commit .env secret files with git add/commit.",
+            }
+
+        # 2d. Prompt (force_ask) on shell redirection / writes targeting .env
+        if _shell_write_targets_secret_env(cmd):
+            return {
+                "decision": "force_ask",
+                "reason": "Env Write Guard (GEMINI.md §4): Shell write targeting .env secrets requires user confirmation.",
             }
 
         if ENV_MUTATION_RE.search(cmd):
@@ -156,11 +493,11 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                     "reason": "GPU Exclusivity Guard (video-gpu.md): .gpu_active.lock exists; confirm no other GPU job is running.",
                 }
 
-        # Unflagged full-episode upscale guard
+        # Unflagged full-episode upscale / benchmark guard
         if UPSCALE_GPU_EXEC_RE.search(cmd) and not SAFE_UPSCALE_FLAGS_RE.search(cmd):
             return {
                 "decision": "deny",
-                "reason": "Blocked (video-gpu.md): Full-episode upscale runs require --preview, --dry-run, or scripts/smoke_test_pipeline.py.",
+                "reason": "Blocked (video-gpu.md): Full-episode upscale/benchmark runs require --preview, --dry-run, or scripts/smoke_test_pipeline.py.",
             }
 
         # Bare pytest on production repo guard
@@ -174,6 +511,8 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "test_verify_offline.py",
                 "test_smoke_pipeline.py",
                 "test_web_gui.py",
+                "test_architecture_boundaries.py",
+                "test_export_review_bundle.py",
                 "--version",
                 "--help",
             )

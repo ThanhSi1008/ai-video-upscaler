@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-scripts/telemetry_collector.py
-Continuous hardware telemetry sampler for ai-video-upscaler benchmarking.
-
-Samples 17 continuous metrics at fixed intervals (default 1.0s):
-- timestamp (ISO-8601)
-- elapsed_s (float seconds since start)
-- pstate (NVIDIA P-State: P0..P8 or N/A)
-- gpu_util_pct (GPU core compute utilization %)
-- mem_util_pct (GPU memory controller utilization %)
-- enc_util_pct (NVENC hardware video encoder utilization %)
-- dec_util_pct (NVDEC hardware video decoder utilization %)
-- mem_clock_mhz (GPU memory clock in MHz)
-- core_clock_mhz (GPU graphics core clock in MHz)
-- power_w (GPU power draw in Watts)
-- temp_c (GPU temperature in Celsius)
-- vram_used_mib (Dedicated VRAM used in MiB)
-- vram_free_mib (Dedicated VRAM free in MiB)
-- cpu_pct (Host CPU utilization %)
-- ram_used_gb (Host system RAM used in GB)
-- ssd_read_mb_s (Disk read throughput in MB/s)
-- ssd_write_mb_s (Disk write throughput in MB/s)
-
-Thread-safe, non-blocking, exception-safe.
-Gracefully handles absent or mocked GPU query environments.
-"""
+"""1 Hz GPU, CPU, RAM, and NVMe I/O telemetry sampler for benchmark runs."""
 
 from __future__ import annotations
 

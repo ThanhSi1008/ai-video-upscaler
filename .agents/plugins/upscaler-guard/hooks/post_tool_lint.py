@@ -1,8 +1,7 @@
 """PostToolUse auto-lint hook for e:\\ai-video-upscaler.
 
-Runs Ruff `--fix` quickly (< 1.5s) on newly written or edited Python files.
-Emits `{}` on stdout with 0 extra token overhead when clean; reports concise
-unfixable errors to stderr on failure.
+Runs Ruff `--fix` quickly (< 1.5s) on modified `.py` files and validates `.json` / `.yaml` / `.yml` syntax (< 50ms).
+Emits `{}` on stdout with 0 extra token overhead when clean; reports concise diagnostics to stderr on failure.
 """
 
 from __future__ import annotations
@@ -35,8 +34,40 @@ def _ruff_command(root: Path) -> list[str]:
     return [sys.executable, "-m", "ruff"]
 
 
+def _validate_yaml_file(root: Path, resolved: Path) -> tuple[bool, str]:
+    text = resolved.read_text(encoding="utf-8-sig")
+    try:
+        import yaml  # type: ignore
+
+        yaml.safe_load(text)
+        return True, ""
+    except ImportError:
+        for cand in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
+            if cand.is_file():
+                try:
+                    res = subprocess.run(
+                        [str(cand), "-c", "import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding='utf-8-sig'))", str(resolved)],
+                        cwd=str(root),
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=1.0,
+                        check=False,
+                    )
+                    if res.returncode == 0:
+                        return True, ""
+                    err = (res.stderr or res.stdout or "YAML parse error").strip().splitlines()[-1]
+                    return False, f"YAML: {err[:300]}"
+                except (OSError, subprocess.TimeoutExpired):
+                    return True, ""
+        return True, ""
+    except Exception as exc:
+        return False, f"YAML: {str(exc).splitlines()[0][:300]}"
+
+
 def run_post_tool_lint(payload: dict, repo_root: Path | None = None) -> dict[str, object]:
-    """Run targeted `ruff check --fix` on a modified `.py` file inside repo_root."""
+    """Run targeted Ruff fix on `.py` or fast syntax check on `.json`/`.yaml`/`.yml` inside repo_root."""
     root = (repo_root or _repo_root()).resolve()
     tool_call = payload.get("toolCall") or {}
     tool_name = str(tool_call.get("name") or "").lower()
@@ -48,9 +79,10 @@ def run_post_tool_lint(payload: dict, repo_root: Path | None = None) -> dict[str
         args.get("Path")
         or args.get("AbsolutePath")
         or args.get("TargetFile")
+        or args.get("FilePath")
         or ""
     ).strip()
-    if not raw_target or not raw_target.lower().endswith(".py"):
+    if not raw_target:
         return {"ok": True, "lintErrors": ""}
 
     target_path = Path(raw_target)
@@ -61,6 +93,21 @@ def run_post_tool_lint(payload: dict, repo_root: Path | None = None) -> dict[str
     except OSError:
         return {"ok": True, "lintErrors": ""}
     if not resolved.is_file() or not resolved.is_relative_to(root):
+        return {"ok": True, "lintErrors": ""}
+
+    suffix = resolved.suffix.lower()
+    if suffix == ".json":
+        try:
+            json.loads(resolved.read_text(encoding="utf-8-sig"))
+            return {"ok": True, "lintErrors": ""}
+        except Exception as exc:
+            return {"ok": False, "lintErrors": f"JSON: {str(exc)[:300]}"}
+
+    if suffix in {".yaml", ".yml"}:
+        ok, err = _validate_yaml_file(root, resolved)
+        return {"ok": ok, "lintErrors": err}
+
+    if suffix != ".py":
         return {"ok": True, "lintErrors": ""}
 
     cmd = [*_ruff_command(root), "check", "--fix", "--output-format=concise", str(resolved)]

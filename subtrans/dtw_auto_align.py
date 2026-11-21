@@ -1,15 +1,7 @@
-"""
-subtrans/dtw_auto_align.py
-Anchor-Guided Monotonic Dynamic Time Warping (MS-DTW) subtitle alignment algorithm:
-1. Resolves local greedy edge cases:
-   - 1 JA <-> 2 EN: Whisper merges into 1 long sentence -> split Japanese text at punctuation
-     proportionally based on duration of the two studio EN cues.
-   - 2 JA <-> 1 EN: Whisper splits into 2 short cues -> merge Japanese text into the EN cue timing window.
-   - OP/ED Quarantine: Detect EN gaps > 45s (intro/outro music), preserve Whisper timestamps,
-     strictly preventing song lyrics from disputing dialogue cue boundaries.
-   - Filter SDH tags in English ([groans], (sighs), musical notes).
-2. Semantic Anchor Bonus:
-   - Bonus points when JA and EN cues share character names in Cast Sheet, or identical punctuation (! ?).
+"""Anchor-guided monotonic DTW alignment between Whisper JA cues and studio EN timing.
+
+Supports 1:1 direct snap, 1:2 proportional pause-aware splitting, 2:1 clause-level
+EN splitting, OP/ED >45s gap quarantine, and semantic Cast/punctuation anchor bonuses.
 """
 
 import re
@@ -30,6 +22,103 @@ def estimate_ja_mora(text: str) -> int:
     """Estimate Japanese mora count for dialogue text."""
     clean = re.sub(r"[\s\W_]+", "", text)
     return max(1, len(clean))
+
+
+def _compute_monotonic_dtw_backpointers(
+    ja_cues: List[SubCue],
+    en_cues: List[SubCue],
+    cast_names_ja_en: List[Tuple[str, str]] = (),
+    max_window_ms: int = 2500,
+) -> List[List[Optional[Tuple[str, int, int]]]]:
+    """Run monotonic 1:1, 1:2, 2:1, and skip DP transitions and return backpointer table."""
+    N, M = len(ja_cues), len(en_cues)
+    INF = 1e9
+    dp = [[INF] * (M + 1) for _ in range(N + 1)]
+    back: List[List[Optional[Tuple[str, int, int]]]] = [[None] * (M + 1) for _ in range(N + 1)]
+    dp[0][0] = 0.0
+
+    SKIP_JA_PENALTY = 0.85
+    SKIP_EN_PENALTY = 0.85
+    SPLIT_MERGE_PENALTY = 0.12
+
+    for i in range(N + 1):
+        for j in range(M + 1):
+            if dp[i][j] >= INF:
+                continue
+            if i < N and dp[i][j] + SKIP_JA_PENALTY < dp[i + 1][j]:
+                dp[i + 1][j] = dp[i][j] + SKIP_JA_PENALTY
+                back[i + 1][j] = ("SKIP_JA", i, j)
+            if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
+                dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
+                back[i][j + 1] = ("SKIP_EN", i, j)
+            if (
+                i < N
+                and j < M
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
+                c11 = _compute_dtw_pair_cost(
+                    ja_cues[i].start_ms, ja_cues[i].end_ms,
+                    en_cues[j].start_ms, en_cues[j].end_ms,
+                    ja_cues[i].text, en_cues[j].text,
+                    cast_names_ja_en, max_window_ms,
+                )
+                if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
+                    dp[i + 1][j + 1] = dp[i][j] + c11
+                    back[i + 1][j + 1] = ("1:1", i, j)
+            if (
+                i < N
+                and j + 1 < M
+                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
+                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
+                c12 = _compute_dtw_pair_cost(
+                    ja_cues[i].start_ms, ja_cues[i].end_ms,
+                    en_cues[j].start_ms, en_cues[j + 1].end_ms,
+                    ja_cues[i].text, en_cues[j].text + " " + en_cues[j + 1].text,
+                    cast_names_ja_en, max_window_ms,
+                ) + SPLIT_MERGE_PENALTY
+                if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
+                    dp[i + 1][j + 2] = dp[i][j] + c12
+                    back[i + 1][j + 2] = ("1:2", i, j)
+            if (
+                i + 1 < N
+                and j < M
+                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
+                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
+                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
+            ):
+                c21 = _compute_dtw_pair_cost(
+                    ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
+                    en_cues[j].start_ms, en_cues[j].end_ms,
+                    ja_cues[i].text + " " + ja_cues[i + 1].text, en_cues[j].text,
+                    cast_names_ja_en, max_window_ms,
+                ) + SPLIT_MERGE_PENALTY
+                if c21 < 1e5 and dp[i][j] + c21 < dp[i + 2][j + 1]:
+                    dp[i + 2][j + 1] = dp[i][j] + c21
+                    back[i + 2][j + 1] = ("2:1", i, j)
+    return back
+
+
+def _split_2_to_1_timing(
+    ja_first: SubCue,
+    ja_second: SubCue,
+    en_cue: SubCue,
+) -> Tuple[Tuple[int, int, str], Tuple[int, int, str]]:
+    """Split a merged EN timing window and reference text across two consecutive JA cues."""
+    dur1 = max(1, ja_first.end_ms - ja_first.start_ms)
+    dur2 = max(1, ja_second.end_ms - ja_second.start_ms)
+    total_en_dur = max(600, en_cue.end_ms - en_cue.start_ms)
+    gap = 50
+    ratio = dur1 / (dur1 + dur2)
+    part1_dur = max(200, int((total_en_dur - gap) * ratio))
+    c1_start = en_cue.start_ms
+    c1_end = c1_start + part1_dur
+    c2_start = c1_end + gap
+    c2_end = max(c2_start + 200, en_cue.end_ms)
+    en_part1, en_part2 = split_en_reference_for_2_to_1(en_cue.text, ratio)
+    return (c1_start, c1_end, en_part1), (c2_start, c2_end, en_part2)
 
 
 def estimate_en_words(text: str) -> int:
@@ -113,7 +202,7 @@ def _compute_dtw_pair_cost(
     cast_names_ja_en: List[Tuple[str, str]],
     max_window_ms: int,
 ) -> float:
-    """Hàm chi phí kết hợp IoU thời gian, độ lệch biên, mật độ âm tiết (mora/word) và điểm neo ngữ nghĩa."""
+    """Compute DTW alignment cost combining temporal IoU, boundary error, density mismatch, and anchor bonuses."""
     gap = max(0, max(j_start, e_start) - min(j_end, e_end))
     if gap > max_window_ms:
         return 1e6
@@ -127,7 +216,7 @@ def _compute_dtw_pair_cost(
     mora = estimate_ja_mora(j_clean)
     en_words = estimate_en_words(e_txt)
 
-    # Phạt khi mật độ độ dài thoại bất tương xứng cực đoan (VD tiếng kêu ngắn 1-2 âm tiết cướp câu EN dài >= 10 từ)
+    # Penalize extreme length mismatches (e.g., short exclamations stealing long EN dialogue).
     density_penalty = 0.0
     if (mora <= 3 and en_words >= 10) or (en_words <= 1 and mora >= 22):
         density_penalty = 0.35
@@ -152,100 +241,13 @@ def align_ja_to_en_monotonic_dtw(
     cast_names_ja_en: List[Tuple[str, str]] = (),
     max_window_ms: int = 2500
 ) -> List[Tuple[SubCue, str]]:
-    """
-    Căn chỉnh chuỗi phụ đề Whisper JA theo timeline chuẩn phòng thu của EN
-    bằng Quy hoạch động đơn điệu (Monotonic DTW) hỗ trợ:
-      - 1 JA <-> 1 EN (Snap trực tiếp)
-      - 1 JA <-> 2 EN (Whisper gộp câu -> Tự động tách JA theo 2 mốc EN)
-      - 2 JA <-> 1 EN (Whisper tách vụn -> Tự động gộp JA vào 1 mốc EN)
-      - Cô lập vùng OP/ED (Khoảng trống EN > 45s) để không kéo lệch câu thoại biên.
-    Returns:
-      Danh sách các cặp (Aligned_SubCue_với_Timestamp_Chuẩn, paired_en_text).
-    """
+    """Align Whisper JA cues to studio EN cues supporting 1:1, 1:2, 2:1, and OP/ED quarantine."""
     N, M = len(ja_cues), len(en_cues)
     if N == 0 or M == 0:
         return [(c, "") for c in ja_cues]
 
-    def pair_cost(j_start: int, j_end: int, e_start: int, e_end: int, j_txt: str, e_txt: str) -> float:
-        return _compute_dtw_pair_cost(
-            j_start, j_end, e_start, e_end, j_txt, e_txt, cast_names_ja_en, max_window_ms
-        )
+    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
-    INF = 1e9
-    dp = [[INF] * (M + 1) for _ in range(N + 1)]
-    back = [[None] * (M + 1) for _ in range(N + 1)]
-    dp[0][0] = 0.0
-
-    SKIP_JA_PENALTY = 0.85
-    SKIP_EN_PENALTY = 0.85
-    SPLIT_MERGE_PENALTY = 0.12
-
-    for i in range(N + 1):
-        for j in range(M + 1):
-            if dp[i][j] >= INF:
-                continue
-
-            # 1. Bỏ qua 1 dòng JA (Lời bài hát OP/ED hoặc tiếng thở không có trong EN)
-            if i < N and dp[i][j] + SKIP_JA_PENALTY < dp[i + 1][j]:
-                dp[i + 1][j] = dp[i][j] + SKIP_JA_PENALTY
-                back[i + 1][j] = ("SKIP_JA", i, j)
-
-            # 2. Bỏ qua 1 dòng EN (Thẻ SDH [music] hoặc biển hiệu trên màn hình)
-            if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
-                dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
-                back[i][j + 1] = ("SKIP_EN", i, j)
-
-            # 3. Khớp 1 JA <-> 1 EN
-            if (
-                i < N
-                and j < M
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c11 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text, en_cues[j].text
-                )
-                if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
-                    dp[i + 1][j + 1] = dp[i][j] + c11
-                    back[i + 1][j + 1] = ("1:1", i, j)
-
-            # 4. Khớp 1 JA <-> 2 EN (Whisper gộp 1 câu dài, Studio EN tách làm 2 câu)
-            if (
-                i < N
-                and j + 1 < M
-                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c12 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j + 1].end_ms,
-                    ja_cues[i].text, en_cues[j].text + " " + en_cues[j + 1].text
-                ) + SPLIT_MERGE_PENALTY
-                if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
-                    dp[i + 1][j + 2] = dp[i][j] + c12
-                    back[i + 1][j + 2] = ("1:2", i, j)
-
-            # 5. Khớp 2 JA <-> 1 EN (Whisper ngắt 2 câu ngắn, Studio EN gộp làm 1 câu)
-            if (
-                i + 1 < N
-                and j < M
-                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
-                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c21 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text + " " + ja_cues[i + 1].text, en_cues[j].text
-                ) + SPLIT_MERGE_PENALTY
-                if c21 < 1e5 and dp[i][j] + c21 < dp[i + 2][j + 1]:
-                    dp[i + 2][j + 1] = dp[i][j] + c21
-                    back[i + 2][j + 1] = ("2:1", i, j)
-
-    # Truy vết đường đi tối ưu (Backtracking)
     aligned_output: List[Tuple[SubCue, str]] = []
     ci, cj = N, M
     while ci > 0 or cj > 0:
@@ -254,7 +256,6 @@ def align_ja_to_en_monotonic_dtw(
             break
         op, pi, pj = step
         if op == "1:1":
-            # Ghim hoàn toàn mốc thời gian chuẩn của Studio EN
             aligned_output.append((
                 SubCue(en_cues[pj].start_ms, en_cues[pj].end_ms, ja_cues[pi].text),
                 en_cues[pj].text
@@ -272,29 +273,13 @@ def align_ja_to_en_monotonic_dtw(
                 en_cues[pj].text
             ))
         elif op == "2:1":
-            dur1 = max(1, ja_cues[pi].end_ms - ja_cues[pi].start_ms)
-            dur2 = max(1, ja_cues[pi + 1].end_ms - ja_cues[pi + 1].start_ms)
-            total_en_dur = max(600, en_cues[pj].end_ms - en_cues[pj].start_ms)
-            gap = 50
-            part1_dur = max(200, int((total_en_dur - gap) * (dur1 / (dur1 + dur2))))
-            c1_start = en_cues[pj].start_ms
-            c1_end = c1_start + part1_dur
-            c2_start = c1_end + gap
-            c2_end = max(c2_start + 200, en_cues[pj].end_ms)
-            en_part1, en_part2 = split_en_reference_for_2_to_1(
-                en_cues[pj].text, dur1 / (dur1 + dur2)
+            (c1_start, c1_end, en_part1), (c2_start, c2_end, en_part2) = _split_2_to_1_timing(
+                ja_cues[pi], ja_cues[pi + 1], en_cues[pj]
             )
-            # Thêm theo thứ tự ngược để reverse() ở cuối giữ đúng trật tự pi, pi+1
-            aligned_output.append((
-                SubCue(c2_start, c2_end, ja_cues[pi + 1].text),
-                en_part2
-            ))
-            aligned_output.append((
-                SubCue(c1_start, c1_end, ja_cues[pi].text),
-                en_part1
-            ))
+            # Push in reverse order so final .reverse() preserves pi, pi+1 ordering.
+            aligned_output.append((SubCue(c2_start, c2_end, ja_cues[pi + 1].text), en_part2))
+            aligned_output.append((SubCue(c1_start, c1_end, ja_cues[pi].text), en_part1))
         elif op == "SKIP_JA":
-            # Giữ nguyên timestamp gốc của Whisper nếu nằm trong vùng OP/ED hoặc không có sub EN tương ứng
             aligned_output.append((ja_cues[pi], ""))
         ci, cj = pi, pj
 
@@ -308,83 +293,12 @@ def get_dtw_alignment_map(
     cast_names_ja_en: List[Tuple[str, str]] = (),
     max_window_ms: int = 2500
 ) -> Dict[int, Optional[Tuple[int, int, str]]]:
-    """
-    Trả về ánh xạ trực tiếp từ chỉ mục câu JA (pi: 0..N-1) sang tuple (start_ms, end_ms, en_text).
-    Nếu câu JA không khớp với câu EN nào (SKIP_JA), giá trị là None.
-    Đảm bảo tuyệt đối không làm dồn toa hay lệch chỉ mục câu thoại.
-    """
+    """Map JA cue index -> (start_ms, end_ms, en_text) or None for unaligned OP/ED lines."""
     N, M = len(ja_cues), len(en_cues)
     if N == 0 or M == 0:
         return {}
 
-    def pair_cost(j_start: int, j_end: int, e_start: int, e_end: int, j_txt: str, e_txt: str) -> float:
-        return _compute_dtw_pair_cost(
-            j_start, j_end, e_start, e_end, j_txt, e_txt, cast_names_ja_en, max_window_ms
-        )
-
-    INF = 1e9
-    dp = [[INF] * (M + 1) for _ in range(N + 1)]
-    back = [[None] * (M + 1) for _ in range(N + 1)]
-    dp[0][0] = 0.0
-
-    SKIP_JA_PENALTY = 0.85
-    SKIP_EN_PENALTY = 0.85
-    SPLIT_MERGE_PENALTY = 0.12
-
-    for i in range(N + 1):
-        for j in range(M + 1):
-            if dp[i][j] >= INF:
-                continue
-            if i < N and dp[i][j] + SKIP_JA_PENALTY < dp[i + 1][j]:
-                dp[i + 1][j] = dp[i][j] + SKIP_JA_PENALTY
-                back[i + 1][j] = ("SKIP_JA", i, j)
-            if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
-                dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
-                back[i][j + 1] = ("SKIP_EN", i, j)
-            if (
-                i < N
-                and j < M
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c11 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text, en_cues[j].text
-                )
-                if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
-                    dp[i + 1][j + 1] = dp[i][j] + c11
-                    back[i + 1][j + 1] = ("1:1", i, j)
-            if (
-                i < N
-                and j + 1 < M
-                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c12 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j + 1].end_ms,
-                    ja_cues[i].text, en_cues[j].text + " " + en_cues[j + 1].text
-                ) + SPLIT_MERGE_PENALTY
-                if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
-                    dp[i + 1][j + 2] = dp[i][j] + c12
-                    back[i + 1][j + 2] = ("1:2", i, j)
-            if (
-                i + 1 < N
-                and j < M
-                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
-                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c21 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text + " " + ja_cues[i + 1].text, en_cues[j].text
-                ) + SPLIT_MERGE_PENALTY
-                if c21 < 1e5 and dp[i][j] + c21 < dp[i + 2][j + 1]:
-                    dp[i + 2][j + 1] = dp[i][j] + c21
-                    back[i + 2][j + 1] = ("2:1", i, j)
+    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
     cue_map: Dict[int, Optional[Tuple[int, int, str]]] = {}
     ci, cj = N, M
@@ -398,17 +312,8 @@ def get_dtw_alignment_map(
         elif op == "1:2":
             cue_map[pi] = (en_cues[pj].start_ms, en_cues[pj + 1].end_ms, en_cues[pj].text + " " + en_cues[pj + 1].text)
         elif op == "2:1":
-            dur1 = max(1, ja_cues[pi].end_ms - ja_cues[pi].start_ms)
-            dur2 = max(1, ja_cues[pi + 1].end_ms - ja_cues[pi + 1].start_ms)
-            total_en_dur = max(600, en_cues[pj].end_ms - en_cues[pj].start_ms)
-            gap = 50
-            part1_dur = max(200, int((total_en_dur - gap) * (dur1 / (dur1 + dur2))))
-            c1_start = en_cues[pj].start_ms
-            c1_end = c1_start + part1_dur
-            c2_start = c1_end + gap
-            c2_end = max(c2_start + 200, en_cues[pj].end_ms)
-            en_part1, en_part2 = split_en_reference_for_2_to_1(
-                en_cues[pj].text, dur1 / (dur1 + dur2)
+            (c1_start, c1_end, en_part1), (c2_start, c2_end, en_part2) = _split_2_to_1_timing(
+                ja_cues[pi], ja_cues[pi + 1], en_cues[pj]
             )
             cue_map[pi] = (c1_start, c1_end, en_part1)
             cue_map[pi + 1] = (c2_start, c2_end, en_part2)
@@ -426,85 +331,12 @@ def get_dtw_alignment_plan(
     max_window_ms: int = 2500,
     min_pause_for_1_to_2_split_ms: int = 250,
 ) -> Tuple[Dict[int, Optional[Tuple[int, int, str]]], Dict[int, List[Tuple[int, int, str, str]]]]:
-    """
-    Mở rộng `get_dtw_alignment_map` để trả thêm kế hoạch tách câu cho ca `1 JA <-> 2 EN` có khoảng lặng
-    ngắt cảnh (`gap >= min_pause_for_1_to_2_split_ms`), tránh để 1 câu phụ đề treo lơ lửng qua đoạn im lặng.
-    Returns:
-      (cue_map, split_1_to_2_map)
-      trong đó `split_1_to_2_map[pi] = [(start1, end1, ja1, en1), (start2, end2, ja2, en2)]`.
-    """
+    """Return (cue_map, split_1_to_2_map) splitting 1:2 matches across scene pauses >= threshold."""
     N, M = len(ja_cues), len(en_cues)
     if N == 0 or M == 0:
         return {}, {}
 
-    def pair_cost(j_start: int, j_end: int, e_start: int, e_end: int, j_txt: str, e_txt: str) -> float:
-        return _compute_dtw_pair_cost(
-            j_start, j_end, e_start, e_end, j_txt, e_txt, cast_names_ja_en, max_window_ms
-        )
-
-    INF = 1e9
-    dp = [[INF] * (M + 1) for _ in range(N + 1)]
-    back = [[None] * (M + 1) for _ in range(N + 1)]
-    dp[0][0] = 0.0
-
-    SKIP_JA_PENALTY = 0.85
-    SKIP_EN_PENALTY = 0.85
-    SPLIT_MERGE_PENALTY = 0.12
-
-    for i in range(N + 1):
-        for j in range(M + 1):
-            if dp[i][j] >= INF:
-                continue
-            if i < N and dp[i][j] + SKIP_JA_PENALTY < dp[i + 1][j]:
-                dp[i + 1][j] = dp[i][j] + SKIP_JA_PENALTY
-                back[i + 1][j] = ("SKIP_JA", i, j)
-            if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
-                dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
-                back[i][j + 1] = ("SKIP_EN", i, j)
-            if (
-                i < N
-                and j < M
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c11 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text, en_cues[j].text
-                )
-                if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
-                    dp[i + 1][j + 1] = dp[i][j] + c11
-                    back[i + 1][j + 1] = ("1:1", i, j)
-            if (
-                i < N
-                and j + 1 < M
-                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c12 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j + 1].end_ms,
-                    ja_cues[i].text, en_cues[j].text + " " + en_cues[j + 1].text
-                ) + SPLIT_MERGE_PENALTY
-                if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
-                    dp[i + 1][j + 2] = dp[i][j] + c12
-                    back[i + 1][j + 2] = ("1:2", i, j)
-            if (
-                i + 1 < N
-                and j < M
-                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
-                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c21 = pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text + " " + ja_cues[i + 1].text, en_cues[j].text
-                ) + SPLIT_MERGE_PENALTY
-                if c21 < 1e5 and dp[i][j] + c21 < dp[i + 2][j + 1]:
-                    dp[i + 2][j + 1] = dp[i][j] + c21
-                    back[i + 2][j + 1] = ("2:1", i, j)
+    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
     cue_map: Dict[int, Optional[Tuple[int, int, str]]] = {}
     split_1_to_2_map: Dict[int, List[Tuple[int, int, str, str]]] = {}
@@ -534,17 +366,8 @@ def get_dtw_alignment_plan(
                     en_cues[pj].text + " " + en_cues[pj + 1].text,
                 )
         elif op == "2:1":
-            dur1 = max(1, ja_cues[pi].end_ms - ja_cues[pi].start_ms)
-            dur2 = max(1, ja_cues[pi + 1].end_ms - ja_cues[pi + 1].start_ms)
-            total_en_dur = max(600, en_cues[pj].end_ms - en_cues[pj].start_ms)
-            gap = 50
-            part1_dur = max(200, int((total_en_dur - gap) * (dur1 / (dur1 + dur2))))
-            c1_start = en_cues[pj].start_ms
-            c1_end = c1_start + part1_dur
-            c2_start = c1_end + gap
-            c2_end = max(c2_start + 200, en_cues[pj].end_ms)
-            en_part1, en_part2 = split_en_reference_for_2_to_1(
-                en_cues[pj].text, dur1 / (dur1 + dur2)
+            (c1_start, c1_end, en_part1), (c2_start, c2_end, en_part2) = _split_2_to_1_timing(
+                ja_cues[pi], ja_cues[pi + 1], en_cues[pj]
             )
             cue_map[pi] = (c1_start, c1_end, en_part1)
             cue_map[pi + 1] = (c2_start, c2_end, en_part2)

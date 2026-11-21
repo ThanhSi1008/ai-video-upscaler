@@ -1,18 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/mux_audit.py
-Kiểm tra tự động tính toàn vẹn của container MKV sau khi mux (Chuẩn phòng thu):
-1. Kiểm tra xen kẽ gói tin đa luồng (Multi-track Window Interleaving):
-   Mỗi cửa sổ 10s đều có cả video và TẤT CẢ các track audio (0:a:0, 0:a:1,...).
-2. Kiểm tra tua và âm lượng (Seek Volumedetect Test):
-   Đo >= 7 mốc (đầu, giữa, cuối) bằng volumedetect trên audio chính, lệch <= 0.5 dB.
-3. Kiểm tra MD5 của TẤT CẢ luồng âm thanh gốc (Bit-exact All Audio MD5):
-   MD5 của từng luồng audio 0:a:i giữa nguồn và đích phải trùng khớp từng bit.
-4. Kiểm tra số stream, ngôn ngữ (tags:language), disposition, font chữ đính kèm (attachments), và chapters khớp nguồn.
-5. Kiểm tra bảo toàn số event phụ đề ASS (Subtitle Events Count Match).
-6. Kiểm tra bảo toàn số khung hình video (Video Frame Count Match).
-Nếu bất kỳ điều kiện nào thất bại -> status = 'FAIL', pipeline không được báo hoàn tất.
-"""
+"""Post-mux MKV container verification using parallel streamhash MD5 and seek audits."""
 
 import os
 import re

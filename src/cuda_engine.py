@@ -1,13 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/cuda_engine.py
-Động cơ suy luận PyTorch FP16 tối ưu hóa cho NVIDIA CUDA & Tensor Cores trên Windows 11:
-- GPUPersistentWorker: Nạp model vào VRAM một lần, tái sử dụng qua các phân đoạn chunk.
-- VRAM Garbage Collection thông minh: Dọn dẹp CUDA memory cache khi reserved >= 9.5 GB.
-- Hỗ trợ đa mô hình: RealESR-AnimeVideoV3 (x4 + bicubic 0.5 -> 2x) và AnimeJaNai HD V3 Compact (x2 native).
-- Giám sát an toàn chất lượng: Phát hiện NaN/Inf, lỗi GPU/OOM để tự động kích hoạt fallback FP32.
-- Ghi nhận viễn trắc chi tiết: VRAM allocated, peak VRAM, và host RAM RSS.
-"""
+"""PyTorch CUDA FP16 and TensorRT persistent inference worker for 4K anime upscaling."""
 
 import os
 import sys
@@ -26,12 +17,8 @@ import torch.nn.functional as F
 
 from src.config import DEFAULT_BATCH_SIZE, REALESRGAN_BIN
 
-# -----------------------------------------------------------------------------
-# 1. Định nghĩa Kiến trúc Mạng Nơ-ron (SRVGGNetCompact)
-# -----------------------------------------------------------------------------
-
 class RealESRAnimeVideoV3(nn.Module):
-    """Mô hình RealESR-AnimeVideoV3: 64f16c x4 + Nearest 4x + Bicubic 0.5x -> 2x 4K"""
+    """RealESR-AnimeVideoV3 (64f16c x4 + Nearest 4x + Bicubic 0.5x -> 2x 4K)."""
     def __init__(self):
         super().__init__()
         self.body = nn.ModuleList()
@@ -53,8 +40,7 @@ class RealESRAnimeVideoV3(nn.Module):
         feat = x
         for layer in self.body:
             feat = layer(feat)
-        # Cắt lát nhánh phóng đại 8K trung gian mỗi 2 frames khi batch lớn trên Full HD
-        # để tiết kiệm ~4.5 GB VRAM mà vẫn khớp bit-exact 100%
+        # Micro-slice 8K tail across 2 frames on Full HD+ batches to save ~4.5 GB VRAM
         if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
             B, _, H, W = x.shape
             out_buf = torch.empty((B, 3, H * 2, W * 2), dtype=x.dtype, device=x.device)
@@ -66,7 +52,7 @@ class RealESRAnimeVideoV3(nn.Module):
 
 
 class AnimeJaNaiCompact2x(nn.Module):
-    """Mô hình AnimeJaNai HD V3 Compact / UltraCompact / SuperUltraCompact: SRVGGNetCompact x2 native -> 2x 4K"""
+    """AnimeJaNai HD V3 Compact / UltraCompact / SuperUltraCompact SRVGGNetCompact x2."""
     def __init__(self, num_feat: int = 64, num_conv: int = 16):
         super().__init__()
         self.num_feat = int(num_feat)
@@ -91,17 +77,7 @@ class AnimeJaNaiCompact2x(nn.Module):
 
 
 class SpandrelModelWrapper(nn.Module):
-    """
-    Wrapper mô hình tải qua Spandrel 0.4.2 cho động cơ suy luận PyTorch/CUDA:
-    - Nếu descriptor.scale == 2 (Native 2x, ví dụ: SPAN-2x, 2x_AnimeJaNai_V3):
-      Suy luận trực tiếp ra 2x (4K), hoàn toàn không downsample với bicubic 0.5x tail.
-    - Nếu descriptor.scale == 4 và target_scale == 2 (ví dụ: RealESR-AnimeVideoV3):
-      Áp dụng đuôi downsampling bicubic 0.5x từ 4x -> 2x.
-      Khi batch lớn (>2) trên ảnh Full HD (>=540p), cắt lát vi mô 8K (micro-slicing)
-      mỗi 2 frames để giảm ~75% đỉnh VRAM đệm trung gian.
-    - Phơi bày đầy đủ thuộc tính body, upsampler, upscale, scale (nếu có) để tương thích 100%
-      với TensorRT builder và inference runner.
-    """
+    """Wrap Spandrel-loaded SR models with 4x->2x bicubic downsampling and 8K micro-slicing."""
     def __init__(self, inner_model: nn.Module, scale: int = 2, target_scale: float = 2.0):
         super().__init__()
         self.inner_model = inner_model
@@ -126,7 +102,7 @@ class SpandrelModelWrapper(nn.Module):
             return self.inner_model(x)
 
         if abs(self.scale - self.target_scale) > 1e-4:
-            # Tối ưu micro-slicing 8K cho mẻ lớn trên Full HD
+            # Micro-slice 8K intermediate tensors across 2 frames on Full HD+ batches
             if (not torch.onnx.is_in_onnx_export()) and x.shape[0] > 2 and (x.shape[2] * x.shape[3]) >= (540 * 960):
                 B, _, H, W = x.shape
                 out_h = int(round(H * self.target_scale))
@@ -145,20 +121,12 @@ class SpandrelModelWrapper(nn.Module):
 
 
 class GPUError(Exception):
-    """Lỗi suy luận trên động cơ PyTorch GPU (NaN, Inf, OOM hoặc lỗi CUDA runtime)."""
+    """Raised when PyTorch/CUDA inference produces NaN, Inf, OOM, or runtime errors."""
     pass
 
 
-# -----------------------------------------------------------------------------
-# 2. Worker PyTorch CUDA Bền (Persistent Worker & Auto-Restart / Smart Cleanup)
-# -----------------------------------------------------------------------------
-
 class GPUPersistentWorker:
-    """
-    Worker PyTorch GPU bền: nạp mô hình vào VRAM một lần duy nhất,
-    hỗ trợ NVIDIA CUDA (Tensor Cores Ampere/Turing/Ada) và CPU fallback;
-    áp dụng Channels-Last memory format (NHWC) cho thông lượng tối đa.
-    """
+    """Persistent PyTorch CUDA/CPU worker with NHWC channels-last execution and TRT caching."""
     def __init__(
         self,
         model_id: str = "animevideov3",
@@ -177,8 +145,10 @@ class GPUPersistentWorker:
         self.total_restarts = 0
         self.use_tensorrt = bool(use_tensorrt)
         self._trt_runners: Dict[Any, Any] = {}
+        self._zero_disk_upscaler: Any = None
+        self._zero_disk_wrapper: Any = None
+        self._zero_disk_key: Any = None
         
-        # Nhận diện device: Ưu tiên NVIDIA CUDA, fallback CPU
         if device:
             self.device = torch.device(device)
         elif torch.cuda.is_available():
@@ -200,7 +170,7 @@ class GPUPersistentWorker:
         self._load_model()
 
     def _resolve_registry_entry(self) -> Optional[Dict[str, Any]]:
-        """Tra cứu cấu hình mô hình trong models/models.yaml (không phân biệt hoa thường)."""
+        """Look up model metadata in models/models.yaml (case-insensitive)."""
         try:
             from src.models_resolver import load_models_registry
             registry = load_models_registry()
@@ -215,7 +185,7 @@ class GPUPersistentWorker:
         return None
 
     def _is_canonical_registered_path(self, reg_info: Optional[Dict[str, Any]]) -> bool:
-        """Kiểm tra self.weights_path có trùng với đường dẫn đăng ký chính tắc trong models.yaml hay không."""
+        """Return whether self.weights_path matches the canonical path in models/models.yaml."""
         if not reg_info or not reg_info.get("weights_path"):
             return False
         from src.models_resolver import _resolve_repo_path
@@ -226,7 +196,7 @@ class GPUPersistentWorker:
         return norm_self in (norm_reg, norm_raw)
 
     def _auto_download_registered_weights(self, reg_info: Dict[str, Any]) -> None:
-        """Tự động tải và xác thực SHA-256 bắt buộc cho mô hình chính thức có source_url hợp lệ (hỗ trợ .pth/.safetensors/.zip)."""
+        """Download and SHA-256 verify registered model weights from HTTPS source_url."""
         import urllib.parse
         import urllib.request
         import zipfile
@@ -291,7 +261,7 @@ class GPUPersistentWorker:
                         pass
 
     def _load_model(self):
-        """Nạp trọng số và khởi tạo mô hình trên device (CUDA/CPU)."""
+        """Load model weights and initialize inference on CUDA or CPU."""
         t0 = time.time()
         in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
         reg_info = self._resolve_registry_entry()
@@ -365,7 +335,7 @@ class GPUPersistentWorker:
             model = model.to(memory_format=torch.channels_last)
         model.eval()
 
-        # Warm-up lô frame
+        # Warm up 1 batch to initialize kernel caches
         warm_b = min(self.batch_size, 2)
         dummy = torch.rand(warm_b, 3, 540, 960, device=self.device)
         if self.precision == "fp16":
@@ -381,11 +351,7 @@ class GPUPersistentWorker:
         self.last_load_time = time.time() - t0
 
     def restart_if_needed(self, logger=None) -> bool:
-        """
-        Quản lý bộ nhớ VRAM thông minh cho GPU NVIDIA (Quick Win):
-        Ưu tiên dọn dẹp CUDA memory cache khi vượt ngưỡng an toàn (9.5 GB) để loại bỏ
-        hoàn toàn việc dừng pipeline 3-4s nạp lại mô hình từ đĩa.
-        """
+        """Trim CUDA reserved memory cache when exceeding DEFAULT_VRAM_CLEANUP_THRESHOLD_GB."""
         self.chunks_processed += 1
         if self.device.type == "cuda":
             reserved_gb = torch.cuda.memory_reserved(self.device) / (1024 ** 3)
@@ -426,11 +392,7 @@ class GPUPersistentWorker:
         logger=None,
         mid_chunk_callback=None
     ) -> Dict[str, Any]:
-        """
-        Suy luận toàn bộ ảnh trong input_dir và lưu 4K vào output_dir trên RAM Disk.
-        Hỗ trợ Batch Inference đa khung hình tối ưu cho NVIDIA CUDA Tensor Cores.
-        Đo đạc tốc độ, đỉnh bộ nhớ và phát hiện NaN/Inf.
-        """
+        """Run batched SR inference on frames in input_dir and write outputs to output_dir."""
         os.makedirs(output_dir, exist_ok=True)
         img_files = sorted([
             os.path.join(input_dir, f)
@@ -448,7 +410,7 @@ class GPUPersistentWorker:
 
         b_size = batch_size if batch_size is not None else self.batch_size
 
-        # Thread pool để ghi PNG song song (12 workers trên 16-thread CPU i5-12600K)
+        # Parallel PNG writer pool
         writer_workers = min(12, max(4, os.cpu_count() or 4))
         writer_executor = ThreadPoolExecutor(max_workers=writer_workers)
         write_futures = []
@@ -508,7 +470,7 @@ class GPUPersistentWorker:
             return self.model
 
         try:
-            # Đọc song song ảnh đầu vào của phân đoạn và khử trùng lặp chu kỳ (A->B->A lip-flap / blink)
+            # Load chunk frames in parallel before cyclic deduplication
             if loader_executor and total_frames > 1:
                 all_in_arrs = list(loader_executor.map(_read_img_bgr_u8, img_files))
             else:
@@ -546,7 +508,7 @@ class GPUPersistentWorker:
                     for i, arr in enumerate(batch_arrs):
                         pinned_in[i].copy_(torch.from_numpy(arr))
                     gpu_bgr = pinned_in[:cur_b].to(self.device, non_blocking=True)
-                    # Lật kênh BGR -> RGB, chuyển NHWC -> NCHW channels_last và chuẩn hóa [0,1] ngay trên VRAM
+                    # Convert BGR->RGB, permute NHWC->NCHW channels-last, and normalize on VRAM
                     tensor = (
                         gpu_bgr[..., [2, 1, 0]]
                         .permute(0, 3, 1, 2)
@@ -566,13 +528,13 @@ class GPUPersistentWorker:
                     if self.device.type == "cuda":
                         tensor = tensor.to(memory_format=torch.channels_last)
 
-                # Giải phóng sớm tham chiếu mảng đầu vào của batch đã nạp lên GPU
+                # Drop host array references once batch tensors are staged on device
                 for clear_i in range(b_start, b_end):
                     distinct_arrs[clear_i] = None
 
                 active_runner = _resolve_runner(h0, w0) if same_shape else self.model
 
-                # 2. Suy luận GPU + Kiểm tra hữu hạn bất đồng bộ + Lượng tử hóa uint8 BGR trên VRAM (chỉ 1 lần sync D2H)
+                # Run GPU inference and uint8 BGR quantization in VRAM with one D2H sync
                 with torch.inference_mode():
                     out_tensor = active_runner(tensor)
                     finite_flag = torch.isfinite(out_tensor).all()
@@ -586,7 +548,7 @@ class GPUPersistentWorker:
                     )
                     slot = (b_start // b_size) % 2
                     if self.device.type == "cuda":
-                        # Đảm bảo các luồng ghi PNG của batch trước dùng cùng slot đã hoàn tất trước khi ghi đè (0 copy RAM)
+                        # Wait until previous PNG writers on this ring slot finish before overwriting
                         if slot_futures[slot]:
                             for prev_fut in slot_futures[slot]:
                                 prev_fut.result()
@@ -615,12 +577,12 @@ class GPUPersistentWorker:
                 if b_start == 0:
                     steady_start = time.time()
 
-                # 3. Kiểm tra NaN / Inf (Safety Gate)
+                # NaN/Inf safety gate
                 if not is_finite:
                     sample_name = distinct_first_names[b_start]
                     raise GPUError(f"Phát hiện giá trị bất thường (NaN/Inf) tại khung hình lô: '{sample_name}'")
 
-                # 4. Ghi nhận đỉnh VRAM
+                # Record peak VRAM allocation
                 if self.device.type == "cuda":
                     c_alloc = torch.cuda.memory_allocated(self.device) / (1024 * 1024)
                     if c_alloc > curr_alloc_peak:
@@ -644,7 +606,6 @@ class GPUPersistentWorker:
                         if logger:
                             logger.warn(f"Lỗi mid_chunk_callback: {e_cb}")
 
-            # Chờ toàn bộ writer threads hoàn tất
             for f in write_futures:
                 f.result()
 
@@ -679,14 +640,10 @@ class GPUPersistentWorker:
         }
 
 
-# -----------------------------------------------------------------------------
-# 3. Singleton Worker & Điều Phối Fallback
-# -----------------------------------------------------------------------------
-
 _GLOBAL_GPU_WORKER: Optional[GPUPersistentWorker] = None
 
 def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
-    """Giải phóng bộ nhớ TRT runner, ring buffer và VRAM cache của worker cũ trước khi đổi worker."""
+    """Release cached TRT runners, zero-disk ring buffers, and VRAM allocations."""
     if worker is None:
         return
     runners = getattr(worker, "_trt_runners", None)
@@ -702,6 +659,11 @@ def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
     for attr in ("_zero_disk_upscaler", "_zero_disk_wrapper"):
         obj = getattr(worker, attr, None)
         if obj is not None:
+            if hasattr(obj, "release"):
+                try:
+                    obj.release()
+                except Exception:
+                    pass
             for ring_attr in ("host_in_pins", "host_out_pins", "gpu_in_ring", "gpu_nhwc_ring", "color_conv", "model"):
                 if hasattr(obj, ring_attr):
                     try:
@@ -709,9 +671,10 @@ def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
                     except Exception:
                         pass
             try:
-                delattr(worker, attr)
+                setattr(worker, attr, None)
             except Exception:
                 pass
+    worker._zero_disk_key = None
     worker.model = None
     if torch.cuda.is_available():
         try:
@@ -729,7 +692,7 @@ def get_gpu_worker(
     batch_size: Optional[int] = None,
     use_tensorrt: bool = True,
 ) -> GPUPersistentWorker:
-    """Lấy hoặc khởi tạo instance Singleton cho GPUPersistentWorker."""
+    """Return or initialize the singleton GPUPersistentWorker instance."""
     global _GLOBAL_GPU_WORKER
     req_dev_type: Optional[str] = None
     if device:
@@ -787,7 +750,7 @@ def get_cuda_inference_engine(
     batch_size: Optional[int] = None,
     use_tensorrt: bool = True,
 ) -> GPUPersistentWorker:
-    """Khởi tạo hoặc lấy worker CUDA cho mô hình đã chỉ định."""
+    """Return a CUDA persistent worker configured for model_info."""
     return get_gpu_worker(
         model_id=model_info["id"],
         weights_path=model_info["weights_path"],
@@ -810,15 +773,7 @@ def upscale_frames_with_fallback(
     mid_chunk_callback=None,
     use_tensorrt: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Hàm giao tiếp chính thực hiện suy luận khung hình cho 1 chunk:
-    - Mặc định: PyTorch CUDA FP16 với Batch Inference
-    - Tự động fallback khi gặp lỗi:
-      + CUDA FP16 -> CUDA FP32
-      + animevideov3: fallback sang NCNN Vulkan (-t 540 -j 1:2:2) nếu có NCNN binary
-      + animejanai: fallback sang FP32
-    - Bảo đảm KHÔNG tự ý đổi sang model khác!
-    """
+    """Run chunk SR inference with FP16 -> FP32 -> NCNN fallback without changing model identity."""
     if engine is None:
         from src.config import DEFAULT_ENGINE
         engine = DEFAULT_ENGINE
@@ -826,7 +781,6 @@ def upscale_frames_with_fallback(
     model_id = model_info["id"]
     weights_path = model_info["weights_path"]
 
-    # 1. Nếu người dùng chỉ định engine NCNN hoặc model được yêu cầu NCNN
     if engine == "ncnn":
         from src.ai_engine import upscale_frames as ncnn_upscale
         ncnn_model_name = "realesr-animevideov3" if model_id == "animevideov3" else model_id
@@ -840,7 +794,6 @@ def upscale_frames_with_fallback(
             thread_cfg="1:2:2"
         )
 
-    # 2. Thử nghiệm trên PyTorch / TensorRT (NVIDIA CUDA / CPU)
     try:
         worker = get_gpu_worker(
             model_id=model_id,
@@ -869,7 +822,7 @@ def upscale_frames_with_fallback(
         else:
             print(warn_msg)
 
-        # Fallback 1: Nếu lỗi FP16 trên GPU (CUDA), thử fallback sang FP32 của chính device đó
+        # Fall back from FP16 to FP32 on the same device
         if precision == "fp16":
             fallback_msg = f"🔄 Chuyển sang {engine.upper()} FP32 cho model {model_id}..."
             if logger:
@@ -922,5 +875,4 @@ def upscale_frames_with_fallback(
         )
 
 
-# Alias tiện ích
 GPUEngineError = GPUError

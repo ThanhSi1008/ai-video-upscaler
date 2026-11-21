@@ -1,4 +1,1 @@
-# -*- coding: utf-8 -*-
-"""
-web package — Local Real-Time Web Studio for AI Video Upscaler 4K & Subtrans.
-"""
+"""Local Real-Time Web Studio FastAPI package for AI Video Upscaler and Subtrans."""

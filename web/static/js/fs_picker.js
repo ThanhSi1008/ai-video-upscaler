@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/fs_picker.js
  * Safe Local Disk & Folder Browser Modal (<dialog closedby="any">):

@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-🎬 AI Video Upscaler 4K - CLI Entry Point
-Công cụ Upscale Video Anime lên 4K chuyên dụng trên Terminal:
-- Tăng độ phân giải 2x bằng PyTorch FP16 / Tensor Cores (NVIDIA CUDA).
-- Mã hóa phần cứng 10-bit HEVC qua NVENC (Windows).
-- Bảo vệ tối đa ổ cứng NVMe SSD với bộ nhớ đệm RAM Disk ảo / bộ nhớ đệm tạm.
-- Bảo toàn 100% âm thanh đa kênh, phụ đề đa ngôn ngữ, font chữ và chapters gốc.
-"""
+"""CLI entrypoint for 4K anime super-resolution, deduplication, and optional subtitle translation."""
 
 import os
 import sys
@@ -1155,9 +1147,7 @@ def main():
                 else:
                     sys.exit(1)
 
-        # -------------------------------------------------------------------------
         # TỰ ĐỘNG THỬ LẠI CÁC TẬP FAILED-RESUMABLE MỘT LẦN Ở CUỐI HÀNG ĐỢI
-        # -------------------------------------------------------------------------
         if failed_resumable_videos:
             print(f"\n{'='*75}")
             print(f"🔄 [RETRY PASS] TỰ ĐỘNG THỬ LẠI {len(failed_resumable_videos)} TẬP FAILED-RESUMABLE MỘT LẦN")
@@ -1201,10 +1191,8 @@ def main():
         if bg_preflight is not None:
             bg_preflight.stop()
 
-    # -------------------------------------------------------------------------
     # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY CHO CÁC TẬP ĐÃ HOÀN TẤT)
     # CHẠY TRONG TIẾN TRÌNH CON ĐỘC LẬP (SUBPROCESS), KHÔNG CHẶN HAY HỎNG VIDEO 4K
-    # -------------------------------------------------------------------------
     if args.subs_after_upscale and completed_videos:
         print(f"\n{'='*75}")
         print("📝 [STAGE B] HOÀN TẤT & ĐỒNG BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ ĐỘC LẬP")
@@ -1265,9 +1253,7 @@ def main():
 
         _set_stage_b_live_status("completed", "Hoàn tất dịch & nhúng phụ đề Stage B")
 
-    # -------------------------------------------------------------------------
     # DỌN DẸP PHỤ ĐỀ TẠM & GOM GỌN CÁC FILE KỸ THUẬT (AUDIT/CAST) SAU KHI HOÀN TẤT
-    # -------------------------------------------------------------------------
     if not getattr(args, "no_organize_audit", False) and completed_videos:
         for src_vid, out_vid in completed_videos:
             sub_out_dir = os.path.dirname(os.path.abspath(out_vid))
@@ -1275,9 +1261,7 @@ def main():
             cleanup_subtitle_extracts(os.path.dirname(os.path.abspath(src_vid)), base_vid_name)
             organize_output_artifacts(sub_out_dir, base_name=base_vid_name)
 
-    # -------------------------------------------------------------------------
     # KIỂM ĐỊNH TẤT CẢ CÁC TẬP: NẾU CÒN TẬP CHƯA XONG THÌ THOÁT MÃ ≠ 0 VÀ IN BẢNG
-    # -------------------------------------------------------------------------
     unfinished_list = [v for v in videos if v not in [cv[0] for cv in completed_videos]]
     if unfinished_list:
         print(f"\n{'='*75}")

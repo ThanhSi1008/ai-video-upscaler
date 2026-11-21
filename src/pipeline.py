@@ -1,15 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/pipeline.py
-Bộ điều phối chính (Orchestrator) cho toàn bộ quy trình Upscale 4K:
-- Kiến trúc phân đoạn cuốn chiếu (Rolling Segments)
-- Bộ nhớ đệm RAM Disk ảo (Zero NVMe SSD wear)
-- Cơ chế chống ngủ máy tự động (Windows SetThreadExecutionState)
-- Kiểm tra an toàn trước khi chạy (Pre-flight Health Checks: Pin, Ổ đĩa)
-- Tự động tiếp tục từ phân đoạn dở (Checkpoint Resume)
-- Thông báo hệ thống khi hoàn tất
-- Thu thập viễn trắc và lưu log có cấu trúc tại logs/
-"""
+"""Core 3-stage overlapped 4K video upscaling pipeline with resume and ENOSPC handling."""
 
 import os
 import sys
@@ -315,9 +304,7 @@ def run_upscale_pipeline(
                     swap_before = get_swap_usage()
                     logger.info(f"📊 Trạng thái Bộ nhớ/Swap ban đầu: {swap_before}")
 
-                    # ---------------------------------------------------------
                     # BƯỚC 1: PHÂN ĐOẠN VIDEO THÔ & KẾ HOẠCH DEDUPLICATION
-                    # ---------------------------------------------------------
                     logger.set_stage("preflight_dedup", f"Phân đoạn GOP {segment_time}s & lập kế hoạch Deduplication...")
                     plan_file = os.path.join(work_dir, "plan.json")
                     if not resume:
@@ -419,9 +406,7 @@ def run_upscale_pipeline(
                     logger.info(f"Đã chuẩn bị {total_segs} phân đoạn. Bắt đầu quá trình Upscale GPU ({DEVICE_NAME})...", to_console=True)
                     print()
 
-                    # -----------------------------------------------------------------
                     # BƯỚC 2: XỬ LÝ UPSCALE & MÃ HÓA PHÂN ĐOẠN CUỐN CHIẾU
-                    # -----------------------------------------------------------------
                     t_chunks_start = time.time()
                     total_frames_processed = 0
                     total_ai_frames = 0
@@ -1557,9 +1542,7 @@ def run_upscale_pipeline(
                 stage_timings["AI Inference & Hardware Encoding (Pipelined)"] = time.time() - t_chunks_start
                 logger.info("Hoàn tất quá trình suy luận 4K cho toàn bộ phân đoạn!", to_console=True)
 
-                # -----------------------------------------------------------------
                 # BƯỚC 3 & 4 (HỢP NHẤT 1 LƯỢT): CONCAT + MUX CONTAINER PHÒNG THU
-                # -----------------------------------------------------------------
                 logger.set_stage("muxing", "Đang ghép nối phân đoạn 4K & đóng gói Container gốc (1-Pass Mux)...")
                 logger.info("Đang ghép nối phân đoạn 4K và đóng gói Audio, Subtitles, Fonts, Chapters gốc (1-Pass Concat-Mux)...", to_console=True)
                 all_upscaled_segs = sorted([
@@ -1694,9 +1677,7 @@ def run_upscale_pipeline(
                     logger.print_benchmark_summary(summary_stats)
                     logger.set_stage("completed", f"Hoàn tất 4K ({avg_fps:.2f} fps E2E | Mux Audit PASS)")
 
-                    # -------------------------------------------------------------
                     # TỰ ĐỘNG DỌN DẸP THƯ MỤC CHECKPOINT TRÊN SSD KHI XUẤT XƯỞNG PASS
-                    # -------------------------------------------------------------
                     if not keep_temp:
                         cleanup_checkpoint_dir(work_dir, output_dir=os.path.dirname(output_path), logger=logger)
                     else:

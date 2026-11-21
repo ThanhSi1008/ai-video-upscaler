@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/charts.js
  * High-DPI Canvas 2D 120-second sliding telemetry charts:

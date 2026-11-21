@@ -281,3 +281,38 @@ def test_micro_timings_cross_chunk_accumulation():
     assert final_mt["avg_trt_ms"] == 25.0
     assert final_mt["avg_triton_ms"] == 5.0
     assert final_mt["avg_d2h_ms"] == 2.5
+
+
+def test_p010le_converter_has_no_dead_compiled_fn_and_release_clears_buffers():
+    """Verify GPUColorConverterP010LE omits _compiled_fn and DoubleBufferedPipeUpscaler.release() clears state."""
+    conv = GPUColorConverterP010LE(device=torch.device("cpu"))
+    assert not hasattr(conv, "_compiled_fn")
+
+    rgb = torch.rand(2, 3, 16, 16, dtype=torch.float32)
+    out = conv.rgb_to_p010le(rgb)
+    assert out.shape == (2, 24, 16)
+    assert len(conv._p010_ring) == 2
+
+    upscaler = DoubleBufferedPipeUpscaler(
+        nn.Identity(),
+        batch_size=2,
+        device=torch.device("cpu"),
+        input_hw=(64, 64),
+        scale=1,
+    )
+    upscaler.color_conv.rgb_to_p010le(rgb)
+    assert len(upscaler.host_in_pins) == 2
+    assert len(upscaler.color_conv._p010_ring) == 2
+
+    upscaler.release()
+    assert upscaler.host_in_pins == []
+    assert upscaler.host_out_pins == []
+    assert upscaler.gpu_in_ring == []
+    assert upscaler.gpu_nhwc_ring == []
+    assert upscaler.color_conv._p010_ring == []
+    assert upscaler._micro_event_pool == []
+    assert upscaler._sync_event_pool == []
+    assert upscaler.last_first_rgb_small is None
+    assert upscaler.input_hw == (0, 0)
+    assert upscaler.output_hw == (0, 0)
+

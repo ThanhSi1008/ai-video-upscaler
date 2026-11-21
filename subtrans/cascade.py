@@ -1,16 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/cascade.py
-Stage P2: Smart Cloud Cascade (100% Cloud API: Flash-Lite -> Flash).
-- Difficulty scoring function S(cue) in [0.0, 15.0] on post-auto-fixed cues
-- Two-tier pipeline:
-  1. Draft Pass: high-throughput, low-quota Gemini Flash-Lite (2,000 RPD)
-  2. Repair/Editor Pass: high-tier Gemini Flash on difficult/uncertain cues (strictly capped <= 20% of episode, max 2 requests)
-- Guardrails:
-  + Cổng Re-lint & Accept/Reject: So sánh danh tính vi phạm _ident, chốt chặn trôi dạt (edit distance > 0.5, số, metadata disagreement)
-  + Fail-Open: Tự động giữ nguyên bản draft Lite khi gặp 429, timeout, bad JSON schema
-  + Đầy đủ telemetry per-cue JSONL: Phân phối S(cue), edit rate, rejection rate, provenance reason_code
-"""
+"""Two-tier cloud translation cascade with difficulty scoring and digit quarantine."""
 
 import re
 import json

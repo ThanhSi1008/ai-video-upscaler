@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/cast_sheet.py
-Stage A: Cast Sheet generation and persistence.
-Analyzes episode dialogue once per episode to standardize character names,
-nicknames (e.g. Emilia-tan, Barusu), register (archaic/divine vs modern casual),
-and speaker-to-listener pronoun consistency.
-"""
+"""Stage A episode cast sheet generator for character names, registers, and pronouns."""
 
 import json
 import logging

@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/config.py
-Configuration loader and validator for subtrans.
-"""
+"""Configuration loader, model metadata, and 3-key rotation settings for subtrans."""
 
 import os
 import threading

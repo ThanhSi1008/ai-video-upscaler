@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/pipeline.py
-Core orchestration pipeline connecting parsing, Stage A cast sheet generation,
-translation backends, caching, output generation (SRT single-line default),
-and Stage C QA audit reporting.
-"""
+"""Four-stage anime subtitle translation pipeline from alignment to QA audit output."""
 
 import re
 import time

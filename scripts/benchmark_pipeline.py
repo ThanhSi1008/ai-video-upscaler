@@ -1,29 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-scripts/benchmark_pipeline.py
-Turnkey benchmark harness CLI for ai-video-upscaler.
-
-CLI arguments:
-    python scripts/benchmark_pipeline.py <source_path> \\
-        --tier [preview|climax|full] \\
-        --output-dir <dir> \\
-        --label <label> \\
-        [--engine cuda|cpu] \\
-        [--zero-disk] \\
-        [--no-tensorrt] \\
-        [--model <model>] \\
-        [--batch-size <n>] \\
-        [--dry-run]
-
-Manages .gpu_active.lock properly.
-Coordinates continuous 17-metric hardware telemetry via TelemetryCollector.
-Wraps upscale execution, aggregates worker statistics, and runs mux auditing.
-Generates:
-    - <output_dir>/<label>_summary.json
-    - <output_dir>/<label>_telemetry.csv
-    - <output_dir>/<label>.audit.json
-"""
+"""End-to-end 4K video upscaling benchmark harness with telemetry capture."""
 
 from __future__ import annotations
 
@@ -38,10 +14,8 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-# ----------------------------------------------------------------------
 # Repository Root Bootstrap
 # Ensure repository root is on sys.path for direct CLI invocation from any cwd
-# ----------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))

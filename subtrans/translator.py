@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/translator.py
-Abstract base class for subtitle translators.
-"""
+"""Abstract base class defining the subtitle translator interface."""
 
 from abc import ABC, abstractmethod
 from typing import List, Optional

@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/cli.py
-Command Line Interface for subtrans anime subtitle translation tool.
-"""
+"""Typer CLI commands (run, batch, eval, rag, check, models) for subtitle translation."""
 
 import sys
 from pathlib import Path

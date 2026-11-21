@@ -4,7 +4,7 @@
       "command": "python",
       "args": [
         "-c",
-        "import os, runpy; root = os.environ.get('PLUGIN_ROOT') or 'e:/ai-video-upscaler/.agents/plugins/upscaler-mcp'; runpy.run_path(os.path.join(root, 'server', 'upscaler_mcp.py'), run_name='__main__')"
+        "import os, runpy; root = os.environ.get('PLUGIN_ROOT') or os.path.join(os.getcwd(), '.agents', 'plugins', 'upscaler-mcp'); runpy.run_path(os.path.join(root, 'server', 'upscaler_mcp.py'), run_name='__main__')"
       ],
       "env": {
         "PYTHONUTF8": "1",

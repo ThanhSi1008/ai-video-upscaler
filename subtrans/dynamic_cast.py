@@ -1,15 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/dynamic_cast.py
-Kiến trúc Quản lý Quan hệ Nhân vật Động Trễ (Hysteresis Dynamic Cast Manager):
-- Phân tầng quan hệ: Quan hệ gốc (Baseline) vs. Thay đổi nhất thời (Situational Override)
-  vs. Bước ngoặt cốt truyện vĩnh viễn (Permanent Arc Shift).
-- Ngăn chặn bẫy "Naive Auto-Update Trap": Khi một nhân vật nổi cáu hoặc nói đùa nhất thời
-  trong 1 cảnh (SITUATIONAL_SHIFT: 'temee/kisama' -> mày/tao), hệ thống KHÔNG ghi đè bảng
-  xưng hô gốc cho toàn bộ phần còn lại của tập phim.
-- Tự động bổ sung nhân vật mới xuất hiện (NEW_CHARACTER: confidence >= 0.75).
-- Khóa chặt bước ngoặt cốt truyện (PERMANENT_ARC_SHIFT: confidence >= 0.90) vào nhánh arc_overrides.
-"""
+"""Hysteresis dynamic cast manager tracking baseline, situational, and arc pronoun shifts."""
 
 import re
 from typing import Dict, Any, List, Optional, Literal, Tuple

@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/ui.js
  * Core accessible UI primitives & safe DOM helpers:

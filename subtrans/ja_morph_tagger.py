@@ -1,14 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/ja_morph_tagger.py
-Bộ phân tích hình thái học tiếng Nhật (Hybrid Morphological MeCab/UniDic + Boundary-Safe Regex Tagger):
-- Ưu tiên tách từ hình thái học C++ (`fugashi` + `unidic-lite`, < 0.5ms/câu trên CPU, 0 VRAM) để
-  nhận diện chính xác ranh giới từ vựng, triệt tiêu 100% báo giả đại từ do trùng chữ Hán trong từ ghép
-  (ví dụ: `私立` không phải `私`, `我慢` không phải `我`, `下僕` không phải `僕`, `君臨` không phải `君`,
-  `余裕` không phải `余`, `某所` không phải `某`, `手前味噌` không phải `てめえ`).
-- Phân biệt chính xác đại từ ngôi 2 độc lập `君` (`2P:kimi`) với hậu tố gọi tên `-君` (`HON:kun`).
-- Tự động fallback mượt mà sang bộ Regex có rào chắn biên Kanji nếu môi trường tối giản thiếu `fugashi`.
-"""
+"""MeCab/UniDic morphological tagger with boundary-safe regex fallback for Japanese hints."""
 
 from __future__ import annotations
 

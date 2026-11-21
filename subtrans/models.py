@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-subtrans/models.py
-Data models for subtrans subtitle translation tool (Schema v2 support).
-"""
+"""Pydantic data models for subtitle cues, glossaries, address rules, and cast entries."""
 
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field

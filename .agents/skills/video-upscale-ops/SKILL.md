@@ -25,9 +25,13 @@ description: >-
 # Inspect registered SR models without GPU inference:
 .\.venv\Scripts\python.exe upscale.py --list-models
 
-# Inspect AST symbols in video modules before reading large files:
-.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/pipeline.py
-.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/dedup.py
+# Inspect AST context & bounded slices in video modules before reading large files:
+.\.venv\Scripts\python.exe scripts/agent_context.py --pack src/pipeline.py:worker_extract src/dedup.py:get_dedup_params
+.\.venv\Scripts\python.exe scripts/agent_context.py --symbols src/pipeline.py src/dedup.py
+.\.venv\Scripts\python.exe scripts/agent_context.py --slice src/trt_zero_copy_upscaler.py DoubleBufferedPipeUpscaler.release
+
+# Run < 5s CPU-safe 24f pipeline smoke check:
+.\.venv\Scripts\python.exe scripts/smoke_test_pipeline.py
 
 # Probe source container streams & frame count (read-only):
 ffprobe -v error -show_entries stream=index,codec_name,codec_type,channels,pix_fmt,r_frame_rate -of json "path/to/source.mkv"

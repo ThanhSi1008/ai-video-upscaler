@@ -5,6 +5,7 @@ This is isolation for the reviewed test suite, not a sandbox for untrusted code.
 """
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import shutil
@@ -15,10 +16,16 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {"src", "subtrans", "tests", "scripts", "models", "glossaries", "docs", "web"}
-ROOT_FILES = {"upscale.py", "upscale.bat", "upscale_turbo.bat", "subtrans.py", "subtrans.bat",
-              "web_gui.py", "web_gui.bat", "pytest.ini", "requirements.txt", "shows.yaml",
-              "GEMINI.md", "README.md"}
-SUFFIXES = {".py", ".bat", ".yaml", ".yml", ".ini", ".md", ".txt", ".json", ".ass", ".srt", ".html", ".css", ".js", ".svg"}
+SAFE_ROOT_DOTFILES = {".antigravityignore", ".gitignore", ".editorconfig", ".env.example"}
+ROOT_FILES = {
+    "upscale.py", "upscale.bat", "upscale_turbo.bat", "subtrans.py", "subtrans.bat",
+    "web_gui.py", "web_gui.bat", "pytest.ini", "ruff.toml", "requirements.txt",
+    "shows.yaml", "GEMINI.md", "README.md",
+}
+SUFFIXES = {
+    ".py", ".bat", ".yaml", ".yml", ".toml", ".ini", ".md", ".txt", ".json",
+    ".ass", ".srt", ".html", ".css", ".js", ".svg",
+}
 GUARD = '''"""Offline guard loaded before test collection in the source snapshot."""
 import _socket
 import socket
@@ -40,6 +47,8 @@ def allowed_source(relative: Path) -> bool:
     """Only source/config/fixtures; never copy production state or credentials."""
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         return False
+    if len(relative.parts) == 1 and relative.name in SAFE_ROOT_DOTFILES:
+        return True
     if relative.parts[0] == ".agents":
         return (
             not any(part in {"__pycache__", "out", "scratch"} for part in relative.parts)
@@ -107,10 +116,125 @@ def _rmtree_force(path: Path) -> None:
     shutil.rmtree(path, onerror=_clear_readonly)
 
 
-def main() -> int:
-    if len(sys.argv) > 1:
-        print("Usage: python scripts/verify_offline.py (runs the full non-GPU suite)")
-        return 2
+def _detect_dirty_paths(root: Path) -> list[str]:
+    """Return modified and untracked repository-relative POSIX paths."""
+    paths: set[str] = set()
+    diff_res = subprocess.run(
+        ["git", "--no-optional-locks", "diff", "--name-only", "HEAD"],
+        cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if diff_res.returncode == 0:
+        for ln in diff_res.stdout.splitlines():
+            p = ln.strip().replace("\\", "/")
+            if p:
+                paths.add(p)
+    st_res = subprocess.run(
+        ["git", "--no-optional-locks", "status", "--porcelain"],
+        cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if st_res.returncode == 0:
+        for raw_line in st_res.stdout.splitlines():
+            if len(raw_line) < 4:
+                continue
+            status = raw_line[:2]
+            if "D" in status:
+                continue
+            rel = raw_line[3:].strip()
+            if " -> " in rel:
+                rel = rel.split(" -> ", 1)[1].strip()
+            rel = rel.strip('"').replace("\\", "/")
+            if rel:
+                paths.add(rel)
+    return sorted(paths)
+
+
+def resolve_impacted_tests(root: Path, changed_paths: list[str] | None = None) -> list[str]:
+    """Resolve impacted test files/directories from modified paths via agent_context 2-hop + contracts."""
+    dirty = changed_paths if changed_paths is not None else _detect_dirty_paths(root)
+    if not dirty:
+        return []
+    root_str = str(root)
+    added_sys_path = False
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+        added_sys_path = True
+    try:
+        from scripts.agent_context import compute_impact
+
+        _, impacted = compute_impact(root, dirty)
+    finally:
+        if added_sys_path and sys.path and sys.path[0] == root_str:
+            sys.path.pop(0)
+
+    candidates: set[str] = set(impacted)
+    for rel in dirty:
+        norm = rel.replace("\\", "/")
+        if (norm.startswith("tests/") or norm.startswith("subtrans/tests/")) and norm.endswith(".py"):
+            if Path(norm).name.startswith("test_") and (root / norm).is_file():
+                candidates.add(norm)
+
+    # Deduplicate files already covered by an impacted directory (e.g. subtrans/tests/)
+    dirs = [c.rstrip("/") + "/" for c in candidates if c.endswith("/") or (root / c).is_dir()]
+    resolved: list[str] = []
+    for cand in sorted(candidates):
+        norm = cand.rstrip("/") + "/" if (root / cand).is_dir() else cand
+        if any(norm != d and norm.startswith(d) for d in dirs):
+            continue
+        if (root / cand).exists():
+            resolved.append(cand)
+    return resolved
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--target",
+        nargs="+",
+        metavar="PATH_OR_NODEID",
+        help="Run only specified test file(s) or pytest node ID(s) inside the isolated snapshot",
+    )
+    mode_group.add_argument(
+        "--impacted",
+        action="store_true",
+        help="Run only tests impacted by current working-tree modifications/untracked files",
+    )
+    parser.add_argument(
+        "--maxfail",
+        type=int,
+        default=None,
+        help="Stop after N test failures (defaults to 3 in --impacted mode)",
+    )
+    parser.add_argument(
+        "--capture",
+        action="store_true",
+        help="Enable pytest failure stdout/stderr capture (overrides default --show-capture=no)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    is_fast_mode = bool(args.target or args.impacted)
+    test_targets: list[str] = []
+    if args.target:
+        test_targets = list(args.target)
+    elif args.impacted:
+        dirty = _detect_dirty_paths(ROOT)
+        if not dirty:
+            print("No modified or untracked files detected; 0 impacted tests.")
+            return 0
+        test_targets = resolve_impacted_tests(ROOT, dirty)
+        if not test_targets:
+            print("No impacted tests matched modified files; skipping pytest.")
+            return 0
+        print(f"Impacted targets ({len(test_targets)}): {', '.join(test_targets)}")
+
     scratch = ROOT / "scratch"
     scratch.mkdir(exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="agent-validation-", dir=scratch))
@@ -118,39 +242,61 @@ def main() -> int:
     snapshot.mkdir()
     tmp_dir = run_dir / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    count = snapshot_sources(ROOT, snapshot)
-    (snapshot / "agent_offline_guard.py").write_text(GUARD, encoding="utf-8")
-    env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
-    env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(tmp_dir)
-    # Pytest may inspect Git for tests of the context helper; snapshot has no parent repository.
-    env["GIT_CEILING_DIRECTORIES"] = str(run_dir)
-    command = [sys.executable, "-m", "pytest", "-m", "not gpu", "-q", "--tb=short",
-               "-p", "agent_offline_guard", "--basetemp", str(tmp_dir / "pytest"),
-               "--junitxml", str(run_dir / "junit.xml")]
-    print(f"Snapshot: {snapshot}\nSource files: {count}\nCPU only; Python sockets blocked; no production cache/weights copied.", flush=True)
-    with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:
-        with subprocess.Popen(command, cwd=snapshot, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                              errors="replace") as process:
-            assert process.stdout is not None
-            for line in process.stdout:
-                print(line, end="", flush=True)
-                log.write(line)
-            code = process.wait()
-    print(f"Evidence: {run_dir}\nPytest exit code: {code}")
-    if code == 0:
-        # Clean heavy disposable snapshot & pytest scratch files while keeping tmp_dir and logs
-        _rmtree_force(snapshot)
-        _rmtree_force(tmp_dir / "pytest")
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        validation_dirs = sorted(
-            (p for p in scratch.glob("agent-validation-*") if p.is_dir()),
-            key=lambda p: (p.stat().st_mtime_ns, p.name),
-            reverse=True,
+
+    code = 1
+    try:
+        count = snapshot_sources(ROOT, snapshot)
+        (snapshot / "agent_offline_guard.py").write_text(GUARD, encoding="utf-8")
+        env = isolated_environment(dict(os.environ), tmp_dir=tmp_dir)
+        env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(tmp_dir)
+        # Pytest may inspect Git for tests of the context helper; snapshot has no parent repository.
+        env["GIT_CEILING_DIRECTORIES"] = str(run_dir)
+
+        command = [
+            sys.executable, "-m", "pytest", "-m", "not gpu", "-q", "--tb=short",
+            "-p", "agent_offline_guard", "--basetemp", str(tmp_dir / "pytest"),
+            "--junitxml", str(run_dir / "junit.xml"),
+        ]
+        if not args.capture:
+            command.append("--show-capture=no")
+        maxfail = args.maxfail if args.maxfail is not None else (3 if args.impacted else None)
+        if maxfail is not None and maxfail > 0:
+            command.extend(["--maxfail", str(maxfail)])
+        if test_targets:
+            command.extend(test_targets)
+
+        print(
+            f"Snapshot: {snapshot}\nSource files: {count}\n"
+            "CPU only; Python sockets blocked; no production cache/weights copied.",
+            flush=True,
         )
-        for old_dir in validation_dirs[2:]:
-            if old_dir != run_dir:
-                _rmtree_force(old_dir)
+        with (run_dir / "pytest.log").open("w", encoding="utf-8") as log:
+            with subprocess.Popen(
+                command, cwd=snapshot, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                errors="replace",
+            ) as process:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    log.write(line)
+                code = process.wait()
+        print(f"Evidence: {run_dir}\nPytest exit code: {code}")
+    finally:
+        if is_fast_mode or code == 0:
+            # Always clean heavy snapshot & pytest temp files on fast modes and passing full runs
+            _rmtree_force(snapshot)
+            _rmtree_force(tmp_dir / "pytest")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            if code == 0:
+                validation_dirs = sorted(
+                    (p for p in scratch.glob("agent-validation-*") if p.is_dir()),
+                    key=lambda p: (p.stat().st_mtime_ns, p.name),
+                    reverse=True,
+                )
+                for old_dir in validation_dirs[2:]:
+                    if old_dir != run_dir:
+                        _rmtree_force(old_dir)
     return code
 
 

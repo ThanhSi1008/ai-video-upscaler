@@ -1,4 +1,3 @@
-// -*- coding: utf-8 -*-
 /**
  * web/static/js/compare_stage.js
  * Tab 3 — Interactive 1080p Source vs 4K AI Split-Compare Lightbox (BT.709):

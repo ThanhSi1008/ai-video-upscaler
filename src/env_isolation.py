@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-src/env_isolation.py
-Cô lập 100% đường dẫn binary (FFmpeg/Python), thư mục tạm (TEMP/TMP/TMPDIR)
-và toàn bộ biến môi trường cache về thư mục dự án trên ổ E: (`E:\\ai-video-upscaler`),
-tránh mọi phụ thuộc hoặc rò rỉ dữ liệu tạm sang ổ hệ thống C:.
-"""
+"""E-drive environment isolation for Python, FFmpeg, TEMP, and AI compiler caches."""
 
 from __future__ import annotations
 

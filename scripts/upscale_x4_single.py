@@ -1,15 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-scripts/upscale_x4_single.py
-Single-image native 4x Super-Resolution utility:
-- Uses native RealESR-AnimeVideoV3 architecture (64f16c, PixelShuffle 4x).
-- Skips 0.5x bicubic downsampling (preserves full 4x scale).
-- Runs optimized FP16 NHWC inference on NVIDIA Tensor Cores or CPU fallback.
-
-Usage:
-    python scripts/upscale_x4_single.py "path/to/image.png"
-    python scripts/upscale_x4_single.py "path/to/image.png" --output "path/to/output_4x.png"
-"""
+"""Standalone native 4x single-image super-resolution utility."""
 
 import argparse
 import contextlib
