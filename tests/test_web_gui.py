@@ -5702,3 +5702,160 @@ def test_pause_graceful_after_abort_rejects_foreign_job_id_and_aborted_stage(
         assert flag_path.is_file()
         assert client.post("/api/jobs/clear-pause").status_code == 200
         assert not flag_path.exists()
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_abort_teardown_preserves_newer_job_pausing_flag(
+    tmp_path: Path, dry_run: bool
+):
+    """Job 1 abort_job() finally must never unlink .graceful_pause.flag owned by a newer Job 2."""
+    root = _seed_workspace(tmp_path / f"abort_cross_job_flag_{dry_run}_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    teardown_entered = threading.Event()
+    teardown_release = threading.Event()
+    spawn_idx = {"n": 0}
+    procs: List[FakePopenProcess] = []
+
+    class _Job1TeardownHoldProc(FakePopenProcess):
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout is not None:
+                teardown_entered.set()
+                assert teardown_release.wait(timeout=5.0)
+            return super().wait()
+
+    def factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        spawn_idx["n"] += 1
+        if spawn_idx["n"] == 1:
+            p = _Job1TeardownHoldProc(cmd, pid=71001, running=True, return_code=-1)
+        else:
+            p = FakePopenProcess(cmd, pid=71002, running=True, return_code=0)
+        procs.append(p)
+        return p
+
+    app = create_app(workspace_root=root, popen_factory=factory)
+    with TestClient(app) as client:
+        start1 = client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": dry_run})
+        assert start1.status_code == 200
+        job1_id = start1.json()["job"]["job_id"]
+
+        abort_holder: List[Dict[str, Any]] = []
+        t_abort = threading.Thread(
+            target=lambda: abort_holder.append(app.state.job_manager.abort_job()),
+            daemon=True,
+        )
+        t_abort.start()
+        try:
+            assert teardown_entered.wait(timeout=5.0)
+
+            start2 = client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": dry_run})
+            assert start2.status_code == 200
+            job2_id = start2.json()["job"]["job_id"]
+            assert job2_id != job1_id
+
+            pause2 = client.post("/api/jobs/pause-graceful")
+            assert pause2.status_code == 200
+            assert pause2.json()["ok"] is True
+            assert pause2.json()["graceful_pause_pending"] is True
+            assert flag_path.is_file()
+            assert app.state.job_manager.get_state()["status"] == "pausing"
+        finally:
+            teardown_release.set()
+            t_abort.join(timeout=5.0)
+
+        assert not t_abort.is_alive()
+        assert abort_holder[0]["ok"] is True
+
+        state_after = app.state.job_manager.get_state()
+        assert state_after["status"] == "pausing"
+        assert state_after["active_job"]["job_id"] == job2_id
+        assert flag_path.is_file()
+
+        assert client.post("/api/jobs/clear-pause").status_code == 200
+        procs[1].terminate()
+
+
+def test_abort_subtrans_job_preserves_external_cli_gpu_lock_and_pause_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Aborting a non-GPU subtrans Web Job must preserve an active external CLI's GPU lock and pause flag."""
+    import psutil
+
+    root = _seed_workspace(tmp_path / "abort_subtrans_ext_cli_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    lock_file = root / ".gpu_active.lock"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    ext_pid = os.getpid()
+    sub_pid = 72001
+    alive_pids: set[int] = {ext_pid, sub_pid}
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+
+    def sub_factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        return FakePopenProcess(cmd, pid=sub_pid, running=True, return_code=-1)
+
+    app = create_app(workspace_root=root, popen_factory=sub_factory)
+    with TestClient(app) as client:
+        # External CLI is active and already requested graceful pause before subtrans starts & aborts.
+        lock_file.write_text(f"{ext_pid}\n", encoding="utf-8")
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": ext_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+        pause_before = client.post("/api/jobs/pause-graceful")
+        assert pause_before.status_code == 200
+        assert flag_path.is_file()
+
+        sub_resp = client.post("/api/jobs/subtrans", json={"input_path": src_ep, "dry_run": True})
+        assert sub_resp.status_code == 200
+        assert sub_resp.json()["job"]["job_type"] == "subtrans"
+        assert flag_path.is_file()
+
+        abort_resp = client.post("/api/jobs/abort")
+        assert abort_resp.status_code == 200
+        assert abort_resp.json()["ok"] is True
+        alive_pids.discard(sub_pid)
+
+        assert app.state.job_manager.get_state()["status"] == "aborted"
+        assert lock_file.is_file()
+        assert flag_path.is_file()
+
+        # External CLI pause/clear controls continue working after subtrans abort.
+        pause_after = client.post("/api/jobs/pause-graceful")
+        assert pause_after.status_code == 200
+        assert pause_after.json()["ok"] is True
+        assert flag_path.is_file()
+        clear_after = client.post("/api/jobs/clear-pause")
+        assert clear_after.status_code == 200
+        assert not flag_path.exists()
+
+
+def test_abort_job_discards_aborting_token_on_unexpected_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Unexpected exception inside abort_job() lock block must still discard abort_token in finally."""
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "abort_token_exc_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    jm = JobManager(
+        root,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=73001, running=True, return_code=-1),
+    )
+    jm.start_upscale_job({"inputs": [src_ep], "dry_run": True})
+    assert jm.request_graceful_pause()["ok"] is True
+    assert flag_path.is_file()
+
+    def _boom(_aborted_job: Dict[str, Any]) -> bool:
+        raise RuntimeError("injected pause-check failure")
+
+    monkeypatch.setattr(jm, "_has_live_external_cli_locked", _boom)
+    with pytest.raises(RuntimeError, match="injected pause-check failure"):
+        jm.abort_job()
+
+    assert jm._aborting_tokens == set()
+    monkeypatch.undo()
+    # Subsequent pause/clear or status polling remains clean after exception recovery.
+    assert jm.get_state()["status"] == "aborted"
+    assert jm.clear_graceful_pause()["ok"] is True

@@ -339,7 +339,7 @@ class JobManager:
 
         # Dọn cờ .graceful_pause.flag còn sót (ví dụ người dùng bấm dừng êm lúc đang Mux cuối tập)
         pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
-        if pause_flag.exists():
+        if pause_flag.exists() and not self._has_live_external_cli_locked(self._active_job):
             try:
                 pause_flag.unlink()
             except OSError:
@@ -628,7 +628,9 @@ class JobManager:
                 prev_rc = self._proc.poll()
                 if prev_rc is not None:
                     self._finalize_locked(int(prev_rc))
-            if pause_flag.exists():
+            if pause_flag.exists() and (
+                requires_gpu or not self._has_live_external_cli_locked(self._active_job or {})
+            ):
                 try:
                     pause_flag.unlink()
                 except OSError:
@@ -1071,73 +1073,76 @@ class JobManager:
         killed_job_id: Optional[str] = None
         abort_token: Optional[str] = None
         owned_tree_pids: set[int] = set()
-        with self._lock:
-            proc = self._proc
-            if proc is not None and proc.poll() is None:
-                killed_pid = getattr(proc, "pid", None)
-                killed_proc = proc
-                killed_job_id = str(self._active_job.get("job_id") or "") if self._active_job else None
-                abort_token = self._job_abort_token(self._active_job, killed_proc)
-                if abort_token is not None:
-                    self._aborting_tokens.add(abort_token)
-                killed_pid_int = _coerce_pid(killed_pid)
-                if killed_pid_int is not None:
-                    owned_tree_pids.add(killed_pid_int)
-                    try:
-                        import psutil
-                        parent_proc = psutil.Process(killed_pid_int)
-                        for child in parent_proc.children(recursive=True):
-                            c_pid = _coerce_pid(getattr(child, "pid", None))
-                            if c_pid is not None:
-                                owned_tree_pids.add(c_pid)
-                    except Exception:
-                        pass
-                live_file = self.workspace_root / "logs" / "live_status.json"
-                if live_file.is_file() and self._active_job is not None:
-                    try:
-                        live_mtime = live_file.stat().st_mtime
-                        ldata = json.loads(live_file.read_text(encoding="utf-8"))
-                        if isinstance(ldata, dict) and live_matches_web_job(ldata, self._active_job, live_mtime):
-                            l_pid = _coerce_pid(ldata.get("pid"))
-                            if l_pid is not None:
-                                owned_tree_pids.add(l_pid)
-                    except Exception:
-                        pass
-                if abort_token is not None and owned_tree_pids:
-                    self._record_aborted_owned_pids_locked(abort_token, owned_tree_pids)
-                if self._active_job:
-                    self._active_job["status"] = "aborted"
-                pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
-                try:
-                    pause_flag.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                try:
-                    if (
-                        sys.platform == "win32"
-                        and killed_pid
-                        and self.popen_factory is subprocess.Popen
-                    ):
-                        startupinfo = subprocess.STARTUPINFO()
-                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                        startupinfo.wShowWindow = subprocess.SW_HIDE
-                        subprocess.run(
-                            ["taskkill", "/PID", str(killed_pid), "/T", "/F"],
-                            capture_output=True,
-                            timeout=5.0,
-                            check=False,
-                            startupinfo=startupinfo,
-                        )
-                    else:
-                        proc.terminate()
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-
         external_lock_pid: Optional[int] = None
         try:
+            with self._lock:
+                proc = self._proc
+                if proc is not None and proc.poll() is None:
+                    killed_pid = getattr(proc, "pid", None)
+                    killed_proc = proc
+                    killed_job_id = str(self._active_job.get("job_id") or "") if self._active_job else None
+                    abort_token = self._job_abort_token(self._active_job, killed_proc)
+                    if abort_token is not None:
+                        self._aborting_tokens.add(abort_token)
+                    killed_pid_int = _coerce_pid(killed_pid)
+                    if killed_pid_int is not None:
+                        owned_tree_pids.add(killed_pid_int)
+                        try:
+                            import psutil
+                            parent_proc = psutil.Process(killed_pid_int)
+                            for child in parent_proc.children(recursive=True):
+                                c_pid = _coerce_pid(getattr(child, "pid", None))
+                                if c_pid is not None:
+                                    owned_tree_pids.add(c_pid)
+                        except Exception:
+                            pass
+                    live_file = self.workspace_root / "logs" / "live_status.json"
+                    if live_file.is_file() and self._active_job is not None:
+                        try:
+                            live_mtime = live_file.stat().st_mtime
+                            ldata = json.loads(live_file.read_text(encoding="utf-8"))
+                            if isinstance(ldata, dict) and live_matches_web_job(ldata, self._active_job, live_mtime):
+                                l_pid = _coerce_pid(ldata.get("pid"))
+                                if l_pid is not None:
+                                    owned_tree_pids.add(l_pid)
+                        except Exception:
+                            pass
+                    if abort_token is not None and owned_tree_pids:
+                        self._record_aborted_owned_pids_locked(abort_token, owned_tree_pids)
+                    if self._active_job:
+                        self._active_job["status"] = "aborted"
+                    pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
+                    if pause_flag.exists() and (
+                        not self._active_job or not self._has_live_external_cli_locked(self._active_job)
+                    ):
+                        try:
+                            pause_flag.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    try:
+                        if (
+                            sys.platform == "win32"
+                            and killed_pid
+                            and self.popen_factory is subprocess.Popen
+                        ):
+                            startupinfo = subprocess.STARTUPINFO()
+                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                            startupinfo.wShowWindow = subprocess.SW_HIDE
+                            subprocess.run(
+                                ["taskkill", "/PID", str(killed_pid), "/T", "/F"],
+                                capture_output=True,
+                                timeout=5.0,
+                                check=False,
+                                startupinfo=startupinfo,
+                            )
+                        else:
+                            proc.terminate()
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+
             if killed_proc is not None:
                 try:
                     killed_proc.wait(timeout=2.0)
@@ -1189,10 +1194,12 @@ class JobManager:
         finally:
             if killed_proc is not None or abort_token is not None:
                 with self._lock:
-                    if abort_token is not None:
-                        if owned_tree_pids:
+                    try:
+                        if abort_token is not None and owned_tree_pids:
                             self._record_aborted_owned_pids_locked(abort_token, owned_tree_pids)
-                        self._aborting_tokens.discard(abort_token)
+                    finally:
+                        if abort_token is not None:
+                            self._aborting_tokens.discard(abort_token)
                     # Finalize deterministically once killed_proc has exited instead of waiting for _drain_output().
                     if (
                         killed_proc is not None
@@ -1204,14 +1211,26 @@ class JobManager:
                         if rc is not None:
                             self._finalize_locked(int(rc))
                     if killed_proc is not None:
-                        pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
-                        if pause_flag.exists() and (
-                            not self._active_job or not self._has_live_external_cli_locked(self._active_job)
-                        ):
-                            try:
-                                pause_flag.unlink(missing_ok=True)
-                            except OSError:
-                                pass
+                        same_aborted_job = self._active_job is None or (
+                            (
+                                (bool(killed_job_id) and self._active_job.get("job_id") == killed_job_id)
+                                or (
+                                    not killed_job_id
+                                    and not self._active_job.get("job_id")
+                                    and (self._proc is None or self._proc is killed_proc)
+                                )
+                            )
+                            and self._active_job.get("status") == "aborted"
+                        )
+                        if same_aborted_job:
+                            pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
+                            if pause_flag.exists() and (
+                                not self._active_job or not self._has_live_external_cli_locked(self._active_job)
+                            ):
+                                try:
+                                    pause_flag.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
 
         if killed_pid is not None:
             return {
