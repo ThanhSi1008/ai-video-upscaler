@@ -30,8 +30,78 @@ from src.config import (
 )
 
 
+_AV_COLOR_RANGE_MAP: Dict[int, str] = {
+    0: "unknown",
+    1: "tv",
+    2: "pc",
+}
+
+_AV_COLOR_SPACE_MAP: Dict[int, str] = {
+    0: "gbr",
+    1: "bt709",
+    2: "unknown",
+    4: "fcc",
+    5: "bt470bg",
+    6: "smpte170m",
+    7: "smpte240m",
+    8: "ycgco",
+    9: "bt2020nc",
+    10: "bt2020c",
+}
+
+_AV_COLOR_PRIMARIES_MAP: Dict[int, str] = {
+    1: "bt709",
+    2: "unknown",
+    4: "bt470m",
+    5: "bt470bg",
+    6: "smpte170m",
+    7: "smpte240m",
+    8: "film",
+    9: "bt2020",
+}
+
+_AV_COLOR_TRC_MAP: Dict[int, str] = {
+    1: "bt709",
+    2: "unknown",
+    4: "gamma22",
+    5: "gamma28",
+    6: "smpte170m",
+    7: "smpte240m",
+    8: "linear",
+    13: "iec61966-2-1",
+    14: "bt2020-10",
+    15: "bt2020-12",
+    16: "smpte2084",
+    18: "arib-std-b67",
+}
+
+
+def _normalize_color_tag(raw_val: Any, *, is_range: bool = False) -> str:
+    """Normalize FFprobe/PyAV color metadata strings into canonical lowercase FFmpeg tokens."""
+    if raw_val is None or isinstance(raw_val, bool) or not isinstance(raw_val, str):
+        return "unknown"
+    norm = raw_val.strip().lower()
+    if not norm or norm in ("unknown", "unspecified", "reserved", "n/a"):
+        return "unknown"
+    if is_range:
+        if norm in ("tv", "mpeg", "limited"):
+            return "tv"
+        if norm in ("pc", "jpeg", "full"):
+            return "pc"
+    return norm
+
+
+def _decode_pyav_color_tag(raw_val: Any, enum_map: Dict[int, str], *, is_range: bool = False) -> str:
+    """Map PyAV AVCodecContext integer color enum or string label to canonical FFmpeg name."""
+    if isinstance(raw_val, bool) or not isinstance(raw_val, (int, str)):
+        return "unknown"
+    if isinstance(raw_val, int):
+        return enum_map.get(raw_val, f"code_{raw_val}")
+    return _normalize_color_tag(raw_val, is_range=is_range)
+
+
 def _probe_video_ffprobe(video_path: str) -> Dict[str, Any]:
-    """Trích xuất thông số kỹ thuật chi tiết của video bằng ffprobe subprocess (fallback)."""
+    """Extract stream, container, and BT.709 VUI metadata via ffprobe subprocess fallback."""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_streams",
@@ -57,6 +127,10 @@ def _probe_video_ffprobe(video_path: str) -> Dict[str, Any]:
     codec = video_stream.get("codec_name", "unknown")
     pix_fmt = video_stream.get("pix_fmt", "yuv420p")
     profile = video_stream.get("profile", "")
+    color_range = _normalize_color_tag(video_stream.get("color_range"), is_range=True)
+    color_space = _normalize_color_tag(video_stream.get("color_space"))
+    color_primaries = _normalize_color_tag(video_stream.get("color_primaries"))
+    color_transfer = _normalize_color_tag(video_stream.get("color_transfer"))
 
     r_fps = video_stream.get("r_frame_rate", "24/1")
     fps_num = 24000
@@ -92,6 +166,10 @@ def _probe_video_ffprobe(video_path: str) -> Dict[str, Any]:
         "codec": codec,
         "pix_fmt": pix_fmt,
         "profile": profile,
+        "color_range": color_range,
+        "color_space": color_space,
+        "color_primaries": color_primaries,
+        "color_transfer": color_transfer,
         "nb_frames": nb_frames,
         "audio_count": len(audio_streams),
         "subtitle_count": len(sub_streams),
@@ -101,7 +179,7 @@ def _probe_video_ffprobe(video_path: str) -> Dict[str, Any]:
 
 
 def _probe_video_pyav(video_path: str) -> Dict[str, Any]:
-    """Trích xuất thông số kỹ thuật chi tiết của video bằng PyAV in-process."""
+    """Extract stream, container, and BT.709 VUI metadata in-process via PyAV."""
     if av is None:
         raise RuntimeError("PyAV is not installed")
     with av.open(video_path) as c:
@@ -111,6 +189,15 @@ def _probe_video_pyav(video_path: str) -> Dict[str, Any]:
         codec = str(v.name) if v else "unknown"
         pix_fmt = str(v.format.name) if (v and v.format) else "yuv420p"
         profile = str(v.profile or "") if v else ""
+        cc = getattr(v, "codec_context", None) if v is not None else None
+        color_range = _decode_pyav_color_tag(
+            getattr(cc, "color_range", None), _AV_COLOR_RANGE_MAP, is_range=True
+        )
+        color_space = _decode_pyav_color_tag(getattr(cc, "colorspace", None), _AV_COLOR_SPACE_MAP)
+        color_primaries = _decode_pyav_color_tag(
+            getattr(cc, "color_primaries", None), _AV_COLOR_PRIMARIES_MAP
+        )
+        color_transfer = _decode_pyav_color_tag(getattr(cc, "color_trc", None), _AV_COLOR_TRC_MAP)
 
         fps_num, fps_den = 24000, 1001
         fps = 23.976
@@ -145,6 +232,10 @@ def _probe_video_pyav(video_path: str) -> Dict[str, Any]:
             "codec": codec,
             "pix_fmt": pix_fmt,
             "profile": profile,
+            "color_range": color_range,
+            "color_space": color_space,
+            "color_primaries": color_primaries,
+            "color_transfer": color_transfer,
             "nb_frames": nb_frames,
             "audio_count": len(c.streams.audio),
             "subtitle_count": len(c.streams.subtitles),
@@ -1047,7 +1138,11 @@ def encode_chunk_hevc(
         "ffmpeg", "-y",
         "-framerate", str(fps),
         "-i", frame_pattern,
-        "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+full_chroma_int",
+        "-vf", (
+            "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:"
+            "flags=bicubic+accurate_rnd+full_chroma_int,"
+            "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+        ),
         "-c:v", HEVC_ENCODER,
         *rate_args,
         "-profile:v", HEVC_PROFILE,

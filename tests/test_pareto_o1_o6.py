@@ -1053,3 +1053,116 @@ def test_o5_auto_pareto_resume_preserves_mid_shot_tier_and_full_audit_routing(tm
         "animejanai-hd-v3-ultracompact": 1,
     }
 
+
+def test_mux_audit_enforces_10bit_bt709_vui_and_preserves_mock_compatibility(tmp_path):
+    """Verify probe_video and verify_mux_integrity catch missing/mismatched VUI or 8-bit output while keeping legacy mocks green."""
+    import subprocess
+    from src.ffmpeg_ops import _probe_video_ffprobe, _probe_video_pyav
+    from src.mux_audit import verify_mux_integrity
+
+    src_mkv = tmp_path / "src_1080p.mkv"
+    good_4k_mkv = tmp_path / "good_4k.mkv"
+    bad_vui_mkv = tmp_path / "bad_vui_4k.mkv"
+    bad_8bit_mkv = tmp_path / "bad_8bit_4k.mkv"
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=12:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(src_mkv),
+        ],
+        check=True,
+    )
+    # Valid 10-bit BT.709 Limited HEVC output container.
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12:duration=1",
+            "-i", str(src_mkv),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-vf", "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
+            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+            "-pix_fmt", "yuv420p10le",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-c:a", "copy", "-max_interleave_delta", "0", str(good_4k_mkv),
+        ],
+        check=True,
+    )
+    # 10-bit HEVC with dropped/mismatched VUI (full range + unspecified BT.709 matrix/primaries/transfer).
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12:duration=1",
+            "-i", str(src_mkv),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-vf", "setparams=range=pc:colorspace=unknown:color_primaries=unknown:color_trc=unknown",
+            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+            "-pix_fmt", "yuv420p10le", "-color_range", "pc",
+            "-c:a", "copy", "-max_interleave_delta", "0", str(bad_vui_mkv),
+        ],
+        check=True,
+    )
+    # 8-bit HEVC (yuv420p) despite BT.709 VUI tags.
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12:duration=1",
+            "-i", str(src_mkv),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-vf", "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
+            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+            "-pix_fmt", "yuv420p",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-c:a", "copy", "-max_interleave_delta", "0", str(bad_8bit_mkv),
+        ],
+        check=True,
+    )
+
+    pyav_good = _probe_video_pyav(str(good_4k_mkv))
+    ffprobe_good = _probe_video_ffprobe(str(good_4k_mkv))
+    for k in ("color_range", "color_space", "color_primaries", "color_transfer"):
+        assert pyav_good[k] == ffprobe_good[k]
+    assert pyav_good["color_range"] == "tv"
+    assert pyav_good["color_space"] == "bt709"
+    assert pyav_good["color_primaries"] == "bt709"
+    assert pyav_good["color_transfer"] == "bt709"
+
+    res_good = verify_mux_integrity(str(src_mkv), str(good_4k_mkv))
+    assert res_good["status"] == "PASS", res_good["failure_reasons"]
+    assert res_good["video_vui_audit"]["checked"] is True
+    assert res_good["video_vui_audit"]["passed"] is True
+
+    res_bad_vui = verify_mux_integrity(str(src_mkv), str(bad_vui_mkv))
+    assert res_bad_vui["status"] == "FAIL"
+    assert res_bad_vui["video_vui_audit"]["passed"] is False
+    assert any("VUI BT.709 Limited" in r for r in res_bad_vui["failure_reasons"])
+
+    res_bad_8bit = verify_mux_integrity(str(src_mkv), str(bad_8bit_mkv))
+    assert res_bad_8bit["status"] == "FAIL"
+    assert res_bad_8bit["video_vui_audit"]["passed"] is False
+    assert any("10-bit" in r for r in res_bad_8bit["failure_reasons"])
+
+    # Backward-compatibility guard: mocked probe dicts omitting color keys must still PASS.
+    legacy_mock_meta = {
+        "width": 3840,
+        "height": 2160,
+        "codec": "hevc",
+        "pix_fmt": "yuv420p",
+        "nb_frames": 12,
+        "duration": 1.0,
+        "audio_count": 0,
+        "subtitle_count": 0,
+        "attachment_count": 0,
+        "chapter_count": 0,
+    }
+    res_legacy = verify_mux_integrity(
+        str(tmp_path / "nonexistent_src.mkv"),
+        str(tmp_path / "nonexistent_out.mkv"),
+        src_meta=legacy_mock_meta,
+        out_meta=legacy_mock_meta,
+    )
+    assert res_legacy["status"] == "PASS"
+    assert res_legacy["video_vui_audit"]["checked"] is False
+

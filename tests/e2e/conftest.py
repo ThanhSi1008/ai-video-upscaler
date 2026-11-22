@@ -145,8 +145,12 @@ def create_synthetic_video(
     if is_hevc:
         cmd.extend([
             "-vframes", str(num_frames),
+            "-vf", "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
             "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
-            "-pix_fmt", "p010le", "-tag:v", "hvc1",
+            "-pix_fmt", "p010le",
+            "-color_range", "tv", "-colorspace", "bt709",
+            "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-tag:v", "hvc1",
         ])
     else:
         cmd.extend(["-vframes", str(num_frames), "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])

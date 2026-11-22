@@ -2142,7 +2142,8 @@ def encode_chunk_reexpanded(
         "-i", concat_script_path,
         "-vf", (
             f"scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+full_chroma_int,"
-            f"fps={fps_num}/{fps_den}"
+            f"fps={fps_num}/{fps_den},"
+            "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"
         ),
         "-pix_fmt", HEVC_PIX_FMT,
         "-c:v", HEVC_ENCODER,

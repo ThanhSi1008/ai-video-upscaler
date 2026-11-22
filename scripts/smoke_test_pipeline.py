@@ -130,7 +130,11 @@ def run_smoke_test() -> dict[str, Any]:
             enc_cmd = [
                 ffmpeg_bin, "-y", "-v", "error",
                 "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{up_w}x{up_h}", "-r", "24", "-i", "pipe:0",
-                "-vf", "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p10le",
+                "-vf", (
+                    "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv,"
+                    "format=yuv420p10le,"
+                    "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+                ),
                 "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:open-gop=0:keyint=12:min-keyint=12",
                 "-pix_fmt", "yuv420p10le",
                 "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",

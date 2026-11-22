@@ -751,6 +751,57 @@ def verify_mux_integrity(
             f"Không thể xác minh số khung hình video (nguồn={src_frames_cnt}, đích={out_frames_cnt})"
         )
 
+    # 7b. Audit output video 10-bit pixel format and BT.709 Limited VUI tags
+    vui_check_passed = True
+    color_keys = ("color_range", "color_space", "color_primaries", "color_transfer")
+    has_color_metadata = any(k in out_meta for k in color_keys)
+    out_codec = str(out_meta.get("codec") or "").strip().lower()
+    src_codec = str(src_meta.get("codec") or "").strip().lower()
+    out_dims = (int(out_meta.get("width") or 0), int(out_meta.get("height") or 0))
+    src_dims = (int(src_meta.get("width") or 0), int(src_meta.get("height") or 0))
+    out_pix = str(out_meta.get("pix_fmt") or "").strip().lower()
+    src_pix = str(src_meta.get("pix_fmt") or "").strip().lower()
+    out_colors = tuple(str(out_meta.get(k) or "").strip().lower() for k in color_keys)
+    src_colors = tuple(str(src_meta.get(k) or "").strip().lower() for k in color_keys)
+
+    # Preserve backward compatibility for mocked probe dicts omitting color keys and un-upscaled non-HEVC -c:v copy fixtures
+    is_non_hevc_stream_copy = (
+        out_codec not in ("hevc", "h265", "")
+        and out_codec == src_codec
+        and out_dims == src_dims
+        and out_pix == src_pix
+        and (
+            out_colors == src_colors
+            or (
+                src_colors[1:] == ("unknown", "unknown", "unknown")
+                and out_colors[1:] == ("unknown", "unknown", "unknown")
+            )
+        )
+    )
+    should_audit_video_vui = has_video_stream and has_color_metadata and not is_non_hevc_stream_copy
+    if should_audit_video_vui:
+        if out_pix not in {"yuv420p10le", "p010le"}:
+            vui_check_passed = False
+            reasons.append(
+                f"Sai định dạng điểm ảnh video đích: yêu cầu 10-bit (yuv420p10le/p010le), nhận '{out_pix or 'unknown'}'"
+            )
+        expected_vui = {
+            "color_range": "tv",
+            "color_space": "bt709",
+            "color_primaries": "bt709",
+            "color_transfer": "bt709",
+        }
+        vui_mismatches = [
+            f"{k}={str(out_meta.get(k) or 'unknown').strip().lower() or 'unknown'} (yêu cầu {exp})"
+            for k, exp in expected_vui.items()
+            if str(out_meta.get(k) or "").strip().lower() != exp
+        ]
+        if vui_mismatches:
+            vui_check_passed = False
+            reasons.append(
+                "Sai hoặc thiếu thẻ màu VUI BT.709 Limited trên video đích: " + ", ".join(vui_mismatches)
+            )
+
     # 8. Check Subtitle Events Count Match cho từng track phụ đề
     sub_events_audit = []
     sub_events_passed = True
@@ -823,6 +874,7 @@ def verify_mux_integrity(
 
     all_passed = (
         stream_check_passed and
+        vui_check_passed and
         audio_md5_all_match and
         interleave_res["passed"] and
         vol_test_passed and
@@ -854,6 +906,15 @@ def verify_mux_integrity(
             "passed": frame_count_match,
             "source_frames": src_frames_cnt,
             "output_frames": out_frames_cnt
+        },
+        "video_vui_audit": {
+            "passed": vui_check_passed,
+            "checked": should_audit_video_vui,
+            "pix_fmt": out_pix or None,
+            "color_range": out_meta.get("color_range"),
+            "color_space": out_meta.get("color_space"),
+            "color_primaries": out_meta.get("color_primaries"),
+            "color_transfer": out_meta.get("color_transfer"),
         },
         "all_audio_tracks_md5": {
             "passed": audio_md5_all_match,

@@ -50,7 +50,7 @@ subtrans.cli -> TranslationPipeline
 | [`build_trt_engine.py`](../../src/build_trt_engine.py) | `_PureFP16TRTExportModule` (`_aa2x`), `resolve_trt_profile_max_batch`, ONNX export, `TRTRuntimeEngineWrapper` (2-slot `_out_ring`, `execute_async_v3`) |
 | [`dedup.py`](../../src/dedup.py) | `DEDUP_POLICY_PARAMS` (`dis-auto`), `_check_8x8_lip_flap_gate`, `_estimate_textured_lk_pan_zoom`, `RollingDedupPlanner`, `deduplicate_cyclic_frames`, `raw_actions_rle` |
 | [`output_sanity.py`](../../src/output_sanity.py) | `check_frame_sanity_arrays`, `check_frame_sanity`, `OutputSanityError`, `write_failed_sanity_audit` ($|\Delta Y| \le 6/255$, $r \ge 0.98$) |
-| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity`, `get_all_audio_streams_md5` (in-process PyAV demux + `-f streamhash` fallback), parallel `check_window_interleaving` |
+| [`mux_audit.py`](../../src/mux_audit.py) | `verify_mux_integrity` (incl. 10-bit & BT.709 `tv` `video_vui_audit`), `get_all_audio_streams_md5` (PyAV demux + `-f streamhash` fallback), parallel `check_window_interleaving` |
 | [`ramdisk.py`](../../src/ramdisk.py) | `RAMDisk` (physical RAM disk / `scratch/rolling_buffer` on NVMe Gen4), `cleanup_orphan_ramdisks` |
 | [`cleanup.py`](../../src/cleanup.py) | `cleanup_checkpoint_dir`, `cleanup_subtitle_extracts`, `organize_output_artifacts`, `clean_all_temporary_data` |
 | [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos`, AC power & disk checks |

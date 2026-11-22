@@ -12,9 +12,9 @@
 - **Decision:** Always mux with `-map 0:v:0 -map 1:a? -map 1:s? -map 1:t? -map_chapters 1 -c copy -max_interleave_delta 0`.
 - **Rationale:** Prevents FFmpeg interleave skew across multi-channel audio (5.1/FLAC/TrueHD) and softsubs that triggers local audio dropouts on TV/media players.
 
-### ADR-003: Two-Way ITU-R BT.709 Color Matrix
-- **Decision:** Extract with `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (TV Limited -> RGB24 Full); encode with `pc -> tv` (`p010le`) and tag `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`.
-- **Rationale:** Eliminates gamma wash-out and crushed blacks on anime masters.
+### ADR-003: Two-Way ITU-R BT.709 Color Matrix & Mux VUI Gate
+- **Decision:** Extract with `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc` (TV Limited -> RGB24 Full); encode with `pc -> tv` (`p010le`, plus `setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709` on FFmpeg 8.x `scale` filtergraphs), tag `-color_range tv -colorspace bt709 -color_primaries bt709 -color_trc bt709 -tag:v hvc1`, and enforce 10-bit + BT.709 `tv` VUI inside `verify_mux_integrity` (`video_vui_audit`).
+- **Rationale:** Eliminates gamma wash-out, crushed blacks, and FFmpeg 8.x `scale` `unspecified` primaries/transfer resets on anime masters.
 
 ### ADR-004: Keyframe GOP + DIS Optical Flow Deduplication
 - **Decision:** Split on source IDR keyframes (`split_video_segments`), force-keep chunk frame 0, scan 1-pass `mpdecimate` (`768:320:0.33` default) + optional early-exit DIS optical flow (`--dedup-policy dis`, `--dis-thresh 0.30`), and re-expand frames in NVENC/Concat Demuxer.
