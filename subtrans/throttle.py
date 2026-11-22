@@ -1,16 +1,18 @@
 """Gemini rate limiter, exponential backoff with jitter, and PerDay quota failover."""
 
 import os
+import math
 import time
 import random
 import logging
 import re
 import json
+import threading
 import requests
 from collections import deque
 from typing import Optional, Callable, Any, Tuple, Dict
 
-from subtrans.config import update_model_quota_in_yaml
+from subtrans.config import load_models_config, update_model_quota_in_yaml
 from subtrans.cache import TranslationCache, get_next_pt_reset
 
 logger = logging.getLogger("subtrans.throttle")
@@ -157,61 +159,180 @@ def parse_429_details(exc: Exception) -> Tuple[Optional[str], Optional[str], Opt
 
 
 class RateLimiter:
-    """Sliding-window rate limiter to enforce max requests per minute (RPM)."""
+    """Thread-safe sliding-window rate limiter enforcing max requests per minute (RPM)."""
 
     def __init__(self, max_rpm: Any = 5):
-        try:
-            self.max_rpm = int(max_rpm)
-        except Exception:
-            self.max_rpm = 5
+        if isinstance(max_rpm, bool):
+            parsed_rpm = 5
+        else:
+            try:
+                parsed_rpm = int(max_rpm)
+            except Exception:
+                parsed_rpm = 5
+        self.max_rpm = parsed_rpm if parsed_rpm > 0 else 5
         self.interval = 60.0
         self.timestamps = deque()
         self.cooldown_until: float = 0.0
+        self._lock = threading.Lock()
 
     def record_cooldown(self, wait_seconds: float) -> None:
         """Records a per-key cooldown timestamp after hitting 429 PerMinute."""
-        if wait_seconds and wait_seconds > 0:
-            self.cooldown_until = max(self.cooldown_until, time.monotonic() + float(wait_seconds))
+        if isinstance(wait_seconds, bool):
+            return
+        try:
+            sec = float(wait_seconds)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(sec) or sec <= 0:
+            return
+        with self._lock:
+            self.cooldown_until = max(self.cooldown_until, time.monotonic() + sec)
 
     def clear_cooldown(self) -> None:
         """Clears active cooldown once wait has been honored."""
-        self.cooldown_until = 0.0
+        with self._lock:
+            self.cooldown_until = 0.0
 
     def available_slots(self) -> int:
-        """Trả về số slot RPM còn trống ngay tức thì trong cửa sổ trượt 60s."""
-        now = time.monotonic()
-        if now < self.cooldown_until:
-            return 0
-        while self.timestamps and (now - self.timestamps[0]) > self.interval:
-            self.timestamps.popleft()
-        return max(0, self.max_rpm - len(self.timestamps))
+        """Returns remaining available RPM slots in the current 60s sliding window."""
+        with self._lock:
+            now = time.monotonic()
+            if now < self.cooldown_until:
+                return 0
+            while self.timestamps and (now - self.timestamps[0]) > self.interval:
+                self.timestamps.popleft()
+            return max(0, self.max_rpm - len(self.timestamps))
 
     def wait_if_needed(self):
-        """Blocks until any active cooldown expires and a request slot is available in the 60s window."""
-        now = time.monotonic()
-        if now < self.cooldown_until:
-            cd_wait = self.cooldown_until - now
-            if cd_wait > 0:
-                logger.info(f"Key cooldown active. Waiting {cd_wait:.1f}s...")
-                time.sleep(cd_wait)
-            self.cooldown_until = 0.0
-            now = time.monotonic()
+        """Blocks until active cooldown expires and reserves a slot in the sliding window."""
+        no_progress_iters = 0
+        while True:
+            sleep_for = 0.0
+            reason = ""
+            target_cooldown = 0.0
+            now = 0.0
 
-        # Remove timestamps older than 60s
-        while self.timestamps and (now - self.timestamps[0]) > self.interval:
-            self.timestamps.popleft()
-
-        if len(self.timestamps) >= self.max_rpm:
-            # Need to wait until the oldest timestamp is out of the window
-            wait_time = self.interval - (now - self.timestamps[0]) + 0.1
-            if wait_time > 0:
-                logger.info(f"Rate limit reached ({self.max_rpm} RPM). Waiting {wait_time:.1f}s...")
-                time.sleep(wait_time)
+            with self._lock:
                 now = time.monotonic()
-                while self.timestamps and (now - self.timestamps[0]) > self.interval:
-                    self.timestamps.popleft()
+                if now < self.cooldown_until:
+                    sleep_for = self.cooldown_until - now
+                    reason = "cooldown"
+                    target_cooldown = self.cooldown_until
+                else:
+                    if self.cooldown_until > 0.0:
+                        self.cooldown_until = 0.0
+                    while self.timestamps and (now - self.timestamps[0]) > self.interval:
+                        self.timestamps.popleft()
+                    if len(self.timestamps) < self.max_rpm:
+                        self.timestamps.append(now)
+                        return
+                    sleep_for = max(0.01, self.interval - (now - self.timestamps[0]) + 0.1)
+                    reason = "window"
 
-        self.timestamps.append(time.monotonic())
+            if sleep_for > 0:
+                if reason == "cooldown":
+                    logger.info(f"Key cooldown active. Waiting {sleep_for:.1f}s...")
+                else:
+                    logger.info(f"Rate limit reached ({self.max_rpm} RPM). Waiting {sleep_for:.1f}s...")
+                t_before = time.perf_counter()
+                time.sleep(sleep_for)
+                elapsed = time.perf_counter() - t_before
+
+                if time.monotonic() <= now:
+                    no_progress_iters += 1
+                else:
+                    no_progress_iters = 0
+
+                # Guard against monkeypatched no-op time.sleep across all durations without Windows 15.625ms false triggers
+                is_noop_sleep = (
+                    (sleep_for > 0.0 and elapsed < min(sleep_for * 0.2, 0.0002))
+                    or (sleep_for > 0.0 and elapsed < (sleep_for * 0.1))
+                    or no_progress_iters >= 3
+                )
+                if is_noop_sleep:
+                    with self._lock:
+                        now2 = time.monotonic()
+                        if reason == "cooldown":
+                            if self.cooldown_until > target_cooldown and now2 < self.cooldown_until:
+                                continue
+                            if self.cooldown_until <= target_cooldown or now2 >= self.cooldown_until:
+                                self.cooldown_until = 0.0
+                            while self.timestamps and (now2 - self.timestamps[0]) > self.interval:
+                                self.timestamps.popleft()
+                            if len(self.timestamps) < self.max_rpm:
+                                self.timestamps.append(now2)
+                                return
+                            continue
+                        while self.timestamps and (now2 - self.timestamps[0]) > self.interval:
+                            self.timestamps.popleft()
+                        if len(self.timestamps) >= self.max_rpm:
+                            self.timestamps.popleft()
+                        self.timestamps.append(now2)
+                        return
+
+
+def get_client_rpm_for_model(model: str, models_cfg: Optional[Dict[str, Any]] = None) -> int:
+    """Returns conservative client-side RPM ceiling for a model based on subtrans/models.yaml."""
+    model_name = str(model or "").strip()
+    if models_cfg is None:
+        try:
+            models_cfg = load_models_config()
+        except Exception:
+            models_cfg = {}
+
+    raw_rpm: Optional[int] = None
+    models_map = models_cfg.get("models") if isinstance(models_cfg, dict) else None
+    if isinstance(models_map, dict) and model_name in models_map:
+        entry = models_map[model_name]
+        if isinstance(entry, dict):
+            val = entry.get("rpm")
+            if val is not None and not isinstance(val, bool):
+                try:
+                    parsed = int(val)
+                    if parsed > 0:
+                        raw_rpm = parsed
+                except (TypeError, ValueError, OverflowError):
+                    raw_rpm = None
+
+    if raw_rpm is None:
+        raw_rpm = 15 if "lite" in model_name.lower() else 5
+
+    return max(1, raw_rpm - max(1, raw_rpm // 5))
+
+
+_RATE_LIMITER_REGISTRY: Dict[Tuple[str, str], RateLimiter] = {}
+_REGISTRY_LOCK = threading.Lock()
+
+
+def get_shared_rate_limiter(
+    key_id: str,
+    model: str,
+    max_rpm: Optional[int] = None,
+) -> RateLimiter:
+    """Returns a process-wide thread-safe RateLimiter shared per (key_id, model)."""
+    norm_key = (str(key_id or "none"), str(model or ""))
+    with _REGISTRY_LOCK:
+        limiter = _RATE_LIMITER_REGISTRY.get(norm_key)
+        if limiter is None:
+            resolved_rpm: Optional[int] = None
+            if max_rpm is not None and not isinstance(max_rpm, bool):
+                try:
+                    parsed = int(max_rpm)
+                    if parsed > 0:
+                        resolved_rpm = parsed
+                except (TypeError, ValueError, OverflowError):
+                    resolved_rpm = None
+            if resolved_rpm is None:
+                resolved_rpm = get_client_rpm_for_model(norm_key[1])
+            limiter = RateLimiter(max_rpm=resolved_rpm)
+            _RATE_LIMITER_REGISTRY[norm_key] = limiter
+        return limiter
+
+
+def clear_rate_limiter_registry() -> None:
+    """Clears all cached shared RateLimiter instances for test isolation."""
+    with _REGISTRY_LOCK:
+        _RATE_LIMITER_REGISTRY.clear()
 
 
 def call_with_retry(

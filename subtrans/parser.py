@@ -4,7 +4,9 @@ import re
 import copy
 import logging
 import statistics
+from bisect import bisect_left, bisect_right
 from collections import Counter
+from operator import itemgetter
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 import pysubs2
@@ -14,8 +16,11 @@ from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters
 logger = logging.getLogger("subtrans.parser")
 
 DEFAULT_SKIP_STYLES = r"(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_\s\-]|$)"
+DEFAULT_SKIP_STYLES_RE = re.compile(DEFAULT_SKIP_STYLES)
 TYPESET_TAG_REGEX = re.compile(r"\\(pos|move|org|clip|iclip|p[1-9])\b", re.IGNORECASE)
 ASS_TAG_REGEX = re.compile(r"\{[^\}]*\}")
+_WS_REGEX = re.compile(r"\s+")
+_ITEM_SORT_KEY_01 = itemgetter(0, 1)
 NON_SPEAKER_ACTOR_REGEX = re.compile(
     r"^(?:sign|signs|comment|title|op|ed|ntp|sfx|text|caption|note|insert|screen|eyecatch|song|lyrics|karaoke|default|main)$",
     re.IGNORECASE,
@@ -30,7 +35,7 @@ def clean_subtitle_text(text: str) -> str:
     text = text.replace(r"\N", " ").replace(r"\n", " ").replace(r"\h", " ")
     text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     # Collapse multiple whitespaces
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _WS_REGEX.sub(" ", text).strip()
     return text
 
 
@@ -41,7 +46,10 @@ def has_typesetting(raw_text: str) -> bool:
 
 def should_skip_cue(style: str, raw_text: str, skip_styles_regex: str = DEFAULT_SKIP_STYLES) -> bool:
     """Checks if cue should be skipped from translation (non-dialogue or typesetting)."""
-    if re.search(skip_styles_regex, style):
+    if skip_styles_regex == DEFAULT_SKIP_STYLES:
+        if DEFAULT_SKIP_STYLES_RE.search(style):
+            return True
+    elif re.search(skip_styles_regex, style):
         return True
     if has_typesetting(raw_text):
         return True
@@ -297,10 +305,29 @@ def snap_whisper_cues_to_en(
     clean_en_cues: List[Dict[str, Any]] = []
     for idx, e in enumerate(en_events):
         if isinstance(e, dict):
-            clean_en_cues.append(e)
+            raw_text = e.get("text") or ""
+            if should_skip_cue(e.get("style") or "Default", raw_text, skip_styles_regex):
+                continue
+            start = int(e.get("start", 0) or 0)
+            end = int(e.get("end", 0) or 0)
+            if end <= start:
+                continue
+            cleaned = clean_subtitle_text(raw_text)
+            if not cleaned or MUSIC_OR_SYMBOL_REGEX.match(cleaned):
+                continue
+            raw_id = e.get("id")
+            clean_en_cues.append({
+                "id": idx if raw_id is None else raw_id,
+                "start": start,
+                "end": end,
+                "duration": max(1, end - start),
+                "text": cleaned,
+            })
         else:
-            raw_text = getattr(e, "text", "")
-            style = getattr(e, "style", "Default")
+            if getattr(e, "is_comment", False):
+                continue
+            raw_text = getattr(e, "text", "") or ""
+            style = getattr(e, "style", "Default") or "Default"
             if should_skip_cue(style, raw_text, skip_styles_regex):
                 continue
             cleaned = clean_subtitle_text(raw_text)
@@ -320,10 +347,12 @@ def snap_whisper_cues_to_en(
 
     if not clean_en_cues:
         return 0
+    clean_en_cues.sort(key=lambda ec: (ec["start"], ec["end"], 0 if ec.get("id") is None else ec["id"]))
 
     dialogue_cues = [c for c in cues if not c.is_skipped and not c.is_dropped_sound]
     if not dialogue_cues:
         return 0
+    dialogue_cues.sort(key=lambda c: (c.start, c.end, c.id))
 
     from subtrans.dtw_auto_align import SubCue, get_dtw_alignment_plan
     ja_sub_cues = [SubCue(start_ms=c.start, end_ms=c.end, text=c.ja) for c in dialogue_cues]
@@ -498,6 +527,8 @@ def parse_and_align_subtitles(
         for idx, event in enumerate(en_ssa):
             if getattr(event, "is_comment", False):
                 continue
+            if should_skip_cue(getattr(event, "style", "Default") or "Default", event.text, skip_styles_regex):
+                continue
             clean_en = clean_subtitle_text(event.text)
             if not clean_en:
                 continue
@@ -517,6 +548,7 @@ def parse_and_align_subtitles(
                 "duration": dur,
                 "text": clean_en
             })
+        en_cues.sort(key=lambda ec: (ec["start"], ec["end"], ec["id"]))
 
     cues: List[Cue] = []
     matched_en_count = 0
@@ -625,13 +657,9 @@ def parse_and_align_subtitles(
 
     # Tự động ghim mốc thời gian Whisper theo track phụ đề EN phòng thu (Auto-Align Subtitle Timestamps)
     if auto_align_whisper_to_en and is_whisper and en_ssa and en_cues:
-        clean_en_dialogues = [
-            ec for ec in en_cues
-            if not should_skip_cue(en_ssa[ec["id"]].style, en_ssa[ec["id"]].text, skip_styles_regex)
-        ]
         snapped_count = snap_whisper_cues_to_en(
             cues=cues,
-            en_events=clean_en_dialogues if clean_en_dialogues else en_cues,
+            en_events=en_cues,
             min_gap_ms=50,
             skip_styles_regex=skip_styles_regex,
             cast_names_ja_en=cast_names_ja_en,
@@ -680,6 +708,62 @@ def is_en_fallback_source(cues: List[Cue]) -> bool:
     return latin_count >= max(1, int(len(active) * 0.5))
 
 
+def _match_rate_sorted_precomputed(
+    ja_intervals: List[Tuple[int, int]],
+    en_thresholds: List[Tuple[int, int, float]],
+    offset_ms: int = 0,
+) -> float:
+    """Compute O(N+M) dialogue match rate using precomputed (start, end, min_overlap) EN tuples."""
+    if not ja_intervals or not en_thresholds:
+        return 0.0
+
+    n_en = len(en_thresholds)
+    en_ptr = 0
+    active: List[Tuple[int, int, float]] = []
+    matched = 0
+
+    for js, je in ja_intervals:
+        j_start = js + offset_ms
+        j_end = je + offset_ms
+        while en_ptr < n_en and en_thresholds[en_ptr][0] < j_end:
+            item = en_thresholds[en_ptr]
+            if item[1] > j_start:
+                active.append(item)
+            en_ptr += 1
+        if active:
+            if len(active) == 1:
+                es, ee, req = active[0]
+                if ee <= j_start:
+                    active.clear()
+                else:
+                    overlap = (j_end if j_end < ee else ee) - (j_start if j_start > es else es)
+                    if overlap > 0 and overlap >= req:
+                        matched += 1
+            else:
+                active = [item for item in active if item[1] > j_start]
+                for es, ee, req in active:
+                    overlap = (j_end if j_end < ee else ee) - (j_start if j_start > es else es)
+                    if overlap > 0 and overlap >= req:
+                        matched += 1
+                        break
+
+    return matched / len(ja_intervals)
+
+
+def _match_rate_sorted(
+    ja_intervals: List[Tuple[int, int]],
+    en_intervals: List[Tuple[int, int]],
+    offset_ms: int = 0,
+    overlap_threshold: float = 0.5,
+) -> float:
+    """Compute O(N+M) dialogue match rate over start-sorted positive-duration intervals."""
+    if not ja_intervals or not en_intervals:
+        return 0.0
+
+    en_thresholds = [(es, ee, overlap_threshold * (ee - es)) for es, ee in en_intervals]
+    return _match_rate_sorted_precomputed(ja_intervals, en_thresholds, offset_ms=offset_ms)
+
+
 def compute_alignment_match_rate(
     ja_events: List[Any],
     en_events: List[Any],
@@ -687,22 +771,18 @@ def compute_alignment_match_rate(
     overlap_threshold: float = 0.5,
 ) -> float:
     """Calculates dialogue match rate (percentage of JA events having overlapping EN cue)."""
-    matched = 0
-    dialogue = 0
-    for j in ja_events:
-        dur_j = j.end - j.start
-        if dur_j <= 0:
-            continue
-        dialogue += 1
-        j_start = j.start + offset_ms
-        j_end = j.end + offset_ms
-        for e in en_events:
-            dur_e = max(1, e.end - e.start)
-            overlap = max(0, min(j_end, e.end) - max(j_start, e.start))
-            if overlap >= overlap_threshold * dur_e:
-                matched += 1
-                break
-    return matched / dialogue if dialogue > 0 else 0.0
+    ja_intervals = sorted((j.start, j.end) for j in ja_events if (j.end - j.start) > 0)
+    if not ja_intervals:
+        return 0.0
+    en_intervals = sorted((e.start, e.end) for e in en_events if (e.end - e.start) > 0)
+    if not en_intervals:
+        return 0.0
+    return _match_rate_sorted(
+        ja_intervals,
+        en_intervals,
+        offset_ms=offset_ms,
+        overlap_threshold=overlap_threshold,
+    )
 
 
 def detect_auto_offset(
@@ -715,7 +795,7 @@ def detect_auto_offset(
 
     offset is defined as median shift needed to align JA with EN (in ms).
     Criteria to apply:
-      1. |offset| >= 1.0s (1000 ms)
+      1. |offset| >= 0.2s (200 ms)
       2. >= 30 candidate pairs in main cluster
       3. quintile drift <= 0.5s (max diff among medians of 5 chronological quintiles)
       4. match rate improvement >= 15.0 percentage points
@@ -732,52 +812,145 @@ def detect_auto_offset(
     except Exception as e:
         return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
 
-    ja_events = [
-        e for e in ja_ssa
-        if not getattr(e, "is_comment", False)
-        and clean_subtitle_text(e.text)
-        and not should_skip_cue(e.style, e.text, skip_styles_regex)
-    ]
-    en_events = [
-        e for e in en_ssa
-        if not getattr(e, "is_comment", False)
-        and clean_subtitle_text(e.text)
-        and not should_skip_cue(e.style, e.text, skip_styles_regex)
-    ]
+    skip_re = DEFAULT_SKIP_STYLES_RE if skip_styles_regex == DEFAULT_SKIP_STYLES else re.compile(skip_styles_regex)
+    style_skip_cache: Dict[str, bool] = {}
 
-    if not ja_events or not en_events:
+    def _extract_items(ssa: pysubs2.SSAFile, check_fw_q: bool) -> List[Tuple[int, int, int, bool]]:
+        items: List[Tuple[int, int, int, bool]] = []
+        for e in ssa:
+            if getattr(e, "is_comment", False):
+                continue
+            s = int(e.start)
+            end = int(e.end)
+            if end <= s:
+                continue
+            style = getattr(e, "style", "Default") or "Default"
+            is_skip_style = style_skip_cache.get(style)
+            if is_skip_style is None:
+                is_skip_style = bool(skip_re.search(style))
+                style_skip_cache[style] = is_skip_style
+            if is_skip_style:
+                continue
+            txt = e.text or ""
+            if "{" not in txt and "\\" not in txt:
+                if not txt.strip():
+                    continue
+            else:
+                if has_typesetting(txt) or not clean_subtitle_text(txt):
+                    continue
+            has_q = ("?" in txt or "？" in txt) if check_fw_q else ("?" in txt)
+            items.append((s, end, end - s, has_q))
+        items.sort(key=_ITEM_SORT_KEY_01)
+        return items
+
+    ja_items = _extract_items(ja_ssa, check_fw_q=True)
+    en_items = _extract_items(en_ssa, check_fw_q=False)
+
+    if not ja_items or not en_items:
         return 0, False, "Không tìm thấy thoại hợp lệ trong file JA hoặc EN", {}
 
-    candidate_diffs = []
-    candidate_pairs = []
+    max_offset_ms = 600_000
+    en_starts = [e[0] for e in en_items]
+    n_ja = len(ja_items)
+    if n_ja <= 200:
+        sample_ja = ja_items
+    else:
+        sample_ja = [ja_items[(i * n_ja) // 200] for i in range(200)]
 
-    for j in ja_events:
-        dur_j = j.end - j.start
-        if dur_j <= 0:
+    # Coarse +/-600s scan using 0.2s bins and 3-bin smoothing to surface commercial-break peaks.
+    coarse_bins: Counter = Counter()
+    for js, _je, jd, jq in sample_ja:
+        lo = bisect_left(en_starts, js - max_offset_ms)
+        hi = bisect_right(en_starts, js + max_offset_ms)
+        for k in range(lo, hi):
+            es, _ee, ed, eq = en_items[k]
+            if jq != eq:
+                continue
+            if (jd if jd < ed else ed) * 4 < (jd if jd > ed else ed):
+                continue
+            coarse_bins[round((es - js) / 200.0)] += 1
+
+    smoothed_scores = [
+        (coarse_bins.get(b - 1, 0) + cnt + coarse_bins.get(b + 1, 0), b * 0.2)
+        for b, cnt in coarse_bins.items()
+    ]
+    smoothed_scores.sort(key=lambda x: (-x[0], abs(x[1])))
+
+    peaks_sec: List[float] = []
+    for _score, center_sec in smoothed_scores:
+        # Skip peaks already well inside the unconditional +/-10s anchor band so 0s never wastes a slot.
+        if abs(center_sec) <= 4.0:
             continue
-        for e in en_events:
-            dur_e = e.end - e.start
-            if dur_e <= 0:
-                continue
-            # Filter pairs with low duration similarity
-            if min(dur_j, dur_e) / max(dur_j, dur_e) < 0.25:
-                continue
-            # Filter mismatched sentence types (e.g. question vs statement)
-            if ('?' in j.text or '？' in j.text) != ('?' in e.text):
-                continue
-            d = (e.start - j.start) / 1000.0  # seconds
-            if -60.0 <= d <= 60.0:
-                candidate_diffs.append(d)
-                candidate_pairs.append((j.start, d))
+        if all(abs(center_sec - p) >= 8.0 for p in peaks_sec):
+            peaks_sec.append(center_sec)
+            if len(peaks_sec) >= 4:
+                break
 
-    if not candidate_diffs:
-        return 0, False, "Không tìm thấy cặp thoại tương đồng trong cửa sổ ±60s", {}
+    # Unconditionally include 0.0s +/-10s anchor band alongside top coarse peaks (+/-10s > 8s NMS).
+    raw_bands = [(-10_000, 10_000)]
+    for p in peaks_sec:
+        b_lo = max(-max_offset_ms, round((p - 10.0) * 1000))
+        b_hi = min(max_offset_ms, round((p + 10.0) * 1000))
+        if b_lo <= b_hi:
+            raw_bands.append((b_lo, b_hi))
+    raw_bands.sort()
 
-    # Cluster differences by 0.1s histogram bins
-    bins = [round(d, 1) for d in candidate_diffs]
-    mode_bin, _ = Counter(bins).most_common(1)[0]
-    cluster_pairs = [p for p in candidate_pairs if abs(p[1] - mode_bin) <= 0.5]
-    cluster_diffs = [p[1] for p in cluster_pairs]
+    merged_bands_ms: List[Tuple[int, int]] = []
+    for b_lo, b_hi in raw_bands:
+        if merged_bands_ms and b_lo <= merged_bands_ms[-1][1]:
+            prev_lo, prev_hi = merged_bands_ms[-1]
+            merged_bands_ms[-1] = (prev_lo, max(prev_hi, b_hi))
+        else:
+            merged_bands_ms.append((b_lo, b_hi))
+
+    # Monotonic multi-band 2-pointer fine scan.
+    n_en = len(en_items)
+    band_ptrs = [[0, 0] for _ in merged_bands_ms]
+    candidate_pairs: List[Tuple[int, float, int]] = []
+    bin_counts: Counter = Counter()
+    bin_pair_idxs: Dict[int, List[int]] = {}
+    bin_pair_diffs: Dict[int, List[float]] = {}
+
+    for js, _je, jd, jq in ja_items:
+        for b_idx, (b_lo, b_hi) in enumerate(merged_bands_ms):
+            lo_target = js + b_lo
+            hi_target = js + b_hi
+            ptrs = band_ptrs[b_idx]
+            p_lo, p_hi = ptrs[0], ptrs[1]
+            while p_lo < n_en and en_starts[p_lo] < lo_target:
+                p_lo += 1
+            if p_hi < p_lo:
+                p_hi = p_lo
+            while p_hi < n_en and en_starts[p_hi] <= hi_target:
+                p_hi += 1
+            ptrs[0] = p_lo
+            ptrs[1] = p_hi
+            for k in range(p_lo, p_hi):
+                es, _ee, ed, eq = en_items[k]
+                if jq != eq:
+                    continue
+                if (jd if jd < ed else ed) * 4 < (jd if jd > ed else ed):
+                    continue
+                d = (es - js) / 1000.0
+                rd_int = round(d * 10)
+                pair_idx = len(candidate_pairs)
+                candidate_pairs.append((js, d, rd_int))
+                bin_counts[rd_int] += 1
+                idxs = bin_pair_idxs.get(rd_int)
+                if idxs is None:
+                    bin_pair_idxs[rd_int] = [pair_idx]
+                    bin_pair_diffs[rd_int] = [d]
+                else:
+                    idxs.append(pair_idx)
+                    bin_pair_diffs[rd_int].append(d)
+
+    if not candidate_pairs:
+        return 0, False, "Không tìm thấy cặp thoại tương đồng trong cửa sổ ±600s", {}
+
+    mode_bin_int, _ = bin_counts.most_common(1)[0]
+    mode_bin = mode_bin_int / 10.0
+    cluster_pairs = [(js, d) for js, d, _rd in candidate_pairs if abs(d - mode_bin) <= 0.5]
+    cluster_diffs = [d for _js, d in cluster_pairs]
 
     if not cluster_diffs:
         return 0, False, "Không xác định được cụm lệch thời gian chính", {}
@@ -791,8 +964,7 @@ def detect_auto_offset(
     # 2. Check pairs >= 30
     cond_pairs = len(cluster_diffs) >= 30
 
-    # 3. Check quintile drift <= 0.5s
-    cluster_pairs.sort(key=lambda p: p[0])
+    # 3. Check quintile drift <= 0.5s (cluster_pairs is already sorted by ja_start)
     n = len(cluster_pairs)
     q_size = n // 5
     q_medians = []
@@ -804,9 +976,11 @@ def detect_auto_offset(
     q_drift = (max(q_medians) - min(q_medians)) if q_medians else 0.0
     cond_drift = q_drift <= 0.5
 
-    # 4. Check match rate improvement >= 15 points
-    rate_before = compute_alignment_match_rate(ja_events, en_events, offset_ms=0)
-    rate_after = compute_alignment_match_rate(ja_events, en_events, offset_ms=med_ms)
+    # 4. Check match rate improvement >= 15 points using O(N+M) 2-pointer sweep.
+    ja_iv = [(s, e) for s, e, _d, _q in ja_items]
+    en_thresholds = [(s, e, 0.5 * (e - s)) for s, e, _d, _q in en_items]
+    rate_before = _match_rate_sorted_precomputed(ja_iv, en_thresholds, offset_ms=0)
+    rate_after = _match_rate_sorted_precomputed(ja_iv, en_thresholds, offset_ms=med_ms)
     rate_diff_points = (rate_after - rate_before) * 100.0
     cond_rate = rate_diff_points >= 15.0
 
@@ -840,61 +1014,133 @@ def detect_auto_offset(
         is_applied = False
         reason_str = f"Không áp dụng do: {', '.join(failed_reasons)} (offset đo được: {med_ms}ms)"
 
-        # Fallback Piecewise 2-Segment: Phát hiện bước nhảy sponsor card tại OP / Eyecatch
-        # (VD: Cold Open 0ms, sau OP lệch -10000ms khiến single-offset thất bại)
-        sorted_all_pairs = sorted(candidate_pairs, key=lambda p: p[0])
-        if len(sorted_all_pairs) >= 30 and len(ja_events) >= 24:
-            unique_starts = sorted({j.start for j in ja_events})
+    # Fallback Piecewise 2-Segment (also checks asymmetric commercial breaks where rate_before >= 0.15 and rate_after < 0.90).
+    if failed_reasons or (rate_before >= 0.15 and rate_after < 0.90):
+        min_pw_margin = 5.0 if failed_reasons else 10.0
+        if len(candidate_pairs) >= 30 and len(ja_iv) >= 24:
+            unique_starts: List[int] = []
+            for s, _e in ja_iv:
+                if not unique_starts or s != unique_starts[-1]:
+                    unique_starts.append(s)
             step_stride = max(1, len(unique_starts) // 16)
             candidate_splits = unique_starts[step_stride:-step_stride:step_stride]
-            best_pw = None
-            for sp_ms in candidate_splits:
-                left_p = [p for p in sorted_all_pairs if p[0] < sp_ms]
-                right_p = [p for p in sorted_all_pairs if p[0] >= sp_ms]
-                if len(left_p) < 12 or len(right_p) < 12:
-                    continue
-                l_mode, _ = Counter(round(p[1], 1) for p in left_p).most_common(1)[0]
-                r_mode, _ = Counter(round(p[1], 1) for p in right_p).most_common(1)[0]
-                l_cluster = [p[1] for p in left_p if abs(p[1] - l_mode) <= 0.5]
-                r_cluster = [p[1] for p in right_p if abs(p[1] - r_mode) <= 0.5]
-                if len(l_cluster) < 12 or len(r_cluster) < 12 or (len(l_cluster) + len(r_cluster)) < 30:
-                    continue
-                off1_sec = statistics.median(l_cluster)
-                off2_sec = statistics.median(r_cluster)
-                off1_ms = round(off1_sec * 1000)
-                off2_ms = round(off2_sec * 1000)
-                if abs(off2_ms - off1_ms) < 1000 or max(abs(off1_ms), abs(off2_ms)) < 1000:
-                    continue
-                if (max(l_cluster) - min(l_cluster)) > 1.0 or (max(r_cluster) - min(r_cluster)) > 1.0:
-                    continue
-                ja_left = [j for j in ja_events if j.start < sp_ms]
-                ja_right = [j for j in ja_events if j.start >= sp_ms]
-                if not ja_left or not ja_right:
-                    continue
-                r_left = compute_alignment_match_rate(ja_left, en_events, offset_ms=off1_ms)
-                r_right = compute_alignment_match_rate(ja_right, en_events, offset_ms=off2_ms)
-                pw_rate = (r_left * len(ja_left) + r_right * len(ja_right)) / len(ja_events)
-                pw_gain = (pw_rate - rate_before) * 100.0
-                if pw_gain >= 15.0 and (pw_rate - rate_after) * 100.0 >= 5.0:
-                    if best_pw is None or pw_rate > best_pw[0]:
-                        best_pw = (pw_rate, pw_gain, sp_ms, off1_ms, off2_ms, len(l_cluster) + len(r_cluster))
+            if candidate_splits:
+                pair_starts = [p[0] for p in candidate_pairs]
+                ja_starts = [j[0] for j in ja_iv]
+                split_pair_indices = [bisect_left(pair_starts, sp) for sp in candidate_splits]
 
-            if best_pw is not None:
-                pw_rate, pw_gain, sp_ms, off1_ms, off2_ms, pw_pairs = best_pw
-                is_applied = True
-                med_ms = off2_ms if abs(off2_ms) >= abs(off1_ms) else off1_ms
-                stats["piecewise_segments"] = [
-                    {"until_ms": sp_ms, "offset_ms": off1_ms},
-                    {"from_ms": sp_ms, "offset_ms": off2_ms},
-                ]
-                stats["rate_after"] = pw_rate
-                stats["rate_diff_points"] = pw_gain
-                stats["pairs_count"] = pw_pairs
-                reason_str = (
-                    f"Áp dụng Piecewise 2-Segment Auto-Offset tại {sp_ms}ms: "
-                    f"đoạn 1={off1_ms}ms, đoạn 2={off2_ms}ms ({pw_pairs} cặp, "
-                    f"tỷ lệ khớp {rate_before*100:.1f}% -> {pw_rate*100:.1f}%, +{pw_gain:.1f} điểm)"
-                )
+                chunk_counters: List[Counter] = []
+                prev_idx = 0
+                for sp_idx in split_pair_indices:
+                    chunk_counters.append(Counter(p[2] for p in candidate_pairs[prev_idx:sp_idx]))
+                    prev_idx = sp_idx
+
+                left_counter: Counter = Counter()
+                right_counter: Counter = Counter(bin_counts)
+                best_pw = None
+                total_pairs = len(candidate_pairs)
+                total_ja = len(ja_iv)
+
+                for idx, sp_ms in enumerate(candidate_splits):
+                    cc = chunk_counters[idx]
+                    left_counter.update(cc)
+                    right_counter.subtract(cc)
+                    p_idx = split_pair_indices[idx]
+                    l_cnt = p_idx
+                    r_cnt = total_pairs - p_idx
+                    if l_cnt < 12 or r_cnt < 12:
+                        continue
+                    l_mode_int, l_mode_cnt = left_counter.most_common(1)[0]
+                    r_mode_int, r_mode_cnt = right_counter.most_common(1)[0]
+                    if l_mode_cnt <= 0 or r_mode_cnt <= 0:
+                        continue
+                    if l_mode_int == r_mode_int or max(abs(l_mode_int), abs(r_mode_int)) <= 5:
+                        continue
+
+                    l_approx_cnt = sum(left_counter.get(b, 0) for b in range(l_mode_int - 6, l_mode_int + 7))
+                    r_approx_cnt = sum(right_counter.get(b, 0) for b in range(r_mode_int - 6, r_mode_int + 7))
+                    if l_approx_cnt < 12 or r_approx_cnt < 12 or (l_approx_cnt + r_approx_cnt) < 30:
+                        continue
+
+                    l_mode = l_mode_int / 10.0
+                    r_mode = r_mode_int / 10.0
+
+                    l_cluster: List[float] = []
+                    for b in range(l_mode_int - 6, l_mode_int + 7):
+                        b_idxs = bin_pair_idxs.get(b)
+                        if not b_idxs:
+                            continue
+                        cut = bisect_left(b_idxs, p_idx)
+                        if cut <= 0:
+                            continue
+                        b_diffs = bin_pair_diffs[b][:cut]
+                        if l_mode_int - 4 <= b <= l_mode_int + 4:
+                            l_cluster.extend(b_diffs)
+                        else:
+                            for dv in b_diffs:
+                                if abs(dv - l_mode) <= 0.5:
+                                    l_cluster.append(dv)
+
+                    r_cluster: List[float] = []
+                    for b in range(r_mode_int - 6, r_mode_int + 7):
+                        b_idxs = bin_pair_idxs.get(b)
+                        if not b_idxs:
+                            continue
+                        cut = bisect_left(b_idxs, p_idx)
+                        if cut >= len(b_idxs):
+                            continue
+                        b_diffs = bin_pair_diffs[b][cut:]
+                        if r_mode_int - 4 <= b <= r_mode_int + 4:
+                            r_cluster.extend(b_diffs)
+                        else:
+                            for dv in b_diffs:
+                                if abs(dv - r_mode) <= 0.5:
+                                    r_cluster.append(dv)
+
+                    if len(l_cluster) < 12 or len(r_cluster) < 12 or (len(l_cluster) + len(r_cluster)) < 30:
+                        continue
+
+                    off1_ms = round(statistics.median(l_cluster) * 1000)
+                    off2_ms = round(statistics.median(r_cluster) * 1000)
+                    if abs(off2_ms - off1_ms) < 1000 or max(abs(off1_ms), abs(off2_ms)) < 1000:
+                        continue
+                    if (max(l_cluster) - min(l_cluster)) > 1.0 or (max(r_cluster) - min(r_cluster)) > 1.0:
+                        continue
+
+                    j_idx = bisect_left(ja_starts, sp_ms)
+                    if j_idx == 0 or j_idx == total_ja:
+                        continue
+                    r_left = _match_rate_sorted_precomputed(ja_iv[:j_idx], en_thresholds, offset_ms=off1_ms)
+                    r_right = _match_rate_sorted_precomputed(ja_iv[j_idx:], en_thresholds, offset_ms=off2_ms)
+                    pw_rate = (r_left * j_idx + r_right * (total_ja - j_idx)) / total_ja
+                    pw_gain = (pw_rate - rate_before) * 100.0
+                    if pw_gain >= 15.0 and (pw_rate - rate_after) * 100.0 >= min_pw_margin:
+                        if best_pw is None or pw_rate > best_pw[0]:
+                            best_pw = (
+                                pw_rate,
+                                pw_gain,
+                                sp_ms,
+                                off1_ms,
+                                off2_ms,
+                                len(l_cluster) + len(r_cluster),
+                            )
+
+                if best_pw is not None:
+                    pw_rate, pw_gain, sp_ms, off1_ms, off2_ms, pw_pairs = best_pw
+                    is_applied = True
+                    med_ms = off2_ms if abs(off2_ms) >= abs(off1_ms) else off1_ms
+                    stats["piecewise_segments"] = [
+                        {"until_ms": sp_ms, "offset_ms": off1_ms},
+                        {"from_ms": sp_ms, "offset_ms": off2_ms},
+                    ]
+                    stats["rate_after"] = pw_rate
+                    stats["rate_diff_points"] = pw_gain
+                    stats["pairs_count"] = pw_pairs
+                    reason_str = (
+                        f"Áp dụng Piecewise 2-Segment Auto-Offset tại {sp_ms}ms: "
+                        f"đoạn 1={off1_ms}ms, đoạn 2={off2_ms}ms ({pw_pairs} cặp, "
+                        f"tỷ lệ khớp {rate_before*100:.1f}% -> {pw_rate*100:.1f}%, +{pw_gain:.1f} điểm)"
+                    )
 
     return med_ms, is_applied, reason_str, stats
 

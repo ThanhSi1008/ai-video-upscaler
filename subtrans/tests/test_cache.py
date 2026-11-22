@@ -217,16 +217,8 @@ def _isolate_pipeline_env(tmp_path, monkeypatch):
     monkeypatch.setattr(rag_mod, "KNOWLEDGE_DB_PATH", tmp_path / "knowledge.db")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "compute_cue_cache_key (subtrans/cache.py:85-110) and TranslationPipeline.run "
-        "(subtrans/pipeline.py:617-627) omit gloss_skill_names, serving stale cached "
-        "translation when --gloss-skill-names is toggled"
-    ),
-)
 def test_cache_key_differentiates_gloss_skill_names(tmp_path, monkeypatch):
-    """Lock stale cache hit when toggling gloss_skill_names on identical JA/EN cues."""
+    """Verify cache key differentiates gloss_skill_names on identical JA/EN cues."""
     _isolate_pipeline_env(tmp_path, monkeypatch)
     ja_srt = tmp_path / "ep_skill.ja.srt"
     en_srt = tmp_path / "ep_skill.en.srt"
@@ -266,15 +258,8 @@ def test_cache_key_differentiates_gloss_skill_names(tmp_path, monkeypatch):
     assert mock_client.models.generate_content.call_count == 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "compute_cue_cache_key (subtrans/cache.py:85-110) and TranslationPipeline.run "
-        "(subtrans/pipeline.py:617-627) omit en_only_source, colliding ASCII cues across JA and EN-only episodes"
-    ),
-)
 def test_cache_key_differentiates_en_only_source(tmp_path, monkeypatch):
-    """Lock cache key collision between JA-mixed and EN-only episodes sharing ASCII lines."""
+    """Verify cache key differentiates JA-mixed and EN-only episodes sharing ASCII lines."""
     _isolate_pipeline_env(tmp_path, monkeypatch)
     mix_srt = tmp_path / "mix.ja.srt"
     enonly_srt = tmp_path / "enonly.ja.srt"
@@ -325,16 +310,8 @@ def test_cache_key_differentiates_en_only_source(tmp_path, monkeypatch):
     assert re_only["stats"]["cache_hits"] == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Cascade repair writes Flash rows under Lite's cue_cache_keys_by_id[rc.id] "
-        "(subtrans/pipeline.py:880-902), so --subs-upgrade querying model='gemini-3.8-flash' "
-        "(subtrans/pipeline.py:617-634) misses them and re-calls Flash"
-    ),
-)
 def test_subs_upgrade_reuses_lite_keyed_cascade_repair(tmp_path, monkeypatch):
-    """Lock cache miss when --subs-upgrade runs after normal Lite + Cascade Flash repair."""
+    """Verify --subs-upgrade reuses Cascade Flash repair rows written during normal Lite pass."""
     _isolate_pipeline_env(tmp_path, monkeypatch)
     ja_srt = tmp_path / "ep_cascade_up.ja.srt"
     ja_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nフラン、行くぞ！\n", encoding="utf-8")
@@ -388,16 +365,8 @@ def test_subs_upgrade_reuses_lite_keyed_cascade_repair(tmp_path, monkeypatch):
     assert mock_client.models.generate_content.call_count == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "TranslationPipeline.run (subtrans/pipeline.py:939-952) persists only scalar sub_offset_ms "
-        "to pending_subs.json without piecewise_ja_offsets, dropping segment-1 offset on retry "
-        "(upscale.py:774-847, pipeline.py:243)"
-    ),
-)
 def test_pending_subs_preserves_piecewise_offsets(tmp_path, monkeypatch):
-    """Lock loss of piecewise_ja_offsets when pending_subs.json records an incomplete episode."""
+    """Verify pending_subs.json persists piecewise_ja_offsets for incomplete episodes."""
     from src.pending_queue import load_pending_subs
 
     _isolate_pipeline_env(tmp_path, monkeypatch)
@@ -432,12 +401,46 @@ def test_pending_subs_preserves_piecewise_offsets(tmp_path, monkeypatch):
             enable_rag=False,
             output_dir=tmp_path / "opw",
             cache_db_path=tmp_path / "pw.db",
-        ).run(ja_p, en_p, output_basename="ep_piecewise_pending")
+        ).run(ja_p, en_p, output_basename="ep_piecewise_pending", auto_offset=True)
 
     recs = load_pending_subs()
     assert len(recs) == 1
     assert "piecewise_ja_offsets" in recs[0]
     assert len(recs[0]["piecewise_ja_offsets"]) == 2
+
+
+def test_pipeline_run_honors_piecewise_offsets_with_nonzero_scalar_offset(tmp_path, monkeypatch):
+    """Verify TranslationPipeline.run applies piecewise_ja_offsets even when sub_offset_ms != 0 and auto_offset=False."""
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    ja_p = tmp_path / "pw_retry.ja.srt"
+    ja_p.write_text(
+        "1\n00:00:05,000 --> 00:00:07,000\nアバンのセリフ\n\n"
+        "2\n00:01:50,000 --> 00:01:52,000\n本編のセリフ\n",
+        encoding="utf-8",
+    )
+
+    with patch("subtrans.pipeline.detect_auto_offset") as mock_det, \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        res = TranslationPipeline(
+            dry_run=True,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "retry_out",
+            cache_db_path=tmp_path / "retry.db",
+        ).run(
+            ja_p,
+            sub_offset_ms=-10000,
+            auto_offset=False,
+            piecewise_ja_offsets=[
+                {"until_ms": 100000, "offset_ms": 0},
+                {"from_ms": 100000, "offset_ms": 10000},
+            ],
+        )
+
+    assert mock_det.call_count == 0
+    srt_text = Path(res["output_path"]).read_text(encoding="utf-8")
+    assert "00:00:05,000 --> 00:00:07,000" in srt_text
+    assert "00:02:00,000 --> 00:02:02,000" in srt_text
 
 
 def test_concurrent_cache_writers_and_night_report_reader_wal(tmp_path):
@@ -474,3 +477,85 @@ def test_concurrent_cache_writers_and_night_report_reader_wal(tmp_path):
     assert errors == []
     stats = query_subtrans_api_stats(str(cdb))
     assert stats["model_summary"]["gemini-3.5-flash-lite"]["total"] == 60
+
+
+def test_pipeline_runs_optimize_once_propagates_fallback_and_drops_enable_review(tmp_path, monkeypatch):
+    """Verify single optimize_cues_for_playback pass, used_en_fallback propagation, and enable_review removal."""
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+
+    with pytest.raises(TypeError):
+        TranslationPipeline(enable_review=True, output_dir=tmp_path, cache_db_path=tmp_path / "dead.db")
+
+    ja_srt = tmp_path / "opt_once.ja.srt"
+    en_srt = tmp_path / "opt_once.en.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nテスト\n", encoding="utf-8")
+    en_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHello fallback\n", encoding="utf-8")
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = RuntimeError("400 Bad Request")
+
+    import subtrans.pipeline as pipe_mod
+    opt_calls = 0
+    orig_opt = pipe_mod.optimize_cues_for_playback
+
+    def _spy_opt(cues, **kwargs):
+        nonlocal opt_calls
+        opt_calls += 1
+        return orig_opt(cues, **kwargs)
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()), \
+         patch("subtrans.pipeline.optimize_cues_for_playback", side_effect=_spy_opt):
+        res = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "o_opt",
+            cache_db_path=tmp_path / "opt.db",
+        ).run(ja_srt, en_srt)
+
+    assert opt_calls == 1
+    assert res["is_qualified"] is False
+    assert res["real_rate"] == 0.0
+    assert Path(res["output_path"]).name.endswith(".vi.partial.srt")
+
+
+def test_qualification_gate_rejects_empty_after_clean_sfx_cues(tmp_path, monkeypatch):
+    """Verify cues normalizing to empty (e.g. '[SFX]') are excluded from real_translated_cues."""
+    from src.pending_queue import load_pending_subs
+
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    ja_srt = tmp_path / "sfx_only.ja.srt"
+    ja_srt.write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\nおはよう\n\n"
+        "2\n00:00:04,000 --> 00:00:06,000\nこんにちは\n",
+        encoding="utf-8",
+    )
+
+    mock_client = MagicMock()
+
+    def _fake_generate(model, contents, config):
+        resp = MagicMock()
+        resp.text = json.dumps([
+            {"id": 0, "vi": "[SFX]"},
+            {"id": 1, "vi": "Xin chào [SFX]"},
+        ])
+        return resp
+
+    mock_client.models.generate_content.side_effect = _fake_generate
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        res = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "o_sfx",
+            cache_db_path=tmp_path / "sfx.db",
+        ).run(ja_srt, output_basename="ep_sfx_gate")
+
+    assert res["real_rate"] == pytest.approx(0.5)
+    assert res["is_qualified"] is False
+    assert Path(res["output_path"]).name.endswith(".vi.partial.srt")
+    recs = load_pending_subs()
+    assert len(recs) == 1 and recs[0]["base_name"] == "ep_sfx_gate"

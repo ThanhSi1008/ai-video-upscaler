@@ -418,13 +418,6 @@ def test_learn_from_linter_violations_auto_feedback(tmp_path):
     assert relearned == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KnowledgeBase._init_db (subtrans/rag.py:326-330) updates gold_units.ja_ngram before "
-        "INSERT OR REPLACE INTO gold_units_fts, leaving old FTS5 tokens orphaned"
-    ),
-)
 def test_fts5_reindex_after_update_purges_stale_tokens(tmp_path):
     """Lock FTS5 external-content index drift when gold_units.ja_text is updated and reindexed."""
     db_path = tmp_path / "fts_drift.db"
@@ -440,13 +433,6 @@ def test_fts5_reindex_after_update_purges_stale_tokens(tmp_path):
     assert len(kb2.search_gold_units("聖杯", series="s1")) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KnowledgeBase._init_db (subtrans/rag.py:321-330) re-queries and re-writes rows where "
-        "_generate_ngram_string returns '' (e.g. digits/punctuation) on every startup"
-    ),
-)
 def test_rag_init_skips_redundant_write_on_empty_ngram_rows(tmp_path):
     """Lock redundant startup write transaction on gold_units rows with empty ja_ngram."""
     db_path = tmp_path / "empty_ngram.db"
@@ -454,6 +440,51 @@ def test_rag_init_skips_redundant_write_on_empty_ngram_rows(tmp_path):
     assert kb.add_gold_unit("12345", "12345", series="s1", status="gold") is True
 
     with contextlib.closing(sqlite3.connect(db_path)) as observer:
+        dv1 = observer.execute("PRAGMA data_version").fetchone()[0]
+        KnowledgeBase(db_path=db_path)
+        dv2 = observer.execute("PRAGMA data_version").fetchone()[0]
+
+    assert dv1 == dv2
+
+
+def test_fts5_reindex_after_ja_to_digits_update_purges_stale_tokens(tmp_path):
+    """Verify JA->digits external update with empty or NULL ja_ngram purges stale FTS5 tokens."""
+    for idx, ngram_sql in enumerate(("''", "NULL")):
+        db_path = tmp_path / f"fts_ja_digits_{idx}.db"
+        kb = KnowledgeBase(db_path=db_path)
+        assert kb.add_gold_unit("魔法少女", "Ma pháp thiếu nữ", series="s1", status="gold") is True
+        assert len(kb.search_gold_units("魔法", series="s1")) == 1
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(f"UPDATE gold_units SET ja_text = '12345', ja_ngram = {ngram_sql} WHERE id = 1")
+            conn.commit()
+
+        kb2 = KnowledgeBase(db_path=db_path)
+        assert kb2.search_gold_units("魔法", series="s1") == []
+
+        with contextlib.closing(sqlite3.connect(db_path)) as observer:
+            dv1 = observer.execute("PRAGMA data_version").fetchone()[0]
+            KnowledgeBase(db_path=db_path)
+            dv2 = observer.execute("PRAGMA data_version").fetchone()[0]
+        assert dv1 == dv2
+
+
+def test_rag_init_converges_null_ngram_empty_row_and_skips_later_writes(tmp_path):
+    """Verify ja_ngram IS NULL on digits-only row converges to '' and avoids later startup writes."""
+    db_path = tmp_path / "null_ngram_digits.db"
+    KnowledgeBase(db_path=db_path)
+
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO gold_units (series, ja_text, ja_ngram, vi_text, status) VALUES (?, ?, NULL, ?, ?)",
+            ("s1", "67890", "67890", "gold"),
+        )
+        conn.commit()
+
+    KnowledgeBase(db_path=db_path)
+    with contextlib.closing(sqlite3.connect(db_path)) as observer:
+        null_count = observer.execute("SELECT COUNT(*) FROM gold_units WHERE ja_ngram IS NULL").fetchone()[0]
+        assert null_count == 0
         dv1 = observer.execute("PRAGMA data_version").fetchone()[0]
         KnowledgeBase(db_path=db_path)
         dv2 = observer.execute("PRAGMA data_version").fetchone()[0]

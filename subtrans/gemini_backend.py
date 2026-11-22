@@ -430,7 +430,7 @@ class GeminiTranslator(BaseTranslator):
         import datetime
         from subtrans.config import get_gemini_api_keys
         from subtrans.cache import TranslationCache, compute_key_id
-        from subtrans.throttle import RateLimiter
+        from subtrans.throttle import RateLimiter, get_shared_rate_limiter
 
         collected_keys: List[str] = []
         if api_keys:
@@ -465,10 +465,9 @@ class GeminiTranslator(BaseTranslator):
         self.stage_deadline: Optional[float] = None
         self.http_options = http_options or types.HttpOptions(timeout=int(self.timeout_ms))
 
-        # Client-side RPM ceiling per API key (Lite <= 12 RPM, Flash <= 4 RPM)
-        rpm_limit = 12 if "lite" in self.model.lower() else 4
+        # Client-side RPM ceiling per (key_id, model) via shared thread-safe registry
         self.rate_limiters: Dict[str, RateLimiter] = {
-            kid: RateLimiter(max_rpm=rpm_limit) for kid in self.key_ids
+            kid: get_shared_rate_limiter(kid, self.model) for kid in self.key_ids
         }
         self.rotation_events: List[Dict[str, Any]] = []
 

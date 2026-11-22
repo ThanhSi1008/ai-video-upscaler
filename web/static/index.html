@@ -146,7 +146,7 @@
                   <dd id="kpi-frames">0 / 0</dd>
                 </div>
                 <div class="kpi-box">
-                  <dt>Chunk 8s</dt>
+                  <dt>Chunk 24s</dt>
                   <dd id="kpi-chunks">0 / 0</dd>
                 </div>
                 <div class="kpi-box">
@@ -217,7 +217,7 @@
                   <span><strong aria-hidden="true">·</strong> Chờ xử lý</span>
                 </div>
                 <div id="chunk-heatmap" class="chunk-heatmap" role="region" aria-labelledby="chunk-heatmap-heading" tabindex="0">
-                  <p class="empty-hint">Bản đồ tiến độ từng chunk 8s sẽ hiển thị ngay khi tập phim bắt đầu chạy.</p>
+                  <p class="empty-hint">Bản đồ tiến độ từng chunk 24s sẽ hiển thị ngay khi tập phim bắt đầu chạy.</p>
                 </div>
                 <div id="checkpoint-list" class="checkpoint-strip"></div>
               </section>
@@ -294,6 +294,15 @@
                     <label for="opt-dedup">Chính sách Khử trùng lặp (Dedup / DIS)</label>
                     <select id="opt-dedup">
                       <option value="">Tự động theo shows.yaml / Mặc định</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-nvenc-multipass">NVENC Multipass (10-bit HEVC)</label>
+                    <select id="opt-nvenc-multipass">
+                      <option value="auto">auto — Tự động theo độ phân giải (Khuyên dùng)</option>
+                      <option value="fullres">fullres — 2-Pass toàn khung (Chất lượng tối đa)</option>
+                      <option value="qres">qres — 2-Pass 1/4 độ phân giải (Tốc độ cao)</option>
                     </select>
                   </div>
 

@@ -172,7 +172,44 @@ def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> t
     return resolved, None
 
 
-def _find_cached_plan(workspace_root: Path, video_path: str, output_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+_MAX_RETAINED_WEB_JOB_LOGS = 20
+
+
+def _prune_old_web_job_logs(
+    logs_dir: Path,
+    active_names: set[str],
+    max_keep: int = _MAX_RETAINED_WEB_JOB_LOGS,
+) -> None:
+    """Keep at most max_keep newest web_job_*.log files while preserving active job logs."""
+    candidates: List[tuple[tuple[int, str], Path]] = []
+    try:
+        for p in logs_dir.glob("web_job_*.log"):
+            if not p.is_file() or p.name in active_names:
+                continue
+            try:
+                mtime_ns = int(p.stat().st_mtime_ns)
+            except OSError:
+                mtime_ns = 0
+            candidates.append(((mtime_ns, p.name), p))
+    except OSError:
+        return
+    inactive_budget = max(0, max_keep - len(active_names))
+    if len(candidates) <= inactive_budget:
+        return
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    for _, old_path in candidates[inactive_budget:]:
+        try:
+            old_path.unlink()
+        except OSError:
+            pass
+
+
+def _find_cached_plan(
+    workspace_root: Path,
+    video_path: str,
+    output_dir: Optional[str] = None,
+    expected_policy: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     out_base, _ = _resolve_output_target(workspace_root, output_dir)
     vid_dir = Path(video_path).resolve().parent
@@ -188,6 +225,10 @@ def _find_cached_plan(workspace_root: Path, video_path: str, output_dir: Optiona
             try:
                 data = json.loads(c.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("total_kept_frames"):
+                    plan_pol = data.get("dedup_policy")
+                    if expected_policy and plan_pol is not None:
+                        if str(plan_pol).strip().lower() != str(expected_policy).strip().lower():
+                            continue
                     return data
             except Exception:
                 pass
@@ -339,7 +380,12 @@ class JobManager:
 
             already_done = (not force) and _has_valid_upscaled_output(out_4k)
 
-            plan = _find_cached_plan(self.workspace_root, vid, str(out_base))
+            plan = _find_cached_plan(
+                self.workspace_root,
+                vid,
+                str(out_base),
+                expected_policy=routing["dedup_policy"],
+            )
             if already_done:
                 if plan:
                     total_f = int(plan.get("total_frames") or 0)
@@ -459,7 +505,8 @@ class JobManager:
                         live_pid = ldata.get("pid")
                         live_stage = str(ldata.get("stage") or "").strip().lower()
                         if (
-                            isinstance(live_pid, int)
+                            not isinstance(live_pid, bool)
+                            and isinstance(live_pid, int)
                             and live_pid > 0
                             and live_stage in {
                                 "initializing",
@@ -537,6 +584,14 @@ class JobManager:
                 f"# Web Studio Job {job_id} ({job_type}) started at {now_iso}\n",
                 encoding="utf-8",
             )
+            active_log_names: set[str] = {web_log_path.name}
+            if (
+                self._active_job
+                and self._active_job.get("status") in {"running", "pausing"}
+                and self._active_job.get("log_path")
+            ):
+                active_log_names.add(Path(str(self._active_job["log_path"])).name)
+            _prune_old_web_job_logs(logs_dir, active_log_names)
             job_record: Dict[str, Any] = {
                 "job_id": job_id,
                 "job_type": job_type,
@@ -726,10 +781,11 @@ class JobManager:
                 out_dir,
                 "--subs-quality",
                 subs_quality,
-                "--yes",
             ]
             if glossary_val:
                 cmd.extend(["--glossary", glossary_val])
+            if payload.get("subs_upgrade"):
+                cmd.append("--subs-upgrade")
             if payload.get("sub_offset_ms"):
                 cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
             if payload.get("auto_align_en") is False:

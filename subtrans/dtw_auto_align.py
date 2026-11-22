@@ -29,76 +29,281 @@ def _compute_monotonic_dtw_backpointers(
     en_cues: List[SubCue],
     cast_names_ja_en: List[Tuple[str, str]] = (),
     max_window_ms: int = 2500,
-) -> List[List[Optional[Tuple[str, int, int]]]]:
-    """Run monotonic 1:1, 1:2, 2:1, and skip DP transitions and return backpointer table."""
+) -> List[Tuple[str, int, int]]:
+    """Run windowed Sakoe-Chiba monotonic DP with 3 rolling rows and return traced ops."""
     N, M = len(ja_cues), len(en_cues)
-    INF = 1e9
-    dp = [[INF] * (M + 1) for _ in range(N + 1)]
-    back: List[List[Optional[Tuple[str, int, int]]]] = [[None] * (M + 1) for _ in range(N + 1)]
-    dp[0][0] = 0.0
+    if N == 0 or M == 0:
+        return []
 
+    INF = 1e9
     SKIP_JA_PENALTY = 0.85
     SKIP_EN_PENALTY = 0.85
     SPLIT_MERGE_PENALTY = 0.12
 
+    safe_win = max(1, max_window_ms)
+    inv_2w = 1.0 / (2.0 * safe_win)
+
+    cast_pairs: List[Tuple[str, str]] = []
+    for ja_name, en_name in cast_names_ja_en:
+        norm_ja = strip_ja_furigana(ja_name)
+        if norm_ja:
+            cast_pairs.append((norm_ja, en_name.lower()))
+
+    ja_s = [c.start_ms for c in ja_cues]
+    ja_e = [c.end_ms for c in ja_cues]
+    ja_mora = [0] * N
+    ja_q = [False] * N
+    ja_ex = [False] * N
+    ja_cmask = [0] * N
+    for i, c in enumerate(ja_cues):
+        txt = c.text
+        jc = strip_ja_furigana(txt)
+        ja_mora[i] = estimate_ja_mora(jc)
+        ja_q[i] = ("？" in txt) or ("?" in txt)
+        ja_ex[i] = ("！" in txt) or ("!" in txt)
+        if cast_pairs:
+            mask = 0
+            for k, (jn, _) in enumerate(cast_pairs):
+                if jn in jc:
+                    mask |= 1 << k
+            ja_cmask[i] = mask
+
+    en_s = [c.start_ms for c in en_cues]
+    en_e = [c.end_ms for c in en_cues]
+    en_words = [0] * M
+    en_q = [False] * M
+    en_ex = [False] * M
+    en_cmask = [0] * M
+    for j, c in enumerate(en_cues):
+        txt = c.text
+        en_words[j] = estimate_en_words(txt)
+        en_q[j] = "?" in txt
+        en_ex[j] = "!" in txt
+        if cast_pairs:
+            el = txt.lower()
+            mask = 0
+            for k, (_, en_n) in enumerate(cast_pairs):
+                if en_n in el:
+                    mask |= 1 << k
+            en_cmask[j] = mask
+
+    ja_p_ok = [False] * max(0, N - 1)
+    ja_p_mora = [0] * max(0, N - 1)
+    ja_p_q = [False] * max(0, N - 1)
+    ja_p_ex = [False] * max(0, N - 1)
+    ja_p_cmask = [0] * max(0, N - 1)
+    for i in range(N - 1):
+        if (ja_s[i + 1] - ja_e[i]) <= 600:
+            ja_p_ok[i] = True
+            jc = strip_ja_furigana(ja_cues[i].text + " " + ja_cues[i + 1].text)
+            ja_p_mora[i] = estimate_ja_mora(jc)
+            ja_p_q[i] = ja_q[i] or ja_q[i + 1]
+            ja_p_ex[i] = ja_ex[i] or ja_ex[i + 1]
+            if cast_pairs:
+                mask = 0
+                for k, (jn, _) in enumerate(cast_pairs):
+                    if jn in jc:
+                        mask |= 1 << k
+                ja_p_cmask[i] = mask
+
+    en_p_ok = [False] * max(0, M - 1)
+    en_p_words = [0] * max(0, M - 1)
+    en_p_q = [False] * max(0, M - 1)
+    en_p_ex = [False] * max(0, M - 1)
+    en_p_cmask = [0] * max(0, M - 1)
+    for j in range(M - 1):
+        if (en_s[j + 1] - en_e[j]) <= 600:
+            en_p_ok[j] = True
+            comb_e = en_cues[j].text + " " + en_cues[j + 1].text
+            en_p_words[j] = estimate_en_words(comb_e)
+            en_p_q[j] = en_q[j] or en_q[j + 1]
+            en_p_ex[j] = en_ex[j] or en_ex[j + 1]
+            if cast_pairs:
+                el = comb_e.lower()
+                mask = 0
+                for k, (_, en_n) in enumerate(cast_pairs):
+                    if en_n in el:
+                        mask |= 1 << k
+                en_p_cmask[j] = mask
+
+    # Ensure band width covers asymmetric length skew so (0, 0) -> (N, M) is reachable.
+    band_w = max(40, abs(N - M) + 10)
+    j_lows = [max(0, round(i * M / N) - band_w) for i in range(N + 1)]
+    j_highs = [min(M, round(i * M / N) + band_w) for i in range(N + 1)]
+
+    OP_NONE = 0
+    OP_SKIP_JA = 1
+    OP_SKIP_EN = 2
+    OP_1_1 = 3
+    OP_1_2 = 4
+    OP_2_1 = 5
+
+    back_rows = [bytearray(j_highs[i] - j_lows[i] + 1) for i in range(N + 1)]
+    dp_curr = [INF] * (M + 1)
+    dp_next1 = [INF] * (M + 1)
+    dp_next2 = [INF] * (M + 1)
+    dp_curr[0] = 0.0
+
     for i in range(N + 1):
-        for j in range(M + 1):
-            if dp[i][j] >= INF:
+        jl = j_lows[i]
+        jh = j_highs[i]
+        has_next1 = i < N
+        has_next2 = i + 1 < N
+        jl1 = j_lows[i + 1] if has_next1 else 0
+        jh1 = j_highs[i + 1] if has_next1 else -1
+        jl2 = j_lows[i + 2] if has_next2 else 0
+        jh2 = j_highs[i + 2] if has_next2 else -1
+
+        if has_next1:
+            js1 = ja_s[i]
+            je1 = ja_e[i]
+            jm1 = ja_mora[i]
+            jq1 = ja_q[i]
+            jex1 = ja_ex[i]
+            jcm1 = ja_cmask[i]
+        if has_next2 and ja_p_ok[i]:
+            jp_ok = True
+            jp_s = ja_s[i]
+            jp_e = ja_e[i + 1]
+            jp_m = ja_p_mora[i]
+            jp_q = ja_p_q[i]
+            jp_ex = ja_p_ex[i]
+            jp_cm = ja_p_cmask[i]
+        else:
+            jp_ok = False
+
+        for j in range(jl, jh + 1):
+            d_ij = dp_curr[j]
+            if d_ij >= INF:
                 continue
-            if i < N and dp[i][j] + SKIP_JA_PENALTY < dp[i + 1][j]:
-                dp[i + 1][j] = dp[i][j] + SKIP_JA_PENALTY
-                back[i + 1][j] = ("SKIP_JA", i, j)
-            if j < M and dp[i][j] + SKIP_EN_PENALTY < dp[i][j + 1]:
-                dp[i][j + 1] = dp[i][j] + SKIP_EN_PENALTY
-                back[i][j + 1] = ("SKIP_EN", i, j)
-            if (
-                i < N
-                and j < M
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c11 = _compute_dtw_pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text, en_cues[j].text,
-                    cast_names_ja_en, max_window_ms,
-                )
-                if c11 < 1e5 and dp[i][j] + c11 < dp[i + 1][j + 1]:
-                    dp[i + 1][j + 1] = dp[i][j] + c11
-                    back[i + 1][j + 1] = ("1:1", i, j)
-            if (
-                i < N
-                and j + 1 < M
-                and (en_cues[j + 1].start_ms - en_cues[j].end_ms) <= 600
-                and ja_cues[i].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j + 1].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c12 = _compute_dtw_pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i].end_ms,
-                    en_cues[j].start_ms, en_cues[j + 1].end_ms,
-                    ja_cues[i].text, en_cues[j].text + " " + en_cues[j + 1].text,
-                    cast_names_ja_en, max_window_ms,
-                ) + SPLIT_MERGE_PENALTY
-                if c12 < 1e5 and dp[i][j] + c12 < dp[i + 1][j + 2]:
-                    dp[i + 1][j + 2] = dp[i][j] + c12
-                    back[i + 1][j + 2] = ("1:2", i, j)
-            if (
-                i + 1 < N
-                and j < M
-                and (ja_cues[i + 1].start_ms - ja_cues[i].end_ms) <= 600
-                and ja_cues[i + 1].end_ms + max_window_ms >= en_cues[j].start_ms
-                and en_cues[j].end_ms + max_window_ms >= ja_cues[i].start_ms
-            ):
-                c21 = _compute_dtw_pair_cost(
-                    ja_cues[i].start_ms, ja_cues[i + 1].end_ms,
-                    en_cues[j].start_ms, en_cues[j].end_ms,
-                    ja_cues[i].text + " " + ja_cues[i + 1].text, en_cues[j].text,
-                    cast_names_ja_en, max_window_ms,
-                ) + SPLIT_MERGE_PENALTY
-                if c21 < 1e5 and dp[i][j] + c21 < dp[i + 2][j + 1]:
-                    dp[i + 2][j + 1] = dp[i][j] + c21
-                    back[i + 2][j + 1] = ("2:1", i, j)
-    return back
+
+            if has_next1 and jl1 <= j <= jh1:
+                cand = d_ij + SKIP_JA_PENALTY
+                if cand < dp_next1[j]:
+                    dp_next1[j] = cand
+                    back_rows[i + 1][j - jl1] = OP_SKIP_JA
+
+            if j < M and j + 1 <= jh:
+                cand = d_ij + SKIP_EN_PENALTY
+                if cand < dp_curr[j + 1]:
+                    dp_curr[j + 1] = cand
+                    back_rows[i][j + 1 - jl] = OP_SKIP_EN
+
+            if has_next1 and j < M and jl1 <= j + 1 <= jh1:
+                es1 = en_s[j]
+                ee1 = en_e[j]
+                if je1 + max_window_ms >= es1 and ee1 + max_window_ms >= js1:
+                    gap = max(0, (js1 if js1 > es1 else es1) - (je1 if je1 < ee1 else ee1))
+                    if gap <= max_window_ms:
+                        inter = max(0, (je1 if je1 < ee1 else ee1) - (js1 if js1 > es1 else es1))
+                        union = max(1, (je1 if je1 > ee1 else ee1) - (js1 if js1 < es1 else es1))
+                        iou_cost = 1.0 - (inter / union)
+                        boundary_err = (abs(js1 - es1) + abs(je1 - ee1)) * inv_2w
+                        ew1 = en_words[j]
+                        dp_pen = 0.35 if ((jm1 <= 3 and ew1 >= 10) or (ew1 <= 1 and jm1 >= 22)) else 0.0
+                        bonus = 0.0
+                        if jq1 and en_q[j]:
+                            bonus += 0.20
+                        if jex1 and en_ex[j]:
+                            bonus += 0.15
+                        if jcm1 & en_cmask[j]:
+                            bonus += 0.35
+                        c11 = 0.65 * iou_cost + 0.55 * boundary_err + dp_pen - bonus
+                        if c11 < 0.0:
+                            c11 = 0.0
+                        cand = d_ij + c11
+                        if cand < dp_next1[j + 1]:
+                            dp_next1[j + 1] = cand
+                            back_rows[i + 1][j + 1 - jl1] = OP_1_1
+
+            if has_next1 and j + 1 < M and en_p_ok[j] and jl1 <= j + 2 <= jh1:
+                ep_s = en_s[j]
+                ep_e = en_e[j + 1]
+                if je1 + max_window_ms >= ep_s and ep_e + max_window_ms >= js1:
+                    gap = max(0, (js1 if js1 > ep_s else ep_s) - (je1 if je1 < ep_e else ep_e))
+                    if gap <= max_window_ms:
+                        inter = max(0, (je1 if je1 < ep_e else ep_e) - (js1 if js1 > ep_s else ep_s))
+                        union = max(1, (je1 if je1 > ep_e else ep_e) - (js1 if js1 < ep_s else ep_s))
+                        iou_cost = 1.0 - (inter / union)
+                        boundary_err = (abs(js1 - ep_s) + abs(je1 - ep_e)) * inv_2w
+                        ewp = en_p_words[j]
+                        dp_pen = 0.35 if ((jm1 <= 3 and ewp >= 10) or (ewp <= 1 and jm1 >= 22)) else 0.0
+                        bonus = 0.0
+                        if jq1 and en_p_q[j]:
+                            bonus += 0.20
+                        if jex1 and en_p_ex[j]:
+                            bonus += 0.15
+                        if jcm1 & en_p_cmask[j]:
+                            bonus += 0.35
+                        c12 = 0.65 * iou_cost + 0.55 * boundary_err + dp_pen - bonus
+                        if c12 < 0.0:
+                            c12 = 0.0
+                        cand = d_ij + c12 + SPLIT_MERGE_PENALTY
+                        if cand < dp_next1[j + 2]:
+                            dp_next1[j + 2] = cand
+                            back_rows[i + 1][j + 2 - jl1] = OP_1_2
+
+            if jp_ok and j < M and jl2 <= j + 1 <= jh2:
+                es1 = en_s[j]
+                ee1 = en_e[j]
+                if jp_e + max_window_ms >= es1 and ee1 + max_window_ms >= jp_s:
+                    gap = max(0, (jp_s if jp_s > es1 else es1) - (jp_e if jp_e < ee1 else ee1))
+                    if gap <= max_window_ms:
+                        inter = max(0, (jp_e if jp_e < ee1 else ee1) - (jp_s if jp_s > es1 else es1))
+                        union = max(1, (jp_e if jp_e > ee1 else ee1) - (jp_s if jp_s < es1 else es1))
+                        iou_cost = 1.0 - (inter / union)
+                        boundary_err = (abs(jp_s - es1) + abs(jp_e - ee1)) * inv_2w
+                        ew1 = en_words[j]
+                        dp_pen = 0.35 if ((jp_m <= 3 and ew1 >= 10) or (ew1 <= 1 and jp_m >= 22)) else 0.0
+                        bonus = 0.0
+                        if jp_q and en_q[j]:
+                            bonus += 0.20
+                        if jp_ex and en_ex[j]:
+                            bonus += 0.15
+                        if jp_cm & en_cmask[j]:
+                            bonus += 0.35
+                        c21 = 0.65 * iou_cost + 0.55 * boundary_err + dp_pen - bonus
+                        if c21 < 0.0:
+                            c21 = 0.0
+                        cand = d_ij + c21 + SPLIT_MERGE_PENALTY
+                        if cand < dp_next2[j + 1]:
+                            dp_next2[j + 1] = cand
+                            back_rows[i + 2][j + 1 - jl2] = OP_2_1
+
+        for jj in range(jl, jh + 1):
+            dp_curr[jj] = INF
+        dp_curr, dp_next1, dp_next2 = dp_next1, dp_next2, dp_curr
+
+    ops: List[Tuple[str, int, int]] = []
+    ci, cj = N, M
+    while ci > 0 or cj > 0:
+        jl = j_lows[ci]
+        jh = j_highs[ci]
+        if cj < jl or cj > jh:
+            break
+        code = back_rows[ci][cj - jl]
+        if code == OP_NONE:
+            break
+        if code == OP_SKIP_JA:
+            pi, pj = ci - 1, cj
+            ops.append(("SKIP_JA", pi, pj))
+        elif code == OP_SKIP_EN:
+            pi, pj = ci, cj - 1
+            ops.append(("SKIP_EN", pi, pj))
+        elif code == OP_1_1:
+            pi, pj = ci - 1, cj - 1
+            ops.append(("1:1", pi, pj))
+        elif code == OP_1_2:
+            pi, pj = ci - 1, cj - 2
+            ops.append(("1:2", pi, pj))
+        elif code == OP_2_1:
+            pi, pj = ci - 2, cj - 1
+            ops.append(("2:1", pi, pj))
+        else:
+            break
+        ci, cj = pi, pj
+
+    return ops
 
 
 def _split_2_to_1_timing(
@@ -109,14 +314,27 @@ def _split_2_to_1_timing(
     """Split a merged EN timing window and reference text across two consecutive JA cues."""
     dur1 = max(1, ja_first.end_ms - ja_first.start_ms)
     dur2 = max(1, ja_second.end_ms - ja_second.start_ms)
-    total_en_dur = max(600, en_cue.end_ms - en_cue.start_ms)
-    gap = 50
     ratio = dur1 / (dur1 + dur2)
-    part1_dur = max(200, int((total_en_dur - gap) * ratio))
-    c1_start = en_cue.start_ms
-    c1_end = c1_start + part1_dur
-    c2_start = c1_end + gap
-    c2_end = max(c2_start + 200, en_cue.end_ms)
+    en_start = en_cue.start_ms
+    en_end = max(en_start, en_cue.end_ms)
+    total_en_dur = en_end - en_start
+
+    if total_en_dur <= 1:
+        c1_start, c1_end = en_start, en_start
+        c2_start, c2_end = en_start, en_end
+    elif total_en_dur == 2:
+        c1_start, c1_end = en_start, en_start + 1
+        c2_start, c2_end = en_start + 1, en_end
+    else:
+        gap = min(50, total_en_dur // 3)
+        avail = total_en_dur - gap
+        min_part = 200 if avail >= 400 else 1
+        part1_dur = max(min_part, min(avail - min_part, int(avail * ratio)))
+        c1_start = en_start
+        c1_end = c1_start + part1_dur
+        c2_start = c1_end + gap
+        c2_end = en_end
+
     en_part1, en_part2 = split_en_reference_for_2_to_1(en_cue.text, ratio)
     return (c1_start, c1_end, en_part1), (c2_start, c2_end, en_part2)
 
@@ -210,7 +428,7 @@ def _compute_dtw_pair_cost(
     inter = max(0, min(j_end, e_end) - max(j_start, e_start))
     union = max(1, max(j_end, e_end) - min(j_start, e_start))
     iou_cost = 1.0 - (inter / union)
-    boundary_err = (abs(j_start - e_start) + abs(j_end - e_end)) / (2.0 * max_window_ms)
+    boundary_err = (abs(j_start - e_start) + abs(j_end - e_end)) / (2.0 * max(1, max_window_ms))
 
     j_clean = strip_ja_furigana(j_txt)
     mora = estimate_ja_mora(j_clean)
@@ -246,15 +464,10 @@ def align_ja_to_en_monotonic_dtw(
     if N == 0 or M == 0:
         return [(c, "") for c in ja_cues]
 
-    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
+    ops = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
     aligned_output: List[Tuple[SubCue, str]] = []
-    ci, cj = N, M
-    while ci > 0 or cj > 0:
-        step = back[ci][cj]
-        if step is None:
-            break
-        op, pi, pj = step
+    for op, pi, pj in ops:
         if op == "1:1":
             aligned_output.append((
                 SubCue(en_cues[pj].start_ms, en_cues[pj].end_ms, ja_cues[pi].text),
@@ -281,7 +494,6 @@ def align_ja_to_en_monotonic_dtw(
             aligned_output.append((SubCue(c1_start, c1_end, ja_cues[pi].text), en_part1))
         elif op == "SKIP_JA":
             aligned_output.append((ja_cues[pi], ""))
-        ci, cj = pi, pj
 
     aligned_output.reverse()
     return aligned_output
@@ -298,15 +510,10 @@ def get_dtw_alignment_map(
     if N == 0 or M == 0:
         return {}
 
-    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
+    ops = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
     cue_map: Dict[int, Optional[Tuple[int, int, str]]] = {}
-    ci, cj = N, M
-    while ci > 0 or cj > 0:
-        step = back[ci][cj]
-        if step is None:
-            break
-        op, pi, pj = step
+    for op, pi, pj in ops:
         if op == "1:1":
             cue_map[pi] = (en_cues[pj].start_ms, en_cues[pj].end_ms, en_cues[pj].text)
         elif op == "1:2":
@@ -319,7 +526,6 @@ def get_dtw_alignment_map(
             cue_map[pi + 1] = (c2_start, c2_end, en_part2)
         elif op == "SKIP_JA":
             cue_map[pi] = None
-        ci, cj = pi, pj
 
     return cue_map
 
@@ -336,16 +542,11 @@ def get_dtw_alignment_plan(
     if N == 0 or M == 0:
         return {}, {}
 
-    back = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
+    ops = _compute_monotonic_dtw_backpointers(ja_cues, en_cues, cast_names_ja_en, max_window_ms)
 
     cue_map: Dict[int, Optional[Tuple[int, int, str]]] = {}
     split_1_to_2_map: Dict[int, List[Tuple[int, int, str, str]]] = {}
-    ci, cj = N, M
-    while ci > 0 or cj > 0:
-        step = back[ci][cj]
-        if step is None:
-            break
-        op, pi, pj = step
+    for op, pi, pj in ops:
         if op == "1:1":
             cue_map[pi] = (en_cues[pj].start_ms, en_cues[pj].end_ms, en_cues[pj].text)
         elif op == "1:2":
@@ -373,6 +574,5 @@ def get_dtw_alignment_plan(
             cue_map[pi + 1] = (c2_start, c2_end, en_part2)
         elif op == "SKIP_JA":
             cue_map[pi] = None
-        ci, cj = pi, pj
 
     return cue_map, split_1_to_2_map

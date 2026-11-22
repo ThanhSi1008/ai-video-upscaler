@@ -25,9 +25,9 @@ from subtrans.cache import execute_and_log_api_request, TranslationCache, comput
 from subtrans.throttle import (
     call_with_retry,
     DailyQuotaExhaustedError,
+    get_shared_rate_limiter,
     MinuteRateLimitError,
     QuotaExhaustedError,
-    RateLimiter,
 )
 
 logger = logging.getLogger("subtrans.cast_sheet")
@@ -479,8 +479,7 @@ def generate_cast_sheet(
     raw_text: Optional[str] = None
     last_err: Optional[Exception] = None
     for model_name in candidate_models:
-        rpm_limit = 12 if "lite" in model_name.lower() else 4
-        rate_limiters = {kid: RateLimiter(max_rpm=rpm_limit) for kid in key_ids}
+        rate_limiters = {kid: get_shared_rate_limiter(kid, model_name) for kid in key_ids}
         cfg_args: Dict[str, Any] = {
             "response_mime_type": "application/json",
             "response_schema": CastSheetResponse,

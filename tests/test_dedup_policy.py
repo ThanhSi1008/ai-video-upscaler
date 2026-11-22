@@ -349,13 +349,6 @@ def test_dedup_policy_dis_synthetic_offcenter_zoom():
         assert kept >= int(0.90 * total), f"dis-0.3 phải giữ >= 90% frames khi zoom lệch tâm, thực tế giữ {kept}/{total} ({kept/total*100:.1f}%)"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "upscale.py:1063-1119 omits dedup_policy in compute_overnight_schedule calls "
-        "and check_deadline_and_eta (L130-191) ignores plan dedup_policy"
-    ),
-)
 def test_upscale_cli_forwards_dedup_policy_to_scheduler(monkeypatch, tmp_path):
     """Lock upscale.py CLI --dry-run omission of dedup_policy when calling compute_overnight_schedule."""
     import src.scheduler as scheduler_mod
@@ -414,13 +407,6 @@ def test_upscale_cli_forwards_dedup_policy_to_scheduler(monkeypatch, tmp_path):
     assert captured_calls[0]["_result"]["episodes"][0]["is_exact_plan"] is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "upscale.py:1063-1119 omits dedup_policy in compute_overnight_schedule calls "
-        "and check_deadline_and_eta (L130-191) ignores plan dedup_policy"
-    ),
-)
 def test_check_deadline_and_eta_rejects_mismatched_plan_policy(monkeypatch, tmp_path):
     """Lock check_deadline_and_eta missing dedup_policy validation against stale plan.json."""
     from datetime import datetime

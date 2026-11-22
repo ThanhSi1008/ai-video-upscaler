@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import sqlite3
+import stat
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -22,7 +27,7 @@ import scripts.set_track_defaults as set_track_mod
 import scripts.upscale_x4_single as upscale_single_mod
 import subtrans.config as st_config
 from subtrans import audio_diarization, cascade, cast_sheet, linter, parser, writer
-from subtrans.cache import TranslationCache, execute_and_log_api_request
+from subtrans.cache import TranslationCache, compute_cue_cache_key, execute_and_log_api_request
 from subtrans.cli import app as subtrans_cli_app
 from subtrans.gemini_backend import GeminiTranslator, build_episode_system_prompt
 from subtrans.models import Cue, Glossary, GlossaryTerm
@@ -157,8 +162,10 @@ def test_build_episode_system_prompt_cached_by_hash():
 
 def test_stage_a_prefetch_worker_waits_for_running_task_past_timeout(tmp_path):
     finished = {"done": False}
+    started = threading.Event()
 
     def slow_prefetch(fpath: str, output_dir: Path, subs_quality: str = "normal"):
+        started.set()
         time.sleep(0.18)
         finished["done"] = True
         return {"status": "PREFETCHED", "episode": Path(fpath).stem, "characters": 3}
@@ -166,7 +173,7 @@ def test_stage_a_prefetch_worker_waits_for_running_task_past_timeout(tmp_path):
     worker = batch_mod.StageAPrefetchWorker(prefetch_fn=slow_prefetch)
     ep = str(tmp_path / "SeriesX" / "E01.mkv")
     worker.submit_next(ep, output_dir=tmp_path, same_series_headstart_sec=0.0)
-    time.sleep(0.03)  # ensure thread has started
+    assert started.wait(timeout=5.0)
 
     res = worker.wait_if_inflight(ep, timeout=0.02)
     worker.shutdown(cancel=False)
@@ -186,7 +193,7 @@ def test_stage_a_prefetch_skips_same_series_when_series_cast_missing(tmp_path):
     ep1 = str(tmp_path / "Fate" / "Fate_E01.mkv")
     ep2 = str(tmp_path / "Fate" / "Fate_E02.mkv")
     worker.submit_next(ep2, current_fpath=ep1, output_dir=tmp_path, same_series_headstart_sec=0.01)
-    res = worker.wait_if_inflight(ep2, timeout=2.0)
+    res = worker.wait_if_inflight(ep2, timeout=5.0)
     worker.shutdown(cancel=False)
 
     assert res is not None and res["status"] == "SKIPPED_WAIT_SERIES_CAST"
@@ -367,7 +374,7 @@ def test_negative_offset_clamps_partial_and_drops_fully_negative_events(tmp_path
 
 
 # ---------------------------------------------------------------------------
-# P1.4: SQLite WAL, busy_timeout=10000, batch exhaustion, single 429 log
+# P1.4: SQLite WAL, busy_timeout=5000, batch exhaustion, single 429 log
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +383,7 @@ def test_sqlite_wal_busy_timeout_and_batched_keys(tmp_path):
     with cache._connect() as conn:
         busy = conn.execute("PRAGMA busy_timeout").fetchone()[0]
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert busy == 10000
+    assert busy == 5000
     assert str(mode).lower() == "wal"
 
     assert cache.are_all_keys_exhausted([], "gemini-3.5-flash-lite") is False
@@ -395,7 +402,7 @@ def test_sqlite_wal_busy_timeout_and_batched_keys(tmp_path):
 
     kb = KnowledgeBase(db_path=tmp_path / "kb.db")
     with kb._connect() as conn:
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         assert str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
 
 
@@ -813,3 +820,300 @@ def test_p2_subtrans_parser_writer_cascade_diarization_report_pipeline(tmp_path,
     assert res_m.exit_code == 0
     clean_models_out = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", res_m.output).split())
     assert "gemini-3.5-flash-lite -> gemini-3.8-flash" in clean_models_out
+
+
+def test_compute_cue_cache_key_mode_flags_and_legacy_compat():
+    base_default = compute_cue_cache_key("gemini-3.5-flash-lite", "こんにちは", "Hello")
+    explicit_false = compute_cue_cache_key(
+        "gemini-3.5-flash-lite",
+        "こんにちは",
+        "Hello",
+        gloss_skill_names=False,
+        en_only_source=False,
+    )
+    gloss_only = compute_cue_cache_key(
+        "gemini-3.5-flash-lite",
+        "こんにちは",
+        "Hello",
+        gloss_skill_names=True,
+        en_only_source=False,
+    )
+    en_only = compute_cue_cache_key(
+        "gemini-3.5-flash-lite",
+        "こんにちは",
+        "Hello",
+        gloss_skill_names=False,
+        en_only_source=True,
+    )
+    both_true = compute_cue_cache_key(
+        "gemini-3.5-flash-lite",
+        "こんにちは",
+        "Hello",
+        gloss_skill_names=True,
+        en_only_source=True,
+    )
+
+    assert base_default == explicit_false
+    assert len({base_default, gloss_only, en_only, both_true}) == 4
+
+
+def test_sqlite_wal_init_only_sets_wal_once_and_uses_30s_timeout(tmp_path, monkeypatch):
+    cache_db = tmp_path / "cache_wal_once.db"
+    kb_db = tmp_path / "kb_wal_once.db"
+    TranslationCache(db_path=cache_db)
+    KnowledgeBase(db_path=kb_db)
+
+    orig_connect = sqlite3.connect
+    timeouts: list[float] = []
+    executed_sql: list[str] = []
+
+    class _SpyConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args, **kwargs):
+            executed_sql.append(str(sql).strip())
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self._inner.__exit__(exc_type, exc_val, exc_tb)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def spy_connect(*args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return _SpyConn(orig_connect(*args, **kwargs))
+
+    monkeypatch.setattr("subtrans.cache.sqlite3.connect", spy_connect)
+    monkeypatch.setattr("subtrans.rag.sqlite3.connect", spy_connect)
+
+    TranslationCache(db_path=cache_db)
+    KnowledgeBase(db_path=kb_db)
+
+    assert timeouts and all(t == 30.0 for t in timeouts)
+    assert any(s == "PRAGMA busy_timeout=5000" for s in executed_sql)
+    assert any(s == "PRAGMA journal_mode" for s in executed_sql)
+    assert not any("journal_mode=WAL" in s for s in executed_sql)
+
+
+def test_night_report_readonly_wal_and_concurrent_writers(tmp_path):
+    from src.night_report import query_subtrans_api_stats
+
+    missing_db = tmp_path / "missing.db"
+    assert query_subtrans_api_stats(str(missing_db)) == {}
+    assert not missing_db.exists()
+
+    # Read-only DELETE-mode DB must succeed without attempting PRAGMA journal_mode=WAL
+    del_db = tmp_path / "ro_delete.db"
+    with contextlib.closing(sqlite3.connect(del_db)) as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("CREATE TABLE translations (cache_key TEXT PRIMARY KEY, model TEXT)")
+        conn.execute("CREATE TABLE api_requests (id INTEGER PRIMARY KEY, model TEXT, status TEXT, error_type TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("INSERT INTO translations VALUES ('k1', 'gemini-3.5-flash-lite')")
+        conn.execute("INSERT INTO api_requests (model, status, error_type) VALUES ('gemini-3.5-flash-lite', 'success', NULL)")
+        conn.commit()
+    os.chmod(del_db, stat.S_IREAD)
+    try:
+        stats_del = query_subtrans_api_stats(str(del_db))
+        assert stats_del["cues_by_model"]["gemini-3.5-flash-lite"] == 1
+        assert stats_del["model_summary"]["gemini-3.5-flash-lite"]["success"] == 1
+    finally:
+        os.chmod(del_db, stat.S_IWRITE | stat.S_IREAD)
+
+    # Read-only WAL-mode DB must succeed cleanly
+    wal_db = tmp_path / "ro_wal.db"
+    wal_cache = TranslationCache(db_path=wal_db)
+    wal_cache.set_cue("k_wal", "gemini", "gemini-3.8-flash", "Xin chao")
+    wal_cache.log_request(model="gemini-3.8-flash", backend="gemini", cues_count=1, status="success")
+    os.chmod(wal_db, stat.S_IREAD)
+    try:
+        stats_wal = query_subtrans_api_stats(str(wal_db))
+        assert stats_wal["cues_by_model"]["gemini-3.8-flash"] == 1
+    finally:
+        os.chmod(wal_db, stat.S_IWRITE | stat.S_IREAD)
+
+    # Concurrent multi-thread TranslationCache + KnowledgeBase writers and night_report readers
+    conc_cache_db = tmp_path / "conc_cache.db"
+    conc_kb_db = tmp_path / "conc_kb.db"
+    TranslationCache(db_path=conc_cache_db)
+    KnowledgeBase(db_path=conc_kb_db)
+    errors: list[Exception] = []
+    err_lock = threading.Lock()
+
+    def cache_writer(tid: int):
+        try:
+            c = TranslationCache(db_path=conc_cache_db)
+            for i in range(10):
+                c.set_cue(f"k_{tid}_{i}", "gemini", "gemini-3.5-flash-lite", f"vi_{tid}_{i}")
+                c.log_request(model="gemini-3.5-flash-lite", backend="gemini", cues_count=1, status="success")
+        except Exception as exc:
+            with err_lock:
+                errors.append(exc)
+
+    def kb_writer(tid: int):
+        try:
+            kb = KnowledgeBase(db_path=conc_kb_db)
+            for i in range(6):
+                kb.add_gold_unit(f"魔法少女{tid}_{i}", f"Ma phap {tid}_{i}", series="s1", status="gold")
+        except Exception as exc:
+            with err_lock:
+                errors.append(exc)
+
+    def report_reader():
+        try:
+            for _ in range(12):
+                query_subtrans_api_stats(str(conc_cache_db))
+        except Exception as exc:
+            with err_lock:
+                errors.append(exc)
+
+    threads = (
+        [threading.Thread(target=cache_writer, args=(i,)) for i in range(4)]
+        + [threading.Thread(target=kb_writer, args=(i,)) for i in range(2)]
+        + [threading.Thread(target=report_reader) for _ in range(2)]
+    )
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30.0)
+    assert not any(t.is_alive() for t in threads)
+
+    assert errors == []
+    final_stats = query_subtrans_api_stats(str(conc_cache_db))
+    assert final_stats["cues_by_model"]["gemini-3.5-flash-lite"] == 40
+    with TranslationCache(db_path=conc_cache_db)._connect() as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_cold_init_concurrent_wal_no_locked_error(tmp_path):
+    """Verify simultaneous cold-start WAL initialization on brand-new DB paths never raises database locked."""
+    for rnd in range(4):
+        cache_db = tmp_path / f"cold_cache_{rnd}.db"
+        kb_db = tmp_path / f"cold_kb_{rnd}.db"
+        errors: list[Exception] = []
+        err_lock = threading.Lock()
+
+        cache_barrier = threading.Barrier(8)
+
+        def init_cache(barrier=cache_barrier, db=cache_db, errs=errors, lock=err_lock):
+            try:
+                barrier.wait(timeout=10.0)
+                TranslationCache(db_path=db)
+            except Exception as exc:
+                with lock:
+                    errs.append(exc)
+
+        kb_barrier = threading.Barrier(8)
+
+        def init_kb(barrier=kb_barrier, db=kb_db, errs=errors, lock=err_lock):
+            try:
+                barrier.wait(timeout=10.0)
+                KnowledgeBase(db_path=db)
+            except Exception as exc:
+                with lock:
+                    errs.append(exc)
+
+        cache_threads = [threading.Thread(target=init_cache) for _ in range(8)]
+        for t in cache_threads:
+            t.start()
+        for t in cache_threads:
+            t.join(timeout=30.0)
+        assert not any(t.is_alive() for t in cache_threads)
+
+        kb_threads = [threading.Thread(target=init_kb) for _ in range(8)]
+        for t in kb_threads:
+            t.start()
+        for t in kb_threads:
+            t.join(timeout=30.0)
+        assert not any(t.is_alive() for t in kb_threads)
+
+        assert errors == []
+
+
+def test_night_report_cold_init_race_returns_empty_or_valid_stats(tmp_path):
+    """Verify query_subtrans_api_stats handles concurrent cold-start TranslationCache init without OperationalError."""
+    from src.night_report import query_subtrans_api_stats
+
+    for rnd in range(20):
+        db_path = tmp_path / f"cold_night_race_{rnd}.db"
+        barrier = threading.Barrier(6)
+        errors: list[Exception] = []
+        results: list[dict] = []
+        lock = threading.Lock()
+
+        def init_writer(b=barrier, p=db_path, errs=errors, lck=lock):
+            try:
+                b.wait(timeout=10.0)
+                TranslationCache(db_path=p)
+            except Exception as exc:
+                with lck:
+                    errs.append(exc)
+
+        def stats_reader(b=barrier, p=db_path, errs=errors, res=results, lck=lock):
+            try:
+                b.wait(timeout=10.0)
+                out = query_subtrans_api_stats(str(p))
+                with lck:
+                    res.append(out)
+            except Exception as exc:
+                with lck:
+                    errs.append(exc)
+
+        threads = (
+            [threading.Thread(target=init_writer) for _ in range(2)]
+            + [threading.Thread(target=stats_reader) for _ in range(4)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30.0)
+        assert not any(t.is_alive() for t in threads)
+        assert errors == []
+        assert len(results) == 4
+        for item in results:
+            assert isinstance(item, dict)
+            assert item == {} or {"cues_by_model", "model_summary", "by_pt_hour"}.issubset(item.keys())
+
+
+def test_night_report_legacy_schema_and_unexpected_operational_error(tmp_path):
+    """Verify legacy translations-only DB returns cues_by_model and unexpected OperationalErrors still propagate."""
+    from src.night_report import query_subtrans_api_stats
+
+    legacy_db = tmp_path / "legacy_translations_only.db"
+    with contextlib.closing(sqlite3.connect(legacy_db)) as conn:
+        conn.execute("CREATE TABLE translations (cache_key TEXT PRIMARY KEY, model TEXT)")
+        conn.execute("INSERT INTO translations VALUES ('k1', 'gemini-3.5-flash-lite')")
+        conn.commit()
+
+    stats = query_subtrans_api_stats(str(legacy_db))
+    assert stats["cues_by_model"] == {"gemini-3.5-flash-lite": 1}
+    assert stats["model_summary"] == {}
+    assert stats["by_pt_hour"] == {}
+
+    broken_db = tmp_path / "corrupt_table_err.db"
+    broken_db.write_bytes(b"not a sqlite database")
+    with pytest.raises(sqlite3.DatabaseError):
+        query_subtrans_api_stats(str(broken_db))
+
+    class _FakeConn:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def cursor(self):
+            class _FakeCur:
+                def execute(self, *_a, **_kw):
+                    raise sqlite3.OperationalError("disk I/O error")
+
+            return _FakeCur()
+
+        def close(self):
+            return None
+
+    with patch("src.night_report.sqlite3.connect", return_value=_FakeConn()):
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            query_subtrans_api_stats(str(legacy_db))

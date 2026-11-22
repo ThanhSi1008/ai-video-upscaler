@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from subtrans.glossary import load_glossary
-from subtrans.models import Cue, Glossary, Character
+from subtrans.models import Cue, Glossary, Character, CharacterSpeaksTo, GlossaryTerm
 from subtrans.linter import (
     lint_cue,
     lint_subtitles,
@@ -241,16 +241,8 @@ def test_format_lint_report_empty_and_mixed():
     assert "LINT_HIGH_CPS" in report
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "RULE_PRONOUN_CONSISTENCY (subtrans/linter.py:344-371) skips mode='comm' and compares "
-        "st.listener.lower()==addr_low without resolving addressee aliases/name_vi/name_ja "
-        "(glossary.tenken.yaml Shishou vs Sư phụ)"
-    ),
-)
 def test_lint_pronoun_consistency_tenken_alias_and_comm_mode():
-    """Lock addressee alias resolution and telepathy mode='comm' bypass in RULE_PRONOUN_CONSISTENCY."""
+    """Verify addressee alias resolution and telepathy mode='comm' enforcement in RULE_PRONOUN_CONSISTENCY."""
     g_tenken = load_glossary(Path("glossaries/glossary.tenken.yaml"))
 
     c_alias = Cue(
@@ -280,3 +272,117 @@ def test_lint_pronoun_consistency_tenken_alias_and_comm_mode():
         p2="ông",
     )
     assert RULE_PRONOUN_CONSISTENCY in [v.rule_id for v in lint_cue(c_comm, glossary=g_tenken)]
+
+    c_valid_spoken = Cue(
+        id=3,
+        start=0,
+        end=2000,
+        ja="師匠、ありがとう",
+        vi="Sư phụ, Fran cảm ơn.",
+        speaker="Fran",
+        addressee="Sư phụ",
+        mode="spoken",
+        p1="Fran",
+        p2="Sư phụ",
+    )
+    assert RULE_PRONOUN_CONSISTENCY not in [v.rule_id for v in lint_cue(c_valid_spoken, glossary=g_tenken)]
+
+    c_valid_comm = Cue(
+        id=4,
+        start=0,
+        end=2000,
+        ja="師匠、ありがとう",
+        vi="Sư phụ, Fran cảm ơn.",
+        speaker="Fran",
+        addressee="Shishou",
+        mode="comm",
+        p1="Fran",
+        p2="Sư phụ",
+    )
+    assert RULE_PRONOUN_CONSISTENCY not in [v.rule_id for v in lint_cue(c_valid_comm, glossary=g_tenken)]
+
+    c_inner = Cue(
+        id=5,
+        start=0,
+        end=2000,
+        ja="師匠、ありがとう",
+        vi="Tôi cảm ơn ông.",
+        speaker="Fran",
+        addressee="Shishou",
+        mode="inner",
+        p1="tôi",
+        p2="ông",
+    )
+    assert RULE_PRONOUN_CONSISTENCY not in [v.rule_id for v in lint_cue(c_inner, glossary=g_tenken)]
+
+
+def test_lint_pronoun_consistency_ambiguous_speaker_and_term_aliases():
+    """Verify ambiguous shared speaker aliases iterate past index 0 and GlossaryTerm.aliases expand identity."""
+    g_ambig = Glossary(
+        characters=[
+            Character(name_ja="先生A", name_vi="Sensei A", aliases=["Sensei"], speaks_to=[]),
+            Character(
+                name_ja="先生B",
+                name_vi="Sensei B",
+                aliases=["Sensei"],
+                speaks_to=[CharacterSpeaksTo(listener="Student", self="ta", other="con")],
+            ),
+            Character(name_ja="生徒", name_vi="Student", speaks_to=[]),
+        ]
+    )
+    c_ambig = Cue(
+        id=1,
+        start=0,
+        end=2000,
+        ja="こんにちは",
+        vi="Quý vị, đồng chí đi đây.",
+        speaker="Sensei",
+        addressee="Student",
+        p1="đồng chí",
+        p2="quý vị",
+        mode="spoken",
+    )
+    v_ambig = lint_cue(c_ambig, glossary=g_ambig)
+    assert RULE_PRONOUN_CONSISTENCY in [v.rule_id for v in v_ambig]
+
+    g_term_alias = Glossary(
+        characters=[
+            Character(
+                name_ja="フラン",
+                name_vi="Fran",
+                speaks_to=[CharacterSpeaksTo(listener="Shishou", self="Fran", other="Sư phụ")],
+            ),
+            Character(name_ja="師匠", name_vi="Shishou", speaks_to=[]),
+        ],
+        terms=[
+            GlossaryTerm(ja="フラン", vi="Fran", aliases=["Hắc Lôi Công Chúa"]),
+        ],
+    )
+    c_term_bad = Cue(
+        id=2,
+        start=0,
+        end=2000,
+        ja="師匠、行くよ",
+        vi="Ông ơi, tôi đi đây.",
+        speaker="Hắc Lôi Công Chúa",
+        addressee="Shishou",
+        p1="tôi",
+        p2="ông",
+        mode="spoken",
+    )
+    v_term_bad = lint_cue(c_term_bad, glossary=g_term_alias)
+    assert RULE_PRONOUN_CONSISTENCY in [v.rule_id for v in v_term_bad]
+
+    c_term_ok = Cue(
+        id=3,
+        start=0,
+        end=2000,
+        ja="師匠、行くよ",
+        vi="Sư phụ ơi, Fran đi đây.",
+        speaker="Hắc Lôi Công Chúa",
+        addressee="Shishou",
+        p1="Fran",
+        p2="Sư phụ",
+        mode="spoken",
+    )
+    assert RULE_PRONOUN_CONSISTENCY not in [v.rule_id for v in lint_cue(c_term_ok, glossary=g_term_alias)]

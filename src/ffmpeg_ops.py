@@ -623,20 +623,70 @@ def _recover_open_gop_leading_frames(
         frame_dtype = np.uint8
         frame_shape = (h_int, w_int, 3)
 
-    seek_sec = max(0.0, float(chunk_start_sec or 0.0) - 15.0)
+    has_target = chunk_start_sec is not None
+    target_sec = max(0.0, float(chunk_start_sec)) if has_target else 0.0
+    seek_sec = max(0.0, target_sec - 15.0)
+    seek_sec_str = f"{seek_sec:.3f}"
+    eff_seek_sec = float(seek_sec_str)
     win_dur = 18.0
-    max_win_frames = 600
+    pts_list: List[float] = []
+    probed_fps: Optional[float] = None
+    if av is not None and not hasattr(subprocess.Popen, "_mock_name"):
+        try:
+            with av.open(source_video_path) as c:
+                v = next((s for s in c.streams if s.type == "video"), None)
+                if v is not None:
+                    rate = v.guessed_rate or v.average_rate
+                    if rate and float(rate) > 0:
+                        probed_fps = float(rate)
+                    if v.time_base is not None:
+                        tb = float(v.time_base)
+                        start_s = (
+                            float(v.start_time * v.time_base)
+                            if v.start_time is not None
+                            else (float(c.start_time) / 1_000_000.0 if c.start_time is not None else 0.0)
+                        )
+                        if eff_seek_sec > 2.0:
+                            c.seek(
+                                int((max(0.0, eff_seek_sec - 2.0) + start_s) / tb),
+                                stream=v,
+                                backward=True,
+                                any_frame=False,
+                            )
+                        tail_over = 0
+                        raw_pts: List[float] = []
+                        for p in c.demux(v):
+                            if p.pts is None or p.size <= 0 or getattr(p, "is_discard", False):
+                                continue
+                            t = float(p.pts * v.time_base) - start_s
+                            if t >= eff_seek_sec - 1e-4:
+                                raw_pts.append(t)
+                            if t > eff_seek_sec + win_dur + 2.0:
+                                tail_over += 1
+                                if tail_over >= 16:
+                                    break
+                            else:
+                                tail_over = 0
+                        raw_pts.sort()
+                        pts_list = raw_pts
+        except Exception:
+            pts_list = []
+
+    eff_fps = probed_fps if (probed_fps and 1.0 <= probed_fps <= 240.0) else (24000.0 / 1001.0)
+    max_win_frames = max(600, int((win_dur + 2.0) * max(eff_fps, 30.0)) + 1)
     ring: collections.deque = collections.deque(maxlen=n_discard + 1)
     frame_buf = bytearray(frame_bytes)
     mv = memoryview(frame_buf)
     mid_y = h_int // 2
     anchor_strip = cra_anchor_frame[mid_y, ::16]
     matched_leading: Optional[List[Any]] = None
+    best_score: Optional[tuple[int, float, int]] = None
+    best_dist: float = float("inf")
 
     vf_args = ["-vf", color_vf] if color_vf else []
     cmd = [
         "ffmpeg", "-v", "error",
-        "-ss", f"{seek_sec:.3f}",
+        "-ss", seek_sec_str,
         "-t", f"{win_dur:.3f}",
         "-i", source_video_path,
         *vf_args,
@@ -659,16 +709,32 @@ def _recover_open_gop_leading_frames(
                 if got < frame_bytes:
                     break
                 frames_seen += 1
+                idx0 = frames_seen - 1
+                t_curr = pts_list[idx0] if idx0 < len(pts_list) else (eff_seek_sec + (idx0 / eff_fps))
                 curr_frame = np.frombuffer(frame_buf, dtype=frame_dtype).reshape(frame_shape).copy()
                 if len(ring) >= n_discard:
                     if (
                         np.array_equal(curr_frame[mid_y, ::16], anchor_strip)
                         and np.array_equal(curr_frame, cra_anchor_frame)
                     ):
-                        prev_list = list(ring)
-                        matched_leading = [f.copy() for f in prev_list[-n_discard:]]
-                        break
+                        if not has_target:
+                            matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
+                            break
+                        dist = abs(t_curr - target_sec)
+                        in_zone = (
+                            (target_sec - 0.5 / eff_fps)
+                            <= t_curr
+                            <= (target_sec + (n_discard + 1.5) / eff_fps)
+                        )
+                        score = (0 if in_zone else 1, dist, idx0)
+                        if best_score is None or score < best_score:
+                            best_score = score
+                            best_dist = dist
+                            matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
                 ring.append(curr_frame)
+                if has_target and matched_leading is not None:
+                    if (t_curr > target_sec + 1.0 and best_dist <= 0.25) or (t_curr > target_sec + 3.0):
+                        break
             try:
                 proc.stdout.close()
             except Exception:

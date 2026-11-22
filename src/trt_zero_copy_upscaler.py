@@ -1406,7 +1406,7 @@ class DoubleBufferedPipeUpscaler:
         fps_str: str = "24000/1001",
         width: int = 3840,
         height: int = 2160,
-        chroma_location: str = "center",
+        chroma_location: str = "left",
         multipass: Optional[str] = None,
     ) -> subprocess.Popen:
         """Spawn FFmpeg NVENC receiving rawvideo P010LE over stdin pipe."""
@@ -1425,7 +1425,7 @@ class DoubleBufferedPipeUpscaler:
             "-colorspace", HEVC_COLORSPACE,
             "-color_primaries", HEVC_COLOR_PRIMARIES,
             "-color_trc", HEVC_COLOR_TRC,
-            "-chroma_sample_location", str(chroma_location or "center"),
+            "-chroma_sample_location", str(chroma_location or "left"),
             "-r", fps_str,
             "-i", "pipe:0",
             "-c:v", HEVC_ENCODER,

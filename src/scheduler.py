@@ -378,10 +378,10 @@ def compute_overnight_schedule(
 
         # 1. Tìm hoặc quét plan.json
         plan = None
+        eff_pol = resolve_dedup_policy(vid, dedup_policy)
         if preflight_now:
-            plan = preflight_video_plan(vid, output_dir, segment_seconds, dedup_policy=dedup_policy)
+            plan = preflight_video_plan(vid, output_dir, segment_seconds, dedup_policy=eff_pol)
         else:
-            eff_pol = resolve_dedup_policy(vid, dedup_policy) if dedup_policy else None
             plan = find_cached_plan(vid, output_dir, expected_policy=eff_pol)
 
         is_exact = plan is not None
@@ -392,15 +392,16 @@ def compute_overnight_schedule(
             n_unique_source = "đo (plan.json)"
         else:
             # Dự toán nếu chưa quét: dùng 60.0% kept frames làm giá trị thận trọng (thay cho 39.1% cũ, đo n=4: 39.1%, 46.0%, 54.4%, 61.3%)
+            keep_factor = 1.0 if eff_pol == "off" else 0.60
             try:
                 meta = probe_video(vid)
                 total_frames = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
-                n_unique = int(total_frames * 0.60)
-                dedup_ratio = (1.0 - (n_unique / total_frames)) * 100.0 if total_frames > 0 else 40.0
+                n_unique = int(total_frames * keep_factor)
+                dedup_ratio = (1.0 - (n_unique / total_frames)) * 100.0 if total_frames > 0 else (1.0 - keep_factor) * 100.0
             except Exception:
                 total_frames = 34000
-                n_unique = int(34000 * 0.60)
-                dedup_ratio = 40.0
+                n_unique = int(34000 * keep_factor)
+                dedup_ratio = (1.0 - keep_factor) * 100.0
             n_unique_source = "ước lượng thận trọng (n=4)"
 
         # Kiểm tra nếu file 4K thành phẩm đã tồn tại (hỗ trợ cả _4K_animejanai.mkv, _4K.mkv và file -o tường minh)

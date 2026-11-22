@@ -1,8 +1,9 @@
 """Typer CLI commands (run, batch, eval, rag, check, models) for subtitle translation."""
 
+import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -157,7 +158,6 @@ def run(
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
     allow_latest_alias: bool = typer.Option(False, "--allow-latest-alias", help="Allow using mutable model alias like gemini-flash-latest"),
     on_quota: str = typer.Option("stop", "--on-quota", help="Action when Gemini quota exhausted ('stop')"),
-    review: bool = typer.Option(False, "--review", "-r", help="Enable optional post-edit review pass"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Limit translation to first N dialogue cues"),
     out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
     format_: str = typer.Option("srt", "--format", "-f", help="Output format ('srt' or 'ass')"),
@@ -177,7 +177,6 @@ def run(
     smart_wrap: bool = typer.Option(True, "--smart-wrap/--no-smart-wrap", help="Tự động ngắt dòng thông minh khi câu > 72 ký tự (Mặc định: Bật)"),
     video: Optional[Path] = typer.Option(None, "--video", "-v", help="Đường dẫn file video MKV/MP4 gốc để phân tích âm sắc đổi giọng 5.1 FC cho SRT trần"),
     explicit_cache: bool = typer.Option(False, "--explicit-cache", help="Bật khóa cứng Explicit Context Cache (TTL 15 phút) trên máy chủ Gemini"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm cloud privacy consent automatically"),
 ):
     """Translates anime subtitles (JA source + optional EN reference) into Vietnamese."""
     if local_only:
@@ -192,7 +191,6 @@ def run(
         model_override=model,
         allow_latest_alias=allow_latest_alias,
         on_quota=on_quota,
-        enable_review=review,
         enable_cascade=not no_cascade,
         enable_rag=not no_rag,
         limit_cues=limit,
@@ -262,16 +260,103 @@ def compare(
     console.print(table)
 
 
+_OUTPUT_ARTIFACT_SUFFIXES = (
+    ".vi.srt",
+    ".vi.ass",
+    ".vi.partial.srt",
+    ".vi.partial.ass",
+    ".review.srt",
+    ".review.ass",
+)
+_JA_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._]whisper)?(?:[._](?:ja|jpn))(?:\[cc\])?$", re.IGNORECASE)
+_EN_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._](?:en|eng))(?:\[cc\])?$", re.IGNORECASE)
+
+
+def _match_en_subtitle(ja_file: Path, en_dir: Path) -> Optional[Path]:
+    """Finds the matching English reference subtitle for a Japanese subtitle file."""
+    base_stem = _JA_STEM_RE.sub("", ja_file.stem)
+    exts = [ja_file.suffix] + [e for e in (".ass", ".srt") if e.lower() != ja_file.suffix.lower()]
+    candidates: List[Path] = []
+    for ext in exts:
+        candidates.extend(
+            [
+                en_dir / f"{base_stem}.en{ext}",
+                en_dir / f"{base_stem}_en{ext}",
+                en_dir / f"{base_stem}_eng{ext}",
+                en_dir / f"{base_stem}.eng{ext}",
+                en_dir / f"{base_stem}.en[cc]{ext}",
+            ]
+        )
+    candidates.extend([en_dir / ja_file.name, en_dir / f"{base_stem}.ass", en_dir / f"{base_stem}.srt"])
+
+    ja_resolved = ja_file.resolve()
+    for cand in candidates:
+        if cand.is_file() and cand.resolve() != ja_resolved:
+            return cand
+    return None
+
+
+def _collect_batch_input_files(input_dir: Path, en_dir: Optional[Path]) -> List[Path]:
+    """Collects batch input subtitle files while skipping output artifacts and paired EN tracks."""
+    raw_files = sorted(
+        f for f in input_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in (".ass", ".srt")
+        and not f.name.lower().endswith(_OUTPUT_ARTIFACT_SUFFIXES)
+    )
+    non_en_base_stems = {
+        _JA_STEM_RE.sub("", f.stem).lower()
+        for f in raw_files
+        if not _EN_STEM_RE.search(f.stem)
+    }
+
+    same_en_dir = bool(en_dir and en_dir.resolve() == input_dir.resolve())
+    matched_en_resolved = set()
+    if same_en_dir and en_dir is not None:
+        for f in raw_files:
+            if not _EN_STEM_RE.search(f.stem):
+                matched = _match_en_subtitle(f, en_dir)
+                if matched is not None:
+                    matched_en_resolved.add(matched.resolve())
+
+    selected: List[Path] = []
+    for f in raw_files:
+        if _EN_STEM_RE.search(f.stem):
+            en_base = _EN_STEM_RE.sub("", f.stem).lower()
+            if en_base in non_en_base_stems or f.resolve() in matched_en_resolved:
+                continue
+        selected.append(f)
+    return selected
+
+
 @app.command()
 def batch(
     input_dir: Path = typer.Argument(..., help="Directory containing subtitle files", exists=True),
     en_dir: Optional[Path] = typer.Option(None, "--en-dir", help="Directory containing matching English subtitles"),
-    out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
+    en_offset_ms: int = typer.Option(0, "--en-offset-ms", help="Offset applied to English timing in milliseconds"),
+    sub_offset_ms: int = typer.Option(0, "--sub-offset-ms", help="Offset applied to Japanese/Output subtitle timing in milliseconds (e.g. -11154)"),
     glossary: Optional[Path] = typer.Option(None, "--glossary", "-g", help="Glossary file"),
     local_only: bool = typer.Option(False, "--local", "-l", help="[Removed] Local Ollama/TranslateGemma backend is no longer supported"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override Gemini model name"),
+    allow_latest_alias: bool = typer.Option(False, "--allow-latest-alias", help="Allow using mutable model alias like gemini-flash-latest"),
+    on_quota: str = typer.Option("stop", "--on-quota", help="Action when Gemini quota exhausted ('stop')"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Limit translation to first N dialogue cues"),
+    out_dir: Path = typer.Option(Path("out"), "--out-dir", "-o", help="Output directory"),
+    format_: str = typer.Option("srt", "--format", "-f", help="Output format ('srt' or 'ass')"),
+    wrap: Optional[int] = typer.Option(None, "--wrap", "-w", help="Wrap lines exceeding N characters into at most 2 lines (default: smart-wrap > 72 chars)"),
+    gloss_skill_names: bool = typer.Option(False, "--gloss-skill-names", help="Append English skill/attack name in parentheses"),
+    require_approved_cast: bool = typer.Option(False, "--require-approved-cast", help="Pause to inspect Stage A cast sheet before continuing"),
+    review_file: bool = typer.Option(False, "--review-file", help="Generate out/<name>.review.srt containing uncertain lines"),
     batch_size: Optional[int] = typer.Option(None, "--batch-size", "-b", help="Batch size in cues (100–150 cues, default: 100)"),
+    subs_quality: str = typer.Option("normal", "--subs-quality", help="Chất lượng dịch: 'normal' (Lite trước, tối ưu quota) hoặc 'high' (Flash trước)"),
+    subs_upgrade: bool = typer.Option(False, "--subs-upgrade", help="Ưu tiên model Flash trước và bỏ qua cache Lite để nâng cấp bản dịch"),
+    auto_offset: bool = typer.Option(False, "--auto-offset", help="Tự động phát hiện và áp dụng lệch thời gian JA-EN nếu thỏa mãn tiêu chí (mặc định: tắt)"),
+    no_rag: bool = typer.Option(False, "--no-rag", help="Tắt truy hồi RAG few-shot và error bank"),
+    no_cascade: bool = typer.Option(False, "--no-cascade", help="Tắt phân hệ Smart Cloud Cascade Repair pass (Stage P2)"),
+    cache_db: Optional[Path] = typer.Option(None, "--cache-db", help="File SQLite cache riêng biệt phục vụ thí nghiệm đo lường"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Chạy thử nghiệm mà không gọi API"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Auto confirm consent"),
+    auto_align_en: bool = typer.Option(True, "--auto-align-en/--no-auto-align-en", help="Tự động ghim mốc thời gian Whisper theo track tiếng Anh phòng thu (Mặc định: Bật)"),
+    smart_wrap: bool = typer.Option(True, "--smart-wrap/--no-smart-wrap", help="Tự động ngắt dòng thông minh khi câu > 72 ký tự (Mặc định: Bật)"),
+    explicit_cache: bool = typer.Option(False, "--explicit-cache", help="Bật khóa cứng Explicit Context Cache (TTL 15 phút) trên máy chủ Gemini"),
 ):
     """Batch translates all Japanese subtitle files in a directory."""
     if local_only:
@@ -281,27 +366,60 @@ def batch(
         )
         raise typer.Exit(code=1)
 
-    sub_files = sorted([f for f in input_dir.iterdir() if f.suffix.lower() in (".ass", ".srt")])
+    sub_files = _collect_batch_input_files(input_dir, en_dir)
     if not sub_files:
         console.print(f"[yellow]No .ass or .srt files found in {input_dir}[/yellow]")
         return
 
     console.print(f"[bold green]Found {len(sub_files)} subtitle files in {input_dir}[/bold green]")
+    failed_files: List[str] = []
     for idx, f in enumerate(sub_files):
         console.print(f"\n[{idx+1}/{len(sub_files)}] Processing {f.name}...")
-        en_f = None
-        if en_dir:
-            candidate = en_dir / f.name
-            if candidate.exists():
-                en_f = candidate
+        en_f = _match_en_subtitle(f, en_dir) if en_dir else None
 
-        pipeline = TranslationPipeline(
-            local_only=local_only,
-            output_dir=out_dir,
-            dry_run=dry_run,
-            batch_size=batch_size,
-        )
-        pipeline.run(ja_path=f, en_path=en_f, glossary_path=glossary)
+        try:
+            pipeline = TranslationPipeline(
+                local_only=False,
+                model_override=model,
+                allow_latest_alias=allow_latest_alias,
+                on_quota=on_quota,
+                enable_cascade=not no_cascade,
+                enable_rag=not no_rag,
+                limit_cues=limit,
+                output_dir=out_dir,
+                output_format=format_,
+                wrap_chars=wrap,
+                smart_wrap=smart_wrap,
+                gloss_skill_names=gloss_skill_names,
+                require_approved_cast=require_approved_cast,
+                review_file=review_file,
+                dry_run=dry_run,
+                batch_size=batch_size,
+                subs_quality=subs_quality,
+                subs_upgrade=subs_upgrade,
+                cache_db_path=cache_db,
+                auto_align_whisper_to_en=auto_align_en,
+                explicit_caching=explicit_cache,
+            )
+            pipeline.run(
+                ja_path=f,
+                en_path=en_f,
+                glossary_path=glossary,
+                en_offset_ms=en_offset_ms,
+                sub_offset_ms=sub_offset_ms,
+                subs_upgrade=subs_upgrade,
+                auto_offset=auto_offset,
+            )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⚠️  Process cancelled by user. Partial cache preserved in SQLite.[/yellow]")
+            sys.exit(130)
+        except Exception as e:
+            console.print(f"\n[bold red]❌ Pipeline Error ({f.name}): {e}[/bold red]")
+            failed_files.append(f.name)
+
+    if failed_files:
+        console.print(f"\n[bold red]❌ Batch finished with {len(failed_files)} failed file(s): {', '.join(failed_files)}[/bold red]")
+        sys.exit(1)
 
 
 @app.command(name="eval")

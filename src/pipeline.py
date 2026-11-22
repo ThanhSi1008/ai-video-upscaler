@@ -415,14 +415,14 @@ def run_upscale_pipeline(
                                     req_params = get_dedup_params(req_pol)
                                     c_params = cached_plan_chk.get("dedup_params") or {}
                                     pol_conflict = (_canonical_dedup_family(c_pol) != _canonical_dedup_family(req_pol))
-                                    if not pol_conflict and req_pol.startswith("dis") and c_params.get("dis_thresh") is not None:
+                                    if not pol_conflict and (req_pol.startswith("dis") or req_pol in ("sakuga", "dis-sakuga")) and c_params.get("dis_thresh") is not None:
                                         pol_conflict = abs(float(c_params["dis_thresh"]) - float(req_params.get("dis_thresh", 0.30))) > 1e-4
                                     if not pol_conflict and req_pol.startswith("drift") and c_params.get("drift_delta") is not None:
                                         pol_conflict = abs(float(c_params["drift_delta"]) - float(req_params.get("drift_delta", 0.75))) > 1e-4
                                     c_counts = [int(c.get("total_frames", 0)) for c in c_chunks]
                                     can_repart_rle = bool(
                                         cached_plan_chk.get("raw_actions_rle")
-                                        and not req_pol.startswith(("drift", "dis"))
+                                        and not (req_pol.startswith(("drift", "dis")) or req_pol in ("sakuga", "dis-sakuga"))
                                         and seg_frame_counts
                                         and sum(seg_frame_counts) == cached_plan_chk.get("total_frames", 0)
                                     )
@@ -441,7 +441,7 @@ def run_upscale_pipeline(
                         if can_use_rolling:
                             logger.info(
                                 f"⚡ Khởi chạy Rolling Parallel Preflight ({effective_dedup_policy}, max_workers=2) — "
-                                f"GPU bắt đầu ngay sau Chunk 0!",
+                                f"GPU bắt đầu sau warmup 3 chunk đầu!",
                                 to_console=True,
                             )
                             rolling_planner = RollingDedupPlanner(
@@ -457,7 +457,7 @@ def run_upscale_pipeline(
                                 decode_threads=2,
                             )
                             rolling_planner.start(
-                                sync_initial_chunks=1,
+                                sync_initial_chunks=3,
                                 extra_fields=plan_extra_meta,
                             )
                             stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
@@ -514,8 +514,8 @@ def run_upscale_pipeline(
                         zero_disk=zero_disk,
                     )
                     plan_extra_meta["nvenc_multipass"] = episode_multipass
-                    if rolling_planner is not None and hasattr(rolling_planner, "_extra_fields") and isinstance(rolling_planner._extra_fields, dict):
-                        rolling_planner._extra_fields["nvenc_multipass"] = episode_multipass
+                    if rolling_planner is not None and hasattr(rolling_planner, "set_extra_fields"):
+                        rolling_planner.set_extra_fields({"nvenc_multipass": episode_multipass})
                     manifest_data["nvenc_multipass"] = episode_multipass
                     manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
                     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -860,7 +860,8 @@ def run_upscale_pipeline(
                                         expected_frames=exp_frames,
                                         fps_num=meta["fps_num"],
                                         fps_den=meta["fps_den"],
-                                        bitrate=bitrate
+                                        bitrate=bitrate,
+                                        multipass=episode_multipass,
                                     )
                                 else:
                                     encode_chunk_hevc(
@@ -868,7 +869,8 @@ def run_upscale_pipeline(
                                         fps=meta["fps"],
                                         output_path=c_seg_out,
                                         bitrate=bitrate,
-                                        fmt=fmt
+                                        fmt=fmt,
+                                        multipass=episode_multipass,
                                     )
                                 return time.time() - t0
                             finally:

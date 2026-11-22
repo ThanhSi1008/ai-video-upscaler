@@ -235,19 +235,44 @@ def test_clean_vietnamese_preserve_dual_retains_real_dual_dashes():
     assert clean_and_normalize_vietnamese(dual, preserve_dual=True) == dual
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "clean_and_normalize_vietnamese(..., preserve_dual=True) (subtrans/writer.py:102-110) "
-        "unconditionally forces '- ' dual-dialogue prefixes on any 2-line text lacking speaker dashes"
-    ),
-)
 def test_clean_vietnamese_preserve_dual_keeps_single_speaker_two_lines():
-    """Lock single-speaker 2-line wrap receiving spurious '- ' speaker dashes under preserve_dual=True."""
+    """Verify single-speaker 2-line wrap does not receive spurious '- ' dashes under preserve_dual=True."""
     single = "Nếu như ngày hôm đó cậu không đến,\ntôi đã không thể vượt qua."
     cleaned = clean_and_normalize_vietnamese(single, preserve_dual=True)
     assert not cleaned.startswith("- ")
     assert "\n- " not in cleaned
+
+    # Dual lines wrapped with HTML/ASS tags still retain speaker dashes
+    tagged_dual = "<i>- Anh đi trước đi.</i>\n{\\an8}– Em theo sau."
+    assert clean_and_normalize_vietnamese(tagged_dual, preserve_dual=True) == "- Anh đi trước đi.\n- Em theo sau."
+
+    # Single dash on first line only (single-speaker continuation) collapses without dash
+    single_dash_wrap = "- Anh đi trước đi,\nhôm nay trời đẹp."
+    assert clean_and_normalize_vietnamese(single_dash_wrap, preserve_dual=True) == "Anh đi trước đi, hôm nay trời đẹp."
+
+
+def test_write_subtitles_uses_preoptimized_cues_and_returns_path(tmp_path, monkeypatch):
+    """Verify preoptimized_cues bypasses duplicate optimize_cues_for_playback and returns Path."""
+    import subtrans.writer as writer_mod
+
+    ssa = pysubs2.SSAFile()
+    ssa.events.append(pysubs2.SSAEvent(start=0, end=2000, text="テスト"))
+    preopt = [Cue(id=1, start=0, end=2000, ja="テスト", vi="Kiểm tra")]
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("optimize_cues_for_playback should not run when preoptimized_cues is supplied")
+
+    monkeypatch.setattr(writer_mod, "optimize_cues_for_playback", _boom)
+
+    out_srt = tmp_path / "preopt.srt"
+    ret_srt = write_subtitles([], ssa, out_srt, output_format="srt", preoptimized_cues=preopt)
+    assert isinstance(ret_srt, Path) and ret_srt == out_srt
+    assert "Kiểm tra" in out_srt.read_text(encoding="utf-8")
+
+    out_ass = tmp_path / "preopt.ass"
+    ret_ass = write_subtitles([], ssa, out_ass, output_format="ass", preoptimized_cues=preopt)
+    assert isinstance(ret_ass, Path) and ret_ass == out_ass
+    assert "Kiểm tra" in out_ass.read_text(encoding="utf-8")
 
 
 

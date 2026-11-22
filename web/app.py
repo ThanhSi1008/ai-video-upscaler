@@ -15,8 +15,11 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 import urllib.parse
+import uuid
 import yaml
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -82,6 +85,7 @@ class SchedulePreviewRequest(BaseModel):
     allow_partial: bool = False
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
+    nvenc_multipass: Optional[str] = None
     zero_disk: bool = True
     use_tensorrt: bool = True
     subs_after_upscale: bool = True
@@ -99,6 +103,16 @@ class SchedulePreviewRequest(BaseModel):
     @classmethod
     def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
         return _validate_no_nul_str(v, "output_dir")
+
+    @field_validator("nvenc_multipass")
+    @classmethod
+    def _validate_mp(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_NVENC_MULTIPASS_POLICIES:
+            raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
+        return norm
 
 
 class StartUpscaleRequest(BaseModel):
@@ -283,6 +297,9 @@ def _mask_secret(raw: str) -> str:
     return f"{val[:6]}...{val[-4:]}"
 
 
+_DOTENV_LOCK = threading.Lock()
+
+
 def _read_dotenv_map(dotenv_path: Path) -> Dict[str, str]:
     """Read KEY=VALUE entries from a local .env file without logging secret values."""
     result: Dict[str, str] = {}
@@ -354,10 +371,17 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
         if val:
             new_lines.append(f"{key_name}={val}")
 
-    tmp_path = dotenv_path.parent / f".env.{os.getpid()}.tmp"
+    tmp_path = dotenv_path.parent / f".env.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
     content = "\n".join(new_lines).rstrip("\n") + ("\n" if new_lines else "")
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, dotenv_path)
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, dotenv_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def _split_gemini_key_tokens(raw: Optional[str]) -> List[str]:
@@ -375,50 +399,57 @@ def _resolve_subtrans_key_slots(
     dotenv_map = _read_dotenv_map(dotenv_path)
     if sub_dotenv_path.is_file():
         for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
-            if sv:
-                dotenv_map[sk] = sv
+            # Match load_dotenv(..., override=False): subtrans/.env presence blocks root .env even when empty
+            dotenv_map[sk] = sv
 
     def _effective_var(name: str) -> tuple[str, str]:
-        if os.environ.get(name) and os.environ[name].strip():
+        if name in os.environ:
             return os.environ[name].strip(), "env"
-        if dotenv_map.get(name) and dotenv_map[name].strip():
+        if name in dotenv_map:
             return dotenv_map[name].strip(), "dotenv"
         return "", ""
 
+    ordered_entries: List[tuple[str, str, str]] = []
+    seen_keys: set[str] = set()
+
+    def _add_entries(toks: List[str], src: str, var_name: str) -> None:
+        for t in toks:
+            if t not in seen_keys:
+                seen_keys.add(t)
+                ordered_entries.append((t, src, var_name))
+
     multi_raw, multi_src = _effective_var("GEMINI_API_KEYS")
     multi_tokens = _split_gemini_key_tokens(multi_raw)
+    _add_entries(multi_tokens, multi_src, "GEMINI_API_KEYS")
 
     prim_raw, prim_src = _effective_var("GEMINI_API_KEY")
     prim_tokens = _split_gemini_key_tokens(prim_raw)
+    _add_entries(prim_tokens, prim_src, "GEMINI_API_KEY")
+
+    prefix_len = len(ordered_entries)
+
+    all_var_names = set(dotenv_map.keys()) | set(os.environ.keys())
+    for extra_name in sorted(k for k in all_var_names if k.startswith("GEMINI_API_KEY_")):
+        e_val, e_src = _effective_var(extra_name)
+        _add_entries(_split_gemini_key_tokens(e_val), e_src, extra_name)
 
     slots_summary: List[Dict[str, Any]] = []
     for idx in (1, 2, 3):
         slot_key_name = f"GEMINI_API_KEY_{idx}"
-        slot_val, slot_src = _effective_var(slot_key_name)
-        slot_tokens = _split_gemini_key_tokens(slot_val)
-
         chosen_val = ""
         chosen_src = ""
         chosen_var = slot_key_name
 
-        # Process env always wins over .env (matching load_dotenv(override=False))
-        if multi_src == "env" and idx - 1 < len(multi_tokens):
-            chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "env", "GEMINI_API_KEYS"
-        elif idx == 1 and prim_src == "env" and prim_tokens:
-            chosen_val, chosen_src, chosen_var = prim_tokens[0], "env", "GEMINI_API_KEY"
-        elif slot_src == "env" and slot_tokens:
-            chosen_val, chosen_src, chosen_var = slot_tokens[0], "env", slot_key_name
-        elif idx >= 2 and prim_src == "env" and idx - 1 < len(prim_tokens):
-            chosen_val, chosen_src, chosen_var = prim_tokens[idx - 1], "env", "GEMINI_API_KEY"
-        # Next check local .env entries in subtrans/config.py precedence order
-        elif multi_src == "dotenv" and idx - 1 < len(multi_tokens):
-            chosen_val, chosen_src, chosen_var = multi_tokens[idx - 1], "dotenv", "GEMINI_API_KEYS"
-        elif idx == 1 and prim_src == "dotenv" and prim_tokens:
-            chosen_val, chosen_src, chosen_var = prim_tokens[0], "dotenv", "GEMINI_API_KEY"
-        elif slot_src == "dotenv" and slot_tokens:
-            chosen_val, chosen_src, chosen_var = slot_tokens[0], "dotenv", slot_key_name
-        elif idx >= 2 and prim_src == "dotenv" and idx - 1 < len(prim_tokens):
-            chosen_val, chosen_src, chosen_var = prim_tokens[idx - 1], "dotenv", "GEMINI_API_KEY"
+        # Align slots 1..3 with ordered_entries when GEMINI_API_KEYS/GEMINI_API_KEY supply prefix tokens;
+        # when absent (P == 0), keep positional GEMINI_API_KEY_1..3 mapping so clearing slot 1 stays unconfigured.
+        if prefix_len > 0:
+            if idx - 1 < len(ordered_entries):
+                chosen_val, chosen_src, chosen_var = ordered_entries[idx - 1]
+        else:
+            slot_val, slot_src = _effective_var(slot_key_name)
+            slot_tokens = _split_gemini_key_tokens(slot_val)
+            if slot_tokens:
+                chosen_val, chosen_src, chosen_var = slot_tokens[0], slot_src, slot_key_name
 
         slots_summary.append(
             {
@@ -431,23 +462,90 @@ def _resolve_subtrans_key_slots(
             }
         )
 
-    ordered_pool: List[str] = []
-    seen_keys: set[str] = set()
+    return slots_summary, len(ordered_entries)
 
-    def _add_tokens(toks: List[str]) -> None:
-        for t in toks:
-            if t not in seen_keys:
-                seen_keys.add(t)
-                ordered_pool.append(t)
 
-    _add_tokens(multi_tokens)
-    _add_tokens(prim_tokens)
-    all_var_names = set(dotenv_map.keys()) | set(os.environ.keys())
-    for extra_name in sorted(k for k in all_var_names if k.startswith("GEMINI_API_KEY_")):
-        e_val, _ = _effective_var(extra_name)
-        _add_tokens(_split_gemini_key_tokens(e_val))
+_SLOT_ENV_KEY_RE = re.compile(r"^GEMINI_API_KEY_([1-9]\d*)$")
 
-    return slots_summary, len(ordered_pool)
+
+def _apply_subtrans_key_edits(
+    existing: Dict[str, str],
+    key_1: Optional[str],
+    key_2: Optional[str],
+    key_3: Optional[str],
+) -> Dict[str, Optional[str]]:
+    """Transform merged .env key entries into normalized GEMINI_API_KEY_1..N slots plus synced GEMINI_API_KEY."""
+    if key_1 is None and key_2 is None and key_3 is None:
+        return {}
+
+    old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
+    old_prim_orig = _split_gemini_key_tokens(existing.get("GEMINI_API_KEY"))
+    old_prim = list(old_prim_orig)
+    legacy_triple_coexist = bool(old_multi and len(old_prim_orig) == 1 and existing.get("GEMINI_API_KEY_1"))
+
+    # Preserve tests/test_web_gui.py:1295: legacy single GEMINI_API_KEY coexisting with
+    # GEMINI_API_KEYS and GEMINI_API_KEY_1 is superseded when Slot 1 is explicitly edited.
+    if legacy_triple_coexist and key_1 is not None:
+        old_prim = []
+
+    prefix_tokens: List[str] = []
+    seen_tokens: set[str] = set()
+    for tok in old_multi + old_prim:
+        if tok not in seen_tokens:
+            seen_tokens.add(tok)
+            prefix_tokens.append(tok)
+    prefix_len = len(prefix_tokens)
+
+    numbered_vars: Dict[int, List[str]] = {}
+    for k, v in existing.items():
+        m = _SLOT_ENV_KEY_RE.match(k)
+        if m:
+            numbered_vars[int(m.group(1))] = _split_gemini_key_tokens(v)
+
+    # Phase 1: Build canonical 1-based slot_table matching get_gemini_api_keys() order.
+    slot_table: Dict[int, str] = {}
+    for idx, tok in enumerate(prefix_tokens, start=1):
+        slot_table[idx] = tok
+
+    for n in sorted(numbered_vars.keys()):
+        # Drop GEMINI_API_KEY_1 only for legacy triple-coexist Slot 1 edits or Edit C's legacy Slot 2 shadow.
+        if (
+            prefix_len > 0
+            and n == 1
+            and (
+                (key_1 is not None and legacy_triple_coexist)
+                or (key_2 is not None and not old_multi and len(old_prim_orig) == 1 and bool(numbered_vars.get(2)))
+            )
+        ):
+            continue
+        for tok in numbered_vars[n]:
+            if tok in seen_tokens:
+                continue
+            seen_tokens.add(tok)
+            target = n
+            while target in slot_table:
+                target += 1
+            slot_table[target] = tok
+
+    # Phase 2: Apply requested Slot 1..3 edits or explicit clears.
+    for slot_idx, raw_val in ((1, key_1), (2, key_2), (3, key_3)):
+        if raw_val is None:
+            continue
+        cleaned = _validate_dotenv_value(raw_val, key_name=f"GEMINI_API_KEY_{slot_idx}")
+        if cleaned:
+            slot_table[slot_idx] = cleaned
+        else:
+            slot_table.pop(slot_idx, None)
+
+    # Phase 3: Materialize normalized .env updates (GEMINI_API_KEYS cleared; GEMINI_API_KEY mirrors Slot 1).
+    updates: Dict[str, Optional[str]] = {
+        "GEMINI_API_KEYS": "",
+        "GEMINI_API_KEY": slot_table.get(1, ""),
+    }
+    all_indices = {1, 2, 3} | set(slot_table.keys()) | set(numbered_vars.keys())
+    for idx in sorted(all_indices):
+        updates[f"GEMINI_API_KEY_{idx}"] = slot_table.get(idx, "")
+    return updates
 
 
 def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
@@ -823,7 +921,10 @@ def _build_mock_gpu_query() -> Callable[[], Dict[str, Any]]:
     return _query
 
 
-def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryHub) -> None:
+def _enable_mock_studio_state(
+    job_manager: JobManager,
+    telemetry_hub: TelemetryHub,
+) -> Dict[str, Callable[[], Dict[str, Any]]]:
     """Attach deterministic simulated active/completed jobs, telemetry ticks, and SSE logs."""
     now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     mock_active_job: Dict[str, Any] = {
@@ -865,16 +966,33 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
         },
     ]
 
+    mock_lock = threading.Lock()
+    tick_counter = {"n": 0}
+    mock_runtime = {"pause_pending": False, "aborted": False}
+    total_chunks = 12
+    total_frames = 34560
+
     orig_get_state = job_manager.get_state
 
     def _mock_get_state() -> Dict[str, Any]:
         real_state = orig_get_state()
         if real_state.get("active_job") is not None:
             return real_state
+        with mock_lock:
+            pause_pending = mock_runtime["pause_pending"]
+            aborted = mock_runtime["aborted"]
         combined_history = list(real_state.get("history") or []) + [dict(h) for h in mock_history]
+        if aborted:
+            return {
+                "status": "idle",
+                "active_job": None,
+                "history": combined_history[:25],
+            }
+        active_copy = dict(mock_active_job)
+        active_copy["status"] = "pausing" if pause_pending else "running"
         return {
-            "status": "running",
-            "active_job": dict(mock_active_job),
+            "status": active_copy["status"],
+            "active_job": active_copy,
             "history": combined_history[:25],
         }
 
@@ -885,16 +1003,14 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
         "vram_total_mib": 12288.0,
     }
 
-    tick_counter = {"n": 0}
-    total_chunks = 12
-    total_frames = 34560
-
     def _mock_read_pipeline_state() -> Dict[str, Any]:
-        n = tick_counter["n"]
-        tick_counter["n"] += 1
-        completed_chunks = min(total_chunks - 1, 4 + (n % 5))
-        done_frames = min(total_frames, completed_chunks * (total_frames // total_chunks) + (n % 6) * 120)
+        with mock_lock:
+            n = tick_counter["n"]
+            pause_pending = mock_runtime["pause_pending"]
+            aborted = mock_runtime["aborted"]
+        completed_chunks = min(total_chunks - 1, 4 + n)
         chunk_frames = total_frames // total_chunks
+        done_frames = min(total_frames, completed_chunks * chunk_frames)
         # Mirror RunLogger: emit 0-based entries solely for completed chunks.
         chunks = [
             {
@@ -908,12 +1024,13 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
             for idx in range(completed_chunks)
         ]
         latest_fps = round(41.2 + (n % 4) * 0.4, 1)
+        stage_val = "paused" if aborted else "upscaling"
         return {
             "active_source": "web",
-            "gpu_lock": {"locked": True, "pid": 90420, "mock": True},
-            "graceful_pause_pending": False,
-            "effective_stage": "upscaling",
-            "pid_alive": True,
+            "gpu_lock": {"locked": not aborted, "pid": 90420, "mock": True},
+            "graceful_pause_pending": pause_pending,
+            "effective_stage": stage_val,
+            "pid_alive": not aborted,
             "mock_mode": True,
             "live": {
                 "video_name": "[Demo] Anime_EP02 (1080p).mkv",
@@ -922,7 +1039,7 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
                 "job_type": "upscale",
                 "started_at": now_str,
                 "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                "stage": "upscaling",
+                "stage": stage_val,
                 "stage_detail": f"Mock TensorRT 10.16 FP16 Zero-Disk 4K ({completed_chunks + 1}/{total_chunks} chunks)",
                 "model_id": "animevideov3",
                 "zero_disk": True,
@@ -944,37 +1061,90 @@ def _enable_mock_studio_state(job_manager: JobManager, telemetry_hub: TelemetryH
         }
 
     def _mock_logs_with_cursor(max_lines: int = 120) -> tuple[List[str], Dict[str, Any]]:
-        step = tick_counter["n"]
+        with mock_lock:
+            step = tick_counter["n"]
+        chunk_num = min(total_chunks, 4 + step)
         lines = [
-            f"[mock] Loaded TensorRT 10.16 FP16 engine: animevideov3 (batch=8, zero_disk=True)",
-            f"[mock] Dedup DIS plan: 18240/34560 unique frames (-47.2% savings)",
-            f"[mock] Chunk {4 + (step % 5)}/12: 41.2 fps | p010le Main10 | VRAM 6.0/12.0 GB",
-            f"[mock] Subtrans EP01 completed offline QA: pronoun_consistency=100% (0 CJK leaks)",
+            "[mock] Loaded TensorRT 10.16 FP16 engine: animevideov3 (batch=8, zero_disk=True)",
+            "[mock] Dedup DIS plan: 18240/34560 unique frames (-47.2% savings)",
+            f"[mock] Chunk {chunk_num}/12: 41.2 fps | p010le Main10 | VRAM 6.0/12.0 GB",
+            "[mock] Subtrans EP01 completed offline QA: pronoun_consistency=100% (0 CJK leaks)",
         ][-max_lines:]
-        return lines, {"path": "mock://telemetry.log", "prefix_len": len(lines), "sig": "mock", "offset": step}
+        return lines, {"path": "mock://telemetry.log", "prefix_len": 1, "sig": "mock", "offset": step}
 
     def _mock_incremental_logs(cursor: Optional[Dict[str, Any]]) -> tuple[List[str], Dict[str, Any]]:
-        step = tick_counter["n"]
-        prev_off = int((cursor or {}).get("offset") or 0)
+        with mock_lock:
+            step = tick_counter["n"]
+        cur = cursor if isinstance(cursor, dict) else {}
+        prev_off = int(cur.get("offset") or 0) if cur.get("path") == "mock://telemetry.log" else 0
         if step <= prev_off:
-            return [], dict(cursor or {"path": "mock://telemetry.log", "prefix_len": 0, "sig": "mock", "offset": step})
-        line = f"[mock] SSE tick #{step}: chunk {4 + (step % 5)}/12 @ 41.{step % 6} fps | temp 62C"
+            return [], {
+                "path": "mock://telemetry.log",
+                "prefix_len": 1,
+                "sig": "mock",
+                "offset": prev_off,
+                "reset": False,
+            }
+        chunk_num = min(total_chunks, 4 + step)
+        line = f"[mock] SSE tick #{step}: chunk {chunk_num}/12 @ 41.{step % 6} fps | temp 62C"
         return [line], {"path": "mock://telemetry.log", "prefix_len": 1, "sig": "mock", "offset": step, "reset": False}
 
+    orig_poll_tick_sync = telemetry_hub._poll_tick_sync
+
+    def _mock_poll_tick_sync() -> Dict[str, Any]:
+        with mock_lock:
+            tick_counter["n"] += 1
+        return orig_poll_tick_sync()
+
+    def _mock_pause_graceful() -> Dict[str, Any]:
+        with mock_lock:
+            mock_runtime["pause_pending"] = True
+        return {"ok": True, "graceful_pause_pending": True, "mock": True}
+
+    def _mock_clear_pause() -> Dict[str, Any]:
+        with mock_lock:
+            mock_runtime["pause_pending"] = False
+        return {"ok": True, "graceful_pause_pending": False, "mock": True}
+
+    def _mock_abort_job() -> Dict[str, Any]:
+        with mock_lock:
+            mock_runtime["aborted"] = True
+            mock_runtime["pause_pending"] = False
+        return {
+            "ok": True,
+            "aborted_pid": mock_active_job["pid"],
+            "status": "aborted",
+            "mock": True,
+            "message": f"Đã dừng tiến trình Mock Web Job (PID={mock_active_job['pid']}).",
+        }
+
+    with telemetry_hub._log_cursor_lock:
+        telemetry_hub._last_log_cursor = {
+            "path": "mock://telemetry.log",
+            "prefix_len": 1,
+            "sig": "mock",
+            "offset": 0,
+        }
     telemetry_hub.read_pipeline_state = _mock_read_pipeline_state  # type: ignore[method-assign]
     telemetry_hub.read_recent_logs_with_cursor = _mock_logs_with_cursor  # type: ignore[method-assign]
     telemetry_hub._read_incremental_logs_from_cursor = _mock_incremental_logs  # type: ignore[method-assign]
+    telemetry_hub._poll_tick_sync = _mock_poll_tick_sync  # type: ignore[method-assign]
+    return {
+        "pause_graceful": _mock_pause_graceful,
+        "clear_pause": _mock_clear_pause,
+        "abort": _mock_abort_job,
+    }
 
 
 def create_app(
-    workspace_root: Optional[Path] = None,
-    gpu_query_fn: Optional[Callable[[], Dict[str, Any]]] = None,
-    popen_factory: Optional[Callable[..., Any]] = None,
-    open_media_fn: Optional[Callable[[Path, bool], str]] = None,
-    frame_extract_fn: Optional[Callable[[Path, float, Path], None]] = None,
-    allow_lan: bool = False,
-    allow_lan_control: bool = False,
-    mock_mode: bool = False,
+    workspace_root: Optional[Path]=None,
+    gpu_query_fn: Optional[Callable[[], Dict[str, Any]]]=None,
+    popen_factory: Optional[Callable[..., Any]]=None,
+    open_media_fn: Optional[Callable[[Path, bool], str]]=None,
+    frame_extract_fn: Optional[Callable[[Path, float, Path], None]]=None,
+    allow_lan: bool=False,
+    allow_lan_control: bool=False,
+    mock_mode: bool=False,
 ) -> FastAPI:
     """Create the FastAPI monitoring app bound to workspace_root."""
     root = Path(workspace_root or Path(__file__).resolve().parent.parent).resolve()
@@ -988,16 +1158,30 @@ def create_app(
         job_state_provider=job_manager.get_state,
         history_size=120,
     )
-    if is_mock:
-        _enable_mock_studio_state(job_manager, telemetry_hub)
+    mock_controls = _enable_mock_studio_state(job_manager, telemetry_hub) if is_mock else None
     media_opener = open_media_fn or _default_open_media
     extractor = frame_extract_fn or _default_extract_frame
 
+    def _cleanup_web_compare_dir() -> None:
+        compare_dir = root / "scratch" / "web_compare"
+        if not compare_dir.is_dir():
+            return
+        try:
+            for png in compare_dir.glob("*.png"):
+                try:
+                    png.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        _cleanup_web_compare_dir()
         try:
             yield
         finally:
+            _cleanup_web_compare_dir()
             await telemetry_hub.shutdown()
 
     app = FastAPI(
@@ -1257,6 +1441,8 @@ def create_app(
 
     @app.post("/api/jobs/pause-graceful")
     def api_pause_graceful() -> Dict[str, Any]:
+        if is_mock and popen_factory is None and mock_controls is not None:
+            return mock_controls["pause_graceful"]()
         try:
             return job_manager.request_graceful_pause()
         except RuntimeError as exc:
@@ -1264,10 +1450,14 @@ def create_app(
 
     @app.post("/api/jobs/clear-pause")
     def api_clear_pause() -> Dict[str, Any]:
+        if is_mock and popen_factory is None and mock_controls is not None:
+            return mock_controls["clear_pause"]()
         return job_manager.clear_graceful_pause()
 
     @app.post("/api/jobs/abort")
     def api_abort_job() -> Dict[str, Any]:
+        if is_mock and popen_factory is None and mock_controls is not None:
+            return mock_controls["abort"]()
         return job_manager.abort_job()
 
     @app.post("/api/open-media")
@@ -1809,7 +1999,8 @@ def create_app(
         reset_seconds = max(0, int((next_pt - now_pt).total_seconds()))
 
         # Masked API key slot statuses mirroring subtrans/config.py precedence
-        key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
+        with _DOTENV_LOCK:
+            key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
         req_client = getattr(request, "client", None)
         req_client_host = (getattr(req_client, "host", "") or "").lower()
         req_host_name, _, _ = _parse_host_header(request.headers.get("host"))
@@ -1965,79 +2156,148 @@ def create_app(
         }
 
     @app.put("/api/subtrans/api-keys")
-    def api_update_subtrans_keys(req: UpdateApiKeysRequest) -> Dict[str, Any]:
+    def api_update_subtrans_keys(request: Request, req: UpdateApiKeysRequest) -> Dict[str, Any]:
         """Update or clear GEMINI_API_KEY_1..3 in local .env without logging or returning raw keys."""
         dotenv_path = root / ".env"
         sub_dotenv_path = root / "subtrans" / ".env"
-        existing = _read_dotenv_map(dotenv_path)
-        if sub_dotenv_path.is_file():
-            for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
-                if sv:
+
+        with _DOTENV_LOCK:
+            existing = _read_dotenv_map(dotenv_path)
+            if sub_dotenv_path.is_file():
+                for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
                     existing[sk] = sv
 
-        updates: Dict[str, Optional[str]] = {
-            "GEMINI_API_KEY_1": req.key_1,
-            "GEMINI_API_KEY_2": req.key_2,
-            "GEMINI_API_KEY_3": req.key_3,
-        }
+            try:
+                updates = _apply_subtrans_key_edits(existing, req.key_1, req.key_2, req.key_3)
+                if updates:
+                    _write_dotenv_keys(dotenv_path, updates)
+                    if sub_dotenv_path.is_file():
+                        sub_existing = _read_dotenv_map(sub_dotenv_path)
+                        has_gemini_in_sub = any(k.startswith("GEMINI_API_KEY") for k in sub_existing)
+                        sub_updates = (
+                            updates
+                            if has_gemini_in_sub
+                            else {k: v for k, v in updates.items() if k in sub_existing and v is not None}
+                        )
+                        if sub_updates:
+                            _write_dotenv_keys(sub_dotenv_path, sub_updates)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
 
-        # Split legacy combined GEMINI_API_KEYS or multi-token GEMINI_API_KEY into numbered slots on edit
-        has_any_edit = any(v is not None for v in (req.key_1, req.key_2, req.key_3))
-        if has_any_edit and existing.get("GEMINI_API_KEYS"):
-            old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
-            for idx in range(1, max(4, len(old_multi) + 1)):
-                k_name = f"GEMINI_API_KEY_{idx}"
-                if idx <= 3:
-                    if updates[k_name] is None and not existing.get(k_name) and idx - 1 < len(old_multi):
-                        updates[k_name] = old_multi[idx - 1]
-                elif k_name not in updates and not existing.get(k_name) and idx - 1 < len(old_multi):
-                    updates[k_name] = old_multi[idx - 1]
-            updates["GEMINI_API_KEYS"] = ""
+            # Leave Web Studio os.environ untouched so subprocesses load .env cleanly and UI slot controls stay accurate
+            slots_summary, active_key_count = _resolve_subtrans_key_slots(dotenv_path, key_id_fn=compute_key_id)
 
-        old_prim = _split_gemini_key_tokens(existing.get("GEMINI_API_KEY"))
-        if has_any_edit and len(old_prim) > 1:
-            for idx in range(1, max(4, len(old_prim) + 1)):
-                k_name = f"GEMINI_API_KEY_{idx}"
-                if idx == 1:
-                    if updates[k_name] is None:
-                        updates[k_name] = old_prim[0]
-                elif idx <= 3:
-                    if updates[k_name] is None and not existing.get(k_name) and idx - 1 < len(old_prim):
-                        updates[k_name] = old_prim[idx - 1]
-                elif k_name not in updates and not existing.get(k_name) and idx - 1 < len(old_prim):
-                    updates[k_name] = old_prim[idx - 1]
-            eff_slot_1 = (
-                req.key_1.strip()
-                if req.key_1 is not None
-                else str(updates["GEMINI_API_KEY_1"] or old_prim[0]).strip()
-            )
-            updates["GEMINI_API_KEY"] = eff_slot_1
-        elif req.key_1 is not None:
-            clean_1 = req.key_1.strip()
-            updates["GEMINI_API_KEY"] = clean_1
-
-        try:
-            _write_dotenv_keys(dotenv_path, updates)
-            if sub_dotenv_path.is_file():
-                sub_existing = _read_dotenv_map(sub_dotenv_path)
-                has_gemini_in_sub = any(k.startswith("GEMINI_API_KEY") for k in sub_existing)
-                sub_updates = (
-                    updates
-                    if has_gemini_in_sub
-                    else {k: v for k, v in updates.items() if k in sub_existing and v is not None}
-                )
-                if sub_updates:
-                    _write_dotenv_keys(sub_dotenv_path, sub_updates)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
-
-        # Leave Web Studio os.environ untouched so subprocesses load .env cleanly and UI slot controls stay accurate
-        slots_summary, active_key_count = _resolve_subtrans_key_slots(dotenv_path, key_id_fn=compute_key_id)
+        req_client = getattr(request, "client", None)
+        req_client_host = (getattr(req_client, "host", "") or "").lower()
+        req_host_name, _, _ = _parse_host_header(request.headers.get("host"))
+        if not _is_loopback_request(req_client_host, req_host_name):
+            for s_entry in slots_summary:
+                s_entry["masked"] = ""
         return {
             "ok": True,
             "key_slots": slots_summary,
             "configured_count": active_key_count,
         }
+
+    audits_cache_lock = threading.Lock()
+    audits_cache: Dict[str, Any] = {
+        "key": None,
+        "stat_sig": None,
+        "expires_at": 0.0,
+        "payload": None,
+    }
+
+    def _temp_dir_sig(scope_label: str, temp_path: Path, dir_mtime_ns: int) -> tuple[Any, ...]:
+        sub_parts: List[Any] = []
+        try:
+            with os.scandir(temp_path) as t_it:
+                for t_entry in t_it:
+                    tname = t_entry.name
+                    if tname in ("upscaled_segs", "raw_segs"):
+                        try:
+                            seg_st = t_entry.stat(follow_symlinks=False)
+                            seg_count = 0
+                            with os.scandir(t_entry.path) as seg_it:
+                                for _ in seg_it:
+                                    seg_count += 1
+                            sub_parts.append((tname, seg_st.st_mtime_ns, seg_count))
+                        except OSError:
+                            pass
+                    elif tname in ("manifest.json", "plan.json"):
+                        try:
+                            mst = t_entry.stat(follow_symlinks=False)
+                            sub_parts.append((tname, mst.st_mtime_ns, mst.st_size))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        sub_parts.sort()
+        return (scope_label, temp_path.name, dir_mtime_ns, tuple(sub_parts))
+
+    def _collect_audits_stat_sig(
+        out_dirs: Sequence[Path],
+    ) -> tuple[Any, ...]:
+        """Collect lightweight os.scandir stat signature for /api/audits TTL cache invalidation."""
+        dir_sigs: List[Any] = []
+        audit_sigs: List[Any] = []
+        temp_sigs: List[Any] = []
+        try:
+            with os.scandir(root) as it:
+                for entry in it:
+                    if entry.name.startswith(".temp_") and entry.is_dir(follow_symlinks=False):
+                        try:
+                            temp_sigs.append(_temp_dir_sig("root", Path(entry.path), entry.stat(follow_symlinks=False).st_mtime_ns))
+                        except OSError:
+                            temp_sigs.append(("root", entry.name, 0, ()))
+        except OSError:
+            pass
+
+        for base_out in out_dirs:
+            search_targets: List[Path] = [base_out]
+            try:
+                base_st = base_out.stat()
+                dir_sigs.append((str(base_out), base_st.st_mtime_ns))
+                with os.scandir(base_out) as it:
+                    for entry in it:
+                        ename = entry.name
+                        elow = ename.lower()
+                        try:
+                            est = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if ename.startswith(".temp_"):
+                                temp_sigs.append(_temp_dir_sig(str(base_out), Path(entry.path), est.st_mtime_ns))
+                            elif elow in {"audit", "cast"} or not ename.startswith("."):
+                                dir_sigs.append((entry.path, est.st_mtime_ns))
+                                search_targets.append(Path(entry.path))
+                        elif elow.endswith((".audit.json", ".audit.md", ".cast.yaml")):
+                            audit_sigs.append((entry.path, est.st_mtime_ns, est.st_size))
+            except OSError:
+                continue
+
+            for sub_dir in search_targets[1:]:
+                try:
+                    with os.scandir(sub_dir) as sub_it:
+                        for sub_entry in sub_it:
+                            sname = sub_entry.name
+                            slow = sname.lower()
+                            try:
+                                sst = sub_entry.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            if sub_entry.is_dir(follow_symlinks=False):
+                                if sname.startswith(".temp_"):
+                                    temp_sigs.append(_temp_dir_sig(str(sub_dir), Path(sub_entry.path), sst.st_mtime_ns))
+                            elif slow.endswith((".audit.json", ".audit.md", ".cast.yaml")):
+                                audit_sigs.append((sub_entry.path, sst.st_mtime_ns, sst.st_size))
+                except OSError:
+                    continue
+
+        dir_sigs.sort()
+        audit_sigs.sort()
+        temp_sigs.sort()
+        return (tuple(dir_sigs), tuple(audit_sigs), tuple(temp_sigs))
 
     @app.get("/api/audits")
     def api_list_audits(output_dir: Optional[str] = Query(default=None)) -> Dict[str, Any]:
@@ -2047,6 +2307,40 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            job_state = job_manager.get_state()
+        except Exception:
+            job_state = {}
+        active_j = job_state.get("active_job") if isinstance(job_state.get("active_job"), dict) else {}
+        hist_list = job_state.get("history") if isinstance(job_state.get("history"), list) else []
+        latest_h = hist_list[0] if (hist_list and isinstance(hist_list[0], dict)) else {}
+        job_sig = (
+            job_state.get("status"),
+            active_j.get("job_id"),
+            latest_h.get("job_id"),
+            latest_h.get("finished_at"),
+        )
+        cache_key = (
+            (output_dir or "").strip(),
+            is_mock,
+            tuple(str(d) for d in out_dirs),
+            job_sig,
+        )
+        stat_sig = _collect_audits_stat_sig(out_dirs)
+        now_mono = time.monotonic()
+        with audits_cache_lock:
+            cached_payload = audits_cache["payload"]
+            if (
+                cached_payload is not None
+                and now_mono < audits_cache["expires_at"]
+                and audits_cache["key"] == cache_key
+                and audits_cache["stat_sig"] == stat_sig
+            ):
+                return {
+                    "audits": list(cached_payload["audits"]),
+                    "checkpoints": list(cached_payload["checkpoints"]),
+                }
 
         audits: List[Dict[str, Any]] = []
         discovered_entries: List[tuple[Path, Path]] = []
@@ -2260,9 +2554,18 @@ def create_app(
                 "mock_mode": True,
             })
 
-        return {
+        result_payload = {
             "audits": audits,
             "checkpoints": scan_temp_checkpoints(root, extra_dirs=out_dirs),
+        }
+        with audits_cache_lock:
+            audits_cache["key"] = cache_key
+            audits_cache["stat_sig"] = stat_sig
+            audits_cache["expires_at"] = time.monotonic() + 1.5
+            audits_cache["payload"] = result_payload
+        return {
+            "audits": list(result_payload["audits"]),
+            "checkpoints": list(result_payload["checkpoints"]),
         }
 
     @app.get("/api/audits/detail")

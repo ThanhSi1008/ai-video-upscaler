@@ -222,7 +222,7 @@ function bootstrapStudio() {
     try {
       await apiFetch("/api/jobs/pause-graceful", { method: "POST" });
       showToast(
-        "Đã đặt cờ Dừng êm: Pipeline sẽ hoàn tất nốt chunk 8s hiện tại, bảo toàn checkpoint và tạm dừng sạch.",
+        "Đã đặt cờ Dừng êm: Pipeline sẽ hoàn tất nốt chunk 24s hiện tại, bảo toàn checkpoint và tạm dừng sạch.",
         "info"
       );
       fetchSnapshotFallback();
@@ -476,7 +476,7 @@ function bootstrapStudio() {
     if (chunkSummary) {
       chunkSummary.textContent =
         totChunks > 0
-          ? `${doneChunks} / ${totChunks} phân đoạn 8s hoàn tất`
+          ? `${doneChunks} / ${totChunks} phân đoạn 24s hoàn tất`
           : "Chưa có phân đoạn hoạt động";
     }
     if (chunkHeatmap) {
@@ -498,7 +498,7 @@ function bootstrapStudio() {
             el("p", {
               className: "empty-hint",
               textContent:
-                "Bản đồ tiến độ từng chunk 8s sẽ hiển thị ngay khi tập phim bắt đầu chạy.",
+                "Bản đồ tiến độ từng chunk 24s sẽ hiển thị ngay khi tập phim bắt đầu chạy.",
             })
           );
         } else {
@@ -507,7 +507,7 @@ function bootstrapStudio() {
           chunkHeatmap.append(
             el("p", {
               className: "visually-hidden",
-              textContent: `Tổng ${totChunks} phân đoạn 8s: ${doneSet.size} hoàn tất${activeLabel}, ${pendingCount} chờ xử lý.`,
+              textContent: `Tổng ${totChunks} phân đoạn 24s: ${doneSet.size} hoàn tất${activeLabel}, ${pendingCount} chờ xử lý.`,
             })
           );
           for (let idx = 0; idx < totChunks; idx++) {

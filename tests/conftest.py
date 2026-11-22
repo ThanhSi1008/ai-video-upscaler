@@ -3,7 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_rate_limiters():
+    """Clear any already-imported subtrans RateLimiter registry without adding import overhead."""
+    mod = sys.modules.get("subtrans.throttle")
+    if mod is not None:
+        mod.clear_rate_limiter_registry()
+    yield
+    mod = sys.modules.get("subtrans.throttle")
+    if mod is not None:
+        mod.clear_rate_limiter_registry()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

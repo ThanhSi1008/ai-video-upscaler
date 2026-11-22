@@ -155,13 +155,6 @@ def test_queue_retry_succeeds_at_end_of_queue(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("extra_args", [[], ["-s", "8"]])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "upscale.py:1295-1317 retry pass uses args.segment instead of eff_segment_time "
-        "and omits nvenc_multipass and segment_time_explicit"
-    ),
-)
 def test_queue_retry_preserves_effective_segment_multipass_and_explicit_flag(
     monkeypatch, tmp_path, extra_args
 ):
@@ -205,4 +198,192 @@ def test_queue_retry_preserves_effective_segment_multipass_and_explicit_flag(
     assert call2["segment_time"] == call1["segment_time"]
     assert call2["nvenc_multipass"] == "qres"
     assert call2["segment_time_explicit"] == call1["segment_time_explicit"]
+
+
+@pytest.mark.parametrize("style", ["explicit", "kwargs"])
+@pytest.mark.parametrize("override_flag", [None, "--sub-offset-ms", "--sub-offset-ms=500"])
+def test_subs_pending_restores_or_overrides_piecewise_ja_offsets(
+    monkeypatch, tmp_path, style, override_flag
+):
+    """Verify --subs-pending forwards piecewise_ja_offsets unless overridden by --sub-offset-ms."""
+    from pathlib import Path
+    import subtrans.pipeline as sub_pipe_mod
+    import upscale
+
+    ja_srt = tmp_path / "ep1.ja.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nテスト\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pw_segments = [
+        {"until_ms": 90000, "offset_ms": 0},
+        {"from_ms": 90000, "offset_ms": -10000},
+    ]
+    pending_record = {
+        "base_name": "ep1_4K",
+        "ja_path": str(ja_srt),
+        "output_dir": str(out_dir),
+        "sub_offset_ms": 0,
+        "piecewise_ja_offsets": pw_segments,
+    }
+    captured_runs = []
+
+    class _PipelineExplicit:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(
+            self,
+            ja_path,
+            en_path=None,
+            output_basename=None,
+            glossary_path=None,
+            subs_upgrade=False,
+            sub_offset_ms=0,
+            auto_offset=False,
+            sound_cues="drop",
+            video_path=None,
+            prefer_whisper=False,
+            piecewise_ja_offsets=None,
+        ):
+            captured_runs.append({
+                "sub_offset_ms": sub_offset_ms,
+                "auto_offset": auto_offset,
+                "piecewise_ja_offsets": piecewise_ja_offsets,
+            })
+            out_srt = Path(out_dir) / f"{output_basename}.vi.srt"
+            out_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nThu\n", encoding="utf-8")
+            return {"subtitle_path": str(out_srt)}
+
+    class _PipelineKwargs:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, **kwargs):
+            captured_runs.append(dict(kwargs))
+            out_srt = Path(out_dir) / f"{kwargs['output_basename']}.vi.srt"
+            out_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nThu\n", encoding="utf-8")
+            return {"subtitle_path": str(out_srt)}
+
+    monkeypatch.setattr(
+        sub_pipe_mod,
+        "TranslationPipeline",
+        _PipelineExplicit if style == "explicit" else _PipelineKwargs,
+    )
+    monkeypatch.setattr(upscale, "load_pending_subs", lambda: [dict(pending_record)])
+    monkeypatch.setattr(upscale, "remove_pending_sub", lambda *_a, **_kw: None)
+
+    argv = ["upscale.py", "--subs-pending", "-o", str(out_dir), "--no-embed", "--dry-run"]
+    if override_flag == "--sub-offset-ms":
+        argv.extend(["--sub-offset-ms", "500"])
+    elif override_flag == "--sub-offset-ms=500":
+        argv.append("--sub-offset-ms=500")
+    monkeypatch.setattr("sys.argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 0
+    assert len(captured_runs) == 1
+    run_call = captured_runs[0]
+    if override_flag is None:
+        assert run_call["sub_offset_ms"] == 0
+        assert run_call["auto_offset"] is False
+        assert run_call["piecewise_ja_offsets"] == pw_segments
+    else:
+        assert run_call["sub_offset_ms"] == 500
+        assert run_call["auto_offset"] is True
+        assert run_call.get("piecewise_ja_offsets") is None
+
+
+@pytest.mark.parametrize("quality_args,expected_quality", [
+    ([], "normal"),
+    (["--subs-quality", "high"], "high"),
+    (["--subs-quality=high"], "high"),
+])
+def test_subs_pending_honors_subs_quality_override_forms(
+    monkeypatch, tmp_path, quality_args, expected_quality
+):
+    """Verify --subs-pending honors both --subs-quality high and --subs-quality=high overrides."""
+    from pathlib import Path
+    import subtrans.pipeline as sub_pipe_mod
+    import upscale
+
+    ja_srt = tmp_path / "ep_qual.ja.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nテスト\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pending_record = {
+        "base_name": "ep_qual_4K",
+        "ja_path": str(ja_srt),
+        "output_dir": str(out_dir),
+        "subs_quality": "normal",
+        "sub_offset_ms": 0,
+    }
+    captured_qualities = []
+
+    class _StubPipeline:
+        def __init__(self, *args, **kwargs):
+            captured_qualities.append(kwargs.get("subs_quality"))
+
+        def run(self, **kwargs):
+            out_srt = Path(out_dir) / f"{kwargs['output_basename']}.vi.srt"
+            out_srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nThu\n", encoding="utf-8")
+            return {"subtitle_path": str(out_srt)}
+
+    monkeypatch.setattr(sub_pipe_mod, "TranslationPipeline", _StubPipeline)
+    monkeypatch.setattr(upscale, "load_pending_subs", lambda: [dict(pending_record)])
+    monkeypatch.setattr(upscale, "remove_pending_sub", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["upscale.py", "--subs-pending", "-o", str(out_dir), "--no-embed", "--dry-run", *quality_args],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 0
+    assert captured_qualities == [expected_quality]
+
+
+@pytest.mark.parametrize("halt_mode", ["graceful_pause", "allow_partial_deadline"])
+def test_queue_retry_pass_skipped_after_graceful_pause_or_allow_partial_halt(
+    monkeypatch, tmp_path, halt_mode
+):
+    """Verify [RETRY PASS] does not run after graceful pause or --allow-partial queue halt."""
+    import upscale
+
+    ep1 = tmp_path / "ep1.mkv"
+    ep2 = tmp_path / "ep2.mkv"
+    ep1.touch()
+    ep2.touch()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    argv = ["upscale.py", "--queue", str(ep1), str(ep2), "-o", str(out_dir), "--no-subs", "--benchmark-mode"]
+    if halt_mode == "allow_partial_deadline":
+        argv.append("--allow-partial")
+    monkeypatch.setattr("sys.argv", argv)
+
+    called = []
+    paused_state = {"active": False}
+
+    def fake_run_upscale(input_path, **kwargs):
+        name = os.path.basename(input_path)
+        called.append(name)
+        if name == "ep1.mkv":
+            raise FailedResumableError("ENOSPC simulated", chunk_idx=1, up_segs_dir=str(tmp_path / "up1"))
+        if halt_mode == "graceful_pause":
+            paused_state["active"] = True
+        up2 = out_dir / ".temp_ep2" / "upscaled_segs"
+        up2.mkdir(parents=True, exist_ok=True)
+        return str(up2)
+
+    monkeypatch.setattr(upscale, "run_upscale_pipeline", fake_run_upscale)
+    monkeypatch.setattr(upscale, "was_graceful_paused", lambda: paused_state["active"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 1
+    assert called == ["ep1.mkv", "ep2.mkv"]
 

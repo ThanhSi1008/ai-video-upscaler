@@ -188,15 +188,8 @@ class TestAllowPartial(unittest.TestCase):
         self.assertEqual(audit["status"], "PASS", f"Mux audit failed: {audit}")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "upscale.py:1242 omits break on allow-partial pause and upscale.py:152-153 "
-        "wraps past HH:MM deadline +1 day for subsequent queue episodes"
-    ),
-)
 def test_queue_stops_after_allow_partial_pause_without_deadline_day_wrap(monkeypatch, tmp_path):
-    """Lock queue continuation + HH:MM +1 day wrap bug after allow-partial pauses ep2."""
+    """Verify queue stops cleanly after allow-partial pause without wrapping HH:MM deadline +1 day."""
     out_dir = tmp_path / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
     ep1 = tmp_path / "ep1.mkv"
@@ -211,6 +204,22 @@ def test_queue_stops_after_allow_partial_pause_without_deadline_day_wrap(monkeyp
         @classmethod
         def now(cls, tz=None):
             return clock["now"]
+
+    class _NoOpPreflight:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def mark_main_started(self, _vid):
+            pass
+
+        def wait_for_video(self, _vid, timeout=None):
+            return True
+
+        def stop(self):
+            pass
 
     called_inputs = []
 
@@ -229,6 +238,7 @@ def test_queue_stops_after_allow_partial_pause_without_deadline_day_wrap(monkeyp
         out3.touch()
         return str(out3)
 
+    monkeypatch.setattr("src.scheduler.BackgroundQueuePreflightManager", _NoOpPreflight)
     monkeypatch.setattr(upscale, "datetime", _FakeDatetime)
     monkeypatch.setattr(upscale, "probe_video", lambda _p: {"nb_frames": 28800, "duration": 1200.0, "fps": 24.0})
     monkeypatch.setattr("src.scheduler.probe_video", lambda _p: {"nb_frames": 28800, "duration": 1200.0, "fps": 24.0})
@@ -250,6 +260,71 @@ def test_queue_stops_after_allow_partial_pause_without_deadline_day_wrap(monkeyp
 
     assert exc_info.value.code == 1
     assert "ep3.mkv" not in called_inputs
+
+
+def test_queue_stops_when_ep1_finishes_past_deadline_without_day_wrap(monkeypatch, tmp_path):
+    """Verify anchored session_deadline_dt stops ep2 when ep1 finishes past HH:MM even with --allow-partial."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ep1 = tmp_path / "ep1.mkv"
+    ep2 = tmp_path / "ep2.mkv"
+    ep1.touch()
+    ep2.touch()
+
+    clock = {"now": datetime(2026, 11, 22, 6, 59, 0)}
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    class _NoOpPreflight:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def mark_main_started(self, _vid):
+            pass
+
+        def wait_for_video(self, _vid, timeout=None):
+            return True
+
+        def stop(self):
+            pass
+
+    called_inputs = []
+
+    def _fake_run_upscale(input_path, **kwargs):
+        called_inputs.append(Path(input_path).name)
+        clock["now"] = datetime(2026, 11, 22, 7, 1, 0)
+        out1 = out_dir / "ep1_4K.mkv"
+        out1.touch()
+        return str(out1)
+
+    monkeypatch.setattr("src.scheduler.BackgroundQueuePreflightManager", _NoOpPreflight)
+    monkeypatch.setattr(upscale, "datetime", _FakeDatetime)
+    monkeypatch.setattr(upscale, "probe_video", lambda _p: {"nb_frames": 28800, "duration": 1200.0, "fps": 24.0})
+    monkeypatch.setattr("src.scheduler.probe_video", lambda _p: {"nb_frames": 28800, "duration": 1200.0, "fps": 24.0})
+    monkeypatch.setattr(upscale, "run_upscale_pipeline", _fake_run_upscale)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "upscale.py",
+            "--queue", str(ep1), str(ep2),
+            "--deadline", "07:00",
+            "--allow-partial",
+            "--no-subs",
+            "-o", str(out_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 1
+    assert called_inputs == ["ep1.mkv"]
 
 
 if __name__ == "__main__":

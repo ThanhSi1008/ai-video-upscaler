@@ -261,16 +261,12 @@ def verify_trt_engine_sha256_sidecar(
     engine_path: str,
     expected_weights_sha256: Optional[str] = None,
 ) -> bool:
-    """
-    Xác thực tính toàn vẹn file .engine qua sidecar <engine_path>.sha256 (nếu có).
-    Trả về False nếu file engine rỗng/thiếu, sidecar hỏng hoặc mã băm engine/weights không khớp.
-    Nếu file .engine tồn tại hợp lệ từ trước khi có sidecar (chưa có .sha256), trả về True để tương thích ngược.
-    """
+    """Verify .engine integrity against its required .sha256 sidecar and optional weights SHA-256."""
     if not os.path.exists(engine_path) or os.path.getsize(engine_path) == 0:
         return False
     sidecar_path = f"{engine_path}.sha256"
     if not os.path.exists(sidecar_path):
-        return True
+        return False
     try:
         raw = open(sidecar_path, "r", encoding="utf-8").read().strip()
         if not raw:
@@ -286,7 +282,7 @@ def verify_trt_engine_sha256_sidecar(
             return False
         if _compute_file_sha256(engine_path) != rec_eng:
             return False
-        if expected_weights_sha256 and rec_weights:
+        if expected_weights_sha256:
             if rec_weights != str(expected_weights_sha256).strip().lower():
                 return False
         return True
@@ -724,6 +720,7 @@ def get_hybrid_engine_or_wrapper(
                     or os.path.getsize(engine_path) == 0
                     or not verify_trt_engine_sha256_sidecar(engine_path, expected_weights_sha256=weights_sha256)
                 )
+                built = None
                 if needs_build:
                     if os.path.exists(engine_path) and os.path.exists(f"{engine_path}.sha256"):
                         print(
@@ -757,7 +754,7 @@ def get_hybrid_engine_or_wrapper(
                         except OSError:
                             pass
 
-                if os.path.exists(engine_path) and os.path.getsize(engine_path) > 0:
+                if (not needs_build or built) and os.path.exists(engine_path) and os.path.getsize(engine_path) > 0:
                     trt_runner = TRTRuntimeEngineWrapper(
                         engine_path,
                         device=device,
@@ -766,11 +763,6 @@ def get_hybrid_engine_or_wrapper(
                         scale=int(round(scale)),
                         fallback_module=wrapper,
                     )
-                    if not os.path.exists(f"{engine_path}.sha256"):
-                        try:
-                            write_trt_engine_sha256_sidecar(engine_path, weights_sha256=weights_sha256)
-                        except OSError:
-                            pass
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     return trt_runner

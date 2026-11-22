@@ -11,7 +11,7 @@ description: "Anime subtitle translation rules synced with subtrans-anime-ops: V
   - Follow the AI-Only Comment Standard on all code edits (concise English 1-line docstrings and invariant `#` comments; zero `# -*- coding: utf-8 -*-` or decorative banners).
   - Enforce canonical pair pronouns and character vocal profiles across episode batches via [subtrans-anime-ops](../skills/subtrans-anime-ops/SKILL.md).
 - **Glossary Precedence & Text Pointers:**
-  - Resolution order: explicit `-g` -> `find_series_glossary()` (`glossaries/glossary.<series>.yaml`) -> `subtrans/glossary.yaml`.
+  - Always load `subtrans/glossary.yaml` (`DEFAULT_BASE_GLOSSARY_PATH`) as `base`, select `override` via explicit `-g` else `find_series_glossary()` (`glossaries/glossary.<series>.yaml`), and merge with `merge_glossaries(base, override)` (`override` wins on matching terms/characters while `AddressRules` deep-merges).
   - Maintain alias files in `glossaries/*.yaml` (`base.yaml`, `glossary.demonslayer.yaml`, `glossary.reincarnatedasasword.yaml`, `glossary.tenseishitarakendeshita.yaml`) as Git `100644` single-line relative text pointers resolved via `resolve_glossary_target()`, never OS symlinks.
 - **SQLite & FTS5/RAG Cache Safety:**
   - Never instantiate default `TranslationCache()` or `KnowledgeBase()` against live `subtrans/.cache/` in tests; always inject `tmp_path` SQLite paths.

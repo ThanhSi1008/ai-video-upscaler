@@ -1,15 +1,31 @@
 """Hybrid BM25 and SQLite FTS5 2/3-gram subtitle RAG and error bank manager."""
 
 import os
+import random
 import re
 import sqlite3
 import hashlib
 import logging
 import contextlib
 import threading
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
 import pysubs2
+
+_INIT_LOCKS_GUARD = threading.Lock()
+_INIT_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _get_init_lock(db_path: Path) -> threading.Lock:
+    """Returns a per-path lock serializing cold-start SQLite WAL initialization."""
+    key = os.path.normcase(os.path.abspath(str(db_path)))
+    with _INIT_LOCKS_GUARD:
+        lock = _INIT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _INIT_LOCKS[key] = lock
+        return lock
 
 from subtrans.models import Cue
 from subtrans.eval.metrics import normalize_nfc
@@ -253,9 +269,9 @@ class KnowledgeBase:
 
     @contextlib.contextmanager
     def _connect(self, immediate: bool = False):
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout=10000")
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=5000")
             with conn:
                 if immediate:
                     conn.execute("BEGIN IMMEDIATE")
@@ -274,8 +290,27 @@ class KnowledgeBase:
         return hasher.hexdigest()
 
     def _init_db(self):
+        with _get_init_lock(self.db_path):
+            last_err: Optional[sqlite3.OperationalError] = None
+            for attempt in range(10):
+                try:
+                    self._init_db_once()
+                    return
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if ("locked" in msg or "busy" in msg) and attempt < 9:
+                        last_err = exc
+                        time.sleep(0.02 * (attempt + 1) + random.uniform(0.0, 0.02))
+                        continue
+                    raise
+            if last_err is not None:
+                raise last_err
+
+    def _init_db_once(self):
         with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+            if not mode_row or str(mode_row[0]).lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
         with self._connect(immediate=True) as conn:
             conn.execute("""
@@ -317,17 +352,28 @@ class KnowledgeBase:
                 )
             """)
 
-            # Synchronize any unindexed rows into gold_units_fts
-            cursor.execute("SELECT id, ja_text FROM gold_units WHERE ja_ngram IS NULL OR ja_ngram = ''")
+            # Synchronize unindexed or externally modified rows into gold_units_fts
+            cursor.execute("""
+                SELECT g.id, g.ja_text, g.ja_ngram, d.sz
+                FROM gold_units g
+                LEFT JOIN gold_units_fts_docsize d ON d.id = g.id
+                WHERE g.ja_ngram IS NULL OR g.ja_ngram = ''
+            """)
             unindexed = cursor.fetchall()
             if unindexed:
-                for r_id, r_ja in unindexed:
+                rebuilt_needed = False
+                for r_id, r_ja, r_existing_ngram, r_docsize in unindexed:
                     ngram_str = _generate_ngram_string(r_ja)
-                    cursor.execute("UPDATE gold_units SET ja_ngram = ? WHERE id = ?", (ngram_str, r_id))
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO gold_units_fts(rowid, ja_ngram) VALUES (?, ?)",
-                        (r_id, ngram_str),
-                    )
+                    has_stale_tokens = (ngram_str == "") and (r_docsize is not None and r_docsize != b"\x00")
+                    if r_existing_ngram is not None and ngram_str == r_existing_ngram and not has_stale_tokens:
+                        continue
+                    if r_existing_ngram is None or ngram_str != r_existing_ngram:
+                        cursor.execute("UPDATE gold_units SET ja_ngram = ? WHERE id = ?", (ngram_str, r_id))
+                    if ngram_str != "" or has_stale_tokens:
+                        rebuilt_needed = True
+                if rebuilt_needed:
+                    # External-content FTS5 requires 'rebuild' to purge orphaned tokens from prior text
+                    cursor.execute("INSERT INTO gold_units_fts(gold_units_fts) VALUES('rebuild')")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS error_bank (

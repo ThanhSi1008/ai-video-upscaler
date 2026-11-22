@@ -5,13 +5,16 @@ Unit tests for Stage 1 parser and aligner.
 """
 
 import os
+import time
 import pytest
 import pysubs2
 from subtrans.parser import (
     clean_subtitle_text,
+    compute_alignment_match_rate,
+    detect_auto_offset,
     has_typesetting,
     should_skip_cue,
-    parse_and_align_subtitles
+    parse_and_align_subtitles,
 )
 
 
@@ -280,15 +283,8 @@ def test_parse_and_align_whisper_auto_detection(tmp_path):
     assert cues_studio[0].start == 1250  # Giữ nguyên mốc phòng thu gốc của tiếng Nhật
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "parse_and_align_subtitles (subtrans/parser.py:496-519,628-634) and snap_whisper_cues_to_en "
-        "(subtrans/parser.py:297-331) pass unsorted en_cues into monotonic DTW"
-    ),
-)
 def test_parse_and_align_sorts_unsorted_en_ssa_before_dtw(tmp_path):
-    """Lock unsorted ASS event ordering breaking monotonic DTW whisper snap."""
+    """Verify unsorted EN ASS events are sorted before monotonic DTW whisper snap."""
     ja_p = tmp_path / "sample.whisper_ja.srt"
     en_p = tmp_path / "sample.en.ass"
 
@@ -307,15 +303,8 @@ def test_parse_and_align_sorts_unsorted_en_ssa_before_dtw(tmp_path):
     assert (cues[1].start, cues[1].end) == (5000, 7000)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "parse_and_align_subtitles (subtrans/parser.py:498-519) omits should_skip_cue on en_ssa events, "
-        "leaking Sign/OP text into cue.en"
-    ),
-)
 def test_parse_and_align_skips_en_sign_and_op_styles(tmp_path):
-    """Lock Sign/OP EN ASS events leaking into dialogue cue.en during 1:1 alignment."""
+    """Verify Sign/OP EN ASS events are skipped in both 1:1 alignment and Whisper DTW."""
     ja_p = tmp_path / "sign_leak.ja.ass"
     en_p = tmp_path / "sign_leak.en.ass"
 
@@ -325,11 +314,243 @@ def test_parse_and_align_skips_en_sign_and_op_styles(tmp_path):
 
     en_ssa = pysubs2.SSAFile()
     en_ssa.events.append(pysubs2.SSAEvent(start=1000, end=5000, text=r"{\pos(100,200)}CHAPTER 1", style="Sign"))
+    en_ssa.events.append(pysubs2.SSAEvent(start=1000, end=4500, text="Opening Song Lyrics", style="OP"))
     en_ssa.events.append(pysubs2.SSAEvent(start=1200, end=2800, text="Hello!", style="Default"))
     en_ssa.save(str(en_p))
 
     cues, _, _ = parse_and_align_subtitles(str(ja_p), str(en_p))
     assert "CHAPTER 1" not in (cues[0].en or "")
+    assert "Opening Song Lyrics" not in (cues[0].en or "")
     assert cues[0].en == "Hello!"
+
+
+def test_snap_whisper_cues_to_en_unsorted_dicts_and_events():
+    """Verify snap_whisper_cues_to_en sorts unsorted dict (without id) and SSAEvent EN inputs."""
+    from subtrans.models import Cue
+    from subtrans.parser import snap_whisper_cues_to_en
+
+    cues_dict = [
+        Cue(id=1, start=5200, end=6800, ja="おやすみ", style="Default", is_skipped=False),
+        Cue(id=0, start=1200, end=2800, ja="おはよう", style="Default", is_skipped=False),
+    ]
+    en_dicts = [
+        {"start": 5000, "end": 7000, "text": "Good night.", "style": "Default"},
+        {"start": 1000, "end": 5000, "text": r"{\pos(10,10)}SIGN", "style": "Sign"},
+        {"start": 1000, "end": 3000, "text": "Good morning.", "style": "Default"},
+    ]
+    assert snap_whisper_cues_to_en(cues_dict, en_dicts) == 2
+    assert (cues_dict[0].start, cues_dict[0].end, cues_dict[0].en) == (1000, 3000, "Good morning.")
+    assert (cues_dict[1].start, cues_dict[1].end, cues_dict[1].en) == (5000, 7000, "Good night.")
+
+    cues_ev = [
+        Cue(id=0, start=1200, end=2800, ja="おはよう", style="Default", is_skipped=False),
+        Cue(id=1, start=5200, end=6800, ja="おやすみ", style="Default", is_skipped=False),
+    ]
+    en_events = [
+        pysubs2.SSAEvent(start=5000, end=7000, text="Good night.", style="Default"),
+        pysubs2.SSAEvent(start=1000, end=3000, text="Good morning.", style="Default"),
+    ]
+    assert snap_whisper_cues_to_en(cues_ev, en_events) == 2
+    assert (cues_ev[0].start, cues_ev[0].end) == (1000, 3000)
+    assert (cues_ev[1].start, cues_ev[1].end) == (5000, 7000)
+
+
+def test_compute_alignment_match_rate_unsorted_and_overlapping():
+    """Verify O(N+M) match rate handles unsorted events, zero-duration cues, and long overlapping EN cues."""
+    ja_events = [
+        pysubs2.SSAEvent(start=10000, end=12000, text="c"),
+        pysubs2.SSAEvent(start=1000, end=3000, text="a"),
+        pysubs2.SSAEvent(start=4000, end=4000, text="zero"),
+        pysubs2.SSAEvent(start=5000, end=7000, text="b"),
+    ]
+    en_events = [
+        pysubs2.SSAEvent(start=0, end=100000, text="long sign"),
+        pysubs2.SSAEvent(start=5100, end=6900, text="b"),
+        pysubs2.SSAEvent(start=1100, end=2900, text="a"),
+    ]
+    # 2 of 3 positive-duration JA cues match a/b; long [0, 100000] EN cue requires >= 50s overlap.
+    assert compute_alignment_match_rate(ja_events, en_events, offset_ms=0) == pytest.approx(2 / 3)
+    # Shifting by +4000ms moves [1000, 3000] onto [5100, 6900], leaving 1 of 3 matched.
+    assert compute_alignment_match_rate(ja_events, en_events, offset_ms=4000) == pytest.approx(1 / 3)
+
+
+def _write_synthetic_offset_pair(tmp_path, prefix: str, ja_specs, en_specs):
+    """Write synthetic JA and EN SRT files for offset tests."""
+    ja_p = tmp_path / f"{prefix}.ja.srt"
+    en_p = tmp_path / f"{prefix}.en.srt"
+    ja_ssa = pysubs2.SSAFile()
+    en_ssa = pysubs2.SSAFile()
+    for start, end, txt in ja_specs:
+        ja_ssa.events.append(pysubs2.SSAEvent(start=start, end=end, text=txt))
+    for start, end, txt in en_specs:
+        en_ssa.events.append(pysubs2.SSAEvent(start=start, end=end, text=txt))
+    ja_ssa.save(str(ja_p))
+    en_ssa.save(str(en_p))
+    return str(ja_p), str(en_p)
+
+
+def _make_nonuniform_ja_specs(n: int, q_mod: int = 5):
+    """Generate realistic non-uniformly spaced JA dialogue cues to avoid periodic aliasing."""
+    specs = []
+    t = 10_000
+    for i in range(n):
+        dur = 900 + (i % 5) * 350
+        specs.append((t, t + dur, f"台詞{i}{'？' if i % q_mod == 0 else ''}"))
+        t += dur + 700 + (i % 7) * 410
+    return specs
+
+
+def test_detect_auto_offset_commercial_break_over_60s(tmp_path):
+    """Verify detect_auto_offset detects both single >60s shifts and >60s commercial breaks."""
+    # Case 1: Single global +95s commercial break offset.
+    ja_single = _make_nonuniform_ja_specs(80, q_mod=5)
+    en_single = [(s + 95_000, e + 95_000, f"Line {i}{'?' if i % 5 == 0 else ''}") for i, (s, e, _) in enumerate(ja_single)]
+    ja_s, en_s = _write_synthetic_offset_pair(tmp_path, "single_95s", ja_single, en_single)
+    off_ms, applied, _reason, stats = detect_auto_offset(ja_s, en_s)
+    assert applied is True
+    assert off_ms == 95_000
+    assert stats["rate_after"] >= 0.99
+    assert stats["rate_diff_points"] >= 50.0
+
+    # Case 2: Asymmetric commercial break (first 25% at 0ms, remaining 75% shifted +125s).
+    ja_pw = _make_nonuniform_ja_specs(120, q_mod=4)
+    en_pw = []
+    for i, (s, e, _) in enumerate(ja_pw):
+        shift = 0 if i < 30 else 125_000
+        en_pw.append((s + shift, e + shift, f"Line {i}{'?' if i % 4 == 0 else ''}"))
+    ja_p, en_p = _write_synthetic_offset_pair(tmp_path, "pw_125s", ja_pw, en_pw)
+    off_pw, applied_pw, _reason_pw, stats_pw = detect_auto_offset(ja_p, en_p)
+    assert applied_pw is True
+    assert off_pw == 125_000
+    pw_segs = stats_pw.get("piecewise_segments")
+    assert pw_segs and len(pw_segs) == 2
+    assert abs(pw_segs[0]["offset_ms"]) <= 200
+    assert abs(pw_segs[1]["offset_ms"] - 125_000) <= 200
+
+
+def test_detect_auto_offset_piecewise_n1200_under_300ms(tmp_path):
+    """Verify N=1200 piecewise commercial-break offset detection completes in < 300 ms."""
+    N = 1200
+    ja_specs = _make_nonuniform_ja_specs(N, q_mod=7)
+    en_specs = []
+    for i, (s, e, _) in enumerate(ja_specs):
+        shift = 0 if i < 600 else 110_000
+        en_specs.append((s + shift, e + shift, f"Line {i}{'?' if i % 7 == 0 else ''}"))
+    ja_p, en_p = _write_synthetic_offset_pair(tmp_path, "n1200_pw", ja_specs, en_specs)
+    # Pre-warm newly written temp files so NTFS creation flush does not skew cold I/O.
+    with open(ja_p, "rb") as f:
+        f.read()
+    with open(en_p, "rb") as f:
+        f.read()
+
+    # Bound up to 3 trials to reject single-shot 6-worker OS scheduling spikes while preserving strict <300ms.
+    wall_trials_ms = []
+    cpu_trials_ms = []
+    for _ in range(3):
+        c0 = time.process_time()
+        t0 = time.perf_counter()
+        off_ms, applied, _reason, stats = detect_auto_offset(ja_p, en_p)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        cpu_ms = (time.process_time() - c0) * 1000.0
+        wall_trials_ms.append(elapsed_ms)
+        cpu_trials_ms.append(cpu_ms)
+        assert applied is True
+        assert off_ms == 110_000
+        pw_segs = stats.get("piecewise_segments")
+        assert pw_segs and len(pw_segs) == 2
+        assert abs(pw_segs[0]["offset_ms"]) <= 200
+        assert abs(pw_segs[1]["offset_ms"] - 110_000) <= 200
+        if elapsed_ms < 300.0 and cpu_ms < 300.0:
+            break
+
+    best_wall_ms = min(wall_trials_ms)
+    best_cpu_ms = min(cpu_trials_ms)
+    assert best_wall_ms < 300.0, (
+        f"detect_auto_offset N=1200 piecewise took min {best_wall_ms:.1f}ms "
+        f"(wall={[round(x, 1) for x in wall_trials_ms]}, cpu={[round(x, 1) for x in cpu_trials_ms]}) >= 300ms"
+    )
+    assert best_cpu_ms < 300.0, f"detect_auto_offset N=1200 CPU time {best_cpu_ms:.1f}ms >= 300ms"
+
+
+def test_snap_whisper_and_match_rate_defensive_edge_cases():
+    """Verify null-text/null-style/comment/invalid-duration guards and zero-overlap boundary."""
+    from subtrans.models import Cue
+    from subtrans.parser import snap_whisper_cues_to_en
+
+    cues_dict = [
+        Cue(id=0, start=1100, end=2900, ja="おはよう", style="Default", is_skipped=False),
+        Cue(id=1, start=1100, end=2900, ja="二行目", style="Default", is_skipped=False),
+    ]
+    bad_and_good_dicts = [
+        {"start": 1000, "end": 3000, "text": None, "style": "Default"},
+        {"start": 1000, "end": 3000, "text": r"{\an8}", "style": "Default"},
+        {"start": 1000, "end": 3000, "text": "♪～", "style": "Default"},
+        {"start": 3000, "end": 3000, "text": "Zero duration", "style": "Default"},
+        {"id": None, "start": 1000, "end": 3000, "text": "Good morning.", "style": "Default"},
+        {"start": 1000, "end": 3000, "text": "Second line.", "style": "Default"},
+    ]
+    assert snap_whisper_cues_to_en(cues_dict, bad_and_good_dicts) == 2
+    assert cues_dict[0].en == "Good morning."
+    assert cues_dict[1].en == "Second line."
+
+    cues_music = [Cue(id=0, start=1100, end=2900, ja="おはよう", style="Default", is_skipped=False)]
+    assert snap_whisper_cues_to_en(cues_music, [{"start": 1000, "end": 3000, "text": "♪～", "style": "Default"}]) == 0
+    assert cues_music[0].en is None
+
+    cues_ev = [Cue(id=0, start=1100, end=2900, ja="おはよう", style="Default", is_skipped=False)]
+    comment_ev = pysubs2.SSAEvent(start=1000, end=3000, text="COMMENT", style="Default", type="Comment")
+    null_style_ev = pysubs2.SSAEvent(start=1000, end=3000, text="Valid line", style="Default")
+    null_style_ev.style = None  # type: ignore[assignment]
+    assert snap_whisper_cues_to_en(cues_ev, [comment_ev, null_style_ev]) == 1
+    assert cues_ev[0].en == "Valid line"
+
+    # Touching endpoints (overlap == 0) must not count even when overlap_threshold == 0.0.
+    ja_touch = [
+        pysubs2.SSAEvent(start=1000, end=5000, text="span"),
+        pysubs2.SSAEvent(start=2000, end=4000, text="touch"),
+    ]
+    en_touch = [pysubs2.SSAEvent(start=4000, end=4500, text="next")]
+    assert compute_alignment_match_rate(ja_touch, en_touch, offset_ms=0, overlap_threshold=0.0) == pytest.approx(0.5)
+    assert compute_alignment_match_rate([ja_touch[1]], en_touch, offset_ms=0, overlap_threshold=0.0) == 0.0
+
+
+def test_detect_auto_offset_nonzero_commercial_break_within_8s(tmp_path):
+    """Verify +100s -> +108s (60/40) non-zero commercial break recovers both segments cleanly."""
+    ja_specs = _make_nonuniform_ja_specs(200, q_mod=5)
+    en_specs = []
+    for i, (s, e, _) in enumerate(ja_specs):
+        shift = 100_000 if i < 120 else 108_000
+        en_specs.append((s + shift, e + shift, f"Line {i}{'?' if i % 5 == 0 else ''}"))
+    ja_p, en_p = _write_synthetic_offset_pair(tmp_path, "pw_100_108", ja_specs, en_specs)
+    off_ms, applied, _reason, stats = detect_auto_offset(ja_p, en_p)
+    assert applied is True
+    assert off_ms in (100_000, 108_000)
+    assert stats["rate_after"] >= 0.99
+    pw_segs = stats.get("piecewise_segments")
+    assert pw_segs and len(pw_segs) == 2
+    assert abs(pw_segs[0]["offset_ms"] - 100_000) <= 200
+    assert abs(pw_segs[1]["offset_ms"] - 108_000) <= 200
+
+
+@pytest.mark.parametrize("shift_ms", [45_000, 95_000])
+def test_detect_auto_offset_accepts_quarter_to_half_duration_ratio_gt_10s(tmp_path, shift_ms):
+    """Verify coarse +/-600s scan accepts 0.25 <= dur_ratio < 0.50 (0.40) for >10s shifts."""
+    ja_specs = []
+    en_specs = []
+    t = 10_000
+    for i in range(60):
+        dur_en = 1000 + (i % 4) * 250
+        dur_ja = int(round(dur_en * 2.5))  # min/max ratio = 0.40 (in [0.25, 0.50))
+        q_mark_ja = "？" if i % 5 == 0 else ""
+        q_mark_en = "?" if i % 5 == 0 else ""
+        ja_specs.append((t, t + dur_ja, f"台詞{i}{q_mark_ja}"))
+        en_specs.append((t + shift_ms, t + shift_ms + dur_en, f"Line {i}{q_mark_en}"))
+        t += dur_ja + 700 + (i % 7) * 410
+
+    ja_p, en_p = _write_synthetic_offset_pair(tmp_path, f"ratio40_{shift_ms}", ja_specs, en_specs)
+    off_ms, applied, _reason, stats = detect_auto_offset(ja_p, en_p)
+    assert applied is True
+    assert off_ms == shift_ms
+    assert stats["pairs_count"] >= 30
 
 

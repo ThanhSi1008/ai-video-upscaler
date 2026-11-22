@@ -45,6 +45,15 @@ _KEEP_REAL_GENAI_CLIENT = {
 
 
 @pytest.fixture(autouse=True)
+def _reset_shared_rate_limiters():
+    from subtrans.throttle import clear_rate_limiter_registry
+
+    clear_rate_limiter_registry()
+    yield
+    clear_rate_limiter_registry()
+
+
+@pytest.fixture(autouse=True)
 def _fast_subtrans_retry_sleep(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     item_path = Path(str(getattr(request, "path", getattr(request.node, "fspath", "")))).resolve()
     if not item_path.is_relative_to(_SUBTRANS_TESTS_DIR):

@@ -112,8 +112,8 @@ def test_export_onnx_pipeline(tmp_path):
     assert os.path.getsize(out_path) > 1000
 
 
-def test_spawn_nvenc_pipe_writer_chroma_center_argument(monkeypatch):
-    """Verifies that spawn_nvenc_pipe_writer includes -chroma_sample_location center for accurate anime edges."""
+def test_spawn_nvenc_pipe_writer_chroma_left_argument(monkeypatch):
+    """Verify spawn_nvenc_pipe_writer defaults -chroma_sample_location to left and honors overrides."""
     captured_cmd = []
 
     def mock_popen(cmd, *args, **kwargs):
@@ -127,7 +127,14 @@ def test_spawn_nvenc_pipe_writer_chroma_center_argument(monkeypatch):
 
     assert "-chroma_sample_location" in captured_cmd
     idx = captured_cmd.index("-chroma_sample_location")
-    assert captured_cmd[idx + 1] == "center"
+    assert captured_cmd[idx + 1] == "left"
+
+    captured_cmd.clear()
+    DoubleBufferedPipeUpscaler.spawn_nvenc_pipe_writer(
+        "out_test.mp4", fps_str="24/1", chroma_location="center"
+    )
+    idx_override = captured_cmd.index("-chroma_sample_location")
+    assert captured_cmd[idx_override + 1] == "center"
 
 
 def test_check_frame_sanity_arrays_in_memory():
@@ -256,29 +263,27 @@ def test_cpu_extract_raw_yuv420_to_p010le_roundtrip(tmp_path):
     assert nv12_p010.dtype == torch.int16
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "src/build_trt_engine.py:272-273 returns True when .sha256 sidecar is absent "
-        "and L713/L769 skips weights_sha256 in engine path & retroactively writes sidecar"
-    ),
-)
 def test_verify_trt_engine_sha256_sidecar_rejects_missing_sidecar(tmp_path):
-    """Lock missing .sha256 sidecar trust bug when expected_weights_sha256 is required."""
+    """Verify verify_trt_engine_sha256_sidecar rejects missing .sha256 and empty/mismatched weights_sha256."""
+    import hashlib
+    import json
+
     eng_path = tmp_path / "model.engine"
-    eng_path.write_bytes(b"FAKE_TRT_ENGINE_BYTES")
+    eng_bytes = b"FAKE_TRT_ENGINE_BYTES"
+    eng_path.write_bytes(eng_bytes)
+    assert verify_trt_engine_sha256_sidecar(str(eng_path), expected_weights_sha256="a" * 64) is False
+
+    # Sidecar with valid engine hash but empty weights_sha256 must still be rejected when expected_weights_sha256 is set.
+    eng_sha = hashlib.sha256(eng_bytes).hexdigest()
+    (tmp_path / "model.engine.sha256").write_text(
+        json.dumps({"engine_sha256": eng_sha, "weights_sha256": ""}),
+        encoding="utf-8",
+    )
     assert verify_trt_engine_sha256_sidecar(str(eng_path), expected_weights_sha256="a" * 64) is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "src/build_trt_engine.py:272-273 returns True when .sha256 sidecar is absent "
-        "and L713/L769 skips weights_sha256 in engine path & retroactively writes sidecar"
-    ),
-)
 def test_get_hybrid_engine_or_wrapper_rejects_unverified_engine_without_sidecar(monkeypatch, tmp_path):
-    """Lock get_hybrid_engine_or_wrapper skipping rebuild & stamping .sha256 on unverified .engine."""
+    """Verify get_hybrid_engine_or_wrapper rejects unverified .engine and falls back safely if rebuild fails."""
     base_model = RealESRAnimeVideoV3().eval()
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(trt_mod, "is_tensorrt_available", lambda: True)
@@ -324,7 +329,7 @@ def test_get_hybrid_engine_or_wrapper_rejects_unverified_engine_without_sidecar(
     monkeypatch.setattr(trt_mod, "build_tensorrt_engine", lambda *a, **kw: build_calls.append(a) or True)
     monkeypatch.setattr(trt_mod, "TRTRuntimeEngineWrapper", lambda *a, **kw: SimpleNamespace(is_tensorrt=True))
 
-    get_hybrid_engine_or_wrapper(
+    res = get_hybrid_engine_or_wrapper(
         base_model,
         max_batch=8,
         force_pytorch=False,
@@ -334,5 +339,66 @@ def test_get_hybrid_engine_or_wrapper_rejects_unverified_engine_without_sidecar(
         weights_sha256="a" * 64,
     )
     assert len(build_calls) == 1
+    assert getattr(res, "is_tensorrt", False) is True
+
+    # If rebuild fails (built=None) on an unverified .engine, must NOT load stale engine or write .sha256.
+    trt_mod._FAILED_TRT_ENGINES.clear()
+    unverified2 = orig_get_path(
+        model_id="realesr-animevideov3",
+        max_batch=expected_mb,
+        input_hw=(240, 426),
+        cache_dir=str(tmp_path),
+        arch_tag="aa2x",
+    )
+    with open(unverified2, "wb") as f:
+        f.write(b"UNVERIFIED_STALE_ENGINE_2")
+    monkeypatch.setattr(trt_mod, "build_tensorrt_engine", lambda *a, **kw: None)
+    fallback_res = get_hybrid_engine_or_wrapper(
+        base_model,
+        max_batch=8,
+        force_pytorch=False,
+        model_id="realesr-animevideov3",
+        input_hw=(240, 426),
+        scale=2.0,
+        weights_sha256="b" * 64,
+    )
+    assert getattr(fallback_res, "is_tensorrt", False) is False
+    assert not os.path.exists(f"{unverified2}.sha256")
+
+
+def test_gpu_persistent_worker_load_model_enforces_weights_only_true(monkeypatch, tmp_path):
+    """Verify GPUPersistentWorker._load_model passes weights_only=True on torch.load fallback."""
+    import builtins
+    from src.cuda_engine import GPUPersistentWorker
+
+    fake_pth = tmp_path / "dummy.pth"
+    fake_pth.write_bytes(b"fake")
+    load_kwargs = []
+
+    def _fake_torch_load(path, **kwargs):
+        load_kwargs.append(dict(kwargs))
+        raise RuntimeError("stop after capturing weights_only")
+
+    real_import = builtins.__import__
+
+    def _block_spandrel(name, *args, **kwargs):
+        if name == "spandrel":
+            raise ImportError("spandrel disabled for fallback test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _block_spandrel)
+    monkeypatch.setattr(torch, "load", _fake_torch_load)
+
+    worker = GPUPersistentWorker.__new__(GPUPersistentWorker)
+    worker.weights_path = str(fake_pth)
+    worker.model_id = "realesr-animevideov3"
+    worker.device = torch.device("cpu")
+    worker.precision = "fp32"
+
+    with pytest.raises(RuntimeError, match="stop after capturing weights_only"):
+        worker._load_model()
+
+    assert len(load_kwargs) == 1
+    assert load_kwargs[0].get("weights_only") is True
 
 

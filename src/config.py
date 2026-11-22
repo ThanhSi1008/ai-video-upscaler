@@ -2,6 +2,7 @@
 
 import atexit
 import contextlib
+from functools import lru_cache
 import os
 from pathlib import Path
 import shutil
@@ -241,11 +242,23 @@ def get_device_name() -> str:
     return "CPU"
 
 
+@lru_cache(maxsize=1)
+def _get_default_engine() -> str:
+    return _detect_default_engine()
+
+
+@lru_cache(maxsize=1)
+def _get_device_name() -> str:
+    return get_device_name()
+
+
+@lru_cache(maxsize=1)
+def _get_default_batch_size() -> int:
+    return 8 if _get_default_engine() == "cuda" else 1
+
+
 DEFAULT_MODEL = "realesr-animevideov3"
-DEFAULT_ENGINE = _detect_default_engine()
-DEVICE_NAME = get_device_name()
 DEFAULT_PRECISION = "fp16"
-DEFAULT_BATCH_SIZE = 8 if DEFAULT_ENGINE == "cuda" else 1
 DEFAULT_VRAM_CLEANUP_THRESHOLD_GB = 9.5
 DEFAULT_GPU_RESTART_CHUNKS = 10
 
@@ -265,11 +278,8 @@ DEFAULT_RAMDISK_SIZE_MB = 5120
 DEFAULT_PNG_UNIT_SIZE_MB = 16.0
 
 
-def _detect_hevc_encoder() -> str:
-    """Detect available 10-bit HEVC hardware/software encoder."""
-    env_enc = os.environ.get("UPSCALER_HEVC_ENCODER", "").strip()
-    if env_enc in ("hevc_nvenc", "hevc_qsv", "libx265"):
-        return env_enc
+@lru_cache(maxsize=1)
+def _probe_ffmpeg_hevc_encoder() -> str:
     try:
         import subprocess
         res = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
@@ -285,9 +295,39 @@ def _detect_hevc_encoder() -> str:
     return "hevc_nvenc"
 
 
-HEVC_ENCODER = _detect_hevc_encoder()
-if not os.environ.get("PYTEST_CURRENT_TEST"):
-    os.environ.setdefault("UPSCALER_HEVC_ENCODER", HEVC_ENCODER)
+def _detect_hevc_encoder() -> str:
+    """Detect available 10-bit HEVC hardware/software encoder."""
+    env_enc = os.environ.get("UPSCALER_HEVC_ENCODER", "").strip()
+    if env_enc in ("hevc_nvenc", "hevc_qsv", "libx265"):
+        return env_enc
+    chosen = _probe_ffmpeg_hevc_encoder()
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        os.environ.setdefault("UPSCALER_HEVC_ENCODER", chosen)
+    return chosen
+
+
+_LAZY_ATTRS = frozenset({
+    "DEFAULT_ENGINE",
+    "DEVICE_NAME",
+    "DEFAULT_BATCH_SIZE",
+    "HEVC_ENCODER",
+})
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_ENGINE":
+        return _get_default_engine()
+    if name == "DEVICE_NAME":
+        return _get_device_name()
+    if name == "DEFAULT_BATCH_SIZE":
+        return _get_default_batch_size()
+    if name == "HEVC_ENCODER":
+        return _detect_hevc_encoder()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals().keys()) | _LAZY_ATTRS)
 HEVC_PRESET = "p6"
 HEVC_CQ_LEVEL = "18"
 HEVC_MAXRATE = "45M"
@@ -353,7 +393,8 @@ def resolve_episode_nvenc_multipass(
 
 def get_hevc_rate_args(bitrate: str = "28M", multipass: str | None = None) -> list:
     """Return 10-bit HEVC Main 10 rate-control flags tuned for NVENC or fallback encoders."""
-    if HEVC_ENCODER == "hevc_nvenc":
+    hevc_encoder = getattr(sys.modules[__name__], "HEVC_ENCODER")
+    if hevc_encoder == "hevc_nvenc":
         eff_mp = str(multipass).strip().lower() if multipass else HEVC_MULTIPASS
         if eff_mp not in ("fullres", "qres"):
             eff_mp = HEVC_MULTIPASS
@@ -373,7 +414,7 @@ def get_hevc_rate_args(bitrate: str = "28M", multipass: str | None = None) -> li
             "-bf", str(HEVC_BF),
             "-b_ref_mode", HEVC_B_REF_MODE,
         ]
-    if HEVC_ENCODER == "libx265":
+    if hevc_encoder == "libx265":
         return [
             "-preset", "ultrafast",
             "-crf", str(HEVC_CQ_LEVEL),
@@ -385,7 +426,7 @@ def get_hevc_rate_args(bitrate: str = "28M", multipass: str | None = None) -> li
     ]
 
 
-def validate_environment(engine: str = DEFAULT_ENGINE):
+def validate_environment(engine: str | None = None):
     """Verify that ffmpeg and ffprobe are available on PATH."""
     if shutil.which("ffmpeg") is None:
         print("❌ Lỗi: Không tìm thấy 'ffmpeg' trên hệ thống!")

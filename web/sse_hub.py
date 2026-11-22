@@ -7,6 +7,7 @@ from collections import deque
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,38 @@ import time
 from typing import Any, AsyncIterator, Callable, Deque, Dict, List, Optional, Sequence
 
 from scripts.telemetry_collector import default_gpu_query
+
+
+def _sanitize_json_payload(val: Any) -> Any:
+    """Recursively convert non-finite floats (NaN/Inf/-Inf) to None for strict RFC 8259 JSON."""
+    if isinstance(val, float):
+        return val if math.isfinite(val) else None
+    if isinstance(val, dict):
+        return {k: _sanitize_json_payload(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_sanitize_json_payload(item) for item in val]
+    return val
+
+
+def _coerce_pid(raw_pid: Any) -> Optional[int]:
+    """Return positive integer PID, rejecting booleans and non-positive values."""
+    if isinstance(raw_pid, bool) or not isinstance(raw_pid, int):
+        return None
+    return raw_pid if raw_pid > 0 else None
+
+
+def _parse_iso_timestamp(raw: Any) -> float:
+    """Parse ISO-8601 timestamp string (with or without microseconds) into epoch seconds."""
+    text = str(raw or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        try:
+            return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S").timestamp()
+        except Exception:
+            return 0.0
 
 
 def _query_gpu_static_info() -> Dict[str, Any]:
@@ -69,7 +102,7 @@ def check_active_gpu_lock(workspace_root: Path) -> Dict[str, Any]:
             return {"locked": False, "pid": None}
         pid = int(raw.splitlines()[0].strip())
         import psutil
-        if psutil.pid_exists(pid):
+        if pid > 0 and psutil.pid_exists(pid):
             return {"locked": True, "pid": pid}
     except Exception:
         pass
@@ -245,6 +278,7 @@ class TelemetryHub:
         self._poll_task: Optional[asyncio.Task[None]] = None
         self._shutting_down: bool = False
         self._history_lock = threading.Lock()
+        self._log_cursor_lock = threading.Lock()
         self._last_log_cursor: Dict[str, Any] = {"path": "", "prefix_len": 0, "sig": "", "offset": 0}
         self._prime_log_cursor()
 
@@ -365,9 +399,9 @@ class TelemetryHub:
                 pass
 
         # Kiểm tra PID của live_status còn đang chạy hay đã kết thúc
-        live_pid = live_data.get("pid")
+        live_pid = _coerce_pid(live_data.get("pid"))
         pid_alive = False
-        if isinstance(live_pid, int) and live_pid > 0:
+        if live_pid is not None:
             try:
                 import psutil
                 pid_alive = psutil.pid_exists(live_pid)
@@ -447,7 +481,7 @@ class TelemetryHub:
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
-            elif isinstance(active_pid, int) and live_pid != active_pid:
+            elif (active_pid_val := _coerce_pid(active_pid)) is not None and live_pid != active_pid_val:
                 # Tập mới vừa được Web GUI khởi chạy nhưng chưa kịp tạo RunLogger mới -> tránh báo nhầm 'completed' của tập cũ
                 effective_stage = "initializing"
                 live_data = {
@@ -489,20 +523,29 @@ class TelemetryHub:
             ):
                 last_type = str(last_job.get("job_type") or "")
                 last_status = str(last_job.get("status") or "")
-                last_finished_ts = 0.0
                 fin_str = str(last_job.get("finished_at") or "")
-                if fin_str:
-                    try:
-                        last_finished_ts = datetime.strptime(fin_str, "%Y-%m-%dT%H:%M:%S").timestamp()
-                    except Exception:
-                        last_finished_ts = 0.0
+                last_finished_ts = _parse_iso_timestamp(fin_str)
+                last_started_ts = _parse_iso_timestamp(last_job.get("started_at"))
+                last_job_pid = _coerce_pid(last_job.get("pid"))
                 live_from_newer_upscale = bool(
                     live_file.is_file()
                     and last_finished_ts > 0.0
                     and live_file_mtime > last_finished_ts + 0.5
-                    and live_data.get("pid") != last_job.get("pid")
+                    and live_pid != last_job_pid
                     and str(live_data.get("stage") or "idle") != "idle"
                 )
+                live_job_id = live_data.get("job_id")
+                last_job_id = last_job.get("job_id")
+                if live_job_id and last_job_id:
+                    live_matches_last_job = str(live_job_id) == str(last_job_id)
+                elif last_job_pid is not None:
+                    live_matches_last_job = bool(
+                        live_file.is_file()
+                        and live_pid == last_job_pid
+                        and (last_started_ts <= 0.0 or live_file_mtime >= last_started_ts - 1.5)
+                    )
+                else:
+                    live_matches_last_job = False
                 q_items_last = last_job.get("queue_items") or []
                 target_label_last = (
                     os.path.basename(str(q_items_last[0]))
@@ -555,43 +598,143 @@ class TelemetryHub:
                             "stage_detail": (
                                 f"Lỗi dịch phụ đề ({target_label_last}, mã thoát {last_job.get('return_code')})."
                             ),
+                            "model_id": f"subtrans ({(last_job.get('options') or {}).get('subs_quality', 'normal')})",
+                            "zero_disk": False,
+                            "total_frames": 0,
+                            "unique_frames": 0,
+                            "total_chunks": 0,
+                            "completed_chunks": 0,
                             "chunks": [],
                             "resumed_chunks": [],
                             "active_chunk": None,
+                            "steady_fps": 0.0,
+                            "latest_fps": 0.0,
+                            "effective_fps": 0.0,
+                            "eta_seconds": None,
                         }
                     elif last_status == "aborted":
-                        effective_stage = "paused" if checkpoints else "idle"
+                        aborted_stage = "paused" if checkpoints else "idle"
+                        effective_stage = aborted_stage
+                        live_data = {
+                            "video_name": target_label_last,
+                            "pid": last_job.get("pid"),
+                            "job_id": last_job.get("job_id"),
+                            "job_type": last_type,
+                            "started_at": last_job.get("started_at"),
+                            "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                            "stage": aborted_stage,
+                            "last_stage": "subtrans",
+                            "stage_detail": (
+                                f"Đã dừng hàng đợi phụ đề ({target_label_last})."
+                                if last_type == "subs_pending"
+                                else f"Đã dừng dịch phụ đề ({target_label_last})."
+                            ),
+                            "model_id": f"subtrans ({(last_job.get('options') or {}).get('subs_quality', 'normal')})",
+                            "zero_disk": False,
+                            "total_frames": 0,
+                            "unique_frames": 0,
+                            "total_chunks": 0,
+                            "completed_chunks": 0,
+                            "chunks": [],
+                            "resumed_chunks": [],
+                            "active_chunk": None,
+                            "steady_fps": 0.0,
+                            "latest_fps": 0.0,
+                            "effective_fps": 0.0,
+                            "eta_seconds": None,
+                        }
                 elif (
                     last_type in {"upscale", "preview"}
                     and last_status in {"failed", "error"}
-                    and effective_stage != "error"
-                    and (not live_file.is_file() or last_finished_ts >= live_file_mtime - 1.0)
+                    and not live_from_newer_upscale
+                    and (not live_file.is_file() or last_finished_ts == 0.0 or last_finished_ts >= live_file_mtime - 1.0)
                 ):
-                    failed_step = (
-                        effective_stage
-                        if effective_stage not in {"idle", "starting", "initializing", "completed"}
-                        else "probing"
-                    )
-                    live_data = dict(live_data)
-                    live_data["failed_stage"] = failed_step
-                    live_data["last_stage"] = failed_step
-                    if effective_stage in {"idle", "starting", "initializing", "completed"} or not live_data.get("stage_detail"):
-                        live_data["stage_detail"] = (
-                            f"Tác vụ {last_type} thất bại ({target_label_last}, mã thoát {last_job.get('return_code')})."
-                        )
-                    live_data["stage"] = "error"
-                    effective_stage = "error"
+                    if live_matches_last_job:
+                        if effective_stage != "error":
+                            failed_step = (
+                                effective_stage
+                                if effective_stage not in {"idle", "starting", "initializing", "completed"}
+                                else "probing"
+                            )
+                            live_data = dict(live_data)
+                            live_data["failed_stage"] = failed_step
+                            live_data["last_stage"] = failed_step
+                            if effective_stage in {"idle", "starting", "initializing", "completed"} or not live_data.get("stage_detail"):
+                                live_data["stage_detail"] = (
+                                    f"Tác vụ {last_type} thất bại ({target_label_last}, mã thoát {last_job.get('return_code')})."
+                                )
+                            live_data["stage"] = "error"
+                            effective_stage = "error"
+                    else:
+                        # Synthesize clean failure state when job crashed before RunLogger wrote live_status.json
+                        effective_stage = "error"
+                        live_data = {
+                            "video_name": target_label_last,
+                            "pid": last_job.get("pid"),
+                            "job_id": last_job.get("job_id"),
+                            "job_type": last_type,
+                            "started_at": last_job.get("started_at"),
+                            "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                            "stage": "error",
+                            "failed_stage": "probing",
+                            "last_stage": "probing",
+                            "stage_detail": (
+                                f"Tác vụ {last_type} thất bại ({target_label_last}, mã thoát {last_job.get('return_code')})."
+                            ),
+                            "model_id": str((last_job.get("options") or {}).get("model") or ""),
+                            "zero_disk": bool((last_job.get("options") or {}).get("zero_disk", True)),
+                            "total_frames": 0,
+                            "unique_frames": 0,
+                            "total_chunks": 0,
+                            "completed_chunks": 0,
+                            "chunks": [],
+                            "resumed_chunks": [],
+                            "active_chunk": None,
+                            "steady_fps": 0.0,
+                            "latest_fps": 0.0,
+                            "effective_fps": 0.0,
+                            "eta_seconds": None,
+                        }
                 elif (
                     last_type in {"upscale", "preview"}
                     and last_status == "aborted"
-                    and effective_stage not in {"completed", "paused", "error", "idle"}
-                    and (not live_file.is_file() or last_finished_ts >= live_file_mtime - 1.0)
+                    and not live_from_newer_upscale
+                    and (not live_file.is_file() or last_finished_ts == 0.0 or last_finished_ts >= live_file_mtime - 1.0)
                 ):
-                    live_data = dict(live_data)
-                    if effective_stage not in {"starting", "initializing"}:
-                        live_data["last_stage"] = effective_stage
-                    live_data["stage"] = "paused"
-                    effective_stage = "paused"
+                    if live_matches_last_job:
+                        if effective_stage not in {"completed", "paused", "error", "idle"}:
+                            live_data = dict(live_data)
+                            if effective_stage not in {"starting", "initializing"}:
+                                live_data["last_stage"] = effective_stage
+                            live_data["stage"] = "paused"
+                            effective_stage = "paused"
+                    else:
+                        aborted_stage = "paused" if checkpoints else "idle"
+                        effective_stage = aborted_stage
+                        live_data = {
+                            "video_name": target_label_last,
+                            "pid": last_job.get("pid"),
+                            "job_id": last_job.get("job_id"),
+                            "job_type": last_type,
+                            "started_at": last_job.get("started_at"),
+                            "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                            "stage": aborted_stage,
+                            "last_stage": "probing",
+                            "stage_detail": f"Tác vụ {last_type} đã bị dừng ({target_label_last}).",
+                            "model_id": str((last_job.get("options") or {}).get("model") or ""),
+                            "zero_disk": bool((last_job.get("options") or {}).get("zero_disk", True)),
+                            "total_frames": 0,
+                            "unique_frames": 0,
+                            "total_chunks": 0,
+                            "completed_chunks": 0,
+                            "chunks": [],
+                            "resumed_chunks": [],
+                            "active_chunk": None,
+                            "steady_fps": 0.0,
+                            "latest_fps": 0.0,
+                            "effective_fps": 0.0,
+                            "eta_seconds": None,
+                        }
 
             if (
                 effective_stage in {"initializing", "probing", "preflight_dedup", "upscaling", "muxing", "auditing", "subtrans"}
@@ -761,8 +904,13 @@ class TelemetryHub:
             text = raw.decode("utf-8", errors="replace")
             lines = [ln.rstrip("\r") for ln in text.splitlines() if ln.strip()]
             cursor = {"path": resolved_str, "prefix_len": prefix_len, "sig": sig, "offset": aligned_end}
-            if not self._last_log_cursor.get("path"):
-                self._last_log_cursor = dict(cursor)
+            with self._log_cursor_lock:
+                if (
+                    not self._last_log_cursor.get("path")
+                    or self._poll_task is None
+                    or self._poll_task.done()
+                ):
+                    self._last_log_cursor = dict(cursor)
             return lines[-max_lines:], cursor
         except Exception:
             return [], {"path": resolved_str, "prefix_len": 0, "sig": "", "offset": 0}
@@ -843,10 +991,24 @@ class TelemetryHub:
         except Exception:
             return [], cur
 
+    @staticmethod
+    def _log_cursors_match(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        return (
+            str(a.get("path") or "") == str(b.get("path") or "")
+            and int(a.get("offset") or 0) == int(b.get("offset") or 0)
+            and int(a.get("prefix_len") or 0) == int(b.get("prefix_len") or 0)
+            and str(a.get("sig") or "") == str(b.get("sig") or "")
+        )
+
     def _read_incremental_logs_with_cursor(self) -> tuple[List[str], Dict[str, Any]]:
         """Đọc phần dòng hoàn chỉnh mới phát sinh trên con trỏ dùng chung nội bộ."""
-        lines, next_cur = self._read_incremental_logs_from_cursor(self._last_log_cursor)
-        self._last_log_cursor = next_cur
+        with self._log_cursor_lock:
+            prev_cursor = dict(self._last_log_cursor)
+        lines, next_cur = self._read_incremental_logs_from_cursor(prev_cursor)
+        with self._log_cursor_lock:
+            self._last_log_cursor = dict(next_cur)
         return lines, next_cur
 
     def _read_incremental_logs(self) -> List[str]:
@@ -869,23 +1031,31 @@ class TelemetryHub:
 
         pipeline = self.read_pipeline_state()
         logs, log_cursor = self.read_recent_logs_with_cursor(100)
-        return {
+        return _sanitize_json_payload({
             "gpu_info": self.gpu_static,
             "telemetry": latest,
             "history": hist_copy,
             "pipeline": pipeline,
             "logs": logs,
             "log_cursor": log_cursor,
-        }
+        })
 
     def _poll_tick_sync(self) -> Dict[str, Any]:
-        """Thu thập 1 nhịp telemetry + trạng thái pipeline (chạy trong threadpool để không block asyncio loop)."""
+        """Thu thập 1 nhịp telemetry + trạng thái pipeline + log tăng dần O(1) (chạy trong threadpool)."""
         telem = self.sample_telemetry(record_history=True)
         pipe = self.read_pipeline_state()
-        return {
+        with self._log_cursor_lock:
+            prev_cursor = dict(self._last_log_cursor)
+        new_logs, next_cursor = self._read_incremental_logs_from_cursor(prev_cursor)
+        with self._log_cursor_lock:
+            self._last_log_cursor = dict(next_cursor)
+        return _sanitize_json_payload({
             "telemetry": telem,
             "pipeline": pipe,
-        }
+            "logs": new_logs,
+            "log_cursor": next_cursor,
+            "log_prev_cursor": prev_cursor,
+        })
 
     async def shutdown(self) -> None:
         """Ngắt sạch các luồng SSE đang mở và hủy vòng lặp thu thập telemetry khi đóng máy chủ."""
@@ -941,7 +1111,8 @@ class TelemetryHub:
         sub_cursor: Dict[str, Any] = dict(
             snap.get("log_cursor") or {"path": "", "prefix_len": 0, "sig": "", "offset": 0}
         )
-        yield f"event: snapshot\ndata: {json.dumps(snap, ensure_ascii=False)}\n\n"
+        snap_payload = _sanitize_json_payload(snap)
+        yield f"event: snapshot\ndata: {json.dumps(snap_payload, ensure_ascii=False, allow_nan=False)}\n\n"
         if once or self._shutting_down:
             return
 
@@ -955,15 +1126,25 @@ class TelemetryHub:
                 base_packet = await queue.get()
                 if base_packet is None or self._shutting_down:
                     break
-                new_logs, sub_cursor = await asyncio.to_thread(
-                    self._read_incremental_logs_from_cursor, sub_cursor
-                )
-                packet = {
+                base_prev = base_packet.get("log_prev_cursor")
+                base_next = base_packet.get("log_cursor")
+                if self._log_cursors_match(sub_cursor, base_prev):
+                    new_logs = list(base_packet.get("logs") or [])
+                    sub_cursor = dict(base_next) if isinstance(base_next, dict) else sub_cursor
+                elif self._log_cursors_match(sub_cursor, base_next):
+                    new_logs = []
+                    sub_cursor = dict(base_next) if isinstance(base_next, dict) else sub_cursor
+                    sub_cursor["reset"] = False
+                else:
+                    new_logs, sub_cursor = await asyncio.to_thread(
+                        self._read_incremental_logs_from_cursor, sub_cursor
+                    )
+                packet = _sanitize_json_payload({
                     "telemetry": base_packet["telemetry"],
                     "pipeline": base_packet["pipeline"],
                     "logs": new_logs,
                     "log_cursor": sub_cursor,
-                }
-                yield f"event: tick\ndata: {json.dumps(packet, ensure_ascii=False)}\n\n"
+                })
+                yield f"event: tick\ndata: {json.dumps(packet, ensure_ascii=False, allow_nan=False)}\n\n"
         finally:
             self._subscribers.discard(queue)

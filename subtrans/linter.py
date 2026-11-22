@@ -3,7 +3,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple, Literal
+from typing import List, Dict, Any, Optional, Tuple, Literal, Set
 
 from subtrans.models import Cue, Glossary
 from subtrans.ja_morph_tagger import strip_ja_furigana, has_cjk_characters, tokenize_ja_morphemes
@@ -67,6 +67,67 @@ VOCATIVE_MAPPINGS: List[Tuple[re.Pattern, str]] = [
 
 _PURE_KATAKANA_RE = re.compile(r"^[\u30A0-\u30FFー]+$")
 _HOSTILE_JA_MARKERS = ("貴様", "きさま", "てめえ", "てめぇ", "お前", "この野郎", "くそ")
+_CANONICAL_CHAR_TITLE_ALIASES: Tuple[Tuple[str, ...], ...] = (
+    ("師匠", "shishou", "sư phụ"),
+)
+
+
+def _norm_char_token(val: Optional[str]) -> str:
+    return normalize_nfc((val or "").strip()).lower()
+
+
+def _resolve_glossary_character_identities(
+    glossary: Glossary,
+) -> Tuple[List[Set[str]], Dict[str, int]]:
+    """Builds per-character normalized identity sets and unambiguous lookup tokens."""
+    char_forms_list: List[Set[str]] = []
+    exact_token_owners: Dict[str, Set[int]] = {}
+    split_token_owners: Dict[str, Set[int]] = {}
+
+    for idx, char in enumerate(glossary.characters or []):
+        forms: Set[str] = set()
+        for raw_name in [char.name_vi, char.name_ja, strip_ja_furigana(char.name_ja or "")]:
+            tok = _norm_char_token(raw_name)
+            if tok:
+                forms.add(tok)
+        for alias in getattr(char, "aliases", []) or []:
+            for raw_al in (alias, strip_ja_furigana(alias or "")):
+                tok = _norm_char_token(raw_al)
+                if tok:
+                    forms.add(tok)
+
+        for alias_group in _CANONICAL_CHAR_TITLE_ALIASES:
+            norm_group = {_norm_char_token(m) for m in alias_group}
+            if forms & norm_group:
+                forms.update(norm_group)
+
+        for term in getattr(glossary, "terms", []) or []:
+            t_ja = _norm_char_token(strip_ja_furigana(getattr(term, "ja", "") or ""))
+            t_vi = _norm_char_token(getattr(term, "vi", "") or "")
+            if (t_ja and t_ja in forms) or (t_vi and t_vi in forms):
+                for t_al in getattr(term, "aliases", []) or []:
+                    tok = _norm_char_token(t_al)
+                    if tok:
+                        forms.add(tok)
+
+        char_forms_list.append(forms)
+        for tok in forms:
+            exact_token_owners.setdefault(tok, set()).add(idx)
+
+        for variant in _expand_romaji_variants(char.name_vi or "", getattr(char, "aliases", []) or []):
+            v_tok = _norm_char_token(variant)
+            if v_tok and v_tok not in forms:
+                split_token_owners.setdefault(v_tok, set()).add(idx)
+
+    token_to_char_idx: Dict[str, int] = {}
+    for tok, owners in exact_token_owners.items():
+        if len(owners) == 1:
+            token_to_char_idx[tok] = next(iter(owners))
+    for tok, owners in split_token_owners.items():
+        if tok not in token_to_char_idx and len(owners) == 1:
+            token_to_char_idx[tok] = next(iter(owners))
+
+    return char_forms_list, token_to_char_idx
 
 
 def _ja_contains_character_name(ja_raw: str, ja_clean: str, char_ja: str) -> bool:
@@ -339,9 +400,10 @@ def lint_cue(
     # 8. Speaker -> Addressee Pronoun Consistency Check (when explicit CoT p1/p2 is present)
     p1_val = normalize_nfc(getattr(cue, "p1", None) or "").strip().lower()
     p2_val = normalize_nfc(getattr(cue, "p2", None) or "").strip().lower()
+    cue_mode_low = (cue.mode or "spoken").strip().lower()
     if (
         (p1_val or p2_val)
-        and (cue.mode or "spoken") == "spoken"
+        and cue_mode_low in ("spoken", "comm")
         and not cue.uncertain
         and glossary
         and glossary.characters
@@ -356,48 +418,83 @@ def lint_cue(
             or any(hm in ja_clean for hm in _HOSTILE_JA_MARKERS)
         )
         if not is_hostile_shift:
-            spk_low = cue.speaker.strip().lower()
-            spk_ja_clean = strip_ja_furigana(cue.speaker.strip())
-            addr_low = cue.addressee.strip().lower()
-            for char in glossary.characters:
-                c_vi_low = (char.name_vi or "").strip().lower()
-                c_ja_clean = strip_ja_furigana(char.name_ja or "").strip()
-                c_aliases_low = {a.strip().lower() for a in getattr(char, "aliases", []) if a}
-                if spk_low == c_vi_low or spk_low in c_aliases_low or (c_ja_clean and spk_ja_clean == c_ja_clean):
-                    matched_rule = None
-                    for st in char.speaks_to or []:
-                        if st.listener.strip().lower() == addr_low:
-                            matched_rule = st
-                            break
-                    if matched_rule:
-                        allowed_self = {
-                            normalize_nfc(tok).strip().lower()
-                            for tok in re.split(r"[/|,]", matched_rule.self or "")
-                            if tok.strip()
-                        }
-                        allowed_other = {
-                            normalize_nfc(tok).strip().lower()
-                            for tok in re.split(r"[/|,]", matched_rule.other or "")
-                            if tok.strip()
-                        }
-                        mismatch_parts = []
-                        if p1_val and allowed_self and p1_val not in allowed_self:
-                            mismatch_parts.append(f"p1='{p1_val}' (expected '{matched_rule.self}')")
-                        if p2_val and allowed_other and p2_val not in allowed_other:
-                            mismatch_parts.append(f"p2='{p2_val}' (expected '{matched_rule.other}')")
-                        if mismatch_parts:
-                            violations.append(
-                                LintViolation(
-                                    rule_id=RULE_PRONOUN_CONSISTENCY,
-                                    severity="WARNING",
-                                    cue_id=cue.id,
-                                    message=(
-                                        f"Cue {cue.id} ({char.name_vi} -> {matched_rule.listener}) pronoun drift: "
-                                        + ", ".join(mismatch_parts)
-                                    ),
-                                    suggestion=f"Use canonical pronouns '{matched_rule.self} / {matched_rule.other}'.",
-                                )
+            char_forms_list, token_to_char_idx = _resolve_glossary_character_identities(glossary)
+            spk_low = _norm_char_token(cue.speaker)
+            spk_ja_clean = _norm_char_token(strip_ja_furigana(cue.speaker.strip()))
+            spk_idx = token_to_char_idx.get(spk_low)
+            if spk_idx is None and spk_ja_clean:
+                spk_idx = token_to_char_idx.get(spk_ja_clean)
+
+            addr_low = _norm_char_token(cue.addressee)
+            addr_ja_clean = _norm_char_token(strip_ja_furigana(cue.addressee.strip()))
+            addr_idx = token_to_char_idx.get(addr_low)
+            if addr_idx is None and addr_ja_clean:
+                addr_idx = token_to_char_idx.get(addr_ja_clean)
+            addr_forms: Set[str] = {f for f in (addr_low, addr_ja_clean) if f}
+            if addr_idx is not None:
+                addr_forms.update(char_forms_list[addr_idx])
+            for alias_group in _CANONICAL_CHAR_TITLE_ALIASES:
+                norm_group = {_norm_char_token(m) for m in alias_group}
+                if addr_forms & norm_group:
+                    addr_forms.update(norm_group)
+
+            candidate_chars = (
+                [glossary.characters[spk_idx]]
+                if spk_idx is not None
+                else [
+                    c
+                    for c, forms in zip(glossary.characters, char_forms_list)
+                    if spk_low in forms or (spk_ja_clean and spk_ja_clean in forms)
+                ]
+            )
+            for char in candidate_chars:
+                matched_rule = None
+                for st in char.speaks_to or []:
+                    st_low = _norm_char_token(st.listener)
+                    st_ja_clean = _norm_char_token(strip_ja_furigana((st.listener or "").strip()))
+                    if not st_low:
+                        continue
+                    if st_low == "all" and addr_low != "all":
+                        continue
+                    st_idx = token_to_char_idx.get(st_low)
+                    if st_idx is None and st_ja_clean:
+                        st_idx = token_to_char_idx.get(st_ja_clean)
+                    if (
+                        (addr_idx is not None and st_idx == addr_idx)
+                        or (st_low in addr_forms)
+                        or (st_ja_clean and st_ja_clean in addr_forms)
+                    ):
+                        matched_rule = st
+                        break
+                if matched_rule:
+                    allowed_self = {
+                        normalize_nfc(tok).strip().lower()
+                        for tok in re.split(r"[/|,]", matched_rule.self or "")
+                        if tok.strip()
+                    }
+                    allowed_other = {
+                        normalize_nfc(tok).strip().lower()
+                        for tok in re.split(r"[/|,]", matched_rule.other or "")
+                        if tok.strip()
+                    }
+                    mismatch_parts = []
+                    if p1_val and allowed_self and p1_val not in allowed_self:
+                        mismatch_parts.append(f"p1='{p1_val}' (expected '{matched_rule.self}')")
+                    if p2_val and allowed_other and p2_val not in allowed_other:
+                        mismatch_parts.append(f"p2='{p2_val}' (expected '{matched_rule.other}')")
+                    if mismatch_parts:
+                        violations.append(
+                            LintViolation(
+                                rule_id=RULE_PRONOUN_CONSISTENCY,
+                                severity="WARNING",
+                                cue_id=cue.id,
+                                message=(
+                                    f"Cue {cue.id} ({char.name_vi} -> {matched_rule.listener}) pronoun drift: "
+                                    + ", ".join(mismatch_parts)
+                                ),
+                                suggestion=f"Use canonical pronouns '{matched_rule.self} / {matched_rule.other}'.",
                             )
+                        )
                     break
 
     return violations

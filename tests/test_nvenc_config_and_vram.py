@@ -96,3 +96,50 @@ def test_phase1_vram_smart_cleanup_logic():
                 mock_empty.assert_called_once()
                 logger_mock.info.assert_called_once()
                 assert "VRAM Garbage Collection" in logger_mock.info.call_args[0][0]
+
+
+def test_config_cold_import_skips_torch_and_ffmpeg_subprocess(tmp_path):
+    """Verify cold import of src.config does not import torch or spawn ffmpeg -encoders."""
+    import subprocess
+
+    env = dict(os.environ)
+    env.pop("UPSCALER_HEVC_ENCODER", None)
+    probe = (
+        "import subprocess, sys; "
+        "calls = []; "
+        "subprocess.run = lambda *a, **kw: calls.append(a); "
+        "import src.config as cfg; "
+        "assert 'torch' not in sys.modules, 'torch imported eagerly'; "
+        "assert calls == [], f'ffmpeg subprocess spawned on import: {calls}'; "
+        "assert 'DEFAULT_ENGINE' in dir(cfg) and 'HEVC_ENCODER' in dir(cfg)"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr or res.stdout
+
+
+def test_config_lazy_attrs_support_mock_patch_and_validate_environment():
+    """Verify PEP 562 lazy attributes support mock.patch, __dir__, and validate_environment."""
+    import src.config as cfg
+
+    for attr in ("DEFAULT_ENGINE", "DEVICE_NAME", "DEFAULT_BATCH_SIZE", "HEVC_ENCODER"):
+        assert attr in dir(cfg)
+
+    with patch("src.config.HEVC_ENCODER", "libx265"):
+        args = cfg.get_hevc_rate_args("28M")
+        assert "-crf" in args
+        assert "-multipass" not in args
+
+    with (
+        patch("src.config.DEFAULT_ENGINE", "cpu"),
+        patch("shutil.which", return_value="ffmpeg.exe"),
+    ):
+        cfg.validate_environment()
+
+    with pytest.raises(AttributeError):
+        getattr(cfg, "NON_EXISTENT_CONFIG_ATTR_XYZ")

@@ -8,6 +8,7 @@ import json
 import sqlite3
 import statistics
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 
@@ -333,91 +334,110 @@ def query_subtrans_api_stats(
     start_utc: Optional[str] = None,
     end_utc: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Truy vấn thống kê API Gemini từ SQLite cache theo cửa sổ thời gian động."""
-    if not os.path.exists(db_path):
+    """Queries Gemini API stats from SQLite cache in read-only mode."""
+    if not os.path.isfile(db_path):
         return {}
 
-    con = sqlite3.connect(db_path)
+    ro_uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    con = sqlite3.connect(ro_uri, uri=True, timeout=30.0)
     try:
+        con.execute("PRAGMA busy_timeout=5000")
         cur = con.cursor()
 
-        # Thống kê bản dịch theo model
-        cur.execute("SELECT model, count(*) FROM translations GROUP BY model")
-        cues_by_model = {row[0]: row[1] for row in cur.fetchall()}
+        try:
+            tables = {
+                row[0]
+                for row in cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "translations" not in tables:
+                return {}
 
-        # Tự động xác định cửa sổ thời gian mới nhất nếu không truyền start_utc / end_utc
-        eff_start = start_utc
-        eff_end = end_utc
-        if eff_start is None or eff_end is None:
-            cur.execute("SELECT MAX(created_at) FROM api_requests WHERE status != 'dry_run'")
-            row_max = cur.fetchone()
-            max_ts = row_max[0] if row_max else None
-            if max_ts:
-                try:
-                    dt_max = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
-                    if eff_end is None:
-                        eff_end = max_ts
-                    if eff_start is None:
-                        eff_start = (dt_max - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    pass
+            # Thống kê bản dịch theo model
+            cur.execute("SELECT model, count(*) FROM translations GROUP BY model")
+            cues_by_model = {row[0]: row[1] for row in cur.fetchall()}
 
-        if eff_start is not None and eff_end is not None:
-            cur.execute(
-                """
-                SELECT model, status, error_type, count(*)
-                FROM api_requests
-                WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
-                GROUP BY model, status, error_type
-                """,
-                (eff_start, eff_end),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT model, status, error_type, count(*)
-                FROM api_requests
-                WHERE status != 'dry_run'
-                GROUP BY model, status, error_type
-                """
-            )
-        req_rows = cur.fetchall()
+            req_rows = []
+            pt_rows = []
+            if "api_requests" in tables:
+                # Tự động xác định cửa sổ thời gian mới nhất nếu không truyền start_utc / end_utc
+                eff_start = start_utc
+                eff_end = end_utc
+                if eff_start is None or eff_end is None:
+                    cur.execute("SELECT MAX(created_at) FROM api_requests WHERE status != 'dry_run'")
+                    row_max = cur.fetchone()
+                    max_ts = row_max[0] if row_max else None
+                    if max_ts:
+                        try:
+                            dt_max = datetime.strptime(max_ts, "%Y-%m-%d %H:%M:%S")
+                            if eff_end is None:
+                                eff_end = max_ts
+                            if eff_start is None:
+                                eff_start = (dt_max - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            pass
 
-        model_summary = {}
-        for m, status, err_type, count in req_rows:
-            if m not in model_summary:
-                model_summary[m] = {"total": 0, "success": 0, "503": 0, "other_err": 0}
-            model_summary[m]["total"] += count
-            if status == "success":
-                model_summary[m]["success"] += count
-            elif "503" in str(status) or err_type == "503_Unavailable":
-                model_summary[m]["503"] += count
-            else:
-                model_summary[m]["other_err"] += count
+                if eff_start is not None and eff_end is not None:
+                    cur.execute(
+                        """
+                        SELECT model, status, error_type, count(*)
+                        FROM api_requests
+                        WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
+                        GROUP BY model, status, error_type
+                        """,
+                        (eff_start, eff_end),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT model, status, error_type, count(*)
+                        FROM api_requests
+                        WHERE status != 'dry_run'
+                        GROUP BY model, status, error_type
+                        """
+                    )
+                req_rows = cur.fetchall()
 
-        # Thống kê theo PT Hour (chuyển đổi created_at UTC từ SQLite sang America/Los_Angeles)
-        pt_tz = ZoneInfo("America/Los_Angeles")
-        if eff_start is not None and eff_end is not None:
-            cur.execute(
-                """
-                SELECT created_at, model, status, error_type
-                FROM api_requests
-                WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
-                """,
-                (eff_start, eff_end),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT created_at, model, status, error_type
-                FROM api_requests
-                WHERE status != 'dry_run'
-                """
-            )
-        pt_rows = cur.fetchall()
+                # Thống kê theo PT Hour (chuyển đổi created_at UTC từ SQLite sang America/Los_Angeles)
+                if eff_start is not None and eff_end is not None:
+                    cur.execute(
+                        """
+                        SELECT created_at, model, status, error_type
+                        FROM api_requests
+                        WHERE status != 'dry_run' AND created_at >= ? AND created_at <= ?
+                        """,
+                        (eff_start, eff_end),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT created_at, model, status, error_type
+                        FROM api_requests
+                        WHERE status != 'dry_run'
+                        """
+                    )
+                pt_rows = cur.fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
     finally:
         con.close()
 
+    model_summary = {}
+    for m, status, err_type, count in req_rows:
+        if m not in model_summary:
+            model_summary[m] = {"total": 0, "success": 0, "503": 0, "other_err": 0}
+        model_summary[m]["total"] += count
+        if status == "success":
+            model_summary[m]["success"] += count
+        elif "503" in str(status) or err_type == "503_Unavailable":
+            model_summary[m]["503"] += count
+        else:
+            model_summary[m]["other_err"] += count
+
+    pt_tz = ZoneInfo("America/Los_Angeles")
     by_pt_hour = {}
     for created_at, m, status, err_type in pt_rows:
         try:

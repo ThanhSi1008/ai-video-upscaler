@@ -59,6 +59,8 @@ CROSS_BOUNDARY_CONTRACTS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[st
     (("GEMINI.md", ".agents/*", "docs/agents/*", ".antigravityignore", ".gitignore"), ("scripts/agent_context.py",), ("tests/test_agent_context.py", "tests/test_agent_setup.py"), True),
     (("subtrans/cache.py",), ("web/app.py", "src/night_report.py"), ("tests/test_web_gui.py", "subtrans/tests/"), True),
     (("src/config.py", "src/pending_queue.py"), ("web/sse_hub.py", "web/job_manager.py", "web/app.py"), ("tests/test_web_gui.py",), True),
+    (("src/scheduler.py",), ("web/job_manager.py",), ("tests/test_web_gui.py",), True),
+    (("src/models_resolver.py",), ("web/fs_browser.py",), ("tests/test_web_gui.py",), True),
 )
 MANAGED_HOOK = (
     "#!/bin/sh\n"

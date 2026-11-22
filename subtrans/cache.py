@@ -1,14 +1,31 @@
 """SQLite WAL contextual translation cache and Pacific Time Gemini quota ledger."""
 
 import os
+import random
 import sqlite3
 import hashlib
 import json
+import threading
+import time
 import zoneinfo
 import datetime
 import contextlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+
+_INIT_LOCKS_GUARD = threading.Lock()
+_INIT_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _get_init_lock(db_path: Path) -> threading.Lock:
+    """Returns a per-path lock serializing cold-start SQLite WAL initialization."""
+    key = os.path.normcase(os.path.abspath(str(db_path)))
+    with _INIT_LOCKS_GUARD:
+        lock = _INIT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _INIT_LOCKS[key] = lock
+        return lock
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 DB_PATH = CACHE_DIR / "translations.db"
@@ -92,8 +109,10 @@ def compute_cue_cache_key(
     stage: str = "draft",
     rag_hash: str = "",
     context_sig: str = "",
+    gloss_skill_names: bool = False,
+    en_only_source: bool = False,
 ) -> str:
-    """Generates a SHA-256 cache key for an individual dialogue cue keyed by model, text, glossary, cast sheet, prompt, stage, rag snapshot, and optional speaker/scene context signature."""
+    """Generates a SHA-256 cache key for an individual cue with optional context and mode flags."""
     payload: Dict[str, Any] = {
         "model": model,
         "ja": ja.strip(),
@@ -106,6 +125,10 @@ def compute_cue_cache_key(
     }
     if context_sig:
         payload["context_sig"] = context_sig
+    if gloss_skill_names:
+        payload["gloss_skill_names"] = True
+    if en_only_source:
+        payload["en_only_source"] = True
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -120,9 +143,9 @@ class TranslationCache:
 
     @contextlib.contextmanager
     def _connect(self, immediate: bool = False):
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout=10000")
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=5000")
             with conn:
                 if immediate:
                     conn.execute("BEGIN IMMEDIATE")
@@ -131,8 +154,27 @@ class TranslationCache:
             conn.close()
 
     def _init_db(self):
+        with _get_init_lock(self.db_path):
+            last_err: Optional[sqlite3.OperationalError] = None
+            for attempt in range(10):
+                try:
+                    self._init_db_once()
+                    return
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if ("locked" in msg or "busy" in msg) and attempt < 9:
+                        last_err = exc
+                        time.sleep(0.02 * (attempt + 1) + random.uniform(0.0, 0.02))
+                        continue
+                    raise
+            if last_err is not None:
+                raise last_err
+
+    def _init_db_once(self):
         with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+            if not mode_row or str(mode_row[0]).lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
         with self._connect(immediate=True) as conn:
             conn.execute("""

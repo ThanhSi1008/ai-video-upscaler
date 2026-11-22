@@ -428,7 +428,7 @@ class GPUPersistentWorker:
             use_spandrel = False
 
         if not use_spandrel or model is None:
-            sd = torch.load(self.weights_path, map_location="cpu", weights_only=False)
+            sd = torch.load(self.weights_path, map_location="cpu", weights_only=True)
             weights = sd.get("params_ema", sd.get("params", sd))
             clean_weights = {k: v for k, v in weights.items() if k.startswith("body.")}
 

@@ -78,6 +78,8 @@ def isolated_environment(
     clean.update(CUDA_VISIBLE_DEVICES="-1", RUN_GPU_TESTS="0", PYTHON_DOTENV_DISABLED="1",
                  SUBTRANS_DISABLE_DOTENV="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                  PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", UPSCALER_HEVC_ENCODER="libx265",
+                 OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+                 OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
                  TEMP=resolved_tmp, TMP=resolved_tmp, TMPDIR=resolved_tmp)
     return clean
 
@@ -341,49 +343,92 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _MEASURED_FILE_WEIGHT_MS: dict[str, int] = {
-    "tests/e2e/test_tier1_features.py": 16500,
-    "tests/e2e/test_tier2_boundaries.py": 11000,
-    "tests/test_allow_partial.py": 10500,
-    "tests/e2e/test_e2e_group_b.py": 7300,
-    "tests/test_export_review_bundle.py": 6900,
-    "tests/e2e/test_tier3_pairwise.py": 6000,
-    "tests/test_web_gui.py": 5900,
-    "tests/test_nvme_cache_and_input_triton.py": 4400,
-    "tests/test_dedup_policy.py": 4100,
-    "tests/e2e/test_tier4_scenarios.py": 3800,
-    "tests/test_benchmark_infra.py": 3400,
-    "tests/test_mux_audit_regression.py": 3200,
-    "tests/test_agent_context.py": 3200,
-    "tests/test_pareto_o1_o6.py": 2800,
-    "subtrans/tests/test_cache.py": 2800,
-    "tests/e2e/test_e2e_integration_t3_t4.py": 2400,
-    "tests/test_zero_disk_and_trt_export.py": 2000,
-    "tests/test_rtx3060_unlocks.py": 1800,
-    "tests/test_algorithmic_optimizations.py": 1600,
-    "tests/test_architecture_boundaries.py": 1500,
-    "tests/test_pipeline.py": 1300,
-    "tests/test_output_sanity.py": 1300,
-    "subtrans/tests/test_subtrans_resilience.py": 1300,
-    "tests/test_model_spandrel_and_whisper.py": 1200,
-    "tests/test_agent_setup.py": 1200,
-    "subtrans/tests/test_pipeline_dynamic_batch.py": 1200,
-    "subtrans/tests/test_audit_fixes_subtrans.py": 1200,
-    "subtrans/tests/test_subtrans_deep_upgrades.py": 1100,
-    "tests/test_audit_fixes_video.py": 850,
-    "tests/test_smoke_pipeline.py": 800,
-    "tests/test_verify_offline.py": 800,
-    "subtrans/tests/test_subtrans_v2_max_quality.py": 650,
-    "tests/test_dedup.py": 600,
-    "tests/e2e/test_e2e_group_a.py": 600,
-    "tests/test_ffmpeg_ops.py": 500,
-    "tests/test_gop_rle_and_3stage_overlap.py": 450,
-    "tests/test_cli_lock_and_pipeline_regressions.py": 450,
-    "subtrans/tests/test_subtrans_v2_5_ceiling_polish.py": 450,
+    "tests/e2e/test_tier1_features.py": 17600,
+    "tests/e2e/test_e2e_group_b.py": 15820,
+    "tests/test_web_gui.py": 13510,
+    "tests/e2e/test_tier2_boundaries.py": 9670,
+    "tests/test_e2e_acceptance_p0_p2.py": 7280,
+    "tests/test_export_review_bundle.py": 7230,
+    "tests/test_rtx3060_unlocks.py": 6470,
+    "tests/e2e/test_tier3_pairwise.py": 6130,
+    "tests/test_nvme_cache_and_input_triton.py": 5560,
+    "tests/test_dedup_policy.py": 4840,
+    "tests/e2e/test_tier4_scenarios.py": 4620,
+    "tests/test_zero_disk_and_trt_export.py": 4270,
+    "tests/e2e/test_e2e_integration_t3_t4.py": 4170,
+    "tests/test_algorithmic_optimizations.py": 3980,
+    "tests/test_mux_audit_regression.py": 3860,
+    "tests/test_benchmark_infra.py": 3680,
+    "tests/test_agent_context.py": 2950,
+    "subtrans/tests/test_throttle.py": 2830,
+    "tests/test_output_sanity.py": 2820,
+    "subtrans/tests/test_cache.py": 2720,
+    "tests/test_pareto_o1_o6.py": 2720,
+    "subtrans/tests/test_audit_fixes_subtrans.py": 2660,
+    "subtrans/tests/test_dtw_and_dynamic_cast.py": 1990,
+    "tests/test_architecture_boundaries.py": 1960,
+    "tests/test_pipeline.py": 1940,
+    "tests/test_allow_partial.py": 1720,
+    "tests/test_verify_offline.py": 1680,
+    "tests/test_model_spandrel_and_whisper.py": 1560,
+    "subtrans/tests/test_subtrans_resilience.py": 1560,
+    "tests/test_agent_setup.py": 1500,
+    "subtrans/tests/test_subtrans_deep_upgrades.py": 1410,
+    "tests/test_smoke_pipeline.py": 980,
+    "subtrans/tests/test_pipeline_dynamic_batch.py": 920,
+    "tests/test_audit_fixes_video.py": 860,
+    "tests/test_cli_lock_and_pipeline_regressions.py": 820,
+    "tests/e2e/test_e2e_group_a.py": 800,
+    "subtrans/tests/test_subtrans_v2_max_quality.py": 750,
+    "tests/test_ffmpeg_ops.py": 630,
+    "tests/test_gop_rle_and_3stage_overlap.py": 630,
+    "tests/test_nvenc_config_and_vram.py": 520,
+    "subtrans/tests/test_cli_batch.py": 520,
+    "subtrans/tests/test_subtrans_v2_5_ceiling_polish.py": 490,
+    "subtrans/tests/test_rag.py": 440,
+    "subtrans/tests/test_parser.py": 430,
+    "subtrans/tests/test_eval_runner.py": 420,
+    "subtrans/tests/test_cascade.py": 390,
+    "subtrans/tests/test_key_rotation_stub.py": 340,
+    "subtrans/tests/test_subtrans_stub_pipeline.py": 280,
+    "subtrans/tests/test_gemini.py": 250,
+    "tests/test_model_selection_and_safety.py": 200,
+    "tests/test_deadline_math_realignment.py": 180,
+    "subtrans/tests/test_fts5_kanji.py": 170,
+    "subtrans/tests/test_whisper_noise_and_speaker.py": 140,
+    "tests/test_dedup.py": 110,
+    "subtrans/tests/test_gemini_quota_management.py": 110,
+    "tests/test_enospc_backpressure_retry.py": 100,
+    "subtrans/tests/test_glossary.py": 90,
+    "subtrans/tests/test_sample_fixture.py": 70,
+    "tests/test_cli_and_shows_polish.py": 70,
+    "subtrans/tests/test_gemini_bisect.py": 70,
+    "subtrans/tests/test_quota_wrapper.py": 70,
+    "subtrans/tests/test_ja_morph_tagger.py": 60,
+    "subtrans/tests/test_harness.py": 50,
+    "subtrans/tests/test_writer.py": 40,
+    "tests/test_cleanup.py": 40,
+    "tests/test_zero_disk_ring_buffers_and_cel.py": 30,
+    "subtrans/tests/test_linter.py": 30,
+    "tests/test_e_drive_isolation.py": 30,
+    "tests/test_bd_gop_desync.py": 30,
+    "tests/test_subtitle_guardrails.py": 20,
+    "tests/test_ramdisk_worst_case.py": 20,
+    "subtrans/tests/test_auto_offset.py": 20,
+    "tests/test_set_track_defaults.py": 20,
+    "tests/test_triton_p010le_kernel.py": 20,
+    "tests/test_model_regression.py": 20,
+    "tests/test_gpu_throttling_overlap.py": 20,
 }
 
 
 def _split_e2e_into_n(
-    file_path: Path, rel: str, base_weight: int, parts: int, first_ratio: float | None = None
+    file_path: Path,
+    rel: str,
+    base_weight: int,
+    parts: int,
+    first_ratio: float | None = None,
+    slice_weights: tuple[int, ...] | None = None,
 ) -> list[tuple[int, list[str]]]:
     """Split pure-function E2E tier files into N balanced nodeid slices."""
     import ast
@@ -400,12 +445,14 @@ def _split_e2e_into_n(
     ]
     if has_test_classes or len(test_fns) < parts * 2:
         return [(base_weight, [rel])]
+    use_slice_weights = slice_weights is not None and len(slice_weights) == parts
     if parts == 2 and first_ratio is not None:
         mid = max(1, min(len(test_fns) - 1, int(round(len(test_fns) * first_ratio))))
-        w_half = max(1, base_weight // 2)
+        w_first = max(1, slice_weights[0] if use_slice_weights else (base_weight // 2))
+        w_second = max(1, slice_weights[1] if use_slice_weights else (base_weight // 2))
         return [
-            (w_half, [f"{rel}::{fn}" for fn in test_fns[:mid]]),
-            (w_half, [f"{rel}::{fn}" for fn in test_fns[mid:]]),
+            (w_first, [f"{rel}::{fn}" for fn in test_fns[:mid]]),
+            (w_second, [f"{rel}::{fn}" for fn in test_fns[mid:]]),
         ]
     slices: list[tuple[int, list[str]]] = []
     n_total = len(test_fns)
@@ -414,7 +461,7 @@ def _split_e2e_into_n(
         hi = ((idx + 1) * n_total) // parts
         fn_slice = test_fns[lo:hi]
         if fn_slice:
-            w_part = max(1, base_weight // parts)
+            w_part = max(1, slice_weights[idx] if use_slice_weights else (base_weight // parts))
             slices.append((w_part, [f"{rel}::{fn}" for fn in fn_slice]))
     return slices
 
@@ -433,9 +480,18 @@ _SPLIT_MONOLITH_PARTS: dict[str, int] = {
     "tests/e2e/test_tier1_features.py": 3,
     "tests/e2e/test_tier2_boundaries.py": 3,
     "tests/e2e/test_e2e_group_b.py": 3,
-    "tests/test_web_gui.py": 2,
+    "tests/test_web_gui.py": 3,
     "tests/e2e/test_tier3_pairwise.py": 2,
     "tests/e2e/test_tier4_scenarios.py": 2,
+}
+
+_SPLIT_MONOLITH_SLICE_WEIGHTS_MS: dict[str, tuple[int, ...]] = {
+    "tests/e2e/test_tier1_features.py": (4120, 8080, 5400),
+    "tests/e2e/test_tier2_boundaries.py": (3330, 3180, 3160),
+    "tests/e2e/test_e2e_group_b.py": (13860, 210, 1750),
+    "tests/test_web_gui.py": (3510, 5390, 4610),
+    "tests/e2e/test_tier3_pairwise.py": (3490, 2650),
+    "tests/e2e/test_tier4_scenarios.py": (1220, 3400),
 }
 
 
@@ -450,10 +506,11 @@ def _partition_test_shards(snapshot: Path, num_workers: int) -> list[list[str]]:
         for p in sorted(base.rglob("test_*.py")):
             file_count += 1
             rel = p.relative_to(snapshot).as_posix()
-            weight = _MEASURED_FILE_WEIGHT_MS.get(rel, max(600, p.stat().st_size // 10))
+            weight = _MEASURED_FILE_WEIGHT_MS.get(rel, max(200, p.stat().st_size // 20))
             parts = _SPLIT_MONOLITH_PARTS.get(rel, 1)
             if parts > 1:
-                all_units.extend(_split_e2e_into_n(p, rel, weight, parts=parts))
+                slice_weights = _SPLIT_MONOLITH_SLICE_WEIGHTS_MS.get(rel)
+                all_units.extend(_split_e2e_into_n(p, rel, weight, parts=parts, slice_weights=slice_weights))
             else:
                 all_units.append((weight, [rel]))
     if file_count < 8 or num_workers <= 1:
@@ -478,6 +535,51 @@ def _merge_junit_files(shard_xmls: list[Path], dest_xml: Path) -> tuple[int, int
             total_skipped += int(st.attrib.get("skipped", 0))
     ET.ElementTree(root).write(dest_xml, encoding="utf-8", xml_declaration=True)
     return total_tests, total_failures, total_errors, total_skipped
+
+
+def _configure_win32_pcore_qos() -> int | None:
+    """Disable Win11 EcoQoS throttling so sharded pytest workers stay on P-cores."""
+    if sys.platform != "win32" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+        kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        h_proc = kernel32.GetCurrentProcess()
+
+        class _PowerThrottlingState(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+        state = _PowerThrottlingState(Version=1, ControlMask=0x1, StateMask=0)
+        kernel32.SetProcessInformation(h_proc, 4, ctypes.byref(state), ctypes.sizeof(state))
+        prev_prio = int(kernel32.GetPriorityClass(h_proc))
+        if prev_prio in (0, 0x00000020):
+            kernel32.SetPriorityClass(h_proc, 0x00008000)
+            return prev_prio or 0x00000020
+    except Exception:
+        pass
+    return None
+
+
+def _restore_win32_pcore_qos(prev_prio: int | None) -> None:
+    """Restore prior Windows process priority class after sharded validation completes."""
+    if prev_prio is None or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), prev_prio)
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -511,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
 
     code = 1
     extra_snapshots: list[Path] = []
+    prev_prio = _configure_win32_pcore_qos()
     try:
         _write_active_pid(active_pid_file, os.getpid())
         snapshot.mkdir()
@@ -655,6 +758,7 @@ def main(argv: list[str] | None = None) -> int:
                 active_pid_file.with_name(f"{active_pid_file.name}.tmp").unlink(missing_ok=True)
             except OSError:
                 pass
+            _restore_win32_pcore_qos(prev_prio)
     return code
 
 

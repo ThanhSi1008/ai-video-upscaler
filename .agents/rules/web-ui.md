@@ -13,7 +13,7 @@ description: "Vanilla HTML/CSS/JS local dashboard conventions, FastAPI + SSE res
 - **FastAPI, SSE & Telemetry Contract (`web/app.py`, `web/sse_hub.py`, `web/job_manager.py`):**
   - Bind `127.0.0.1:8765` by default with loopback/Origin anti-DNS-rebinding guards.
   - Keep `/api/status` and `/api/events` (SSE) non-blocking; query `subtrans/.cache/translations.db` exclusively via read-only URI (`?mode=ro`) and mask all API key slots.
-  - Keep `/api/status` `live.chunks` matching `src/logger.py:RunLogger`: emit **0-based** `chunk_idx` entries **only for completed chunks** (`len(chunks) == completed_chunks`), `resumed_chunks` 0-based, and 0-based `active_chunk`.
+  - Keep `/api/status` `live` chunk telemetry aligned with `src/logger.py:RunLogger` and `tests/test_architecture_boundaries.py`: emit **0-based** `chunk_idx` entries for completed chunks only (`resumed_chunks` and `active_chunk` also 0-based); `RunLogger` stores current-run completed chunks in `chunks` (`completed_chunks = len(set(chunks) | set(resumed_chunks))`), while `--mock` emits `len(chunks) == completed_chunks`.
 - **UI Performance & Accessibility:**
   - Batch chart/canvas updates with `requestAnimationFrame`, maintain keyboard focus and ARIA attributes (`aria-busy`, `tabindex`), and sanitize dynamic DOM insertions.
 - **Fast `--mock` & Offline Verification:**

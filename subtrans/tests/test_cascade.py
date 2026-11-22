@@ -358,3 +358,26 @@ def test_cascade_logs_usage_metadata_tokens_to_real_sqlite_cache(tmp_path):
     assert rows == [("gemini-3.8-flash", "success", 25, 4, 10)]
 
 
+def test_cascade_dry_run_blocks_telemetry_jsonl_even_outside_pytest(tmp_path, monkeypatch):
+    """Verify dry_run=True blocks logs/cascade_telemetry_*.jsonl writes even when PYTEST_CURRENT_TEST is unset."""
+    from subtrans.cascade import _write_telemetry_jsonl
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン、待って", vi="Em, đợi đã", uncertain=True),
+    ]
+    dry_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash", dry_run=True)
+    run_cascade_repair_pass(cues, repair_translator=dry_translator, episode_basename="ep_dry", dry_run=True)
+
+    live_translator = GeminiTranslator(api_key="mock_key", model="gemini-3.8-flash", dry_run=False)
+    run_cascade_repair_pass(cues, repair_translator=live_translator, episode_basename="ep_dry_kw", dry_run=True)
+    _write_telemetry_jsonl("ep_direct_dry", [{"cue_id": 1}], dry_run=True)
+    assert not (tmp_path / "logs").exists()
+
+    # Control check: dry_run=False writes telemetry when PYTEST_CURRENT_TEST is unset
+    _write_telemetry_jsonl("live_ep", [{"cue_id": 1}], dry_run=False)
+    assert (tmp_path / "logs" / "cascade_telemetry_live_ep.jsonl").is_file()
+
+

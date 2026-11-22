@@ -739,6 +739,7 @@ def test_o5_o6_auto_pareto_pipeline_scene_cut_hysteresis_and_episode_multipass_l
         )
 
     assert Path(res_out).is_file()
+    assert mock_planner.start.call_args.kwargs["sync_initial_chunks"] == 3
     # Auto-promoted omitted -s (default 8) -> 24s super-chunks in CUDA zero-disk mode.
     assert split_seg_times == [24]
     # Shared single DoubleBufferedPipeUpscaler ring across both engines.
@@ -748,6 +749,226 @@ def test_o5_o6_auto_pareto_pipeline_scene_cut_hysteresis_and_episode_multipass_l
     # Uniform per-episode multipass across all 3 chunks (zero SPS/PPS mismatch).
     assert len(set(chunk_multipass_used)) == 1
     assert chunk_multipass_used[0] in ("fullres", "qres")
+
+
+def test_p1_4_rolling_planner_3chunk_warmup_and_sakuga_dis_thresh(tmp_path):
+    """Verify RollingDedupPlanner warmup with 1-2 chunks and sakuga/dis-sakuga dis_thresh persistence."""
+    from src.dedup import RollingDedupPlanner, load_or_create_plan, scan_dedup_plan
+
+    def _fake_scan_fused(*args, **kwargs):
+        return (["keep", "drop", "keep", "drop"], ["keep", "drop", "keep", "drop"])
+
+    for n_chunks in (1, 2):
+        segs = []
+        for idx in range(n_chunks):
+            sp = tmp_path / f"seg_{n_chunks}_{idx:04d}.mp4"
+            sp.write_bytes(b"SEG")
+            segs.append(str(sp))
+        plan_path = tmp_path / f"plan_{n_chunks}.json"
+        with (
+            patch("src.dedup._scan_fused_mpdecimate_and_dis", side_effect=_fake_scan_fused),
+            patch("src.ffmpeg_ops._count_leading_discard_packets", return_value=0),
+        ):
+            planner = RollingDedupPlanner(
+                input_path=segs[0],
+                seg_paths=segs,
+                seg_frame_counts=[4] * n_chunks,
+                plan_path=str(plan_path),
+                segment_seconds=24,
+                policy="sakuga",
+            )
+            planner.start(sync_initial_chunks=3)
+            est = planner.get_estimated_dedup_ratio_pct()
+            fin = planner.finalize_plan(extra_fields={"nvenc_multipass": "qres"})
+            planner.close()
+
+        assert est == pytest.approx(50.0)
+        assert fin["dedup_params"]["dis_thresh"] == pytest.approx(0.35)
+        assert fin["nvenc_multipass"] == "qres"
+        saved = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert saved["dedup_params"]["dis_thresh"] == pytest.approx(0.35)
+
+    for pol in ("sakuga", "dis-sakuga"):
+        scan_plan_path = tmp_path / f"scan_{pol}.json"
+        with (
+            patch("src.dedup._scan_fused_mpdecimate_and_dis", side_effect=_fake_scan_fused),
+            patch("src.ffmpeg_ops._count_leading_discard_packets", return_value=0),
+            patch("src.dedup.subprocess.run") as sp_run,
+        ):
+            sp_run.return_value = MagicMock(returncode=0, stdout="ffmpeg version 7.1\n")
+            scanned = scan_dedup_plan(
+                str(tmp_path / "seg_1_0000.mp4"),
+                str(scan_plan_path),
+                segment_seconds=24,
+                chunk_frame_counts=[4],
+                policy=pol,
+            )
+        assert scanned["dedup_params"]["dis_thresh"] == pytest.approx(0.35)
+
+        with pytest.raises(ValueError, match="dis_thresh"):
+            load_or_create_plan(
+                str(tmp_path / "seg_1_0000.mp4"),
+                str(scan_plan_path),
+                segment_seconds=24,
+                resume=True,
+                chunk_frame_counts=[4],
+                policy=pol,
+                dis_thresh=0.20,
+            )
+
+
+def test_p1_4_non_zero_disk_worker_encode_forwards_multipass(tmp_path, monkeypatch):
+    """Verify encode_chunk_reexpanded and non-zero-disk worker_encode forward multipass."""
+    from src.dedup import encode_chunk_reexpanded
+
+    concat_txt = tmp_path / "concat.txt"
+    concat_txt.write_text("file 'frame00000001.png'\n", encoding="utf-8")
+    out_mp4 = tmp_path / "chunk_reexp.mp4"
+    captured_cmds: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        if cmd[0] == "ffmpeg":
+            captured_cmds.append(list(cmd))
+            Path(cmd[-1]).write_bytes(b"MP4" * 4000)
+            return MagicMock(returncode=0, stdout="")
+        return MagicMock(returncode=0, stdout="4\n")
+
+    with (
+        patch.object(src_config, "HEVC_ENCODER", "hevc_nvenc"),
+        patch("src.dedup.subprocess.run", side_effect=_fake_run),
+        patch("src.ffmpeg_ops.verify_segment_resume_frames", return_value=True),
+    ):
+        encode_chunk_reexpanded(
+            str(concat_txt),
+            str(out_mp4),
+            expected_frames=4,
+            multipass="qres",
+        )
+    assert out_mp4.is_file()
+    assert "-multipass" in captured_cmds[0]
+    assert captured_cmds[0][captured_cmds[0].index("-multipass") + 1] == "qres"
+
+    # Also verify non-zero-disk pipeline worker_encode forwards episode_multipass to both encoders.
+    src_vid = tmp_path / "ep_nzd.mkv"
+    src_vid.write_bytes(b"FAKE_MKV" * 200)
+    out_vid = tmp_path / "out_nzd" / "ep_nzd_4K.mkv"
+    reexp_calls: list[dict[str, Any]] = []
+    hevc_calls: list[dict[str, Any]] = []
+    fake_meta = {
+        "size_bytes": 2400, "width": 24, "height": 16, "pix_fmt": "yuv420p",
+        "fps": 24.0, "fps_num": 24, "fps_den": 1, "duration": 24.0, "nb_frames": 8,
+        "audio_count": 0, "subtitle_count": 0, "attachment_count": 0, "chapter_count": 0,
+    }
+    fake_plan = {
+        "total_frames": 8,
+        "total_kept_frames": 4,
+        "dedup_ratio_percent": 50.0,
+        "chunks": [
+            {"chunk_idx": 0, "total_frames": 4, "kept_count": 2, "kept_indices": [0, 2], "runs": [{"frame_idx": 0, "count": 2}, {"frame_idx": 2, "count": 2}]},
+            {"chunk_idx": 1, "total_frames": 4, "kept_count": 2, "kept_indices": [0, 2], "runs": [{"frame_idx": 0, "count": 2}, {"frame_idx": 2, "count": 2}]},
+        ],
+    }
+
+    def _fake_split(in_p, segs_d, seg_t):
+        Path(segs_d).mkdir(parents=True, exist_ok=True)
+        res = []
+        for idx in range(2):
+            sp = Path(segs_d) / f"seg_{idx:04d}.mp4"
+            sp.write_bytes(b"SEG")
+            res.append(str(sp))
+        return res
+
+    def _fake_upscale_fallback(*, input_dir, output_dir, **kwargs):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        n = 0
+        for p in Path(input_dir).glob("*.png"):
+            (Path(output_dir) / p.name).write_bytes(b"PNG")
+            n += 1
+        return {"frames_processed": n, "engine_used": "cuda_fp16", "elapsed_seconds": 0.01, "fps": 100.0}
+
+    def _fake_reexp(*args, **kwargs):
+        reexp_calls.append(dict(kwargs))
+        Path(kwargs["output_path"]).write_bytes(b"CHUNK" * 100)
+
+    def _fake_hevc(*args, **kwargs):
+        hevc_calls.append(dict(kwargs))
+        Path(kwargs["output_path"]).write_bytes(b"CHUNK" * 100)
+
+    def _fake_extract(seg_file, frames_dir, *args, **kwargs):
+        Path(frames_dir).mkdir(parents=True, exist_ok=True)
+        for i in range(1, 3):
+            (Path(frames_dir) / f"frame{i:08d}.png").write_bytes(b"PNG")
+        return 2
+
+    with (
+        patch.object(pipeline_mod, "validate_environment"),
+        patch.object(pipeline_mod, "acquire_gpu_lock"),
+        patch.object(pipeline_mod, "release_gpu_lock"),
+        patch.object(pipeline_mod, "run_preflight_checks", return_value=True),
+        patch.object(pipeline_mod, "send_system_notification"),
+        patch.object(pipeline_mod, "probe_video", return_value=fake_meta),
+        patch.object(pipeline_mod, "split_video_segments", side_effect=_fake_split),
+        patch.object(pipeline_mod, "get_segments_frame_counts", return_value=[4, 4]),
+        patch.object(pipeline_mod, "load_or_create_plan", return_value=fake_plan),
+        patch.object(pipeline_mod, "extract_frames", side_effect=_fake_extract),
+        patch.object(pipeline_mod, "generate_concat_demuxer_script"),
+        patch.object(pipeline_mod, "encode_chunk_reexpanded", side_effect=_fake_reexp),
+        patch.object(pipeline_mod, "encode_chunk_hevc", side_effect=_fake_hevc),
+        patch.object(pipeline_mod, "upscale_frames_with_fallback", side_effect=_fake_upscale_fallback),
+        patch.object(pipeline_mod, "mux_segments_directly", side_effect=lambda segs, wd, ip, op: Path(op).parent.mkdir(parents=True, exist_ok=True) or Path(op).write_bytes(b"MKV")),
+        patch("src.output_sanity.check_frame_sanity", return_value={"passed": True, "delta_y": 0.0, "corr": 1.0, "max_delta_y": 6.0, "min_corr": 0.98, "elapsed_ms": 0.5}),
+        patch("src.mux_audit.verify_mux_integrity", return_value={"status": "PASS", "source_meta": fake_meta, "output_meta": fake_meta}),
+    ):
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_vid),
+            output_path=str(out_vid),
+            model="realesr-animevideov3",
+            engine="cuda",
+            precision="fp16",
+            zero_disk=False,
+            use_tensorrt=False,
+            nvenc_multipass="qres",
+            anti_sleep=False,
+            keep_temp=True,
+        )
+
+    assert len(reexp_calls) == 2
+    assert all(c.get("multipass") == "qres" for c in reexp_calls)
+
+    reexp_calls.clear()
+    hevc_calls.clear()
+    with (
+        patch.object(pipeline_mod, "validate_environment"),
+        patch.object(pipeline_mod, "acquire_gpu_lock"),
+        patch.object(pipeline_mod, "release_gpu_lock"),
+        patch.object(pipeline_mod, "run_preflight_checks", return_value=True),
+        patch.object(pipeline_mod, "send_system_notification"),
+        patch.object(pipeline_mod, "probe_video", return_value=fake_meta),
+        patch.object(pipeline_mod, "split_video_segments", side_effect=_fake_split),
+        patch.object(pipeline_mod, "get_segments_frame_counts", return_value=[4, 4]),
+        patch.object(pipeline_mod, "extract_frames", side_effect=_fake_extract),
+        patch.object(pipeline_mod, "encode_chunk_hevc", side_effect=_fake_hevc),
+        patch.object(pipeline_mod, "upscale_frames_with_fallback", side_effect=_fake_upscale_fallback),
+        patch.object(pipeline_mod, "mux_segments_directly", side_effect=lambda segs, wd, ip, op: Path(op).parent.mkdir(parents=True, exist_ok=True) or Path(op).write_bytes(b"MKV")),
+        patch("src.output_sanity.check_frame_sanity", return_value={"passed": True, "delta_y": 0.0, "corr": 1.0, "max_delta_y": 6.0, "min_corr": 0.98, "elapsed_ms": 0.5}),
+        patch("src.mux_audit.verify_mux_integrity", return_value={"status": "PASS", "source_meta": fake_meta, "output_meta": fake_meta}),
+    ):
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_vid),
+            output_path=str(tmp_path / "out_nzd_no_dedup" / "ep_nzd_4K.mkv"),
+            model="realesr-animevideov3",
+            engine="cuda",
+            precision="fp16",
+            dedup=False,
+            zero_disk=False,
+            use_tensorrt=False,
+            nvenc_multipass="qres",
+            anti_sleep=False,
+            keep_temp=True,
+        )
+
+    assert len(hevc_calls) == 2
+    assert all(c.get("multipass") == "qres" for c in hevc_calls)
 
 
 class _NonSRVGGWithBodyAndPixelShuffle(nn.Module):
@@ -1165,4 +1386,65 @@ def test_mux_audit_enforces_10bit_bt709_vui_and_preserves_mock_compatibility(tmp
     )
     assert res_legacy["status"] == "PASS"
     assert res_legacy["video_vui_audit"]["checked"] is False
+
+
+def test_rolling_dedup_planner_set_extra_fields_thread_safe(tmp_path):
+    """Verify RollingDedupPlanner.set_extra_fields safely updates metadata concurrently with _bg_flusher."""
+    import threading
+    import time
+
+    segs = []
+    for idx in range(4):
+        p = tmp_path / f"seg_{idx:04d}.mp4"
+        p.write_bytes(b"fake")
+        segs.append(str(p))
+    plan_path = tmp_path / "dedup_plan.json"
+
+    def _fake_scan_fused(input_path, *args, **kwargs):
+        time.sleep(0.01)
+        boundary_out = kwargs.get("boundary_out")
+        if boundary_out is not None:
+            boundary_out["first_gray"] = np.full((64, 64), 32, dtype=np.uint8)
+            boundary_out["last_gray"] = np.full((64, 64), 32, dtype=np.uint8)
+        return (["keep"] * 4, ["keep", "drop", "keep", "drop"])
+
+    with (
+        patch("src.dedup._scan_fused_mpdecimate_and_dis", side_effect=_fake_scan_fused),
+        patch("src.ffmpeg_ops._count_leading_discard_packets", return_value=0),
+    ):
+        planner = RollingDedupPlanner(
+            input_path=segs[0],
+            seg_paths=segs,
+            seg_frame_counts=[4, 4, 4, 4],
+            plan_path=str(plan_path),
+            segment_seconds=8,
+            policy="dis-auto",
+            max_workers=2,
+            decode_threads=1,
+        )
+        planner.start(sync_initial_chunks=1)
+        errors = []
+
+        def _mutator():
+            try:
+                for step in range(25):
+                    planner.set_extra_fields({"nvenc_multipass": "qres", f"extra_{step}": step})
+                    time.sleep(0.001)
+            except Exception as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=_mutator)
+        t.start()
+        final_plan = planner.finalize_plan()
+        t.join()
+        # Post-finalization update must also rewrite plan.json cleanly.
+        planner.set_extra_fields({"nvenc_multipass": "fullres", "post_final": True})
+        planner.close()
+
+    assert errors == []
+    assert final_plan["total_frames"] == 16
+    saved = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert saved["nvenc_multipass"] == "fullres"
+    assert saved["post_final"] is True
+    assert saved["extra_24"] == 24
 

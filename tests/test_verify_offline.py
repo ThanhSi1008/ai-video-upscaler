@@ -38,6 +38,10 @@ def test_child_environment_drops_credentials_without_mutating_parent():
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in child
     assert "PYTHONPATH" not in child and "PYTEST_ADDOPTS" not in child
     assert child["CUDA_VISIBLE_DEVICES"] == "-1" and child["RUN_GPU_TESTS"] == "0"
+    assert child["OMP_NUM_THREADS"] == "1"
+    assert child["MKL_NUM_THREADS"] == "1"
+    assert child["OPENBLAS_NUM_THREADS"] == "1"
+    assert child["NUMEXPR_NUM_THREADS"] == "1"
     assert child["PATH"] == "tools"
 
 
@@ -212,7 +216,7 @@ def test_partition_test_shards_covers_all_files_without_shard0_pinning():
     covered_files = sorted({t.split("::", 1)[0] for t in all_targets})
     assert covered_files == expected_files
 
-    for split_rel in verify_offline._SPLIT_MONOLITH_PARTS:
+    for split_rel, parts in verify_offline._SPLIT_MONOLITH_PARTS.items():
         fn_count = sum(
             1
             for n in ast.parse((repo_root / split_rel).read_text(encoding="utf-8")).body
@@ -220,6 +224,11 @@ def test_partition_test_shards_covers_all_files_without_shard0_pinning():
         )
         nodeids = [t for t in all_targets if t.startswith(f"{split_rel}::")]
         assert len(nodeids) == fn_count
+        if split_rel in verify_offline._SPLIT_MONOLITH_SLICE_WEIGHTS_MS:
+            weights = verify_offline._SPLIT_MONOLITH_SLICE_WEIGHTS_MS[split_rel]
+            assert len(weights) == parts
+            assert all(w > 0 for w in weights)
+    assert set(verify_offline._SPLIT_MONOLITH_SLICE_WEIGHTS_MS) <= set(verify_offline._SPLIT_MONOLITH_PARTS)
 
     shard0_files = {t.split("::", 1)[0] for t in shards[0]}
     assert len(shard0_files) < 31

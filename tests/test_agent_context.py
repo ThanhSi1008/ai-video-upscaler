@@ -444,11 +444,21 @@ def test_slice_pack_and_two_hop_cross_boundary_impact(tmp_path, capsys):
     assert "src/mod_b.py" in ops_a and "src/mod_c.py" in ops_a
     assert "tests/test_chain.py" in tests_a
 
-    # Cross-boundary contract lookup (all 8 contracts defined + bidirectional test on logger -> web/sse_hub)
-    assert len(agent_context.CROSS_BOUNDARY_CONTRACTS) == 8
+    # Cross-boundary contract lookup (all 10 contracts defined + bidirectional edge checks)
+    assert len(agent_context.CROSS_BOUNDARY_CONTRACTS) == 10
     ops_log, tests_log = agent_context.compute_impact(tmp_path, ["src/logger.py"])
     assert "web/sse_hub.py" in ops_log
     assert "tests/test_web_gui.py" in tests_log
+    ops_sched, tests_sched = agent_context.compute_impact(tmp_path, ["src/scheduler.py"])
+    assert "web/job_manager.py" in ops_sched
+    assert "tests/test_web_gui.py" in tests_sched
+    ops_jm, _ = agent_context.compute_impact(tmp_path, ["web/job_manager.py"])
+    assert "src/scheduler.py" in ops_jm
+    ops_mr, tests_mr = agent_context.compute_impact(tmp_path, ["src/models_resolver.py"])
+    assert "web/fs_browser.py" in ops_mr
+    assert "tests/test_web_gui.py" in tests_mr
+    ops_fb, _ = agent_context.compute_impact(tmp_path, ["web/fs_browser.py"])
+    assert "src/models_resolver.py" in ops_fb
 
     # Batched --pack across Python nested fn + JS fn; rejects > 4 targets
     assert agent_context.main(

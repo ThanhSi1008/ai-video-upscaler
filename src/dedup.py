@@ -1421,7 +1421,7 @@ def scan_dedup_plan(
             "motion_tau": motion_tau if policy_clean == "motion" else None,
             "drift_delta": effective_drift_delta if policy_clean.startswith("drift") else None,
             "drift_min_response": drift_min_response if policy_clean.startswith("drift") else None,
-            "dis_thresh": effective_dis_thresh if policy_clean.startswith("dis") else None
+            "dis_thresh": effective_dis_thresh if is_dis_policy else None
         },
         "total_frames": total_frames,
         "raw_kept_frames": raw_keep,
@@ -1520,7 +1520,7 @@ def load_or_create_plan(
                             f"Từ chối resume: Kế hoạch drift trong {plan_path} sử dụng delta={cached_delta} "
                             f"khác với delta yêu cầu={effective_drift_delta}."
                         )
-                if policy_clean.startswith("dis"):
+                if policy_clean.startswith("dis") or policy_clean in ("sakuga", "dis-sakuga"):
                     cached_params = data.get("dedup_params", {})
                     cached_dis = cached_params.get("dis_thresh")
                     if cached_dis is not None and abs(cached_dis - effective_dis_thresh) > 1e-4:
@@ -1538,7 +1538,7 @@ def load_or_create_plan(
                 if (
                     isinstance(rle_str, str)
                     and rle_str
-                    and not policy_clean.startswith(("drift", "dis"))
+                    and not (policy_clean.startswith(("drift", "dis")) or policy_clean in ("sakuga", "dis-sakuga"))
                     and sum(chunk_frame_counts) == data.get("total_frames", 0)
                 ):
                     raw_actions = _decode_actions_rle(rle_str)
@@ -1941,6 +1941,16 @@ class RollingDedupPlanner:
             return 0.0
         return round((1.0 - (kept_f / float(tot_f))) * 100.0, 2)
 
+    def set_extra_fields(self, extra_fields: Dict[str, Any]) -> None:
+        """Atomically merges extra plan fields and rewrites plan.json if already finalized."""
+        if not extra_fields:
+            return
+        with self._lock:
+            self._extra_fields.update(extra_fields)
+            if self._final_plan is not None:
+                self._final_plan.update(extra_fields)
+                self._atomic_write_plan(self._final_plan)
+
     def finalize_plan(self, extra_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if extra_fields:
             with self._lock:
@@ -1997,7 +2007,7 @@ class RollingDedupPlanner:
                     "motion_tau": eff_motion_tau if self.policy == "motion" else None,
                     "drift_delta": float(p_params.get("drift_delta", 0.75)) if self.policy.startswith("drift") else None,
                     "drift_min_response": self.drift_min_response if self.policy.startswith("drift") else None,
-                    "dis_thresh": float(p_params.get("dis_thresh", 0.30)) if self.policy.startswith("dis") else None,
+                    "dis_thresh": float(p_params.get("dis_thresh", 0.30)) if is_dis else None,
                 },
                 "total_frames": self.total_frames,
                 "raw_kept_frames": raw_keep,
@@ -2122,7 +2132,8 @@ def encode_chunk_reexpanded(
     expected_frames: int,
     fps_num: int = 24000,
     fps_den: int = 1001,
-    bitrate: str = "28M"
+    bitrate: str = "28M",
+    multipass: Optional[str] = None,
 ) -> None:
     """
     Mã hóa phân đoạn 4K qua FFmpeg Concat Demuxer + NVENC HEVC 10-bit:
@@ -2134,7 +2145,7 @@ def encode_chunk_reexpanded(
     if os.path.exists(tmp_output):
         os.remove(tmp_output)
 
-    rate_args = get_hevc_rate_args(bitrate=bitrate)
+    rate_args = get_hevc_rate_args(bitrate=bitrate, multipass=multipass) if multipass else get_hevc_rate_args(bitrate=bitrate)
 
     cmd = [
         "ffmpeg", "-y",

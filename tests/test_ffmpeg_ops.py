@@ -314,13 +314,6 @@ def test_real_open_gop_x265_cra_rasl_split_and_recovery(tmp_path: Path):
     assert extracted_counts == counts
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "src/ffmpeg_ops.py:_recover_open_gop_leading_frames aliases first identical black frame "
-        "in 18s window instead of matching near CRA timestamp"
-    ),
-)
 def test_recover_open_gop_leading_frames_black_fade_aliasing(tmp_path: Path):
     """Lock Open-GOP CRA solid-black fade anchor aliasing bug on real ffmpeg rawvideo decode."""
     import numpy as np

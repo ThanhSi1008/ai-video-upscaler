@@ -1332,6 +1332,41 @@ def test_env_api_keys_crlf_injection_key1_sync_and_precedence(tmp_path: Path, mo
         assert client.get("/api/subtrans/overview").json()["configured_keys_count"] == 2
 
 
+def test_env_api_keys_preserves_distinct_key1_when_editing_key3(tmp_path: Path, monkeypatch):
+    """Verify editing key_3 preserves distinct GEMINI_API_KEY and GEMINI_API_KEY_1 entries."""
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    for var in (
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    root = _seed_workspace(tmp_path / "env_distinct_key1_ws")
+    (root / ".env").write_text(
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSySecondKey0002\n",
+        encoding="utf-8",
+    )
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r_put = client.put("/api/subtrans/api-keys", json={"key_3": "AIzaSyThirdKey0003"})
+        assert r_put.status_code == 200
+        assert r_put.json()["configured_count"] == 3
+
+        r_ov = client.get("/api/subtrans/overview")
+        assert r_ov.status_code == 200
+        assert r_ov.json()["configured_keys_count"] == 3
+
+    env_text = (root / ".env").read_text(encoding="utf-8")
+    assert "AIzaSyPrimaryKey0001" in env_text
+    assert "AIzaSySecondKey0002" in env_text
+    assert "AIzaSyThirdKey0003" in env_text
+
+
 def test_dns_rebinding_host_origin_csp_multidrive_nan_nul_and_corrupt_audit(tmp_path: Path):
     import base64
     import hashlib
@@ -2539,13 +2574,6 @@ def test_batch4_security_env_parity_scheduler_and_cli_hardening(tmp_path: Path):
     assert parser.parse_args(["ep01.mkv", "--dedup-policy", "drift-0.6"]).dedup_policy == "drift-0.6"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/sse_hub.py:944,967 emits non-RFC8259 NaN/Inf via json.dumps(allow_nan=True) "
-        "without sanitizing live_status.json"
-    ),
-)
 def test_sse_nan_in_live_status_strict_json_contract(tmp_path: Path):
     """Lock non-RFC8259 NaN/Infinity JSON emission in /api/events SSE snapshot."""
     root = _seed_workspace(tmp_path / "sse_nan")
@@ -2581,13 +2609,6 @@ def test_sse_nan_in_live_status_strict_json_contract(tmp_path: Path):
     assert parsed["pipeline"]["live"]["steady_fps"] is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/sse_hub.py:564-583 copies stale live_status.json from prior episode when new "
-        "upscale/preview job fails before RunLogger writes live_status.json"
-    ),
-)
 def test_pre_runlogger_upscale_failure_does_not_leak_prior_live_status(tmp_path: Path):
     """Lock stale prior-episode live_status.json bleed when a new upscale job fails before RunLogger."""
     from datetime import datetime
@@ -2640,13 +2661,6 @@ def test_pre_runlogger_upscale_failure_does_not_leak_prior_live_status(tmp_path:
     assert pipe["live"]["chunks"] == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/app.py:1258 POST /api/jobs/pause-graceful delegates to JobManager.request_graceful_pause "
-        "in --mock mode and writes logs/.graceful_pause.flag to disk"
-    ),
-)
 def test_mock_pause_graceful_does_not_mutate_disk_flag(tmp_path: Path):
     """Lock --mock mode mutating workspace logs/.graceful_pause.flag on POST /api/jobs/pause-graceful."""
     app = create_app(workspace_root=tmp_path, mock_mode=True)
@@ -2656,13 +2670,6 @@ def test_mock_pause_graceful_does_not_mutate_disk_flag(tmp_path: Path):
     assert not (tmp_path / "logs" / ".graceful_pause.flag").exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/app.py:892-896 _mock_read_pipeline_state mutates tick_counter on GET /api/status "
-        "and wraps completed_chunks backwards 8->4"
-    ),
-)
 def test_mock_get_status_is_idempotent_and_monotonic(tmp_path: Path):
     """Lock GET /api/status server state mutation and backwards chunk wraparound in --mock mode."""
     app = create_app(workspace_root=tmp_path, mock_mode=True)
@@ -2672,13 +2679,6 @@ def test_mock_get_status_is_idempotent_and_monotonic(tmp_path: Path):
     assert all(snaps[i]["completed_chunks"] >= snaps[i - 1]["completed_chunks"] for i in range(1, 6))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/job_manager.py:175-194,342 _find_cached_plan ignores dedup_policy mismatch "
-        "when dedup_override changes"
-    ),
-)
 def test_job_manager_schedule_preview_ignores_stale_policy_plan_json(tmp_path: Path):
     """Lock JobManager.compute_schedule_preview serving stale plan.json across dedup_override changes."""
     from web.job_manager import JobManager
@@ -2709,13 +2709,6 @@ def test_job_manager_schedule_preview_ignores_stale_policy_plan_json(tmp_path: P
     assert ep_info["dedup_ratio_percent"] == 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/job_manager.py:717-738 standalone subtitle branch omits --subs-upgrade "
-        "despite subtrans/cli.py:170 and MKV branch L754 parity"
-    ),
-)
 def test_job_manager_subtrans_srt_forwards_subs_upgrade(tmp_path: Path):
     """Lock JobManager.start_subtrans_job dropping subs_upgrade=True for standalone .srt files."""
     from web.job_manager import JobManager
@@ -2734,6 +2727,7 @@ def test_job_manager_subtrans_srt_forwards_subs_upgrade(tmp_path: Path):
     jm.start_subtrans_job({"input_path": str(srt_path), "subs_upgrade": True, "dry_run": True})
     assert len(captured_cmds) == 1
     assert "--subs-upgrade" in captured_cmds[0]
+    assert "--yes" not in captured_cmds[0]
 
 
 def test_models_and_shows_exposes_auto_pareto_and_nvenc_multipass_backend_contract(studio_env):
@@ -2761,17 +2755,1102 @@ def test_models_and_shows_exposes_auto_pareto_and_nvenc_multipass_backend_contra
     assert "--nvenc-multipass" in cmd and cmd[cmd.index("--nvenc-multipass") + 1] == "fullres"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web/static/index.html & web/static/js/panels.js:415-434,553-575 omit "
-        "routing_modes (auto-pareto) and nvenc_multipass UI controls"
-    ),
-)
 def test_frontend_wires_auto_pareto_and_nvenc_multipass_controls(studio_env):
     """Lock missing auto-pareto routing_modes and nvenc_multipass selector in Web Studio UI."""
     client = studio_env["client"]
     html = client.get("/").text
     panels_js = client.get("/static/js/panels.js").text
+    app_js = client.get("/static/js/app.js").text
     assert "routing_modes" in panels_js
     assert ("nvenc_multipass" in html or "nvenc-multipass" in html) and "nvenc_multipass" in panels_js
+    assert "opt-nvenc-multipass" in html
+    assert "24s" in html and "24s" in app_js
+    assert "8s" not in html and "8s" not in app_js
+
+
+def test_job_manager_prunes_web_job_logs_to_20_preserving_active_and_latest(tmp_path: Path):
+    """Verify _spawn_command retains newest N=20 web_job_*.log files without deleting active or latest.log."""
+    import time as _time
+    from web.job_manager import JobManager, _MAX_RETAINED_WEB_JOB_LOGS
+
+    assert _MAX_RETAINED_WEB_JOB_LOGS == 20
+    root = _seed_workspace(tmp_path / "jm_prune")
+    logs_dir = root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    latest_log = logs_dir / "latest.log"
+    latest_log.write_text("keep latest\n", encoding="utf-8")
+
+    seeded: List[Path] = []
+    base_ts = _time.time() - 500.0
+    for idx in range(25):
+        p = logs_dir / f"web_job_{idx:010d}.log"
+        p.write_text(f"log {idx}\n", encoding="utf-8")
+        ts = base_ts + idx * 10.0
+        os.utime(p, (ts, ts))
+        seeded.append(p)
+
+    srt_path = root / "anime_season" / "PruneTest.ja.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nテスト\n", encoding="utf-8")
+
+    jm = JobManager(
+        root,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=71001, running=False),
+    )
+    job = jm.start_subtrans_job({"input_path": str(srt_path), "dry_run": True})
+    active_log = Path(job["log_path"])
+
+    remaining = list(logs_dir.glob("web_job_*.log"))
+    assert len(remaining) == 20
+    assert active_log.is_file()
+    assert latest_log.is_file()
+    # Oldest 6 seeded logs (0..5) must be pruned; newest 19 (6..24) + new active_log remain
+    for old_p in seeded[:6]:
+        assert not old_p.exists()
+    for keep_p in seeded[6:]:
+        assert keep_p.is_file()
+
+
+def test_lifespan_cleans_web_compare_pngs_on_startup_and_shutdown(tmp_path: Path):
+    """Verify FastAPI _lifespan removes scratch/web_compare/*.png on startup and shutdown."""
+    root = _seed_workspace(tmp_path / "lifespan_cleanup")
+    compare_dir = root / "scratch" / "web_compare"
+    compare_dir.mkdir(parents=True, exist_ok=True)
+    stale_png = compare_dir / "stale_prev.png"
+    stale_png.write_bytes(PNG_1X1_BYTES)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        assert not stale_png.exists()
+        session_png = compare_dir / "session_temp.png"
+        session_png.write_bytes(PNG_1X1_BYTES)
+        assert client.get("/api/status").status_code == 200
+        assert session_png.is_file()
+
+    assert not session_png.exists()
+
+
+def test_api_audits_stat_guarded_ttl_cache_and_invalidation(tmp_path: Path, monkeypatch):
+    """Verify /api/audits caches within 1.5s TTL and invalidates immediately when audit files change."""
+    import web.app as web_app_mod
+
+    root = _seed_workspace(tmp_path / "audits_cache")
+    audit1 = root / "out" / "Ep01_4K.audit.json"
+    audit1.write_text(json.dumps({"status": "PASS", "source_frames": 100, "output_frames": 100}), encoding="utf-8")
+
+    scan_calls = {"n": 0}
+    orig_scan = web_app_mod.scan_temp_checkpoints
+
+    def _counting_scan(ws_root: Path, extra_dirs=None):
+        scan_calls["n"] += 1
+        return orig_scan(ws_root, extra_dirs=extra_dirs)
+
+    monkeypatch.setattr(web_app_mod, "scan_temp_checkpoints", _counting_scan)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r1 = client.get("/api/audits")
+        r2 = client.get("/api/audits")
+        r3 = client.get("/api/audits")
+        assert r1.status_code == 200 and r2.status_code == 200 and r3.status_code == 200
+        assert len(r1.json()["audits"]) == 1
+        assert scan_calls["n"] == 1
+
+        # Writing a new audit.json within the 1.5s TTL window must invalidate cache immediately
+        audit2 = root / "out" / "Ep02_4K.audit.json"
+        audit2.write_text(json.dumps({"status": "PASS", "source_frames": 200, "output_frames": 200}), encoding="utf-8")
+        r4 = client.get("/api/audits")
+        assert r4.status_code == 200
+        assert len(r4.json()["audits"]) == 2
+        assert scan_calls["n"] == 2
+
+        # Creating a .temp_* dir must also invalidate immediately
+        (root / "out" / ".temp_Ep03").mkdir(parents=True, exist_ok=True)
+        r5 = client.get("/api/audits")
+        assert r5.status_code == 200
+        assert scan_calls["n"] == 3
+
+
+def test_dotenv_key_priority_parity_and_midrun_vs_prerunlogger_crash(tmp_path: Path, monkeypatch):
+    """Verify .env key priority matches subtrans/config.py and mid-run crashes retain chunk telemetry."""
+    from datetime import datetime
+    import time as _time
+    import subtrans.config as subtrans_cfg
+    from web.app import _resolve_subtrans_key_slots
+    from web.sse_hub import TelemetryHub
+
+    for var in ("SUBTRANS_DISABLE_DOTENV", "PYTHON_DOTENV_DISABLED", "GEMINI_API_KEYS", "GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"):
+        monkeypatch.delenv(var, raising=False)
+
+    root = _seed_workspace(tmp_path / "env_parity")
+    dotenv_file = root / ".env"
+    dotenv_file.write_text("GEMINI_API_KEY=dotenv_primary_secret_1\n", encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY_1", "env_slot1_secret_2")
+
+    slots, count = _resolve_subtrans_key_slots(dotenv_file)
+    assert count == 2
+    assert slots[0]["env_name"] == "GEMINI_API_KEY"
+    assert slots[0]["source"] == "dotenv"
+
+    # Cross-check exact order parity with subtrans/config.py:get_gemini_api_keys()
+    monkeypatch.setenv("GEMINI_API_KEY", "dotenv_primary_secret_1")
+    cfg_keys = subtrans_cfg.get_gemini_api_keys()
+    assert cfg_keys[0] == "dotenv_primary_secret_1"
+    assert cfg_keys[1] == "env_slot1_secret_2"
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
+
+    # Unwrapping GEMINI_API_KEYS while updating key_2 syncs over stale single-token GEMINI_API_KEY
+    dotenv_file.write_text(
+        "GEMINI_API_KEY=stale_single_key\nGEMINI_API_KEYS=list_slot1_key;list_slot2_key\n",
+        encoding="utf-8",
+    )
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r_upd = client.put("/api/subtrans/api-keys", json={"key_2": "new_slot2_key"})
+        assert r_upd.status_code == 200
+        upd_slots = r_upd.json()["key_slots"]
+        assert "list_s" in upd_slots[0]["masked"]
+        assert "new_sl" in upd_slots[1]["masked"]
+
+    # Mid-run crash (matching pid + recent mtime) retains chunk telemetry; prior-episode error does not leak
+    live_file = root / "logs" / "live_status.json"
+    live_file.write_text(
+        json.dumps(
+            {
+                "video_name": "MidRunEp.mkv",
+                "pid": 61616,
+                "stage": "upscaling",
+                "total_chunks": 10,
+                "completed_chunks": 3,
+                "chunks": [{"chunk_idx": 0}, {"chunk_idx": 1}, {"chunk_idx": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    now_iso = datetime.now().isoformat()
+    hub = TelemetryHub(
+        root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "active_job": None,
+            "history": [
+                {
+                    "job_id": "mid1",
+                    "job_type": "upscale",
+                    "status": "failed",
+                    "pid": 61616,
+                    "started_at": now_iso,
+                    "finished_at": now_iso,
+                    "return_code": 1,
+                    "queue_items": [str(root / "anime_season" / "MidRunEp.mkv")],
+                    "options": {},
+                }
+            ],
+        },
+    )
+    mid_pipe = hub.read_pipeline_state()
+    assert mid_pipe["effective_stage"] == "error"
+    assert mid_pipe["live"]["total_chunks"] == 10
+    assert len(mid_pipe["live"]["chunks"]) == 3
+
+    # Pre-RunLogger crash when prior live_status.json already had stage='error' must NOT leak old chunks
+    live_file.write_text(
+        json.dumps(
+            {
+                "video_name": "OldErrorEp.mkv",
+                "pid": 999999,
+                "stage": "error",
+                "total_chunks": 12,
+                "completed_chunks": 4,
+                "chunks": [{"chunk_idx": 0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_ts = _time.time() - 30.0
+    os.utime(live_file, (old_ts, old_ts))
+    hub_pre = TelemetryHub(
+        root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "active_job": None,
+            "history": [
+                {
+                    "job_id": "fail_new",
+                    "job_type": "upscale",
+                    "status": "failed",
+                    "pid": 62626,
+                    "started_at": now_iso,
+                    "finished_at": now_iso,
+                    "return_code": 1,
+                    "queue_items": [str(root / "anime_season" / "FreshFail.mkv")],
+                    "options": {},
+                }
+            ],
+        },
+    )
+    pre_pipe = hub_pre.read_pipeline_state()
+    assert pre_pipe["effective_stage"] == "error"
+    assert pre_pipe["live"]["video_name"] == "FreshFail.mkv"
+    assert pre_pipe["live"]["total_chunks"] == 0
+    assert pre_pipe["live"]["chunks"] == []
+
+
+def test_sse_o1_log_polling_and_mock_control_disk_isolation(tmp_path: Path, monkeypatch):
+    """Verify O(1) SSE log polling across 3 tabs and --mock clear-pause/abort disk isolation & monotonic ticks."""
+    import asyncio
+    from web.sse_hub import TelemetryHub
+
+    root = _seed_workspace(tmp_path / "sse_o1")
+    latest_log = root / "logs" / "latest.log"
+    latest_log.write_text("[00:00:01] Boot\n", encoding="utf-8")
+
+    hub = TelemetryHub(root, gpu_query_fn=_idle_gpu_metrics)
+    select_calls = {"n": 0}
+    orig_select = hub._select_active_log_file
+
+    def _counted_select():
+        select_calls["n"] += 1
+        return orig_select()
+
+    monkeypatch.setattr(hub, "_select_active_log_file", _counted_select)
+
+    def _parse_data(raw: str) -> Dict[str, Any]:
+        for ln in raw.splitlines():
+            if ln.startswith("data: "):
+                return json.loads(ln[len("data: "):])
+        raise AssertionError(raw)
+
+    async def _run_three_tabs() -> None:
+        g1 = hub.stream_events()
+        g2 = hub.stream_events()
+        g3 = hub.stream_events()
+        try:
+            await anext(g1)
+            await anext(g2)
+            await anext(g3)
+            select_calls["n"] = 0
+
+            with latest_log.open("a", encoding="utf-8") as f:
+                f.write("[00:00:02] Shared O(1) tick line 1\n")
+
+            t1, t2, t3 = await asyncio.gather(anext(g1), anext(g2), anext(g3))
+            for raw in (t1, t2, t3):
+                assert "[00:00:02] Shared O(1) tick line 1" in _parse_data(raw)["logs"]
+            # 1 tick shared across 3 subscribers -> 1 _select_active_log_file call (not 3)
+            assert select_calls["n"] == 1
+        finally:
+            await g1.aclose()
+            await g2.aclose()
+            await g3.aclose()
+            await hub.shutdown()
+
+    asyncio.run(_run_three_tabs())
+
+    # --mock mode: clear-pause / abort never touch disk flags or .gpu_active.lock, and ticks stay monotonic
+    mock_ws = tmp_path / "mock_iso"
+    (mock_ws / "logs").mkdir(parents=True, exist_ok=True)
+    app = create_app(workspace_root=mock_ws, mock_mode=True)
+    with TestClient(app) as client:
+        assert client.post("/api/jobs/pause-graceful").status_code == 200
+        assert client.get("/api/status").json()["pipeline"]["graceful_pause_pending"] is True
+        assert not (mock_ws / "logs" / ".graceful_pause.flag").exists()
+
+        assert client.post("/api/jobs/clear-pause").status_code == 200
+        assert client.get("/api/status").json()["pipeline"]["graceful_pause_pending"] is False
+        assert not (mock_ws / "logs" / ".graceful_pause.flag").exists()
+
+        # Simulate stale lock file on disk: --mock abort must NOT unlink real workspace lock
+        lock_path = mock_ws / ".gpu_active.lock"
+        lock_path.write_text('{"pid": 999999}', encoding="utf-8")
+        abort_res = client.post("/api/jobs/abort")
+        assert abort_res.status_code == 200
+        assert abort_res.json()["mock"] is True
+        assert lock_path.is_file()
+
+        # Verify SSE ticks advance monotonically without wraparound across >6 ticks
+        completed_seq: List[int] = []
+        for _ in range(9):
+            pkt = app.state.telemetry_hub._poll_tick_sync()
+            completed_seq.append(pkt["pipeline"]["live"]["completed_chunks"])
+        assert completed_seq == sorted(completed_seq)
+        assert completed_seq[-1] == 11
+
+
+def test_dotenv_key_slots_alignment_empty_blocking_and_put_edits(tmp_path: Path, monkeypatch):
+    """Verify _resolve_subtrans_key_slots and PUT /api/subtrans/api-keys handle mixed vars, empty overrides, and edits."""
+    from dotenv import dotenv_values
+    import subtrans.config as subtrans_cfg
+    from web.app import _resolve_subtrans_key_slots
+
+    for var in (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+        "GEMINI_API_KEY_4",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    def _get_keys_from_dotenv(path: Path) -> List[str]:
+        for k in ("GEMINI_API_KEYS", "GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMINI_API_KEY_4"):
+            monkeypatch.delenv(k, raising=False)
+        for k, v in dotenv_values(path).items():
+            if v is not None:
+                monkeypatch.setenv(k, v)
+        return subtrans_cfg.get_gemini_api_keys()
+
+    root = _seed_workspace(tmp_path / "env_slots_align")
+    dotenv_file = root / ".env"
+
+    # 1. Mixed GEMINI_API_KEYS + GEMINI_API_KEY + GEMINI_API_KEY_2 aligns slots 1..3 in pool order
+    dotenv_file.write_text(
+        "GEMINI_API_KEYS=keyAlpha111111\nGEMINI_API_KEY=keyBeta222222\nGEMINI_API_KEY_2=keyDelta444444\n",
+        encoding="utf-8",
+    )
+    slots_mix, cnt_mix = _resolve_subtrans_key_slots(dotenv_file)
+    assert cnt_mix == 3
+    assert [s["env_name"] for s in slots_mix] == ["GEMINI_API_KEYS", "GEMINI_API_KEY", "GEMINI_API_KEY_2"]
+    assert "keyAlp" in slots_mix[0]["masked"]
+    assert "keyBet" in slots_mix[1]["masked"]
+    assert "keyDel" in slots_mix[2]["masked"]
+
+    # 2. Empty subtrans/.env or os.environ entry blocks fallback to lower-precedence .env (load_dotenv parity)
+    sub_env = root / "subtrans" / ".env"
+    sub_env.parent.mkdir(parents=True, exist_ok=True)
+    dotenv_file.write_text("GEMINI_API_KEY=rootFallback999\n", encoding="utf-8")
+    sub_env.write_text("GEMINI_API_KEY=\n", encoding="utf-8")
+    slots_sub_empty, cnt_sub_empty = _resolve_subtrans_key_slots(dotenv_file)
+    assert cnt_sub_empty == 0
+    assert all(not s["configured"] for s in slots_sub_empty)
+    sub_env.unlink()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    slots_env_empty, cnt_env_empty = _resolve_subtrans_key_slots(dotenv_file)
+    assert cnt_env_empty == 0
+    assert all(not s["configured"] for s in slots_env_empty)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    # 3. Edit B: GEMINI_API_KEYS (2 keys) + GEMINI_API_KEY (3rd key) preserves slot 3 on key_2 update
+    dotenv_file.write_text(
+        "GEMINI_API_KEYS=k1_alpha11,k2_beta22\nGEMINI_API_KEY=k3_gamma33\n",
+        encoding="utf-8",
+    )
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r_b = client.put("/api/subtrans/api-keys", json={"key_2": "k2_updated22"})
+        assert r_b.status_code == 200
+        assert r_b.json()["configured_count"] == 3
+    assert _get_keys_from_dotenv(dotenv_file) == ["k1_alpha11", "k2_updated22", "k3_gamma33"]
+
+    # 4. Edit C: GEMINI_API_KEY + stale GEMINI_API_KEY_1 + GEMINI_API_KEY_2 unwraps without k_old1 shadowing key_2
+    for var in ("GEMINI_API_KEYS", "GEMINI_API_KEY", "GEMINI_API_KEY_1", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3"):
+        monkeypatch.delenv(var, raising=False)
+    dotenv_file.write_text(
+        "GEMINI_API_KEY=k1_alpha11\nGEMINI_API_KEY_1=k_old_shadow\nGEMINI_API_KEY_2=k2_beta22\n",
+        encoding="utf-8",
+    )
+    with TestClient(app) as client:
+        r_c = client.put("/api/subtrans/api-keys", json={"key_2": "k2_updated22"})
+        assert r_c.status_code == 200
+        assert r_c.json()["configured_count"] == 2
+    assert _get_keys_from_dotenv(dotenv_file) == ["k1_alpha11", "k2_updated22"]
+
+
+def test_read_pipeline_state_subtrans_aborted_and_pid_none_crash_isolation(tmp_path: Path):
+    """Verify subtrans aborted resets stale live_status.json and pid=None crash never matches prior file via mtime."""
+    from datetime import datetime
+    from web.sse_hub import TelemetryHub
+
+    root = _seed_workspace(tmp_path / "pipe_edge")
+    live_file = root / "logs" / "live_status.json"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text(
+        json.dumps(
+            {
+                "video_name": "old_failed.mkv",
+                "pid": 999999,
+                "stage": "error",
+                "total_chunks": 8,
+                "completed_chunks": 3,
+                "chunks": [{"chunk_idx": 0}, {"chunk_idx": 1}, {"chunk_idx": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    now_iso = datetime.now().isoformat()
+
+    hub_sub_aborted = TelemetryHub(
+        root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "active_job": None,
+            "history": [
+                {
+                    "job_id": "sub_ab1",
+                    "job_type": "subtrans",
+                    "status": "aborted",
+                    "pid": 77778,
+                    "started_at": now_iso,
+                    "finished_at": now_iso,
+                    "queue_items": [str(root / "anime_season" / "AbortedSub.srt")],
+                    "options": {"subs_quality": "high"},
+                }
+            ],
+        },
+    )
+    sub_pipe = hub_sub_aborted.read_pipeline_state()
+    assert sub_pipe["effective_stage"] == "idle"
+    assert sub_pipe["live"]["video_name"] == "AbortedSub.srt"
+    assert sub_pipe["live"]["stage"] == "idle"
+    assert sub_pipe["live"]["total_chunks"] == 0
+    assert sub_pipe["live"]["chunks"] == []
+
+    hub_pid_none = TelemetryHub(
+        root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "active_job": None,
+            "history": [
+                {
+                    "job_id": "fail_none_pid",
+                    "job_type": "upscale",
+                    "status": "failed",
+                    "pid": None,
+                    "started_at": now_iso,
+                    "finished_at": now_iso,
+                    "return_code": 1,
+                    "queue_items": [str(root / "anime_season" / "NoPidCrash.mkv")],
+                    "options": {},
+                }
+            ],
+        },
+    )
+    fail_pipe = hub_pid_none.read_pipeline_state()
+    assert fail_pipe["effective_stage"] == "error"
+    assert fail_pipe["live"]["video_name"] == "NoPidCrash.mkv"
+    assert fail_pipe["live"]["total_chunks"] == 0
+    assert fail_pipe["live"]["chunks"] == []
+
+
+def test_api_audits_invalidates_on_checkpoint_upscaled_seg_and_cast_artifacts(tmp_path: Path):
+    """Verify /api/audits invalidates immediately when up_0000.mp4 or cast YAML is created within TTL."""
+    root = _seed_workspace(tmp_path / "audits_ckpt_inval")
+    audit1 = root / "out" / "Ep01_4K.audit.json"
+    audit1.write_text(json.dumps({"status": "PASS", "source_frames": 100, "output_frames": 100}), encoding="utf-8")
+    up_dir = root / "out" / ".temp_Ep01" / "upscaled_segs"
+    up_dir.mkdir(parents=True, exist_ok=True)
+    cast_dir = root / "out" / "cast"
+    cast_dir.mkdir(parents=True, exist_ok=True)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        r1 = client.get("/api/audits").json()
+        assert r1["checkpoints"][0]["completed_chunks"] == 0
+        assert r1["audits"][0]["cast_yaml_path"] == ""
+
+        (up_dir / "up_0000.mp4").write_bytes(b"\x00" * 16)
+        r2 = client.get("/api/audits").json()
+        assert r2["checkpoints"][0]["completed_chunks"] == 1
+
+        (cast_dir / "Ep01.cast.yaml").write_text("characters: []\n", encoding="utf-8")
+        r3 = client.get("/api/audits").json()
+        assert r3["audits"][0]["cast_yaml_path"].endswith("Ep01.cast.yaml")
+
+
+def test_mock_sse_o1_cursor_resets_existing_disk_log_and_aligns_prefix_len(tmp_path: Path, monkeypatch):
+    """Verify --mock mode resets _last_log_cursor over existing logs/latest.log and keeps O(1) log sharing."""
+    import asyncio
+
+    mock_ws = tmp_path / "mock_with_disk_log"
+    (mock_ws / "models").mkdir(parents=True, exist_ok=True)
+    (mock_ws / "out").mkdir(parents=True, exist_ok=True)
+    (mock_ws / "logs").mkdir(parents=True, exist_ok=True)
+    (mock_ws / "logs" / "latest.log").write_text("existing disk line\n" * 400, encoding="utf-8")
+
+    app = create_app(workspace_root=mock_ws, mock_mode=True)
+    hub = app.state.telemetry_hub
+
+    inc_calls = {"n": 0}
+    orig_inc = hub._read_incremental_logs_from_cursor
+
+    def _counted_inc(cursor):
+        inc_calls["n"] += 1
+        return orig_inc(cursor)
+
+    monkeypatch.setattr(hub, "_read_incremental_logs_from_cursor", _counted_inc)
+
+    def _parse_data(raw: str) -> Dict[str, Any]:
+        for ln in raw.splitlines():
+            if ln.startswith("data: "):
+                return json.loads(ln[len("data: "):])
+        raise AssertionError(raw)
+
+    async def _verify_mock_o1() -> None:
+        g1 = hub.stream_events()
+        g2 = hub.stream_events()
+        try:
+            s1 = _parse_data(await anext(g1))
+            s2 = _parse_data(await anext(g2))
+            assert s1["log_cursor"]["path"] == "mock://telemetry.log"
+            assert s1["log_cursor"]["prefix_len"] == 1
+            assert s2["log_cursor"]["prefix_len"] == 1
+            inc_calls["n"] = 0
+
+            t1_1, t1_2 = await asyncio.gather(anext(g1), anext(g2))
+            p1_1, p1_2 = _parse_data(t1_1), _parse_data(t1_2)
+            assert any("[mock] SSE tick #1" in ln for ln in p1_1["logs"])
+            assert p1_1["logs"] == p1_2["logs"]
+            # Delayed subscriber joins after Tick 1
+            g3 = hub.stream_events()
+            try:
+                _parse_data(await anext(g3))
+                t2_1, t2_2, t2_3 = await asyncio.gather(anext(g1), anext(g2), anext(g3))
+                for raw in (t2_1, t2_2, t2_3):
+                    assert any("[mock] SSE tick #2" in ln for ln in _parse_data(raw)["logs"])
+                # Exactly 1 incremental read per tick across 2 ticks (O(1), not per-subscriber)
+                assert inc_calls["n"] == 2
+            finally:
+                await g3.aclose()
+        finally:
+            await g1.aclose()
+            await g2.aclose()
+            await hub.shutdown()
+
+    asyncio.run(_verify_mock_o1())
+
+
+def test_mixed_var_dotenv_key_edits_preserve_extra_and_avoid_slot_leakage(tmp_path: Path, monkeypatch):
+    """Verify mixed GEMINI_API_KEYS/GEMINI_API_KEY/GEMINI_API_KEY_2 edits keep all keys in canonical order."""
+    from dotenv import dotenv_values
+    import subtrans.config as subtrans_cfg
+
+    env_vars = (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+        "GEMINI_API_KEY_4",
+    )
+
+    def _clear_env() -> None:
+        for var in env_vars:
+            monkeypatch.delenv(var, raising=False)
+
+    def _get_keys_from_dotenv(path: Path) -> List[str]:
+        _clear_env()
+        for k, v in dotenv_values(path).items():
+            if v is not None:
+                monkeypatch.setenv(k, v)
+        keys = subtrans_cfg.get_gemini_api_keys()
+        _clear_env()
+        return keys
+
+    _clear_env()
+    root = _seed_workspace(tmp_path / "mixed_env_ws")
+    dotenv_file = root / ".env"
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+
+    # Case A: GEMINI_API_KEY=k1,k2 + GEMINI_API_KEY_2=k_extra
+    dotenv_file.write_text("GEMINI_API_KEY=k1_alpha,k2_beta\nGEMINI_API_KEY_2=k_extra\n", encoding="utf-8")
+    with TestClient(app) as client:
+        r1 = client.put("/api/subtrans/api-keys", json={"key_2": "k2_upd"})
+        assert r1.status_code == 200
+        assert r1.json()["configured_count"] == 3
+        assert _get_keys_from_dotenv(dotenv_file) == ["k1_alpha", "k2_upd", "k_extra"]
+
+        r2 = client.put("/api/subtrans/api-keys", json={"key_1": "k1_upd"})
+        assert r2.status_code == 200
+        assert r2.json()["configured_count"] == 3
+        assert _get_keys_from_dotenv(dotenv_file) == ["k1_upd", "k2_upd", "k_extra"]
+
+    # Case B: GEMINI_API_KEYS=k1,k2 + GEMINI_API_KEY_2=k_extra
+    dotenv_file.write_text("GEMINI_API_KEYS=k1_alpha,k2_beta\nGEMINI_API_KEY_2=k_extra\n", encoding="utf-8")
+    with TestClient(app) as client:
+        r3 = client.put("/api/subtrans/api-keys", json={"key_2": "k2_upd"})
+        assert r3.status_code == 200
+        assert r3.json()["configured_count"] == 3
+        assert _get_keys_from_dotenv(dotenv_file) == ["k1_alpha", "k2_upd", "k_extra"]
+
+        r4 = client.put("/api/subtrans/api-keys", json={"key_1": "k1_upd"})
+        assert r4.status_code == 200
+        assert r4.json()["configured_count"] == 3
+        assert _get_keys_from_dotenv(dotenv_file) == ["k1_upd", "k2_upd", "k_extra"]
+
+    # Case C: GEMINI_API_KEYS=k1 + GEMINI_API_KEY=k2,k3 (replacing slot 2 must not leak k2 into slot 3)
+    dotenv_file.write_text("GEMINI_API_KEYS=k1_alpha\nGEMINI_API_KEY=k2_beta,k3_gamma\n", encoding="utf-8")
+    with TestClient(app) as client:
+        r5 = client.put("/api/subtrans/api-keys", json={"key_2": "k2_upd"})
+        assert r5.status_code == 200
+        assert r5.json()["configured_count"] == 3
+        assert _get_keys_from_dotenv(dotenv_file) == ["k1_alpha", "k2_upd", "k3_gamma"]
+
+
+def test_lan_control_api_keys_put_masks_non_loopback_responses(tmp_path: Path, monkeypatch):
+    """Verify --lan --lan-control strips masked API key previews on PUT /api/subtrans/api-keys for non-loopback peers."""
+    for var in (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    root = _seed_workspace(tmp_path / "lan_ctrl_mask_ws")
+    (root / ".env").write_text(
+        "GEMINI_API_KEY_1=AIzaSySlotOne111111\nGEMINI_API_KEY_2=AIzaSySlotTwo222222\n",
+        encoding="utf-8",
+    )
+    app_ctrl = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        allow_lan=True,
+        allow_lan_control=True,
+    )
+
+    lan_headers = {"Host": "192.168.1.50:8765", "Origin": "http://192.168.1.50:8765"}
+    with TestClient(app_ctrl, client=("192.168.1.99", 54321)) as lan_client:
+        ov = lan_client.get("/api/subtrans/overview", headers=lan_headers)
+        assert ov.status_code == 200
+        ov_data = ov.json()
+        assert ov_data["configured_keys_count"] == 2
+        assert all(s["masked"] == "" for s in ov_data["key_slots"])
+
+        put_res = lan_client.put(
+            "/api/subtrans/api-keys",
+            json={"key_3": "AIzaSySlotThree3333"},
+            headers=lan_headers,
+        )
+        assert put_res.status_code == 200
+        put_json = put_res.json()
+        assert put_json["configured_count"] == 3
+        assert [s["configured"] for s in put_json["key_slots"]] == [True, True, True]
+        assert all(s["masked"] == "" for s in put_json["key_slots"])
+        dumped = json.dumps(put_json)
+        for secret in ("AIzaSySlotOne111111", "AIzaSySlotTwo222222", "AIzaSySlotThree3333"):
+            assert secret not in dumped
+
+        spoof_headers = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
+        spoof_res = lan_client.put(
+            "/api/subtrans/api-keys",
+            json={"key_2": "AIzaSySlotTwoUpdated"},
+            headers=spoof_headers,
+        )
+        assert spoof_res.status_code == 200
+        assert all(s["masked"] == "" for s in spoof_res.json()["key_slots"])
+
+    with TestClient(app_ctrl) as tc_lan_host:
+        non_lb_host_res = tc_lan_host.put(
+            "/api/subtrans/api-keys",
+            json={"key_1": "AIzaSySlotOneUpdated"},
+            headers=lan_headers,
+        )
+        assert non_lb_host_res.status_code == 200
+        assert all(s["masked"] == "" for s in non_lb_host_res.json()["key_slots"])
+
+    with TestClient(app_ctrl) as local_client:
+        local_headers = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
+        local_res = local_client.put(
+            "/api/subtrans/api-keys",
+            json={"key_1": "AIzaSySlotOne111111"},
+            headers=local_headers,
+        )
+        assert local_res.status_code == 200
+        local_slots = local_res.json()["key_slots"]
+        assert local_slots[0]["masked"] == "AIzaSy...1111"
+        assert local_slots[1]["masked"] == "AIzaSy...ated"
+        assert local_slots[2]["masked"] == "AIzaSy...3333"
+
+
+def test_sse_bool_pid_rejection_and_subtrans_failed_baseline_keys(tmp_path: Path, monkeypatch):
+    """Verify bool PID values are rejected and subtrans failed/error states expose all baseline keys."""
+    import psutil
+    from web.job_manager import JobManager
+    from web.sse_hub import TelemetryHub
+
+    pid_checks: List[Any] = []
+
+    def _forbid_bool_or_one_pid(pid: Any) -> bool:
+        pid_checks.append(pid)
+        assert not isinstance(pid, bool), f"psutil.pid_exists called with bool: {pid!r}"
+        assert pid != 1, "bool True coerced to PID 1"
+        return False
+
+    monkeypatch.setattr(psutil, "pid_exists", _forbid_bool_or_one_pid)
+
+    root = _seed_workspace(tmp_path / "bool_pid_ws")
+    (root / "logs" / "live_status.json").write_text(
+        json.dumps(
+            {
+                "video_name": "Ep01.mkv",
+                "pid": True,
+                "stage": "upscaling",
+                "updated_at": "2026-11-22T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state_holder: Dict[str, Any] = {
+        "status": "idle",
+        "active_job": None,
+        "history": [
+            {
+                "job_id": "job_prev",
+                "job_type": "upscale",
+                "status": "failed",
+                "pid": True,
+                "started_at": "2026-11-22T09:59:00",
+                "finished_at": "2026-11-22T09:59:30",
+                "queue_items": ["Ep01.mkv"],
+                "options": {},
+            }
+        ],
+    }
+    hub = TelemetryHub(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: state_holder,
+    )
+    snap_idle = hub.read_pipeline_state()
+    assert snap_idle["pid_alive"] is False
+    assert snap_idle["active_source"] == "idle"
+
+    # Active job with bool pid must not treat live_pid (None) == active_pid (True) as matching
+    state_holder["status"] = "running"
+    state_holder["active_job"] = {
+        "job_id": "job_bool",
+        "job_type": "upscale",
+        "pid": True,
+        "started_at": "2026-11-22T10:01:00",
+        "queue_items": ["Ep02.mkv"],
+        "options": {"model": "animevideov3", "zero_disk": True},
+    }
+    snap_active = hub.read_pipeline_state()
+    assert snap_active["effective_stage"] == "upscaling"
+
+    # JobManager._ensure_ready_to_launch_locked must ignore bool pid in live_status.json
+    jm = JobManager(workspace_root=root)
+    with jm._lock:
+        jm._ensure_ready_to_launch_locked(requires_gpu=True)
+
+    # subtrans failed and subs_pending error synthetic live_data must contain all 10 baseline keys
+    expected_baseline = {
+        "model_id",
+        "zero_disk",
+        "total_frames",
+        "unique_frames",
+        "total_chunks",
+        "completed_chunks",
+        "steady_fps",
+        "latest_fps",
+        "effective_fps",
+        "eta_seconds",
+    }
+    from datetime import datetime, timedelta
+    fin_ts = (datetime.now() + timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%S")
+    start_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    for job_type, status_val in (("subtrans", "failed"), ("subs_pending", "error")):
+        state_holder["status"] = "idle"
+        state_holder["active_job"] = None
+        state_holder["history"] = [
+            {
+                "job_id": f"sub_{status_val}",
+                "job_type": job_type,
+                "status": status_val,
+                "pid": 999999,
+                "return_code": 1,
+                "started_at": start_ts,
+                "finished_at": fin_ts,
+                "queue_items": ["Ep01.ja.srt"] if job_type == "subtrans" else [],
+                "options": {"subs_quality": "high"},
+            }
+        ]
+        snap_sub = hub.read_pipeline_state()
+        assert snap_sub["effective_stage"] == "error"
+        live_sub = snap_sub["live"]
+        assert expected_baseline.issubset(live_sub.keys())
+        assert live_sub["model_id"] == "subtrans (high)"
+        assert live_sub["zero_disk"] is False
+        assert live_sub["total_chunks"] == 0
+        assert live_sub["completed_chunks"] == 0
+        assert live_sub["eta_seconds"] is None
+    assert pid_checks == []
+
+
+def test_schedule_preview_nvenc_multipass_and_concurrent_api_keys_put(tmp_path: Path, monkeypatch):
+    """Verify SchedulePreviewRequest validates nvenc_multipass and concurrent PUT /api/subtrans/api-keys is race-free."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    for var in (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    root = _seed_workspace(tmp_path / "sched_concurrent_ws")
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+
+    with TestClient(app) as client:
+        for valid_mp in ("auto", "fullres", "qres", ""):
+            res_ok = client.post(
+                "/api/queue/preview-schedule",
+                json={"inputs": [], "nvenc_multipass": valid_mp},
+            )
+            assert res_ok.status_code == 200
+        res_bad = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [], "nvenc_multipass": "bogus"},
+        )
+        assert res_bad.status_code == 422
+
+        payloads = [
+            {"key_1": "AIzaSyConcOne111111"},
+            {"key_2": "AIzaSyConcTwo222222"},
+            {"key_3": "AIzaSyConcThree3333"},
+            {"key_1": "AIzaSyConcOne111111"},
+            {"key_2": "AIzaSyConcTwo222222"},
+            {"key_3": "AIzaSyConcThree3333"},
+        ]
+
+        def _put_slot(body: Dict[str, str]) -> int:
+            return client.put("/api/subtrans/api-keys", json=body).status_code
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            statuses = list(pool.map(_put_slot, payloads))
+        assert statuses == [200] * 6
+
+        ov = client.get("/api/subtrans/overview")
+        assert ov.status_code == 200
+        assert ov.json()["configured_keys_count"] == 3
+        assert list(root.glob(".env.*.tmp")) == []
+        env_text = (root / ".env").read_text(encoding="utf-8")
+        assert "GEMINI_API_KEY_1=AIzaSyConcOne111111" in env_text
+        assert "GEMINI_API_KEY_2=AIzaSyConcTwo222222" in env_text
+        assert "GEMINI_API_KEY_3=AIzaSyConcThree3333" in env_text
+
+
+def test_env_api_keys_editing_key3_preserves_key1_with_empty_or_populated_key2(tmp_path: Path, monkeypatch):
+    """Verify editing key_3 preserves distinct GEMINI_API_KEY_1 with empty GEMINI_API_KEY_2 or 3 populated keys."""
+    for var in (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    # Case A: GEMINI_API_KEY + GEMINI_API_KEY_1 + empty GEMINI_API_KEY_2=, PUT {"key_3": ...}
+    root_a = _seed_workspace(tmp_path / "env_key3_empty_k2_ws")
+    (root_a / ".env").write_text(
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSySecondKey0002\n"
+        "GEMINI_API_KEY_2=\n",
+        encoding="utf-8",
+    )
+    app_a = create_app(workspace_root=root_a, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app_a) as client_a:
+        r_put_a = client_a.put("/api/subtrans/api-keys", json={"key_3": "AIzaSyThirdKey0003"})
+        assert r_put_a.status_code == 200
+        assert r_put_a.json()["configured_count"] == 3
+
+        r_ov_a = client_a.get("/api/subtrans/overview")
+        assert r_ov_a.status_code == 200
+        ov_a = r_ov_a.json()
+        assert ov_a["configured_keys_count"] == 3
+        slots_a = {s["slot"]: s for s in ov_a["key_slots"]}
+        assert slots_a[1]["masked"] == "AIzaSy...0001"
+        assert slots_a[2]["masked"] == "AIzaSy...0002"
+        assert slots_a[3]["masked"] == "AIzaSy...0003"
+
+    env_a = (root_a / ".env").read_text(encoding="utf-8")
+    assert "AIzaSyPrimaryKey0001" in env_a
+    assert "AIzaSySecondKey0002" in env_a
+    assert "AIzaSyThirdKey0003" in env_a
+
+    # Case B: 3 distinct keys (GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2), PUT {"key_3": ...}
+    root_b = _seed_workspace(tmp_path / "env_key3_three_keys_ws")
+    (root_b / ".env").write_text(
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSySecondKey0002\n"
+        "GEMINI_API_KEY_2=AIzaSyThirdKey0003\n",
+        encoding="utf-8",
+    )
+    app_b = create_app(workspace_root=root_b, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app_b) as client_b:
+        r_put_b = client_b.put("/api/subtrans/api-keys", json={"key_3": "AIzaSyUpdatedThree0004"})
+        assert r_put_b.status_code == 200
+        assert r_put_b.json()["configured_count"] == 3
+
+        r_ov_b = client_b.get("/api/subtrans/overview")
+        assert r_ov_b.status_code == 200
+        ov_b = r_ov_b.json()
+        assert ov_b["configured_keys_count"] == 3
+        slots_b = {s["slot"]: s for s in ov_b["key_slots"]}
+        assert slots_b[1]["masked"] == "AIzaSy...0001"
+        assert slots_b[2]["masked"] == "AIzaSy...0002"
+        assert slots_b[3]["masked"] == "AIzaSy...0004"
+
+    env_b = (root_b / ".env").read_text(encoding="utf-8")
+    assert "GEMINI_API_KEY=AIzaSyPrimaryKey0001" in env_b
+    assert "GEMINI_API_KEY_2=AIzaSySecondKey0002" in env_b
+    assert "GEMINI_API_KEY_3=AIzaSyUpdatedThree0004" in env_b
+    assert "AIzaSyThirdKey0003" not in env_b
+
+
+def test_env_api_keys_tier5_preserves_distinct_key1_and_dedups_mirrored(tmp_path: Path, monkeypatch):
+    """Verify ADV3-ADV6 and ADV10-ADV12 preserve distinct GEMINI_API_KEY_1 and deduplicate mirrored keys."""
+    for var in (
+        "SUBTRANS_DISABLE_DOTENV",
+        "PYTHON_DOTENV_DISABLED",
+        "GEMINI_API_KEYS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_1",
+        "GEMINI_API_KEY_2",
+        "GEMINI_API_KEY_3",
+        "GEMINI_API_KEY_4",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    def _run_put_and_overview(name: str, initial_env: str, payload: dict) -> tuple[int, dict, str]:
+        root = _seed_workspace(tmp_path / name)
+        (root / ".env").write_text(initial_env, encoding="utf-8")
+        app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+        with TestClient(app) as client:
+            r_put = client.put("/api/subtrans/api-keys", json=payload)
+            assert r_put.status_code == 200
+            r_ov = client.get("/api/subtrans/overview")
+            assert r_ov.status_code == 200
+            return r_put.json()["configured_count"], r_ov.json(), (root / ".env").read_text(encoding="utf-8")
+
+    # ADV3: 3 distinct keys (GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2), PUT key_1 preserves Slot 2 & 3
+    cnt3, ov3, env3 = _run_put_and_overview(
+        "adv3_ws",
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSySecondKey0002\n"
+        "GEMINI_API_KEY_2=AIzaSyThirdKey0003\n",
+        {"key_1": "AIzaSyUpdatedOne8888"},
+    )
+    assert cnt3 == 3
+    assert ov3["configured_keys_count"] == 3
+    assert {s["slot"]: s["masked"] for s in ov3["key_slots"]} == {
+        1: "AIzaSy...8888",
+        2: "AIzaSy...0002",
+        3: "AIzaSy...0003",
+    }
+    assert "AIzaSySecondKey0002" in env3
+    assert "AIzaSyThirdKey0003" in env3
+
+    # ADV4: 2 distinct keys (GEMINI_API_KEY, GEMINI_API_KEY_1), PUT key_1 preserves Slot 2
+    cnt4, ov4, env4 = _run_put_and_overview(
+        "adv4_ws",
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\nGEMINI_API_KEY_1=AIzaSySecondKey0002\n",
+        {"key_1": "AIzaSyUpdatedOne8888"},
+    )
+    assert cnt4 == 2
+    assert {s["slot"]: s["masked"] for s in ov4["key_slots"]} == {
+        1: "AIzaSy...8888",
+        2: "AIzaSy...0002",
+        3: "",
+    }
+    assert "AIzaSySecondKey0002" in env4
+
+    # ADV5: 2 distinct keys (GEMINI_API_KEY, GEMINI_API_KEY_1), PUT key_1="" clears Slot 1 & preserves Slot 2
+    cnt5, ov5, env5 = _run_put_and_overview(
+        "adv5_ws",
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\nGEMINI_API_KEY_1=AIzaSySecondKey0002\n",
+        {"key_1": ""},
+    )
+    assert cnt5 == 1
+    assert ov5["configured_keys_count"] == 1
+    assert {s["slot"]: s["masked"] for s in ov5["key_slots"]} == {
+        1: "",
+        2: "AIzaSy...0002",
+        3: "",
+    }
+    assert "GEMINI_API_KEY_2=AIzaSySecondKey0002" in env5
+    assert "AIzaSyPrimaryKey0001" not in env5
+
+    # ADV10: GEMINI_API_KEY + GEMINI_API_KEY_1 + empty GEMINI_API_KEY_2=, PUT key_1="" preserves Slot 2
+    cnt10, ov10, env10 = _run_put_and_overview(
+        "adv10_ws",
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSySecondKey0002\n"
+        "GEMINI_API_KEY_2=\n",
+        {"key_1": ""},
+    )
+    assert cnt10 == 1
+    assert {s["slot"]: s["masked"] for s in ov10["key_slots"]} == {
+        1: "",
+        2: "AIzaSy...0002",
+        3: "",
+    }
+    assert "GEMINI_API_KEY_2=AIzaSySecondKey0002" in env10
+
+    # ADV6: GEMINI_API_KEYS (2 keys) + distinct GEMINI_API_KEY_1, PUT key_1 preserves Slot 3
+    cnt6, ov6, env6 = _run_put_and_overview(
+        "adv6_ws",
+        "GEMINI_API_KEYS=AIzaSyMultiOne1111,AIzaSyMultiTwo2222\n"
+        "GEMINI_API_KEY_1=AIzaSyThirdKey0003\n",
+        {"key_1": "AIzaSyUpdatedOne8888"},
+    )
+    assert cnt6 == 3
+    assert {s["slot"]: s["masked"] for s in ov6["key_slots"]} == {
+        1: "AIzaSy...8888",
+        2: "AIzaSy...2222",
+        3: "AIzaSy...0003",
+    }
+    assert "AIzaSyThirdKey0003" in env6
+
+    # ADV11: GEMINI_API_KEYS (2 keys) + GEMINI_API_KEY_1 + GEMINI_API_KEY_2, PUT key_2 preserves Slot 3 & 4
+    cnt11, ov11, env11 = _run_put_and_overview(
+        "adv11_ws",
+        "GEMINI_API_KEYS=AIzaSyMultiOne1111,AIzaSyMultiTwo2222\n"
+        "GEMINI_API_KEY_1=AIzaSyThirdKey0003\n"
+        "GEMINI_API_KEY_2=AIzaSyFourthKey0004\n",
+        {"key_2": "AIzaSyUpdatedTwo9999"},
+    )
+    assert cnt11 == 4
+    assert ov11["configured_keys_count"] == 4
+    assert {s["slot"]: s["masked"] for s in ov11["key_slots"]} == {
+        1: "AIzaSy...1111",
+        2: "AIzaSy...9999",
+        3: "AIzaSy...0003",
+    }
+    assert "GEMINI_API_KEY_3=AIzaSyThirdKey0003" in env11
+    assert "GEMINI_API_KEY_4=AIzaSyFourthKey0004" in env11
+
+    # ADV12: mirrored GEMINI_API_KEY == GEMINI_API_KEY_1 + GEMINI_API_KEY_2, PUT key_1="" deduplicates & clears Slot 1
+    cnt12, ov12, env12 = _run_put_and_overview(
+        "adv12_ws",
+        "GEMINI_API_KEY=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_1=AIzaSyPrimaryKey0001\n"
+        "GEMINI_API_KEY_2=AIzaSySecondKey0002\n",
+        {"key_1": ""},
+    )
+    assert cnt12 == 1
+    assert ov12["configured_keys_count"] == 1
+    assert {s["slot"]: s["masked"] for s in ov12["key_slots"]} == {
+        1: "",
+        2: "AIzaSy...0002",
+        3: "",
+    }
+    assert "AIzaSyPrimaryKey0001" not in env12
+    assert "GEMINI_API_KEY_2=AIzaSySecondKey0002" in env12

@@ -19,7 +19,7 @@ from subtrans.parser import parse_and_align_subtitles, detect_auto_offset, is_en
 from subtrans.cache import TranslationCache, compute_cue_cache_key, compute_contextual_cue_sig
 from subtrans.gemini_backend import GeminiTranslator
 from subtrans.throttle import RateLimiter, call_with_retry, QuotaExhaustedError, DailyQuotaExhaustedError
-from subtrans.writer import write_subtitles, optimize_cues_for_playback
+from subtrans.writer import write_subtitles, optimize_cues_for_playback, clean_and_normalize_vietnamese
 from subtrans.report import generate_qa_report
 from subtrans.glossary import (
     load_glossary,
@@ -43,8 +43,7 @@ class TranslationPipeline:
         config_path: Optional[Path] = None,
         local_only: bool = False,
         model_override: Optional[str] = None,
-        on_quota: str = "stop",  # "stop" (Graceful exit on reset hour) | "local"
-        enable_review: bool = False,
+        on_quota: str = "stop",  # "stop" (Graceful exit on reset hour)
         enable_cascade: bool = True,
         enable_rag: bool = True,
         limit_cues: Optional[int] = None,
@@ -76,7 +75,6 @@ class TranslationPipeline:
         self.model_override = model_override
         self.subs_upgrade = bool(subs_upgrade)
         self.on_quota = on_quota
-        self.enable_review = enable_review
         self.enable_cascade = enable_cascade
         self.enable_rag = enable_rag
         self.limit_cues = limit_cues
@@ -130,14 +128,8 @@ class TranslationPipeline:
                 f"Please specify an explicit versioned model (e.g. gemini-3.8-flash) or pass --allow-latest-alias."
             )
 
-        ollama_cfg = self.cfg.get("ollama", {})
-        self.ollama_endpoint = ollama_cfg.get("endpoint", "http://localhost:11434")
-        self.ollama_model = ollama_cfg.get("model", "translategemma:12b")
-        self.ollama_review_model = ollama_cfg.get("review_model", "gemma3:12b")
-
         trans_cfg = self.cfg.get("translation", {})
         self.batch_size = batch_size or trans_cfg.get("batch_size", 100)
-        self.local_batch_size = trans_cfg.get("local_batch_size", 20)
         self.allow_silent_fallback = trans_cfg.get("allow_silent_fallback", False)
         self.validate_batch_pronouns = trans_cfg.get("validate_batch_pronouns", True)
         self.stage_watchdog_seconds = int(trans_cfg.get("stage_watchdog_seconds", 1500))
@@ -164,7 +156,7 @@ class TranslationPipeline:
         self.series: Optional[str] = None
 
     def _init_primary_backend(self):
-        if not self.local_only and not self.gemini_backends:
+        if not self.gemini_backends:
             from subtrans.config import get_gemini_api_keys
             api_keys = get_gemini_api_keys()
             primary_key = api_keys[0] if api_keys else None
@@ -215,6 +207,7 @@ class TranslationPipeline:
         sound_cues: str = "drop",
         video_path: Optional[Path] = None,
         prefer_whisper: bool = False,
+        piecewise_ja_offsets: Optional[List[Dict[str, int]]] = None,
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
@@ -238,8 +231,13 @@ class TranslationPipeline:
         auto_offset_applied = False
         offset_reason = "Không có phụ đề EN tham chiếu để so sánh"
         det_offset = 0
-        piecewise_ja_offsets = None
-        if en_path:
+        if not (isinstance(piecewise_ja_offsets, list) and len(piecewise_ja_offsets) >= 2):
+            piecewise_ja_offsets = None
+        if piecewise_ja_offsets is not None:
+            auto_offset_applied = True
+            offset_reason = f"Áp dụng Piecewise 2-Segment đã lưu ({len(piecewise_ja_offsets)} phân đoạn)"
+            console.print(f"  • [cyan]Auto-offset:[/cyan] {offset_reason}.")
+        elif en_path:
             if sub_offset_ms != 0:
                 offset_reason = f"Ưu tiên cờ thủ công --sub-offset-ms={sub_offset_ms}ms (bỏ qua detect_auto_offset)"
                 console.print(f"  • [cyan]Auto-offset:[/cyan] {offset_reason}.")
@@ -248,7 +246,9 @@ class TranslationPipeline:
                 if can_apply:
                     sub_offset_ms = det_offset
                     auto_offset_applied = True
-                    piecewise_ja_offsets = off_stats.get("piecewise_segments")
+                    raw_segments = off_stats.get("piecewise_segments")
+                    if isinstance(raw_segments, list) and len(raw_segments) >= 2:
+                        piecewise_ja_offsets = raw_segments
                     offset_reason = f"Tự động áp dụng {det_offset}ms ({reason_str})"
                     console.print(f"  • [bold green]Auto-offset ĐƯỢC ÁP DỤNG:[/bold green] {det_offset}ms ({reason_str})")
                 else:
@@ -382,45 +382,27 @@ class TranslationPipeline:
         t_sa = time.monotonic()
         audit_cast_file = self.output_dir / "audit" / f"{base_name}.cast.yaml"
         cast_file = audit_cast_file if audit_cast_file.exists() else self.output_dir / f"{base_name}.cast.yaml"
-        if not self.local_only:
-            with console.status("[bold blue]Stage A: Analyzing series cast & character pronoun table...[/bold blue]"):
-                cast_glossary = load_or_generate_series_cast_sheet(
-                    cues=cues,
-                    source_name=base_name,
-                    output_dir=self.output_dir,
-                    episode_cast_path=cast_file,
-                    gemini_model=self.gemini_model,
-                    fallback_models=self.fallback_models,
-                    timeout_ms=self.request_timeout_ms,
-                    dry_run=self.dry_run,
-                    cache=self.cache,
-                )
-                if cast_glossary and cast_glossary.characters:
-                    console.print(f"  • Stage A Cast Sheet: [cyan]{cast_file}[/cyan] ({len(cast_glossary.characters)} characters identified)")
-                    if not (self.dry_run and glossary and glossary.characters):
-                        glossary = merge_glossaries(base=cast_glossary, override=glossary)
-                    if self.require_approved_cast:
-                        confirm = typer.confirm(f"Please inspect {cast_file}. Approve and proceed?", default=True)
-                        if not confirm:
-                            console.print("[yellow]Stopped by user to edit cast sheet.[/yellow]")
-                            return {}
-        else:
-            # Auto-detect existing Stage A Cast Sheet from candidate paths for fair local evaluation
-            candidate_cast_paths = [
-                cast_file,
-                self.output_dir / "audit" / f"{base_name}.cast.yaml",
-                self.output_dir / f"{base_name}.cast.yaml",
-                Path("out") / f"{base_name}.cast.yaml",
-                Path("out/gemini") / f"{base_name}.cast.yaml",
-                Path("out/gemini_35") / f"{base_name}.cast.yaml",
-            ]
-            for cp in candidate_cast_paths:
-                if cp.exists():
-                    cast_glossary = load_glossary(cp)
-                    if cast_glossary and cast_glossary.characters:
-                        console.print(f"  • Stage A Cast Sheet Loaded for Local: [cyan]{cp}[/cyan] ({len(cast_glossary.characters)} characters)")
-                        glossary = merge_glossaries(base=cast_glossary, override=glossary)
-                        break
+        with console.status("[bold blue]Stage A: Analyzing series cast & character pronoun table...[/bold blue]"):
+            cast_glossary = load_or_generate_series_cast_sheet(
+                cues=cues,
+                source_name=base_name,
+                output_dir=self.output_dir,
+                episode_cast_path=cast_file,
+                gemini_model=self.gemini_model,
+                fallback_models=self.fallback_models,
+                timeout_ms=self.request_timeout_ms,
+                dry_run=self.dry_run,
+                cache=self.cache,
+            )
+            if cast_glossary and cast_glossary.characters:
+                console.print(f"  • Stage A Cast Sheet: [cyan]{cast_file}[/cyan] ({len(cast_glossary.characters)} characters identified)")
+                if not (self.dry_run and glossary and glossary.characters):
+                    glossary = merge_glossaries(base=cast_glossary, override=glossary)
+                if self.require_approved_cast:
+                    confirm = typer.confirm(f"Please inspect {cast_file}. Approve and proceed?", default=True)
+                    if not confirm:
+                        console.print("[yellow]Stopped by user to edit cast sheet.[/yellow]")
+                        return {}
         stage_times["stage_a_cast"] = time.monotonic() - t_sa
 
         stats = {
@@ -434,10 +416,10 @@ class TranslationPipeline:
 
         # Stage 2 & 3: Translation loop (Batch size 50, Context +/-10)
         t_s2 = time.monotonic()
-        curr_batch_size = self.local_batch_size if self.local_only else self.batch_size
+        curr_batch_size = self.batch_size
 
         # Dynamic Batch Sizing: Tự động tối ưu kích thước batch khi thoại dày đặc (nếu người dùng không ép batch_size)
-        if not self.local_only and self.custom_batch_size is None:
+        if self.custom_batch_size is None:
             if len(dialogue_cues) >= 380:
                 optimal_batch = 60 if len(dialogue_cues) >= 450 else 70
                 if optimal_batch < curr_batch_size:
@@ -453,7 +435,7 @@ class TranslationPipeline:
             for i in range(0, len(dialogue_cues), curr_batch_size)
         ]
 
-        active_backend_mode = "local" if self.local_only else "gemini"
+        active_backend_mode = "gemini"
         candidate_gemini_models = getattr(self, "candidate_gemini_models", None) or (
             [self.gemini_model] + [m for m in self.fallback_models if m != self.gemini_model]
         )
@@ -473,6 +455,8 @@ class TranslationPipeline:
         prompt_version = "v2.2"
         diag_pos_map = {c.id: idx for idx, c in enumerate(dialogue_cues)}
         cue_cache_keys_by_id: Dict[int, str] = {}
+        cue_context_sigs_by_id: Dict[int, str] = {}
+        cue_rag_hashes_by_id: Dict[int, str] = {}
 
         def _cue_context_sig(c_obj: Cue) -> str:
             d_pos = diag_pos_map.get(c_obj.id, -1)
@@ -611,6 +595,9 @@ class TranslationPipeline:
                 is_lower_model = "lite" in target_m.lower()
                 use_batch_cache = isinstance(self.cache, TranslationCache)
                 pre_context_sigs = {cue.id: _cue_context_sig(cue) for cue in batch}
+                for cue in batch:
+                    cue_context_sigs_by_id[cue.id] = pre_context_sigs[cue.id]
+                    cue_rag_hashes_by_id[cue.id] = rag_hash
                 cue_keys = [
                     (
                         cue,
@@ -624,6 +611,8 @@ class TranslationPipeline:
                             stage="draft",
                             rag_hash=rag_hash,
                             context_sig=pre_context_sigs[cue.id],
+                            gloss_skill_names=bool(self.gloss_skill_names),
+                            en_only_source=bool(en_only_source),
                         ),
                     )
                     for cue in batch
@@ -800,8 +789,10 @@ class TranslationPipeline:
                                 cast_sheet_hash=cast_sheet_hash,
                                 prompt_version=prompt_version,
                                 stage="draft",
-                                rag_hash=rag_hash,
-                                context_sig=pre_context_sigs.get(cue.id) or _cue_context_sig(cue),
+                                rag_hash=cue_rag_hashes_by_id.get(cue.id, rag_hash),
+                                context_sig=cue_context_sigs_by_id.get(cue.id) or _cue_context_sig(cue),
+                                gloss_skill_names=bool(self.gloss_skill_names),
+                                en_only_source=bool(en_only_source),
                             )
                             cue_cache_keys_by_id[cue.id] = ckey
                         cue_meta = {
@@ -832,7 +823,7 @@ class TranslationPipeline:
 
         # Optional Smart Cloud Cascade Repair Pass (100% Cloud API)
         t_srev = time.monotonic()
-        if getattr(self, "enable_cascade", True) and not self.local_only and self.gemini_backends:
+        if getattr(self, "enable_cascade", True) and self.gemini_backends:
             def _is_model_exhausted(m_name: str) -> bool:
                 try:
                     return self.cache.is_model_exhausted(m_name) is True
@@ -870,12 +861,14 @@ class TranslationPipeline:
                     series=self.series,
                     episode_basename=base_name,
                     dynamic_cast_context=cast_manager.to_prompt_context() if cast_manager else None,
+                    dry_run=self.dry_run,
                 )
                 stats["cascade_repaired"] = repair_stats.get("repaired_count", 0)
 
-                # Lưu ngược các câu đã được Flash biên tập đạt chuẩn vào SQLite Cache & tuyển chọn Silver RAG
+                # Store repaired cues under both original draft key and repair model key for --subs-upgrade cache hits
                 if stats["cascade_repaired"] > 0 and not self.dry_run:
                     repaired_cache_rows = []
+                    repair_model_name = getattr(repair_backend, "model", None)
                     for rc in dialogue_cues:
                         ck = cue_cache_keys_by_id.get(rc.id)
                         if (
@@ -898,6 +891,24 @@ class TranslationPipeline:
                                 "en_conflict": bool(getattr(rc, "en_conflict", False)),
                             }
                             repaired_cache_rows.append((ck, "gemini", rc.model_used, rc.vi, rc_meta))
+                            if repair_model_name:
+                                rc_rag_hash = cue_rag_hashes_by_id.get(rc.id, "no_rag")
+                                rc_ctx_sig = cue_context_sigs_by_id.get(rc.id) or _cue_context_sig(rc)
+                                repair_ck = compute_cue_cache_key(
+                                    model=repair_model_name,
+                                    ja=rc.ja,
+                                    en=rc.en,
+                                    glossary_hash=glossary_hash,
+                                    cast_sheet_hash=cast_sheet_hash,
+                                    prompt_version=prompt_version,
+                                    stage="draft",
+                                    rag_hash=rc_rag_hash,
+                                    context_sig=rc_ctx_sig,
+                                    gloss_skill_names=bool(self.gloss_skill_names),
+                                    en_only_source=bool(en_only_source),
+                                )
+                                if repair_ck != ck:
+                                    repaired_cache_rows.append((repair_ck, "gemini", rc.model_used, rc.vi, rc_meta))
                     if repaired_cache_rows and isinstance(self.cache, TranslationCache):
                         self.cache.set_cues_batch(repaired_cache_rows)
 
@@ -911,57 +922,16 @@ class TranslationPipeline:
                             logger.debug(f"Could not promote cascade silver units: {e_sil}")
         stage_times["stage_review"] = time.monotonic() - t_srev
 
-        # Stage 4: Writing output (Item 4b: Chốt chặn kiểm định chất lượng nội dung)
+        # Stage 4: Pre-optimize playback once, propagate fallback flags, qualify, write, and lint
         t_s4 = time.monotonic()
         out_ext = self.output_format.lower()
 
-        active_dialogue_cues = [c for c in cues if not c.is_skipped and not getattr(c, "is_dropped_sound", False)]
-        total_active = len(active_dialogue_cues)
-        real_translated_cues = [
-            c for c in active_dialogue_cues
-            if c.vi and not getattr(c, "used_en_fallback", False) and c.vi.strip() not in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]
-        ]
-        real_rate = (len(real_translated_cues) / total_active) if total_active > 0 else 1.0
-        uncertain_cues = [c for c in active_dialogue_cues if getattr(c, "uncertain", False)]
-        uncertain_rate = (len(uncertain_cues) / total_active) if total_active > 0 else 0.0
-
-        is_qualified = (real_rate >= 0.95 and uncertain_rate < 0.10)
-        from src.pending_queue import add_pending_sub, remove_pending_sub
-        import datetime
-
-        if is_qualified:
-            out_file = self.output_dir / f"{base_name}.vi.{out_ext}"
-            if not self.dry_run:
-                remove_pending_sub(base_name)
-        else:
-            out_file = self.output_dir / f"{base_name}.vi.partial.{out_ext}"
-            if not self.dry_run:
-                add_pending_sub({
-                    "base_name": base_name,
-                    "video_path": str(video_path) if video_path else None,
-                    "ja_path": str(ja_path),
-                    "en_path": str(en_path) if en_path else None,
-                    "output_dir": str(self.output_dir),
-                    "prefer_whisper": bool(prefer_whisper or str(ja_path).endswith(".whisper_ja.srt")),
-                    "glossary": str(glossary_path) if glossary_path else None,
-                    "subs_quality": str(self.subs_quality),
-                    "sub_offset_ms": int(sub_offset_ms),
-                    "real_rate": round(real_rate, 4),
-                    "uncertain_rate": round(uncertain_rate, 4),
-                    "timestamp": datetime.datetime.now().isoformat()
-                })
-            console.print(
-                f"\n[bold yellow]⚠️ [CHỐT CHẶN PHỤ ĐỀ] Tập '{base_name}' chưa đạt chuẩn nhúng "
-                f"(Bản dịch thật: {real_rate*100:.1f}% < 95% hoặc Nghi vấn: {uncertain_rate*100:.1f}% >= 10%).[/bold yellow]\n"
-                f"   • Đã ghi file tạm: [yellow]{out_file}[/yellow]\n"
-                + ("" if self.dry_run else "   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n")
-            )
-
-        # Stage 4: Optimize Playback -> Write Subtitle -> Linter V1 Final Audit
         from subtrans.linter import lint_subtitles, lint_cue, auto_fix_cues
         cues, fixes_count = auto_fix_cues(cues)
 
-        # Gói 2: Tự động học bẫy lỗi từ per-cue Linter Violations (trước khi gộp Dual Dialogue để giữ 1-1 JA)
+        active_dialogue_cues = [c for c in cues if not c.is_skipped and not getattr(c, "is_dropped_sound", False)]
+
+        # Learn linter violations into RAG Error Bank on 1-to-1 JA cues before Dual Dialogue merge
         if self.enable_rag and not self.dry_run:
             try:
                 per_cue_violations = []
@@ -983,6 +953,62 @@ class TranslationPipeline:
             except Exception as e:
                 logger.debug(f"Could not auto-learn from linter violations: {e}")
 
+        playback_audited_cues, post_fixes = auto_fix_cues(
+            optimize_cues_for_playback(cues, sound_cues=sound_cues)
+        )
+        fallback_ids = {oc.id for oc in playback_audited_cues if getattr(oc, "used_en_fallback", False)}
+        if fallback_ids:
+            for orig_c in cues:
+                if orig_c.id in fallback_ids:
+                    orig_c.used_en_fallback = True
+
+        total_active = len(active_dialogue_cues)
+        real_translated_cues = [
+            c for c in active_dialogue_cues
+            if c.vi
+            and not getattr(c, "used_en_fallback", False)
+            and c.vi.strip() not in ["[Chưa dịch]", "(Chưa dịch)", "[Untranslated]"]
+            and bool(clean_and_normalize_vietnamese(c.vi, preserve_dual=True, sound_cues=sound_cues))
+        ]
+        real_rate = (len(real_translated_cues) / total_active) if total_active > 0 else 1.0
+        uncertain_cues = [c for c in active_dialogue_cues if getattr(c, "uncertain", False)]
+        uncertain_rate = (len(uncertain_cues) / total_active) if total_active > 0 else 0.0
+
+        is_qualified = (real_rate >= 0.95 and uncertain_rate < 0.10)
+        from src.pending_queue import add_pending_sub, remove_pending_sub
+        import datetime
+
+        if is_qualified:
+            out_file = self.output_dir / f"{base_name}.vi.{out_ext}"
+            if not self.dry_run:
+                remove_pending_sub(base_name)
+        else:
+            out_file = self.output_dir / f"{base_name}.vi.partial.{out_ext}"
+            if not self.dry_run:
+                pending_entry: Dict[str, Any] = {
+                    "base_name": base_name,
+                    "video_path": str(video_path) if video_path else None,
+                    "ja_path": str(ja_path),
+                    "en_path": str(en_path) if en_path else None,
+                    "output_dir": str(self.output_dir),
+                    "prefer_whisper": bool(prefer_whisper or str(ja_path).endswith(".whisper_ja.srt")),
+                    "glossary": str(glossary_path) if glossary_path else None,
+                    "subs_quality": str(self.subs_quality),
+                    "sub_offset_ms": int(sub_offset_ms),
+                    "real_rate": round(real_rate, 4),
+                    "uncertain_rate": round(uncertain_rate, 4),
+                    "timestamp": datetime.datetime.now().isoformat(),
+                }
+                if isinstance(piecewise_ja_offsets, list) and len(piecewise_ja_offsets) >= 2:
+                    pending_entry["piecewise_ja_offsets"] = piecewise_ja_offsets
+                add_pending_sub(pending_entry)
+            console.print(
+                f"\n[bold yellow]⚠️ [CHỐT CHẶN PHỤ ĐỀ] Tập '{base_name}' chưa đạt chuẩn nhúng "
+                f"(Bản dịch thật: {real_rate*100:.1f}% < 95% hoặc Nghi vấn: {uncertain_rate*100:.1f}% >= 10%).[/bold yellow]\n"
+                f"   • Đã ghi file tạm: [yellow]{out_file}[/yellow]\n"
+                + ("" if self.dry_run else "   • Đã thêm vào pending_subs.json (Dùng cờ --subs-pending để chạy lại sau).\n")
+            )
+
         with console.status(f"[bold blue]Stage 4: Writing subtitle file to {out_file}...[/bold blue]"):
             saved_path = write_subtitles(
                 cues=cues,
@@ -992,12 +1018,9 @@ class TranslationPipeline:
                 wrap_chars=self.wrap_chars,
                 smart_wrap=self.smart_wrap,
                 sound_cues=sound_cues,
+                preoptimized_cues=playback_audited_cues,
             )
 
-        # Kiểm định Linter V1 trên chuỗi cue đã tối ưu hóa hiển thị thực tế (sau Dual Dialogue & Zero-Overlap)
-        playback_audited_cues, post_fixes = auto_fix_cues(
-            optimize_cues_for_playback(cues, sound_cues=sound_cues)
-        )
         lint_violations = lint_subtitles(playback_audited_cues, glossary=glossary)
         total_fixes = fixes_count + post_fixes
         stats["lint_errors_count"] = sum(1 for v in lint_violations if v.severity == "ERROR")

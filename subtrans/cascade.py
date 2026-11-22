@@ -275,6 +275,7 @@ def run_cascade_repair_pass(
     series: Optional[str] = None,
     episode_basename: str = "",
     dynamic_cast_context: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
     Runs the Cloud Cascade Repair/Editor Pass on cues needing review.
@@ -345,8 +346,9 @@ def run_cascade_repair_pass(
     # Telemetry records
     telemetry_records: List[Dict[str, Any]] = []
 
-    # Dry-run check
-    if getattr(repair_translator, "dry_run", False):
+    # Dry-run check: never write cascade telemetry JSONL files on dry-run
+    is_dry_run = bool(dry_run or getattr(repair_translator, "dry_run", False))
+    if is_dry_run:
         for c, score, issues, features in budgeted_candidates:
             c.uncertain = False
             c.model_used = f"{repair_translator.model} (dry-run repair)"
@@ -363,7 +365,6 @@ def run_cascade_repair_pass(
                 "fixed_vi": c.vi,
                 "issues": issues,
             })
-        _write_telemetry_jsonl(episode_basename, telemetry_records)
         return {
             "cues_evaluated": len(cues),
             "candidates_count": len(budgeted_candidates),
@@ -747,7 +748,7 @@ def run_cascade_repair_pass(
         f"(Flash sửa: {edited_count} [{edit_rate}%], từ chối: {rejected_count} [{rejection_rate}%])."
     )
 
-    _write_telemetry_jsonl(episode_basename, telemetry_records)
+    _write_telemetry_jsonl(episode_basename, telemetry_records, dry_run=is_dry_run)
 
     ret_stats = {
         "cues_evaluated": len(cues),
@@ -763,10 +764,10 @@ def run_cascade_repair_pass(
     return ret_stats
 
 
-def _write_telemetry_jsonl(episode_basename: str, records: List[Dict[str, Any]]) -> None:
+def _write_telemetry_jsonl(episode_basename: str, records: List[Dict[str, Any]], dry_run: bool = False) -> None:
     """Writes detailed per-cue telemetry JSONL for calibration and logistic regression training."""
     import os
-    if not records or os.environ.get("PYTEST_CURRENT_TEST"):
+    if dry_run or not records or os.environ.get("PYTEST_CURRENT_TEST"):
         return
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)

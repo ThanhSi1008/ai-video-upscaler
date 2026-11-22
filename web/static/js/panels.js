@@ -53,6 +53,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   const optModel = document.getElementById("opt-model");
   const optDedup = document.getElementById("opt-dedup");
+  const optNvencMultipass = document.getElementById("opt-nvenc-multipass");
   const optBatch = document.getElementById("opt-batch-size");
   const optBatchError = document.getElementById("opt-batch-size-error");
   const optDeadline = document.getElementById("opt-deadline");
@@ -373,6 +374,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           seconds: 10,
           model: optModel?.value || null,
           dedup_policy: optDedup?.value || null,
+          nvenc_multipass: optNvencMultipass?.value || "auto",
           zero_disk: Boolean(optZeroDisk?.checked ?? true),
           use_tensorrt: Boolean(optTensorrt?.checked ?? true),
           force: true,
@@ -417,6 +419,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         output_dir: optOutDir?.value.trim() || null,
         model: optModel?.value || null,
         dedup_policy: optDedup?.value || null,
+        nvenc_multipass: optNvencMultipass?.value || "auto",
         batch_size: batchVal,
         deadline: optDeadline?.value.trim() || null,
         allow_partial: Boolean(optAllowPartial?.checked),
@@ -495,6 +498,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
 
   const optModelSelect = document.getElementById("opt-model");
   const optDedupSelect = document.getElementById("opt-dedup");
+  const optNvencMultipassSelect = document.getElementById("opt-nvenc-multipass");
 
   let editorDirty = false;
 
@@ -551,11 +555,16 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
     try {
       const data = await apiFetch("/api/config/models-and-shows");
       const models = Array.isArray(data.models) ? data.models : [];
+      const routingModes = Array.isArray(data.routing_modes) ? data.routing_modes : [];
       const policies = Array.isArray(data.dedup_policies) ? data.dedup_policies : [];
+      const multipassPolicies = Array.isArray(data.nvenc_multipass_policies)
+        ? data.nvenc_multipass_policies
+        : ["auto", "fullres", "qres"];
 
       // Populate Queue dropdowns
       if (optModelSelect instanceof HTMLSelectElement) {
         const cur = optModelSelect.value;
+        const addedIds = new Set();
         clearChildren(optModelSelect);
         optModelSelect.append(
           el("option", {
@@ -563,7 +572,19 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
             textContent: "Tự động phân giải theo shows.yaml (Khuyên dùng)",
           })
         );
+        for (const rm of routingModes) {
+          if (!rm?.id || addedIds.has(rm.id)) continue;
+          addedIds.add(rm.id);
+          optModelSelect.append(
+            el("option", {
+              value: rm.id,
+              textContent: `${rm.id} — ~${rm.ref_median_fps} fps (Auto-Pareto)`,
+            })
+          );
+        }
         for (const m of models) {
+          if (!m?.id || addedIds.has(m.id)) continue;
+          addedIds.add(m.id);
           optModelSelect.append(
             el("option", {
               value: m.id,
@@ -572,6 +593,25 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
           );
         }
         setSelectValueSafely(optModelSelect, cur, "");
+      }
+
+      if (optNvencMultipassSelect instanceof HTMLSelectElement) {
+        const curMp = optNvencMultipassSelect.value || "auto";
+        const mpLabels = {
+          auto: "auto — Tự động theo độ phân giải (Khuyên dùng)",
+          fullres: "fullres — 2-Pass toàn khung (Chất lượng tối đa)",
+          qres: "qres — 2-Pass 1/4 độ phân giải (Tốc độ cao)",
+        };
+        clearChildren(optNvencMultipassSelect);
+        for (const mp of multipassPolicies) {
+          optNvencMultipassSelect.append(
+            el("option", {
+              value: mp,
+              textContent: mpLabels[mp] || mp,
+            })
+          );
+        }
+        setSelectValueSafely(optNvencMultipassSelect, curMp, "auto");
       }
 
       if (optDedupSelect instanceof HTMLSelectElement) {

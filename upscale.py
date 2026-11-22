@@ -14,6 +14,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+import inspect
 import json
 import re
 import argparse
@@ -48,7 +49,7 @@ from src.pipeline import run_upscale_pipeline, FailedResumableError
 from src.config import is_gpu_lock_held_by_other
 from src.logger import is_graceful_pause_requested, clear_graceful_pause, was_graceful_paused
 from src.ffmpeg_ops import probe_video
-from src.dedup import DEDUP_POLICY_PARAMS, get_dedup_params, spawn_background_preflight
+from src.dedup import DEDUP_POLICY_PARAMS, get_dedup_params, resolve_dedup_policy, spawn_background_preflight
 from src.models_resolver import (
     list_models_formatted,
     resolve_expected_4k_output_path,
@@ -138,6 +139,8 @@ def check_deadline_and_eta(
     allow_partial: bool = False,
     output_dir: Optional[str] = None,
     reserved_seconds: float = 0.0,
+    dedup_policy: Optional[str] = None,
+    base_deadline_dt: Optional[datetime] = None,
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
@@ -146,19 +149,23 @@ def check_deadline_and_eta(
     Returns: (can_run, is_partial, deadline_dt)
     """
     now = datetime.now()
-    try:
-        dh, dm = map(int, deadline_str.split(":"))
-        deadline_dt = now.replace(hour=dh, minute=dm, second=0, microsecond=0)
-        if deadline_dt <= now:
-            deadline_dt += timedelta(days=1)
-    except Exception as e:
-        print(f"⚠️ Định dạng deadline không hợp lệ '{deadline_str}' (cần HH:MM): {e}")
-        return True, False, None
+    if base_deadline_dt is not None:
+        deadline_dt = base_deadline_dt
+    else:
+        try:
+            dh, dm = map(int, deadline_str.split(":"))
+            deadline_dt = now.replace(hour=dh, minute=dm, second=0, microsecond=0)
+            if deadline_dt <= now:
+                deadline_dt += timedelta(days=1)
+        except Exception as e:
+            print(f"⚠️ Định dạng deadline không hợp lệ '{deadline_str}' (cần HH:MM): {e}")
+            return True, False, None
 
     if reserved_seconds and reserved_seconds > 0:
         deadline_dt = deadline_dt - timedelta(seconds=float(reserved_seconds))
 
     seconds_left = (deadline_dt - now).total_seconds()
+    eff_policy = resolve_dedup_policy(video_path, dedup_policy)
 
     # Đọc số frame độc nhất từ plan.json nếu có (ưu tiên thư mục output -o nếu được truyền)
     base_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -182,8 +189,13 @@ def check_deadline_and_eta(
             try:
                 with open(p, "r", encoding="utf-8") as f:
                     pdata = json.load(f)
-                    n_unique = pdata.get("total_kept_frames")
-                    if n_unique:
+                    plan_pol = pdata.get("dedup_policy")
+                    if eff_policy and plan_pol is not None:
+                        if str(plan_pol).strip().lower() != str(eff_policy).strip().lower():
+                            continue
+                    cand_kept = pdata.get("total_kept_frames")
+                    if cand_kept:
+                        n_unique = cand_kept
                         is_measured = True
                         break
             except Exception:
@@ -191,12 +203,13 @@ def check_deadline_and_eta(
 
     if n_unique is None:
         # Ước lượng thận trọng 60.0% frame giữ nếu chưa quét (thay thế 39.1% cũ, đo n=4: 39.1%, 46.0%, 54.4%, 61.3%)
+        keep_factor = 1.0 if eff_policy == "off" else 0.60
         try:
             meta = probe_video(video_path)
             total_f = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
-            n_unique = int(total_f * 0.60)
+            n_unique = int(total_f * keep_factor)
         except Exception:
-            n_unique = int(34000 * 0.60)
+            n_unique = int(34000 * keep_factor)
 
     total_overhead = video_overhead + subtitles_overhead
     eta_p5 = (n_unique / max(0.5, fps_p5)) + total_overhead
@@ -206,7 +219,7 @@ def check_deadline_and_eta(
     source_tag = "đo (plan.json)" if is_measured else "ước lượng thận trọng (n=4)"
 
     if decision_eta > seconds_left:
-        if allow_partial:
+        if allow_partial and seconds_left > 0:
             print(f"\n⏳ [ALLOW PARTIAL] Tập '{os.path.basename(video_path)}':")
             print(f"   • Cần: ~{eta_med/60:.1f}m (kỳ vọng trung vị) | Quyết định hạn chót: {decision_eta/60:.1f}m (P5 {fps_p5:.2f} fps + 5m subs + 7% margin) cho {n_unique} unique frames [{source_tag}]")
             print(f"   • Thời gian còn lại trước {deadline_str}: {seconds_left/60:.1f} phút ({seconds_left/3600:.2f}h)")
@@ -751,8 +764,14 @@ def main():
         glossary_arg = getattr(args, "glossary", None)
         glossary_path_obj = Path(os.path.expanduser(str(glossary_arg).strip())) if glossary_arg else None
         is_dry_run = bool(getattr(args, "dry_run", False))
-        cli_subs_quality_explicit = "--subs-quality" in sys.argv
-        cli_sub_offset_explicit = "--sub-offset-ms" in sys.argv
+        cli_subs_quality_explicit = any(
+            tok == "--subs-quality" or tok.startswith("--subs-quality=")
+            for tok in sys.argv[1:]
+        )
+        cli_sub_offset_explicit = any(
+            tok == "--sub-offset-ms" or tok.startswith("--sub-offset-ms=")
+            for tok in sys.argv[1:]
+        )
         from subtrans.pipeline import TranslationPipeline
         for it in pending_items:
             vid_p = it.get("video_path")
@@ -775,6 +794,12 @@ def main():
                 args.sub_offset_ms
                 if cli_sub_offset_explicit
                 else int(it.get("sub_offset_ms") if it.get("sub_offset_ms") is not None else args.sub_offset_ms)
+            )
+            raw_pw_offsets = None if cli_sub_offset_explicit else it.get("piecewise_ja_offsets")
+            eff_piecewise_ja_offsets = (
+                raw_pw_offsets
+                if (isinstance(raw_pw_offsets, list) and len(raw_pw_offsets) >= 2)
+                else None
             )
 
             if vid_p and os.path.exists(vid_p):
@@ -832,8 +857,12 @@ def main():
                 subs_quality=eff_subs_quality,
                 auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
             )
-            pending_auto_offset = not getattr(args, "no_auto_offset", False)
-            res = sub_pipe.run(
+            pending_auto_offset = (
+                False
+                if eff_piecewise_ja_offsets is not None
+                else (not getattr(args, "no_auto_offset", False))
+            )
+            run_kwargs: Dict[str, Any] = dict(
                 ja_path=Path(ja_s),
                 en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
                 output_basename=out_basename,
@@ -845,6 +874,13 @@ def main():
                 video_path=Path(vid_p) if vid_p else None,
                 prefer_whisper=eff_prefer_whisper,
             )
+            if eff_piecewise_ja_offsets is not None:
+                sig_params = inspect.signature(sub_pipe.run).parameters
+                if "piecewise_ja_offsets" in sig_params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
+                ):
+                    run_kwargs["piecewise_ja_offsets"] = eff_piecewise_ja_offsets
+            res = sub_pipe.run(**run_kwargs)
             srt_p = res.get('subtitle_path') or res.get('output_path')
             is_partial_pending = bool(not srt_p or str(srt_p).endswith(".partial.srt"))
             if vid_p and not is_dry_run:
@@ -1035,6 +1071,7 @@ def main():
         if (not explicit_segment_arg and use_zero_disk and args.engine == "cuda" and int(args.segment) == DEFAULT_SEGMENT_TIME)
         else int(args.segment)
     )
+    eff_cli_dedup_policy = "off" if args.no_dedup else args.dedup_policy
     if args.engine == "cuda":
         if not getattr(args, "no_tensorrt", False) and args.precision == "fp16":
             import importlib.util
@@ -1072,6 +1109,7 @@ def main():
             segment_seconds=eff_segment_time,
             preflight_now=False,
             subs_quality=args.subs_quality,
+            dedup_policy=eff_cli_dedup_policy,
         )
         print(format_schedule_decision_table(sched))
         sys.exit(0)
@@ -1097,6 +1135,7 @@ def main():
             segment_seconds=eff_segment_time,
             preflight_now=False,
             subs_quality=args.subs_quality,
+            dedup_policy=eff_cli_dedup_policy,
         )
         print(format_schedule_decision_table(sched))
 
@@ -1116,6 +1155,7 @@ def main():
                         segment_seconds=eff_segment_time,
                         preflight_now=False,
                         subs_quality=args.subs_quality,
+                        dedup_policy=eff_cli_dedup_policy,
                     )
                     print(f"\n🔄 [BẢNG LẬP LỊCH CẬP NHẬT] Đã nạp số đo n_unique thật cho '{os.path.basename(scanned_vid)}':")
                     print(format_schedule_decision_table(updated_sched))
@@ -1129,7 +1169,7 @@ def main():
                 skip_first=True,
                 benchmark_mode=args.benchmark_mode,
                 on_plan_ready=_on_bg_plan_ready,
-                dedup_policy=args.dedup_policy,
+                dedup_policy=eff_cli_dedup_policy,
             )
             bg_preflight.start()
 
@@ -1137,12 +1177,24 @@ def main():
     async_sub_procs = []          # [(src_vid, out_vid, Popen, launch_ts)]
     failed_resumable_videos = {}  # vid -> (up_segs_dir, chunk_idx)
     unfinished_videos = {}        # vid -> reason
+    queue_halted = False
     can_overlap_async_subs = bool(
         getattr(args, "async_subs", False)
         and args.subs_after_upscale
         and not getattr(args, "prefer_whisper", False)
         and len(videos) > 1
     )
+    session_deadline_dt: Optional[datetime] = None
+    if args.deadline:
+        try:
+            _dh, _dm = map(int, args.deadline.split(":"))
+            _now = datetime.now()
+            _dt = _now.replace(hour=_dh, minute=_dm, second=0, microsecond=0)
+            if _dt <= _now:
+                _dt += timedelta(days=1)
+            session_deadline_dt = _dt
+        except Exception:
+            session_deadline_dt = None
 
     try:
         for idx, vid in enumerate(videos):
@@ -1186,10 +1238,13 @@ def main():
                     allow_partial=args.allow_partial,
                     output_dir=args.output,
                     reserved_seconds=subs_reserved_sec,
+                    dedup_policy=eff_cli_dedup_policy,
+                    base_deadline_dt=session_deadline_dt,
                 )
                 if not can_finish:
                     print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")
                     unfinished_videos[vid] = f"Bỏ qua do chạm hạn chót {args.deadline}"
+                    queue_halted = True
                     break
 
             try:
@@ -1238,9 +1293,12 @@ def main():
                     if was_graceful_paused():
                         unfinished_videos[vid] = "Dừng êm theo yêu cầu người dùng (bảo toàn checkpoint)"
                         print(f"\n⏸️ [GRACEFUL PAUSE] Tập '{os.path.basename(vid)}' đã dừng êm và giữ nguyên checkpoint. Tạm ngưng hàng đợi.")
+                        queue_halted = True
                         break
                     unfinished_videos[vid] = "Dừng sạch ranh giới phân đoạn theo --allow-partial"
                     print(f"\n⏸️ [PARTIAL] Tập '{os.path.basename(vid)}' chưa hoàn tất 4K, tự động loại khỏi danh sách dịch phụ đề (Stage B) và không mux thành phẩm.")
+                    queue_halted = True
+                    break
 
                 # Cập nhật fps từ audit.json nếu có
                 audit_path = os.path.splitext(out_file)[0] + ".audit.json" if out_file else None
@@ -1285,7 +1343,7 @@ def main():
                     sys.exit(1)
 
         # TỰ ĐỘNG THỬ LẠI CÁC TẬP FAILED-RESUMABLE MỘT LẦN Ở CUỐI HÀNG ĐỢI
-        if failed_resumable_videos:
+        if failed_resumable_videos and not queue_halted:
             print(f"\n{'='*75}")
             print(f"🔄 [RETRY PASS] TỰ ĐỘNG THỬ LẠI {len(failed_resumable_videos)} TẬP FAILED-RESUMABLE MỘT LẦN")
             print(f"{'='*75}")
@@ -1301,7 +1359,7 @@ def main():
                         batch_size=args.batch_size,
                         force=args.force,
                         bitrate=args.bitrate,
-                        segment_time=args.segment,
+                        segment_time=eff_segment_time,
                         fmt=args.format,
                         use_ramdisk=not args.no_ramdisk,
                         resume=not args.no_resume,
@@ -1314,6 +1372,8 @@ def main():
                         dedup_policy=args.dedup_policy,
                         zero_disk=getattr(args, "zero_disk", True),
                         use_tensorrt=not getattr(args, "no_tensorrt", False),
+                        nvenc_multipass=getattr(args, "nvenc_multipass", HEVC_MULTIPASS_POLICY),
+                        segment_time_explicit=explicit_segment_arg,
                     )
                     if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                         completed_videos.append((vid, out_file))

@@ -142,3 +142,75 @@ def test_batch3_dialogue_preservation_and_prompt_dedup():
         [Character(name_ja="ウルシ", name_vi="Urushi")],
     )
     assert [c.name_vi for c in merged_cast] == ["Fran", "Urushi"]
+
+
+def test_verify_pronoun_cue_passes_and_rejects_mismatches():
+    """Verify verify_pronoun_cue validates valid cues, linguistic exceptions, and rejects mismatches."""
+    from subtrans.eval.runner import verify_pronoun_cue
+
+    cues_by_id = {c["id"]: c for c in load_yaml("pronoun_suite.yaml").get("cues", [])}
+    for cid in (
+        "tenken_01",
+        "tenken_03",
+        "tenken_05",
+        "tenken_07",
+        "dmmtv_cc_01",
+        "futsutsuka_01",
+        "mushoku_01",
+        "katakana_loanword_01",
+    ):
+        ok, msg = verify_pronoun_cue(cues_by_id[cid])
+        assert ok is True, f"{cid} unexpectedly failed: {msg}"
+
+    # Reject comm-mode pronoun mismatch against Tenken glossary
+    bad_comm = {
+        "id": "neg_tenken_comm_mismatch",
+        "series": "tenken",
+        "speaker": "Fran",
+        "addressee": "Shishou",
+        "mode": "comm",
+        "ja": "師匠、大丈夫？",
+        "allowed_pronouns": ["ông"],
+        "expected_names": [],
+    }
+    ok_comm, _ = verify_pronoun_cue(bad_comm)
+    assert ok_comm is False
+
+    # Reject non-honorific pronoun on HON:sama cue
+    bad_hon = dict(cues_by_id["futsutsuka_01"])
+    bad_hon["allowed_pronouns"] = ["ông"]
+    ok_hon, _ = verify_pronoun_cue(bad_hon)
+    assert ok_hon is False
+
+    # Reject missing expected hint or expected name
+    bad_hint = dict(cues_by_id["kansai_01"])
+    bad_hint["ja"] = "和葉、こんにちは。"
+    ok_hint, _ = verify_pronoun_cue(bad_hint)
+    assert ok_hint is False
+
+
+def test_verify_pronoun_cue_invokes_cast_manager_and_linter(monkeypatch):
+    """Verify verify_pronoun_cue genuinely exercises HysteresisCastManager and lint_cue."""
+    import subtrans.eval.runner as runner_mod
+    from subtrans.dynamic_cast import HysteresisCastManager
+
+    cues_by_id = {c["id"]: c for c in load_yaml("pronoun_suite.yaml").get("cues", [])}
+    calls = {"from_glossary": 0, "lint_cue": 0}
+    orig_from_glossary = HysteresisCastManager.from_glossary
+    orig_lint_cue = runner_mod.lint_cue
+
+    def _spy_from_glossary(cls, glossary):
+        calls["from_glossary"] += 1
+        return orig_from_glossary(glossary)
+
+    def _spy_lint_cue(*args, **kwargs):
+        calls["lint_cue"] += 1
+        return orig_lint_cue(*args, **kwargs)
+
+    monkeypatch.setattr(HysteresisCastManager, "from_glossary", classmethod(_spy_from_glossary))
+    monkeypatch.setattr(runner_mod, "lint_cue", _spy_lint_cue)
+
+    ok, msg = runner_mod.verify_pronoun_cue(cues_by_id["tenken_01"])
+    assert ok is True, msg
+    assert calls["from_glossary"] >= 1
+    assert calls["lint_cue"] >= 3
