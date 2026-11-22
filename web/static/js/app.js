@@ -33,11 +33,13 @@ const STEP_ORDER = [
   "completed",
 ];
 
-function parseElapsedSeconds(startedAtIso) {
+function parseElapsedSeconds(startedAtIso, endedAtIso = null) {
   if (!startedAtIso) return null;
-  const ts = Date.parse(startedAtIso);
-  if (Number.isNaN(ts)) return null;
-  return Math.max(0, Math.round((Date.now() - ts) / 1000));
+  const startTs = Date.parse(startedAtIso);
+  if (Number.isNaN(startTs)) return null;
+  const endTs = endedAtIso ? Date.parse(endedAtIso) : Date.now();
+  if (Number.isNaN(endTs)) return null;
+  return Math.max(0, Math.round((endTs - startTs) / 1000));
 }
 
 function bootstrapStudio() {
@@ -90,6 +92,21 @@ function bootstrapStudio() {
   let lastHeatmapSignature = "";
   let lastCheckpointSignature = null;
   let gpuStaticInfo = { gpu_name: "NVIDIA RTX GPU", vram_total_mib: 12288 };
+  let isProgrammaticLogScroll = false;
+  let logScrollRafId = 0;
+
+  const scrollLogsToBottom = () => {
+    if (!logPre) return;
+    if (logScrollRafId) window.cancelAnimationFrame(logScrollRafId);
+    logScrollRafId = window.requestAnimationFrame(() => {
+      logScrollRafId = 0;
+      isProgrammaticLogScroll = true;
+      logPre.scrollTop = logPre.scrollHeight;
+      window.requestAnimationFrame(() => {
+        isProgrammaticLogScroll = false;
+      });
+    });
+  };
 
   let compareCtrl = null;
   let queueCtrl = null;
@@ -100,9 +117,7 @@ function bootstrapStudio() {
     if (activeTabId === "tab-monitor") {
       charts.redrawAll();
       if (logPre && logAutoscroll instanceof HTMLInputElement && logAutoscroll.checked) {
-        window.requestAnimationFrame(() => {
-          logPre.scrollTop = logPre.scrollHeight;
-        });
+        scrollLogsToBottom();
       }
     } else if (activeTabId === "tab-queue") {
       queueCtrl?.onTabActivated();
@@ -194,14 +209,29 @@ function bootstrapStudio() {
           : "Chưa có nhật ký tiến trình.";
 
     if (logAutoscroll instanceof HTMLInputElement && logAutoscroll.checked) {
-      window.requestAnimationFrame(() => {
-        logPre.scrollTop = logPre.scrollHeight;
-      });
+      scrollLogsToBottom();
     }
   };
 
   logFilterInput?.addEventListener("input", renderLogs);
   logLevelSelect?.addEventListener("change", renderLogs);
+  logPre?.addEventListener(
+    "scroll",
+    () => {
+      if (isProgrammaticLogScroll || !(logAutoscroll instanceof HTMLInputElement)) return;
+      if (logPre.clientHeight <= 0 || logPre.scrollHeight <= logPre.clientHeight) return;
+      const distanceFromBottom = logPre.scrollHeight - logPre.scrollTop - logPre.clientHeight;
+      if (distanceFromBottom > 36 && logAutoscroll.checked) {
+        logAutoscroll.checked = false;
+      } else if (distanceFromBottom <= 12 && !logAutoscroll.checked) {
+        logAutoscroll.checked = true;
+      }
+    },
+    { passive: true }
+  );
+  logAutoscroll?.addEventListener("change", () => {
+    if (logAutoscroll.checked) scrollLogsToBottom();
+  });
 
   btnCopyLogs?.addEventListener("click", async () => {
     const text = logCode?.textContent || "";
@@ -340,6 +370,20 @@ function bootstrapStudio() {
       Boolean(activeWebJob) &&
       (activeWebJob.job_type === "subtrans" || activeWebJob.job_type === "subs_pending");
 
+    let busyReason = "";
+    if (activeSource === "web") {
+      const jobLabel = activeWebJob?.job_type || "upscale";
+      const pidLabel = activeWebJob?.pid || live.pid || "—";
+      const targetSuffix = live.video_name ? ` — ${live.video_name}` : "";
+      busyReason = `Đang chạy Web Job (${jobLabel} • PID ${pidLabel})${targetSuffix}`;
+    } else if (activeSource === "cli") {
+      const pidLabel = pipeline.gpu_lock?.pid || live.pid || "—";
+      const targetSuffix = live.video_name ? ` — ${live.video_name}` : "";
+      busyReason = `Đang có tiến trình CLI ngoài hoạt động (PID ${pidLabel})${targetSuffix}`;
+    }
+    queueCtrl?.setSystemBusy?.(isRunning, busyReason);
+    subtransCtrl?.setSystemBusy?.(isRunning, busyReason);
+
     if (episodeTitle) {
       if (isSubtransWebJob && isRunning) {
         const subTarget =
@@ -441,7 +485,8 @@ function bootstrapStudio() {
       if (totF > 0 && totChunks > 0) {
         const estDoneF =
           stage === "completed" ? totF : Math.min(totF, Math.round((doneChunks / totChunks) * totF));
-        const dedupNote = live.dedup_ratio_percent ? ` (-${Number(live.dedup_ratio_percent).toFixed(1)}%)` : "";
+        const dedupPct = Number(live.dedup_ratio_percent || 0);
+        const dedupNote = dedupPct > 0 ? ` (tiết kiệm ${dedupPct.toFixed(1)}% dedup)` : "";
         kpiFrames.textContent = `${estDoneF.toLocaleString("vi-VN")} / ${totF.toLocaleString("vi-VN")}${dedupNote}`;
       } else if (totF > 0) {
         kpiFrames.textContent = `${totF.toLocaleString("vi-VN")} (Unique: ${uniqF.toLocaleString("vi-VN")})`;
@@ -458,14 +503,34 @@ function bootstrapStudio() {
       kpiFps.textContent = `${aiFps} / ${effFps} fps`;
     }
     if (kpiEta) {
-      const elapsedSec = isRunning
-        ? parseElapsedSeconds(activeWebJob?.started_at || live.started_at)
-        : null;
+      const lastJob =
+        job.last_job ||
+        job.last_finished_job ||
+        (Array.isArray(job.history) && job.history.length > 0 ? job.history[0] : null);
+      const lastJobMatchesLive = Boolean(
+        lastJob &&
+          (!live.started_at ||
+            (lastJob.job_id && live.job_id && lastJob.job_id === live.job_id) ||
+            (lastJob.pid && live.pid && lastJob.pid === live.pid))
+      );
+      const startedIso = isRunning
+        ? activeWebJob?.started_at || live.started_at
+        : lastJobMatchesLive
+          ? lastJob.started_at || live.started_at
+          : live.started_at;
+      const endedIso = isRunning
+        ? null
+        : lastJobMatchesLive
+          ? lastJob.finished_at || live.finished_at || live.updated_at
+          : live.finished_at || live.updated_at;
+      const elapsedSec = parseElapsedSeconds(startedIso, endedIso);
       const elapsedStr = elapsedSec !== null ? formatDuration(elapsedSec) : "00:00";
       const etaStr =
         live.eta_seconds !== null && live.eta_seconds !== undefined
           ? formatDuration(live.eta_seconds)
-          : "--:--";
+          : stage === "completed"
+            ? "00:00"
+            : "--:--";
       kpiEta.textContent = `${elapsedStr} / ${etaStr}`;
     }
     if (kpiDisk && telemetry) {
@@ -543,17 +608,53 @@ function bootstrapStudio() {
     // Resumable Checkpoints (.temp_*) — only rebuild DOM when checkpoint list changes so 1Hz ticks preserve focus/clicks
     if (checkpointList) {
       const cps = Array.isArray(pipeline.checkpoints) ? pipeline.checkpoints : [];
+      const normPath = (v) =>
+        String(v || "")
+          .trim()
+          .replace(/\\/g, "/")
+          .replace(/\/+$/, "")
+          .toLowerCase();
+      const baseNameOf = (v) => normPath(v).split("/").pop() || "";
+      const stripVideoExt = (v) => v.replace(/\.(mkv|mp4|webm|mov|avi|ts|m2ts)$/i, "");
+      const isActiveUpscale =
+        isRunning &&
+        !isSubtransWebJob &&
+        activeWebJob?.job_type !== "preview" &&
+        !live.is_preview;
+      const activeTargets = isActiveUpscale
+        ? [
+            live.input_path,
+            live.video_name,
+            ...(Array.isArray(activeWebJob?.queue_items) ? activeWebJob.queue_items : []),
+          ]
+            .map(normPath)
+            .filter(Boolean)
+        : [];
+      const isCpActive = (cp) => {
+        if (!isActiveUpscale || activeTargets.length === 0) return false;
+        const cpSrc = normPath(cp.source_file);
+        const cpEpStem = normPath(cp.episode_name);
+        const cpSrcStem = stripVideoExt(baseNameOf(cpSrc));
+        return activeTargets.some((t) => {
+          if (cpSrc && t.includes("/")) {
+            return cpSrc === t;
+          }
+          const tStem = stripVideoExt(baseNameOf(t));
+          return (cpEpStem && tStem === cpEpStem) || (cpSrcStem && tStem === cpSrcStem);
+        });
+      };
+
       const cpSig = cps
         .map(
           (cp) =>
-            `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}`
+            `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${isCpActive(cp) ? "1" : "0"}`
         )
         .join(";;");
       if (cpSig !== lastCheckpointSignature) {
         lastCheckpointSignature = cpSig;
         clearChildren(checkpointList);
         for (const cp of cps) {
-          const resumeHint = cp.source_file || cp.episode_name || cp.path || "";
+          const isCpRunning = isCpActive(cp);
           checkpointList.append(
             el("div", { className: "checkpoint-chip" }, [
               el("span", {
@@ -562,8 +663,24 @@ function bootstrapStudio() {
               el("button", {
                 type: "button",
                 className: "btn btn-ghost",
-                textContent: "Mở Tab Hàng đợi để Tiếp tục →",
-                onClick: () => queueCtrl?.focusWithPath(resumeHint),
+                disabled: isCpRunning,
+                textContent: isCpRunning ? "▶ Đang xử lý…" : "Mở Tab Hàng đợi để Tiếp tục →",
+                onClick: () => {
+                  if (!cp.source_file) {
+                    showToast(
+                      `Checkpoint '${cp.episode_name || cp.name}' thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại tệp video gốc.`,
+                      "warn"
+                    );
+                    tabsCtrl.selectTabById("tab-queue", { focusTab: false });
+                    return;
+                  }
+                  queueCtrl?.focusWithPath({
+                    sourceFile: cp.source_file,
+                    outputDir: cp.output_dir || "",
+                    isCustomOutputDir: Boolean(cp.is_custom_output_dir),
+                    episodeName: cp.episode_name || "",
+                  });
+                },
               }),
             ])
           );

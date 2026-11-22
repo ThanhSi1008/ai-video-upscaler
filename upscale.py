@@ -47,7 +47,12 @@ from src.config import (
 from src.pending_queue import load_pending_subs, remove_pending_sub
 from src.pipeline import run_upscale_pipeline, FailedResumableError
 from src.config import is_gpu_lock_held_by_other
-from src.logger import is_graceful_pause_requested, clear_graceful_pause, was_graceful_paused
+from src.logger import (
+    get_live_status_path,
+    is_graceful_pause_requested,
+    clear_graceful_pause,
+    was_graceful_paused,
+)
 from src.ffmpeg_ops import probe_video
 from src.dedup import DEDUP_POLICY_PARAMS, get_dedup_params, resolve_dedup_policy, spawn_background_preflight
 from src.models_resolver import (
@@ -1121,7 +1126,7 @@ def main():
 
     # 2. Phiên chạy thật: Lập lịch và in bảng quyết định ngay đầu phiên (nếu không ở benchmark mode)
     bg_preflight = None
-    if not args.benchmark_mode:
+    if not args.benchmark_mode and not (args.preview and len(videos) == 1 and not args.deadline):
         from src.scheduler import compute_overnight_schedule, format_schedule_decision_table, BackgroundQueuePreflightManager
         sched = compute_overnight_schedule(
             queue=videos,
@@ -1394,7 +1399,7 @@ def main():
         print(f"\n{'='*75}")
         print("📝 [STAGE B] HOÀN TẤT & ĐỒNG BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ ĐỘC LẬP")
         print(f"{'='*75}")
-        _stage_b_live_path = os.path.join("logs", "live_status.json")
+        _stage_b_live_path = get_live_status_path()
         def _set_stage_b_live_status(stage_val: str, detail_val: str) -> None:
             if not os.path.isfile(_stage_b_live_path):
                 return
@@ -1482,7 +1487,7 @@ def main():
             print(f"[{u_idx+1:02d}] | {os.path.basename(u_vid)[:45]:<45} | {reason}")
         print(f"{'='*75}")
         print(f"⚠️ Có {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất. Hàng đợi kết thúc với trạng thái CHƯA XONG.\n")
-        _live_status_path = os.path.join("logs", "live_status.json")
+        _live_status_path = get_live_status_path()
         if os.path.isfile(_live_status_path):
             try:
                 is_paused_exit = was_graceful_paused() or any(

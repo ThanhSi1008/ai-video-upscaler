@@ -7,6 +7,7 @@ import base64
 import hashlib
 from pathlib import Path
 import re
+import sys
 
 from fastapi.testclient import TestClient
 import pytest
@@ -25,6 +26,7 @@ FORBIDDEN_WEB_MODULES = frozenset({
     "triton",
     "spandrel",
     "src.config",
+    "src.logger",
     "src.pipeline",
     "src.cuda_engine",
     "src.build_trt_engine",
@@ -32,6 +34,7 @@ FORBIDDEN_WEB_MODULES = frozenset({
 })
 FORBIDDEN_SRC_ATTRS = frozenset({
     "config",
+    "logger",
     "pipeline",
     "cuda_engine",
     "build_trt_engine",
@@ -145,3 +148,59 @@ def test_runtime_and_test_python_hygiene():
                 assert not DOC_ECHO_RE.match(first_line), (
                     f"Filename-echo module docstring in {path}: {first_line!r}"
                 )
+
+
+def test_night_report_stdlib_only_and_zero_vram_ast_boundaries():
+    """Verify src/night_report.py uses stdlib imports only and web/app.py avoids GPU/config imports."""
+    nr_path = REPO_ROOT / "src" / "night_report.py"
+    nr_tree = ast.parse(nr_path.read_text(encoding="utf-8-sig"), filename=str(nr_path))
+    allowed_top = sys.stdlib_module_names | {"__future__"}
+    nr_violations: list[str] = []
+
+    for node in ast.walk(nr_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if top not in allowed_top:
+                    nr_violations.append(f"src/night_report.py:{node.lineno} imports {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                nr_violations.append(
+                    f"src/night_report.py:{node.lineno} uses relative import {node.module or '.'}"
+                )
+            else:
+                mod = node.module or ""
+                top = mod.split(".", 1)[0]
+                if top not in allowed_top:
+                    nr_violations.append(f"src/night_report.py:{node.lineno} imports from {mod}")
+
+    assert not nr_violations, "src/night_report.py non-stdlib imports:\n" + "\n".join(nr_violations)
+
+    app_path = REPO_ROOT / "web" / "app.py"
+    app_tree = ast.parse(app_path.read_text(encoding="utf-8-sig"), filename=str(app_path))
+    refs_night_report = False
+    app_violations: list[str] = []
+    forbidden_src_submodules = {"src.config", "src.logger", "src.pipeline"}
+
+    for node in ast.walk(app_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "src.night_report" or alias.name.startswith("src.night_report."):
+                    refs_night_report = True
+                if any(alias.name == f or alias.name.startswith(f + ".") for f in forbidden_src_submodules):
+                    app_violations.append(f"web/app.py:{node.lineno} imports {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "src.night_report" or mod.startswith("src.night_report."):
+                refs_night_report = True
+            elif mod == "src":
+                for alias in node.names:
+                    if alias.name == "night_report":
+                        refs_night_report = True
+                    if alias.name in {"config", "logger", "pipeline"}:
+                        app_violations.append(f"web/app.py:{node.lineno} imports src.{alias.name}")
+            if any(mod == f or mod.startswith(f + ".") for f in forbidden_src_submodules):
+                app_violations.append(f"web/app.py:{node.lineno} imports from {mod}")
+
+    assert refs_night_report, "web/app.py must import src.night_report"
+    assert not app_violations, "web/app.py forbidden src imports:\n" + "\n".join(app_violations)

@@ -50,6 +50,7 @@ export function initCompareStage({ selectTabById } = {}) {
   let pointerPos = null;
   let draggingSplit = false;
   let renderRafId = 0;
+  let extractSeq = 0;
   let imageBounds = { x: 0, y: 0, w: 0, h: 0 };
 
   const setFieldError = (inputEl, errorEl, msg) => {
@@ -367,8 +368,12 @@ export function initCompareStage({ selectTabById } = {}) {
     }
     setFieldError(offsetInput, offsetErrorEl, null);
 
+    const reqId = ++extractSeq;
+    const isCurrentExtract = () => reqId === extractSeq;
+
     if (btnExtract instanceof HTMLButtonElement) {
       btnExtract.disabled = true;
+      btnExtract.setAttribute("aria-busy", "true");
     }
     if (metaCaption) {
       metaCaption.textContent = "Đang trích xuất cặp khung hình chuẩn ma trận màu BT.709…";
@@ -384,11 +389,14 @@ export function initCompareStage({ selectTabById } = {}) {
           source_offset_sec: offsetVal,
         },
       });
+      if (!isCurrentExtract()) return;
 
       const [loadedSrc, loadedUp] = await Promise.all([
         loadHtmlImage(res.source_frame_url),
         loadHtmlImage(res.upscaled_frame_url),
       ]);
+      if (!isCurrentExtract()) return;
+
       srcImg = loadedSrc;
       upImg = loadedUp;
       if (placeholder) {
@@ -402,13 +410,15 @@ export function initCompareStage({ selectTabById } = {}) {
       }
       renderCanvas();
     } catch (err) {
+      if (!isCurrentExtract()) return;
       showToast(err.message, "error");
       if (metaCaption) {
         metaCaption.textContent = `Không thể trích xuất khung hình: ${err.message}`;
       }
     } finally {
-      if (btnExtract instanceof HTMLButtonElement) {
+      if (isCurrentExtract() && btnExtract instanceof HTMLButtonElement) {
         btnExtract.disabled = false;
+        btnExtract.removeAttribute("aria-busy");
       }
     }
   };
@@ -422,8 +432,16 @@ export function initCompareStage({ selectTabById } = {}) {
     if (offsetInput) offsetInput.value = "";
     if (srcInput?.value && upInput?.value) {
       extractAndCompare();
-    } else if (metaCaption) {
-      metaCaption.textContent = "Tệp 4K này chưa tự khớp được video gốc 1080p — hãy chọn video gốc thủ công rồi nhấn Trích xuất.";
+    } else {
+      ++extractSeq;
+      if (btnExtract instanceof HTMLButtonElement) {
+        btnExtract.disabled = false;
+        btnExtract.removeAttribute("aria-busy");
+      }
+      if (metaCaption) {
+        metaCaption.textContent =
+          "Tệp 4K này chưa tự khớp được video gốc 1080p — hãy chọn video gốc thủ công rồi nhấn Trích xuất.";
+      }
     }
   });
 

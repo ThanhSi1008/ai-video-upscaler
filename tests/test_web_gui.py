@@ -3854,3 +3854,1144 @@ def test_env_api_keys_tier5_preserves_distinct_key1_and_dedups_mirrored(tmp_path
     }
     assert "AIzaSyPrimaryKey0001" not in env12
     assert "GEMINI_API_KEY_2=AIzaSySecondKey0002" in env12
+
+
+def test_windows_venv_child_pid_live_telemetry_not_frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify UPSCALER_WEB_JOB_ID and ppid lineage stream live upscaling telemetry and survive abort."""
+    import asyncio
+    import time
+    import psutil
+    from web.sse_hub import TelemetryHub, live_matches_web_job
+
+    root = _seed_workspace(tmp_path / "pid_lineage_ws")
+    stale_live = root / "logs" / "live_status.json"
+    stale_live.write_text(
+        json.dumps({"video_name": "OldCrash.mkv", "pid": 11111, "stage": "error", "last_error": "stale"}),
+        encoding="utf-8",
+    )
+    stale_ts = time.time() - 30.0
+    os.utime(stale_live, (stale_ts, stale_ts))
+
+    captured_spawn: Dict[str, Any] = {}
+    procs: List[FakePopenProcess] = []
+    alive_pids = {25000, 27000}
+
+    def fake_popen(cmd: List[str], **kwargs: Any) -> FakePopenProcess:
+        proc = FakePopenProcess(cmd, pid=25000, running=True)
+        orig_terminate = proc.terminate
+
+        def _term() -> None:
+            alive_pids.discard(25000)
+            alive_pids.discard(27000)
+            orig_terminate()
+
+        proc.terminate = _term  # type: ignore[method-assign]
+        captured_spawn["cmd"] = cmd
+        captured_spawn["env"] = dict(kwargs.get("env") or {})
+        captured_spawn["proc"] = proc
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", str(root / "logs"))
+    app = create_app(workspace_root=root, gpu_query_fn=_fake_gpu_metrics, popen_factory=fake_popen)
+    with TestClient(app) as client:
+        start_resp = client.post(
+            "/api/jobs/start",
+            json={"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]},
+        )
+        assert start_resp.status_code == 200
+        job = start_resp.json()["job"]
+        assert job["pid"] == 25000
+        assert captured_spawn["env"]["UPSCALER_WEB_JOB_ID"] == job["job_id"]
+
+        monkeypatch.setattr(os, "getpid", lambda: 27000)
+        monkeypatch.setattr(os, "getppid", lambda: 25000)
+        monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+        monkeypatch.setenv("UPSCALER_WEB_JOB_ID", job["job_id"])
+
+        rl = logger_mod.RunLogger("Frieren_10")
+        live_disk = json.loads(stale_live.read_text(encoding="utf-8"))
+        assert live_disk["pid"] == 27000
+        assert live_disk["ppid"] == 25000
+        assert live_disk["job_id"] == job["job_id"]
+
+        rl.update_live_context(total_chunks=4, total_frames=400, unique_frames=240)
+        rl.set_stage("upscaling", "Chunk 2/4", active_chunk=1)
+        rl.log_chunk_done(
+            chunk_idx=0,
+            total_chunks=4,
+            frames=100,
+            ai_time=5.0,
+            ai_fps=20.0,
+            enc_time=0.2,
+            total_chunk_time=5.2,
+            output_seg=str(root / "out" / "seg_0000.mp4"),
+            steady_fps=21.4,
+        )
+
+        st_resp = client.get("/api/status")
+        assert st_resp.status_code == 200
+        pipe = st_resp.json()["pipeline"]
+        assert pipe["effective_stage"] == "upscaling"
+        assert pipe["live"]["stage"] == "upscaling"
+        assert pipe["live"]["pid"] == 27000
+        assert pipe["live"]["ppid"] == 25000
+        assert pipe["live"]["job_id"] == job["job_id"]
+        assert pipe["live"]["completed_chunks"] == 1
+        assert pipe["live"]["active_chunk"] == 1
+        assert pipe["live"]["steady_fps"] > 0
+
+        assert live_matches_web_job(
+            {"pid": 27000, "ppid": 25000, "job_id": None},
+            {"pid": 25000, "job_id": job["job_id"], "started_at": job["started_at"]},
+            time.time(),
+        )
+        assert TelemetryHub._live_matches_web_job(
+            {"pid": 27000, "ppid": 25000, "job_id": None},
+            {"pid": 25000, "job_id": job["job_id"], "started_at": job["started_at"]},
+            time.time(),
+        )
+
+        async def _read_one_tick() -> Dict[str, Any]:
+            gen = app.state.telemetry_hub.stream_events()
+            try:
+                snap_raw = await anext(gen)
+                assert snap_raw.startswith("event: snapshot\n")
+                rl.log_chunk_done(
+                    chunk_idx=1,
+                    total_chunks=4,
+                    frames=100,
+                    ai_time=4.5,
+                    ai_fps=22.2,
+                    enc_time=0.2,
+                    total_chunk_time=4.7,
+                    output_seg=str(root / "out" / "seg_0001.mp4"),
+                    steady_fps=22.1,
+                )
+                for _ in range(5):
+                    ev_raw = await anext(gen)
+                    if ev_raw.startswith("event: tick\n"):
+                        for ln in ev_raw.splitlines():
+                            if ln.startswith("data: "):
+                                return json.loads(ln[len("data: "):])
+                raise AssertionError("Did not receive SSE event: tick")
+            finally:
+                await gen.aclose()
+
+        tick_payload = asyncio.run(_read_one_tick())
+        tick_pipe = tick_payload["pipeline"]
+        assert tick_pipe["effective_stage"] == "upscaling"
+        assert tick_pipe["live"]["completed_chunks"] == 2
+        assert tick_pipe["live"]["active_chunk"] == 1
+        assert tick_pipe["live"]["steady_fps"] > 0
+
+        abort_resp = client.post("/api/jobs/abort")
+        assert abort_resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            snap = app.state.job_manager.get_state()
+            if snap.get("status") != "running":
+                break
+            time.sleep(0.02)
+
+        post_abort = client.get("/api/status").json()["pipeline"]
+        assert post_abort["effective_stage"] == "paused"
+        assert post_abort["live"]["completed_chunks"] == 2
+        assert post_abort["live"]["active_chunk"] == 1
+        assert post_abort["live"]["steady_fps"] > 0
+
+
+def test_preview_job_honors_output_dir_batch_size_and_force_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify preview -o/batch_size/force=False forwarding, 1..32 validation, and .preview_clip_* isolation."""
+    import contextlib
+    import src.dedup as dedup_mod
+    import src.models_resolver as mr_mod
+    import src.pipeline as pipeline_mod
+    import web.job_manager as jm_mod
+
+    root = _seed_workspace(tmp_path / "preview_api_ws")
+    spawned: List[Dict[str, Any]] = []
+
+    def fake_popen(cmd: List[str], **kwargs: Any) -> FakePopenProcess:
+        proc = FakePopenProcess(cmd, pid=52000 + len(spawned), running=False)
+        spawned.append({"cmd": cmd, "env": dict(kwargs.get("env") or {})})
+        return proc
+
+    app = create_app(workspace_root=root, gpu_query_fn=_fake_gpu_metrics, popen_factory=fake_popen)
+    custom_out = tmp_path / "custom_preview_out"
+    custom_out.mkdir(parents=True, exist_ok=True)
+    ep_rel = "anime_season/[BD 1080p] Fate_Ep22.mkv"
+
+    with TestClient(app) as client:
+        r_default = client.post(
+            "/api/jobs/preview",
+            json={"video_path": ep_rel, "seconds": 12, "output_dir": str(custom_out), "batch_size": 16},
+        )
+        assert r_default.status_code == 200
+        cmd_def = spawned[-1]["cmd"]
+        assert "-o" in cmd_def and cmd_def[cmd_def.index("-o") + 1] == str(custom_out)
+        assert "--batch-size" in cmd_def and cmd_def[cmd_def.index("--batch-size") + 1] == "16"
+        assert "--force" not in cmd_def
+        assert spawned[-1]["env"]["UPSCALER_NO_AUTO_OPEN"] == "1"
+
+        r_force = client.post(
+            "/api/jobs/preview",
+            json={"video_path": ep_rel, "seconds": 10, "force": True, "batch_size": 4},
+        )
+        assert r_force.status_code == 200
+        assert "--force" in spawned[-1]["cmd"]
+
+        for bad_bs in (0, 33, 99, True, False, 8.0, 8.5, "abc"):
+            assert client.post("/api/jobs/preview", json={"video_path": ep_rel, "batch_size": bad_bs}).status_code == 422
+            assert client.post("/api/jobs/start", json={"inputs": [ep_rel], "batch_size": bad_bs}).status_code == 422
+            assert client.post(
+                "/api/queue/preview-schedule",
+                json={"inputs": [], "batch_size": bad_bs},
+            ).status_code == 422
+
+        for good_bs in (1, 32, "8", "32"):
+            assert client.post(
+                "/api/queue/preview-schedule",
+                json={"inputs": [], "batch_size": good_bs},
+            ).status_code == 200
+
+        assert client.post(
+            "/api/jobs/preview",
+            json={"video_path": ep_rel, "output_dir": ".env"},
+        ).status_code == 403
+        assert client.post(
+            "/api/jobs/preview",
+            json={"video_path": ep_rel, "output_dir": str(root / ".env")},
+        ).status_code == 403
+
+    for bad_jm in (True, False, 8.0, "8.0", "8.5", 0, 33):
+        with pytest.raises(ValueError):
+            jm_mod._validate_batch_size(bad_jm)
+    for ok_jm in (None, "", 1, "16", 32):
+        jm_mod._validate_batch_size(ok_jm)
+
+    iso_root = tmp_path / "pipeline_preview_iso"
+    src_dir = iso_root / "Raw"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    src_vid = src_dir / "[BD 1080p] Fate_Ep22.mkv"
+    src_vid.write_bytes(b"\x00" * 4096)
+    (iso_root / "shows.yaml").write_text(
+        'shows:\n  - pattern: "*[BD*"\n    model: animevideov3\n    dedup_policy: dis-auto\n',
+        encoding="utf-8",
+    )
+    (iso_root / "models").mkdir(parents=True, exist_ok=True)
+    (iso_root / "models" / "models.yaml").write_text(
+        (root / "models" / "models.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    target_out = iso_root / "custom_out"
+    target_out.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(dedup_mod, "ROOT_DIR", str(iso_root))
+    monkeypatch.setattr(mr_mod, "ROOT_DIR", str(iso_root))
+    mr_mod._YAML_STAT_CACHE.clear()
+
+    class _StopAfterDedup(RuntimeError):
+        pass
+
+    recorded_cut_cmds: List[List[str]] = []
+    recorded_dedup_calls: List[tuple[str, Any]] = []
+    orig_resolve_dedup = pipeline_mod.resolve_dedup_policy
+
+    def spy_resolve_dedup(vid_path: str, cli_pol: Any = None) -> str:
+        res = orig_resolve_dedup(vid_path, cli_pol)
+        recorded_dedup_calls.append((vid_path, res))
+        return res
+
+    def fake_subprocess_run(cmd: List[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        recorded_cut_cmds.append(list(cmd))
+        out_clip = Path(cmd[-1])
+        out_clip.parent.mkdir(parents=True, exist_ok=True)
+        out_clip.write_bytes(b"\x00" * 2048)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    @contextlib.contextmanager
+    def fake_ramdisk(**_kwargs: Any):
+        ram_dir = iso_root / "ram"
+        ram_dir.mkdir(parents=True, exist_ok=True)
+        yield str(ram_dir)
+
+    monkeypatch.setattr(pipeline_mod, "validate_environment", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "acquire_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "release_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "run_preflight_checks", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "RAMDisk", fake_ramdisk)
+    monkeypatch.setattr(pipeline_mod, "resolve_dedup_policy", spy_resolve_dedup)
+    monkeypatch.setattr(pipeline_mod.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "probe_video",
+        lambda _p: {
+            "duration": 120.0,
+            "nb_frames": 2880,
+            "fps": 23.976,
+            "fps_num": 24000,
+            "fps_den": 1001,
+            "width": 1920,
+            "height": 1080,
+            "size_bytes": 4096,
+            "audio_count": 1,
+            "subtitle_count": 1,
+            "attachment_count": 0,
+            "chapter_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "split_video_segments",
+        lambda _in, segs_d, _st: [str(Path(segs_d) / "seg_0000.mp4")],
+    )
+    monkeypatch.setattr(pipeline_mod, "get_segments_frame_counts", lambda _segs: [240])
+    monkeypatch.setattr(pipeline_mod, "is_valid_completed_4k_output", lambda _p: False)
+
+    def stop_at_plan(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        raise _StopAfterDedup("stop")
+
+    monkeypatch.setattr(pipeline_mod, "load_or_create_plan", stop_at_plan)
+    monkeypatch.setattr(pipeline_mod, "RollingDedupPlanner", stop_at_plan)
+
+    with pytest.raises(_StopAfterDedup):
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_vid),
+            output_path=str(target_out),
+            preview_seconds=10,
+            force=False,
+            dedup=True,
+            anti_sleep=False,
+        )
+
+    expected_temp = target_out / ".preview_clip_[BD 1080p] Fate_Ep22.mkv"
+    assert recorded_cut_cmds and Path(recorded_cut_cmds[-1][-1]).resolve() == expected_temp.resolve()
+    assert list(src_dir.glob(".preview_clip_*")) == []
+    assert list(target_out.glob(".preview_clip_*")) == []
+    assert recorded_dedup_calls == [(str(src_vid.resolve()), "dis-auto")]
+    live_data = json.loads(Path(logger_mod.get_live_status_path()).read_text(encoding="utf-8"))
+    assert live_data["dedup_policy"] == "dis-auto"
+
+    expected_prev_4k = target_out / "[BD 1080p] Fate_Ep22_preview_10s_4K.mkv"
+    expected_prev_4k.write_bytes(b"\x00" * 16)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "is_valid_completed_4k_output",
+        lambda p: Path(p).resolve() == expected_prev_4k.resolve(),
+    )
+    ret_path = pipeline_mod.run_upscale_pipeline(
+        input_path=str(src_vid),
+        output_path=str(target_out),
+        model="animevideov3",
+        preview_seconds=10,
+        force=False,
+        dedup=True,
+        anti_sleep=False,
+    )
+    assert Path(ret_path).resolve() == expected_prev_4k.resolve()
+    assert list(target_out.glob(".preview_clip_*")) == []
+
+
+def test_checkpoint_resume_preserves_full_source_path_and_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify manifest.json, plan.json, and scan_temp_checkpoints preserve full source_file and output_dir."""
+    import contextlib
+    import src.dedup as dedup_mod
+    import src.pipeline as pipeline_mod
+    from web.sse_hub import scan_temp_checkpoints
+
+    src_ep = tmp_path / "Raw" / "Season 1" / "Ep11.mkv"
+    src_ep.parent.mkdir(parents=True, exist_ok=True)
+    src_ep.write_bytes(b"\x00" * 1024)
+
+    cp_plan_dir = tmp_path / "planner_cp"
+    cp_plan_dir.mkdir(parents=True, exist_ok=True)
+    plan_file = cp_plan_dir / "plan.json"
+    monkeypatch.setattr(
+        dedup_mod,
+        "scan_single_segment_actions",
+        lambda **_kw: {
+            "chunk_meta": {
+                "chunk_idx": 0,
+                "start_frame": 0,
+                "end_frame": 4,
+                "total_frames": 4,
+                "kept_count": 2,
+                "kept_indices": [0, 2],
+                "runs": [{"frame_idx": 0, "count": 2}, {"frame_idx": 2, "count": 2}],
+                "scene_cut": True,
+            },
+            "raw_actions": ["keep", "drop", "keep", "drop"],
+            "first_gray": None,
+            "last_gray": None,
+        },
+    )
+    planner = dedup_mod.RollingDedupPlanner(
+        input_path=str(src_ep),
+        seg_paths=[str(cp_plan_dir / "seg_0000.mp4")],
+        seg_frame_counts=[4],
+        plan_path=str(plan_file),
+        policy="default",
+    )
+    planner.finalize_plan()
+    saved_plan = json.loads(plan_file.read_text(encoding="utf-8"))
+    assert saved_plan["source_file"] == "Ep11.mkv"
+    assert saved_plan["source_path"] == os.path.abspath(str(src_ep))
+
+    ws = _seed_workspace(tmp_path / "cp_manifest_ws")
+    custom_out = tmp_path / "custom_out_dir"
+    custom_out.mkdir(parents=True, exist_ok=True)
+
+    class _StopAfterManifest(RuntimeError):
+        pass
+
+    @contextlib.contextmanager
+    def stop_ramdisk(**_kwargs: Any):
+        raise _StopAfterManifest("stop")
+        yield ""
+
+    monkeypatch.setattr(pipeline_mod, "validate_environment", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "acquire_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "release_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "run_preflight_checks", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "RAMDisk", stop_ramdisk)
+    monkeypatch.setattr(pipeline_mod, "is_valid_completed_4k_output", lambda _p: False)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "resolve_model_for_video",
+        lambda _p, _m=None: {"id": "animevideov3", "name": "AnimeVideo-v3", "sha256": "abc123", "arch": {"upscale": 4}},
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "probe_video",
+        lambda _p: {
+            "duration": 24.0,
+            "nb_frames": 576,
+            "fps": 24.0,
+            "fps_num": 24,
+            "fps_den": 1,
+            "width": 1920,
+            "height": 1080,
+            "size_bytes": 1024,
+            "audio_count": 1,
+            "subtitle_count": 0,
+            "attachment_count": 0,
+            "chapter_count": 0,
+        },
+    )
+
+    with pytest.raises(_StopAfterManifest):
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_ep),
+            output_path=str(custom_out),
+            anti_sleep=False,
+        )
+
+    manifest_path = custom_out / ".temp_Ep11" / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest_data["source_file"] == os.path.abspath(str(src_ep))
+    assert manifest_data["output_dir"] == os.path.abspath(str(custom_out))
+
+    default_cp = ws / "out" / ".temp_DefaultEp"
+    (default_cp / "raw_segs").mkdir(parents=True, exist_ok=True)
+    (default_cp / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+    default_src = ws / "anime_season" / "DefaultEp.mkv"
+    (default_cp / "manifest.json").write_text(
+        json.dumps({"model_id": "animevideov3", "source_file": str(default_src), "output_dir": str(ws / "out")}),
+        encoding="utf-8",
+    )
+
+    fallback_cp = ws / "custom_scan" / ".temp_Ep11"
+    (fallback_cp / "raw_segs").mkdir(parents=True, exist_ok=True)
+    (fallback_cp / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+    (fallback_cp / "manifest.json").write_text(
+        json.dumps({"model_id": "animevideov3", "source_file": str(ws / "custom_scan" / ".preview_clip_Ep11.mkv")}),
+        encoding="utf-8",
+    )
+    (fallback_cp / "plan.json").write_text(
+        json.dumps({"source_file": "Ep11.mkv", "source_path": os.path.abspath(str(src_ep)), "chunks": [{"chunk_idx": 0}]}),
+        encoding="utf-8",
+    )
+
+    preview_temp_cp = ws / "out" / ".temp_.preview_clip_Ep11"
+    preview_temp_cp.mkdir(parents=True, exist_ok=True)
+    (preview_temp_cp / "manifest.json").write_text(
+        json.dumps({"model_id": "animevideov3", "source_file": str(ws / "out" / ".preview_clip_Ep11.mkv")}),
+        encoding="utf-8",
+    )
+
+    scanned = scan_temp_checkpoints(ws, extra_dirs=[ws / "custom_scan"])
+    by_ep = {item["episode_name"]: item for item in scanned}
+    assert by_ep[".preview_clip_Ep11"]["source_file"] == ""
+    assert ".preview_clip_" not in by_ep["Ep11"]["source_file"]
+    assert by_ep["DefaultEp"]["source_file"] == str(default_src)
+    assert by_ep["DefaultEp"]["output_dir"] == str(ws / "out")
+    assert by_ep["DefaultEp"]["is_custom_output_dir"] is False
+    assert by_ep["Ep11"]["source_file"] == os.path.abspath(str(src_ep))
+    assert by_ep["Ep11"]["output_dir"] == str((ws / "custom_scan").resolve())
+    assert by_ep["Ep11"]["is_custom_output_dir"] is True
+
+
+def test_abort_job_cleans_orphan_descendant_gpu_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify abort_job removes orphan descendant .gpu_active.lock while preserving external CLI locks."""
+    from types import SimpleNamespace
+    import psutil
+    from web.job_manager import JobManager
+
+    root1 = _seed_workspace(tmp_path / "abort_child_ws")
+    jm1 = JobManager(root1, popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=25000, running=True))
+    start1 = jm1.start_upscale_job({"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]})
+    assert start1["pid"] == 25000
+    (root1 / ".gpu_active.lock").write_text("27000\n", encoding="utf-8")
+
+    child_checks = {"n": 0}
+
+    class _FakeParentProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def children(self, recursive: bool = True) -> List[Any]:
+            return [SimpleNamespace(pid=27000)] if self.pid == 25000 and recursive else []
+
+    def fake_pid_exists_delay(pid: int) -> bool:
+        if pid == 27000:
+            child_checks["n"] += 1
+            return child_checks["n"] <= 2
+        return False
+
+    monkeypatch.setattr(psutil, "Process", _FakeParentProc)
+    monkeypatch.setattr(psutil, "pid_exists", fake_pid_exists_delay)
+    res1 = jm1.abort_job()
+    assert res1["ok"] is True
+    assert res1["status"] == "aborted"
+    assert res1["aborted_pid"] == 25000
+    assert not (root1 / ".gpu_active.lock").exists()
+
+    root2 = _seed_workspace(tmp_path / "abort_live_fallback_ws")
+    jm2 = JobManager(root2, popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=25001, running=True))
+    start2 = jm2.start_upscale_job({"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]})
+    job2 = start2
+    (root2 / "logs" / "live_status.json").write_text(
+        json.dumps({"job_id": job2["job_id"], "pid": 27001, "stage": "upscaling"}),
+        encoding="utf-8",
+    )
+    (root2 / ".gpu_active.lock").write_text("27001\n", encoding="utf-8")
+
+    def raising_process(_pid: int) -> Any:
+        raise RuntimeError("Process lookup unavailable")
+
+    monkeypatch.setattr(psutil, "Process", raising_process)
+    monkeypatch.setattr(psutil, "pid_exists", lambda pid: pid == 27001)
+    res2 = jm2.abort_job()
+    assert res2["ok"] is True
+    assert not (root2 / ".gpu_active.lock").exists()
+
+    root3 = _seed_workspace(tmp_path / "abort_external_preserve_ws")
+    jm3 = JobManager(root3, popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=25002, running=True))
+    jm3.start_upscale_job({"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]})
+    (root3 / ".gpu_active.lock").write_text("99001\n", encoding="utf-8")
+
+    class _FakeParentProc3:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def children(self, recursive: bool = True) -> List[Any]:
+            return [SimpleNamespace(pid=27002)] if self.pid == 25002 and recursive else []
+
+    monkeypatch.setattr(psutil, "Process", _FakeParentProc3)
+    monkeypatch.setattr(psutil, "pid_exists", lambda pid: pid == 99001)
+    res3 = jm3.abort_job()
+    assert res3["ok"] is True
+    assert (root3 / ".gpu_active.lock").read_text(encoding="utf-8").strip() == "99001"
+
+
+def test_fs_browse_hides_windows_system_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify SafeLocalFSBrowser hides Windows system/hidden/secret folders and enforces 403 on secrets."""
+    import stat as stat_mod
+    import web.fs_browser as fs_browser_mod
+
+    drive_root = tmp_path / "fake_drive"
+    drive_root.mkdir(parents=True, exist_ok=True)
+    for d_name in ("$RECYCLE.BIN", "System Volume Information", "Recovery", "Normal_Show"):
+        (drive_root / d_name).mkdir(exist_ok=True)
+    (drive_root / "Normal_Ep01.mkv").write_bytes(b"\x00" * 64)
+    (drive_root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    browser = SafeLocalFSBrowser(tmp_path)
+    listed = browser.browse(str(drive_root))
+    names = {e["name"] for e in listed["entries"]}
+    assert names == {"Normal_Show", "Normal_Ep01.mkv"}
+
+    class _FakeDirEntry:
+        def __init__(self, name: str, is_dir_flag: bool, attrs: int = 0, stat_err: bool = False) -> None:
+            self.name = name
+            self.path = str(drive_root / name)
+            self._is_dir = is_dir_flag
+            self._attrs = attrs
+            self._stat_err = stat_err
+
+        def is_dir(self, follow_symlinks: bool = False) -> bool:
+            return self._is_dir
+
+        def is_file(self, follow_symlinks: bool = False) -> bool:
+            return not self._is_dir
+
+        def stat(self, follow_symlinks: bool = False) -> Any:
+            if self._stat_err:
+                raise OSError("Access denied")
+
+            class _FakeStat:
+                st_size = 128
+                st_mtime = 1700000000
+                st_file_attributes = self._attrs
+
+            return _FakeStat()
+
+    class _FakeScandirCtx:
+        def __init__(self, entries: List[Any]) -> None:
+            self._entries = entries
+
+        def __iter__(self) -> Any:
+            return iter(self._entries)
+
+        def __enter__(self) -> List[Any]:
+            return self._entries
+
+        def __exit__(self, *_args: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(fs_browser_mod.sys, "platform", "win32")
+    monkeypatch.setattr(stat_mod, "FILE_ATTRIBUTE_SYSTEM", 0x4, raising=False)
+    monkeypatch.setattr(stat_mod, "FILE_ATTRIBUTE_HIDDEN", 0x2, raising=False)
+    fake_entries = [
+        _FakeDirEntry("HiddenFolder", True, attrs=0x2),
+        _FakeDirEntry("SystemFolder", True, attrs=0x4),
+        _FakeDirEntry("BrokenStatFolder", True, stat_err=True),
+        _FakeDirEntry("VisibleFolder", True, attrs=0),
+        _FakeDirEntry("HiddenVideo.mkv", False, attrs=0x2),
+        _FakeDirEntry("VisibleVideo.mkv", False, attrs=0),
+    ]
+    monkeypatch.setattr(fs_browser_mod.os, "scandir", lambda _p: _FakeScandirCtx(fake_entries))
+    win_listed = browser.browse(str(drive_root))
+    assert [e["name"] for e in win_listed["entries"]] == ["VisibleFolder", "VisibleVideo.mkv"]
+
+    monkeypatch.undo()
+    app = create_app(workspace_root=drive_root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        assert client.get("/api/fs/browse", params={"path": ".env"}).status_code == 403
+        assert client.get("/api/fs/browse", params={"path": str(drive_root / ".env")}).status_code == 403
+
+        def _deny_scandir(_p: str) -> Any:
+            raise PermissionError("Permission denied")
+
+        monkeypatch.setattr(fs_browser_mod.os, "scandir", _deny_scandir)
+        assert client.get("/api/fs/browse", params={"path": str(drive_root)}).status_code == 403
+
+
+def test_dry_run_completion_does_not_resurrect_stale_live_status_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify dry-run completion suppresses stale error state, prefers newer log, and skips preview schedule."""
+    from datetime import datetime
+    import time
+    import src.scheduler as sched_mod
+    import upscale as upscale_mod
+    from web.sse_hub import TelemetryHub
+
+    ws = _seed_workspace(tmp_path / "dry_run_ws")
+    ep = ws / "anime_season" / "[SubsPlease] Frieren - 10 (1080p).mkv"
+    logs_dir = ws / "logs"
+    stale_live = logs_dir / "live_status.json"
+    old_log = logs_dir / "old_run.log"
+    web_log = logs_dir / "web_job_dry01.log"
+    old_log.write_text("[00:00:01] old error\n", encoding="utf-8")
+    web_log.write_text("[00:00:02] dry-run decision table\n", encoding="utf-8")
+
+    now_ts = time.time()
+    os.utime(old_log, (now_ts - 40.0, now_ts - 40.0))
+    os.utime(web_log, (now_ts, now_ts))
+
+    stale_live.write_text(
+        json.dumps({
+            "video_name": "OldCrash.mkv",
+            "pid": 999991,
+            "stage": "error",
+            "last_error": "CUDA OOM",
+            "log_file": "old_run.log",
+            "total_chunks": 10,
+            "completed_chunks": 3,
+            "chunks": [{"chunk_idx": 0}],
+        }),
+        encoding="utf-8",
+    )
+    os.utime(stale_live, (now_ts - 30.0, now_ts - 30.0))
+
+    now_iso = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%dT%H:%M:%S")
+    job_state = {
+        "status": "idle",
+        "active_job": None,
+        "history": [
+            {
+                "job_id": "dry01",
+                "job_type": "upscale",
+                "status": "completed",
+                "pid": 81000,
+                "started_at": now_iso,
+                "finished_at": now_iso,
+                "return_code": 0,
+                "log_path": str(web_log),
+                "queue_items": [str(ep)],
+                "options": {"dry_run": True, "model": "animevideov3"},
+            }
+        ],
+    }
+    hub = TelemetryHub(ws, gpu_query_fn=_idle_gpu_metrics, job_state_provider=lambda: job_state)
+    pipe = hub.read_pipeline_state()
+    assert pipe["effective_stage"] == "completed"
+    assert pipe["live"]["stage"] == "completed"
+    assert pipe["live"]["dry_run"] is True
+    assert "last_error" not in pipe["live"]
+    assert pipe["live"]["chunks"] == []
+    assert hub._select_active_log_file().resolve() == web_log.resolve()
+
+    sched_calls: List[str] = []
+    monkeypatch.setattr(
+        sched_mod,
+        "compute_overnight_schedule",
+        lambda **kw: (sched_calls.append("compute") or {"summary": {}, "episodes": [], "decision": "RUN"}),
+    )
+    monkeypatch.setattr(
+        sched_mod,
+        "format_schedule_decision_table",
+        lambda _s: (sched_calls.append("format") or "table"),
+    )
+    monkeypatch.setattr(upscale_mod, "is_graceful_pause_requested", lambda: False)
+    monkeypatch.setattr(upscale_mod, "check_deadline_and_eta", lambda *_a, **_kw: (True, False, None))
+    preview_out_file = ws / "out" / "ep_preview_10s_4K.mkv"
+    preview_out_file.parent.mkdir(parents=True, exist_ok=True)
+    preview_out_file.write_bytes(b"\x00" * 64)
+    monkeypatch.setattr(
+        upscale_mod,
+        "run_upscale_pipeline",
+        lambda **_kw: str(preview_out_file),
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["upscale.py", str(ep), "--preview", "10", "--no-subs", "--no-organize-audit", "-o", str(ws / "out")],
+    )
+    with pytest.raises(SystemExit) as exc1:
+        upscale_mod.main()
+    assert exc1.value.code == 0
+    assert sched_calls == []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upscale.py",
+            str(ep),
+            "--preview",
+            "10",
+            "--deadline",
+            "23:59",
+            "--no-subs",
+            "--no-organize-audit",
+            "-o",
+            str(ws / "out"),
+        ],
+    )
+    with pytest.raises(SystemExit) as exc2:
+        upscale_mod.main()
+    assert exc2.value.code == 0
+    assert "compute" in sched_calls
+
+
+def test_save_shows_yaml_and_dotenv_preserve_lf_newlines(studio_env: Dict[str, Any]):
+    """Verify PUT /api/config/shows and PUT /api/subtrans/api-keys write LF-only bytes without CRLF."""
+    root: Path = studio_env["root"]
+    client: TestClient = studio_env["client"]
+
+    shows_resp = client.put(
+        "/api/config/shows",
+        json={"yaml_content": "shows:\r\n  - pattern: '*TestShow*'\r\n    model: animevideov3\r\n"},
+    )
+    assert shows_resp.status_code == 200
+    raw_shows = (root / "shows.yaml").read_bytes()
+    assert b"\r\n" not in raw_shows and b"\r" not in raw_shows
+    assert raw_shows.endswith(b"\n")
+
+    (root / ".env").write_bytes(b"CUSTOM_FLAG=keep_me\r\nGEMINI_API_KEY_1=AIzaSyOldKey111111111\r\n")
+    env_resp = client.put(
+        "/api/subtrans/api-keys",
+        json={"key_2": "AIzaSyLfCheckKey222222"},
+    )
+    assert env_resp.status_code == 200
+    raw_env = (root / ".env").read_bytes()
+    assert b"\r\n" not in raw_env and b"\r" not in raw_env
+    assert raw_env.endswith(b"\n")
+
+
+def test_compare_frames_uses_preview_start_sec_from_audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify /api/preview/compare-frames resolves preview_start_sec by precedence, clamps, and honors override."""
+    import web.app as web_app_mod
+
+    ws = _seed_workspace(tmp_path / "compare_preview_start_ws")
+    src_vid = ws / "anime_season" / "Ep01.mkv"
+    src_vid.write_bytes(b"\x00" * 128)
+    out_dir = ws / "out"
+    audit_sub = out_dir / "audit"
+    audit_sub.mkdir(parents=True, exist_ok=True)
+    up_1 = out_dir / "Ep01_preview_10s_4K.mkv"
+    up_1.write_bytes(b"\x00" * 128)
+
+    sibling_audit = out_dir / "Ep01_preview_10s_4K.audit.json"
+    sub_audit = audit_sub / "Ep01_preview_10s_4K.audit.json"
+    live_file = ws / "logs" / "live_status.json"
+
+    sibling_audit.write_text(json.dumps({"preview_start_sec": 120.5}), encoding="utf-8")
+    sub_audit.write_text(json.dumps({"preview_start_sec": 90.0}), encoding="utf-8")
+    live_file.write_text(
+        json.dumps({
+            "is_preview": True,
+            "preview_start_sec": 45.0,
+            "output_path": str(up_1),
+            "video_name": "Ep01_preview_10s",
+        }),
+        encoding="utf-8",
+    )
+
+    durations = {"src": 1400.0, "up": 10.0}
+
+    def fake_probe(p: Path) -> Dict[str, Any]:
+        if p.resolve() == src_vid.resolve():
+            return {"duration": durations["src"], "width": 1920, "height": 1080}
+        return {"duration": durations["up"], "width": 3840, "height": 2160}
+
+    monkeypatch.setattr(web_app_mod, "_probe_duration_and_dims", fake_probe)
+
+    def fake_extract(_video_path: Path, _ts: float, out_png: Path) -> None:
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        out_png.write_bytes(PNG_1X1_BYTES)
+
+    app = create_app(workspace_root=ws, gpu_query_fn=_idle_gpu_metrics, frame_extract_fn=fake_extract)
+    payload_base = {
+        "source_path": str(src_vid),
+        "upscaled_path": str(up_1),
+        "timestamp_sec": 2.0,
+    }
+    with TestClient(app) as client:
+        r1 = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r1["source_offset_sec"] == 120.5
+        assert r1["source_timestamp_sec"] == 122.5
+
+        sibling_audit.unlink()
+        r2 = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r2["source_offset_sec"] == 90.0
+        assert r2["source_timestamp_sec"] == 92.0
+
+        sub_audit.unlink()
+        r3 = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r3["source_offset_sec"] == 45.0
+
+        live_file.write_text(
+            json.dumps({"is_preview": False, "preview_start_sec": 45.0, "output_path": str(up_1)}),
+            encoding="utf-8",
+        )
+        r_fallback = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r_fallback["source_offset_sec"] == 420.0
+
+        sibling_audit.write_text(json.dumps({"preview_start_sec": 500.0}), encoding="utf-8")
+        durations["src"] = 100.0
+        r_clamped = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r_clamped["source_offset_sec"] == 90.0
+
+        durations["src"] = 0.0
+        r_zero_dur = client.post("/api/preview/compare-frames", json=payload_base).json()
+        assert r_zero_dur["source_offset_sec"] == 500.0
+
+        durations["src"] = 1400.0
+        r_explicit = client.post(
+            "/api/preview/compare-frames",
+            json={**payload_base, "source_offset_sec": 33.25},
+        ).json()
+        assert r_explicit["source_offset_sec"] == 33.25
+        assert r_explicit["source_timestamp_sec"] == 35.25
+
+
+def test_list_audits_deduplicates_paired_4k_entries(tmp_path: Path):
+    """Verify /api/audits deduplicates paired raw/_4K audits preferring _4K before [:60] slicing."""
+    import time
+
+    ws = _seed_workspace(tmp_path / "dedup_audits_ws")
+    out_dir = ws / "out"
+    base_ts = time.time() - 500.0
+
+    for idx in range(1, 66):
+        stem = f"Ep{idx:03d}"
+        raw_p = out_dir / f"{stem}.audit.json"
+        up_p = out_dir / f"{stem}_4K.audit.json"
+        common = {
+            "status": "PASS",
+            "output_file": f"{stem}_4K.mkv",
+            "completed_at": "2026-11-22T01:00:00",
+        }
+        up_p.write_text(json.dumps(common), encoding="utf-8")
+        raw_p.write_text(json.dumps(common), encoding="utf-8")
+        os.utime(up_p, (base_ts + idx, base_ts + idx))
+        # Give raw_p a newer mtime than up_p to confirm _4K stem still wins.
+        os.utime(raw_p, (base_ts + idx + 1000.0, base_ts + idx + 1000.0))
+
+    corrupt_p = out_dir / "ZCorrupt_4K.audit.json"
+    corrupt_p.write_text("{bad json", encoding="utf-8")
+    os.utime(corrupt_p, (base_ts + 2000.0, base_ts + 2000.0))
+
+    app = create_app(workspace_root=ws, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        resp = client.get("/api/audits")
+        assert resp.status_code == 200
+        items = resp.json()["audits"]
+
+    assert len(items) == 60
+    assert any(it.get("corrupt") for it in items)
+    ep_rows = [it for it in items if not it.get("corrupt")]
+    assert len(ep_rows) == 59
+    for row in ep_rows:
+        assert row["audit_json_path"].endswith("_4K.audit.json")
+    output_files = [row["output_file"] for row in ep_rows]
+    assert len(output_files) == len(set(output_files))
+
+
+def test_night_report_endpoint_and_workspace_isolation(tmp_path: Path):
+    """Verify GET /api/night-report supports workspace-isolated real mode, mock mode, and 422 validation."""
+    ws = _seed_workspace(tmp_path / "night_report_iso_ws")
+    logs_dir = ws / "logs"
+    (logs_dir / "soak_telemetry_night1.csv").write_text(
+        "timestamp,elapsed_s,gpu_util_pct,vram_used_mib,power_w,temp_c,cpu_pct,ram_used_gb,"
+        "ssd_read_mb_s,ssd_write_mb_s,pstate\n"
+        "2026-11-22T01:00:00,0.0,88.0,6144,160.0,65.0,25.0,12.0,10.0,20.0,P0\n"
+        "2026-11-22T01:00:10,10.0,90.0,6244,165.0,66.0,26.0,12.5,12.0,22.0,P0\n",
+        encoding="utf-8",
+    )
+    (logs_dir / "ep_IsolatedShow_01_20261122_010000.log").write_text(
+        "# AI Video Upscaler 4K - Execution Log\n"
+        "# Started: 2026-11-22 01:00:00\n"
+        "# Video: IsolatedShow_01.mkv\n"
+        "[2026-11-22 01:00:01] [CHUNK 1/1] Hoàn tất 24 frames (AI CUDA: 1.0s @ 24.0 fps | "
+        "Encode: 0.2s | Tổng: 1.2s | File: up_0000.mp4 1.0 MB)\n"
+        "[2026-11-22 01:00:10] Mux Audit: PASS\n",
+        encoding="utf-8",
+    )
+    db_path = ws / "subtrans" / ".cache" / "translations.db"
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("CREATE TABLE translations (id INTEGER PRIMARY KEY, model TEXT)")
+        con.execute(
+            "CREATE TABLE api_requests (id INTEGER PRIMARY KEY, created_at TEXT, model TEXT, status TEXT, error_type TEXT)"
+        )
+        con.execute("INSERT INTO translations (model) VALUES ('gemini-3.5-flash-lite')")
+        con.execute(
+            "INSERT INTO api_requests (created_at, model, status, error_type) "
+            "VALUES ('2026-11-21 18:00:05', 'gemini-3.5-flash-lite', 'success', NULL)"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    real_app = create_app(workspace_root=ws, gpu_query_fn=_idle_gpu_metrics, mock_mode=False)
+    with TestClient(real_app) as client:
+        r_ok = client.get("/api/night-report", params={"session_name": "night1"})
+        assert r_ok.status_code == 200
+        body = r_ok.json()
+        assert body["ok"] is True
+        assert body["mock_mode"] is False
+        assert body["session_name"] == "night1"
+        assert "NIGHT1" in body["markdown"]
+        assert "IsolatedShow_01.mkv" in body["markdown"]
+        assert "gemini-3.5-flash-lite" in body["markdown"]
+
+        for bad_name in ("../evil", "bad space", "", "a" * 65, "night;1"):
+            assert client.get("/api/night-report", params={"session_name": bad_name}).status_code == 422
+
+    mock_app = create_app(workspace_root=tmp_path / "mock_nr_ws", mock_mode=True)
+    with TestClient(mock_app) as mock_client:
+        r_mock = mock_client.get("/api/night-report", params={"session_name": "soak_2"})
+        assert r_mock.status_code == 200
+        mbody = r_mock.json()
+        assert mbody["ok"] is True
+        assert mbody["mock_mode"] is True
+        assert mbody["session_name"] == "soak_2"
+        assert "SOAK_2" in mbody["markdown"]
+
+
+def test_conftest_isolates_logs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify conftest _isolate_logs_dir isolates RunLogger into tmp_path even without PYTEST_CURRENT_TEST."""
+    repo_logs = Path(__file__).resolve().parents[1] / "logs"
+    before_logs = {p.name for p in repo_logs.iterdir()} if repo_logs.is_dir() else set()
+
+    env_logs = os.environ.get("UPSCALER_LOGS_DIR", "")
+    assert env_logs
+    assert Path(env_logs).resolve().is_relative_to(tmp_path.resolve())
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    resolved_logs = Path(logger_mod.get_logs_dir()).resolve()
+    resolved_live_dir = Path(logger_mod.get_live_status_path()).resolve().parent
+    assert resolved_logs.is_relative_to(tmp_path.resolve())
+    assert resolved_live_dir.is_relative_to(tmp_path.resolve())
+
+    rl = logger_mod.RunLogger("conftest_isolation_probe")
+    assert Path(rl.log_filepath).resolve().is_relative_to(tmp_path.resolve())
+    assert Path(rl.live_status_path).resolve().is_relative_to(tmp_path.resolve())
+
+    custom_dyn = tmp_path / "dynamic_env_logs"
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", logger_mod._CONFIG_LOGS_DIR)
+    monkeypatch.setenv("UPSCALER_LOGS_DIR", str(custom_dyn))
+    assert Path(logger_mod.get_logs_dir()).resolve() == custom_dyn.resolve()
+
+    after_logs = {p.name for p in repo_logs.iterdir()} if repo_logs.is_dir() else set()
+    assert after_logs == before_logs
+
+
+def test_frontend_ui_upgrade_contracts_issue_02_to_20(studio_env: Dict[str, Any]):
+    """Verify HTML, CSS, and ES module contracts across ISSUE-02 through ISSUE-20 remain intact."""
+    import re
+
+    client: TestClient = studio_env["client"]
+    html = client.get("/").text
+    css = client.get("/static/styles.css").text
+    app_js = client.get("/static/js/app.js").text
+    panels_js = client.get("/static/js/panels.js").text
+    fs_picker_js = client.get("/static/js/fs_picker.js").text
+    compare_js = client.get("/static/js/compare_stage.js").text
+
+    assert 'id="opt-force"' in html
+    assert re.search(r'<input[^>]*id="opt-force"[^>]*\bchecked\b', html) is None
+    assert 'id="opt-subs-after"' in html
+    assert re.search(r'<input[^>]*id="opt-subs-after"[^>]*\bchecked\b', html) is None
+    assert 'aria-describedby="manual-queue-path-error"' in html
+    assert 'id="manual-queue-path-error" class="field-error" role="alert" hidden' in html
+    for token in (
+        'id="night-report-details"',
+        'id="btn-refresh-night-report"',
+        'id="btn-copy-night-report"',
+        'id="night-report-pre"',
+        'id="night-report-code"',
+    ):
+        assert token in html
+    assert "8s" not in html and "8s" not in app_js
+
+    fs_list_blk = re.search(r"\.fs-entries-list\s*\{([^}]*)\}", css)
+    assert fs_list_blk and "align-content: start;" in fs_list_blk.group(1)
+    assert '.fs-entries-list[aria-busy="true"]' in css
+    assert ".fs-error-banner" in css
+
+    m900 = re.search(r"@media\s*\(min-width:\s*900px\)\s*\{([\s\S]*?)\n\}", css)
+    assert m900 and "--fade-size: 0px;" in m900.group(1) and "flex: 1 1 auto;" in m900.group(1)
+    m899 = re.search(r"@media\s*\(max-width:\s*899px\)\s*\{([\s\S]*?)\n\}", css)
+    assert m899 and "--fade-size: 1.25rem;" in m899.group(1) and "scrollbar-width: thin;" in m899.group(1)
+
+    assert '.selected-input-item[data-error="true"]' in css
+    table_blk = re.search(r"\.studio-table th,\s*\.studio-table td\s*\{([^}]*)\}", css)
+    assert table_blk and "padding-block: 0.52rem;" in table_blk.group(1) and "padding-inline: 0.55rem;" in table_blk.group(1)
+    models_th = re.search(r"#models-table tbody th\s*\{([^}]*)\}", css)
+    assert models_th and "word-break: keep-all;" in models_th.group(1)
+    models_code = re.search(r"#models-table tbody th code\s*\{([^}]*)\}", css)
+    assert models_code and "white-space: nowrap;" in models_code.group(1) and "word-break: keep-all;" in models_code.group(1)
+
+    assert "text-overflow: ellipsis;" in css and "white-space: nowrap;" in css
+    assert ".compare-controls-grid" in css
+    assert "grid-template-rows: minmax(2.65rem, auto) auto auto;" in css
+    assert "grid-row: 2;" in css and "grid-row: 3;" in css
+    assert "@media (max-width: 520px)" in css
+
+    stepper_blk = re.search(r"\.pipeline-stepper\s*\{([^}]*)\}", css)
+    assert stepper_blk and "repeat(2, minmax(0, 1fr))" in stepper_blk.group(1)
+    m600 = re.search(r"@media\s*\(min-width:\s*600px\)\s*\{([\s\S]*?)\n\}", css)
+    assert m600 and "repeat(3, minmax(0, 1fr))" in m600.group(1)
+    m1080 = re.search(r"@media\s*\(min-width:\s*1080px\)\s*\{([\s\S]*?)\n\}", css)
+    assert m1080 and "repeat(6, minmax(0, 1fr))" in m1080.group(1)
+
+    m640 = re.search(r"@media\s*\(max-width:\s*640px\)\s*\{([\s\S]*?)\n\}", css)
+    assert m640
+    m640_body = m640.group(1)
+    assert ".studio-subtitle" in m640_body and "display: none;" in m640_body
+    assert ".header-pills" in m640_body and "repeat(2, minmax(0, 1fr))" in m640_body
+    assert ".status-pill > span:not(.pill-icon)" in m640_body and "text-overflow: ellipsis;" in m640_body
+
+    btn_dis = re.search(r"\.btn-primary:disabled\s*\{([^}]*)\}", css)
+    assert btn_dis
+    for prop in (
+        "background-color: var(--bg-elevated);",
+        "border-color: var(--border-subtle);",
+        "color: var(--fg-muted);",
+        "opacity: 0.65;",
+    ):
+        assert prop in btn_dis.group(1)
+
+    assert fs_picker_js.count("ev.stopPropagation()") >= 4
+    assert 'entriesList.setAttribute("aria-busy", "true")' in fs_picker_js
+    assert 'entriesList.removeAttribute("aria-busy")' in fs_picker_js
+    assert '"fs-error-banner"' in fs_picker_js
+    assert 'role: "alert"' in fs_picker_js
+    assert "showToast" not in fs_picker_js
+    browse_pos = fs_picker_js.find("async browse(")
+    fetch_pos = fs_picker_js.find("await apiFetch", browse_pos)
+    clear_pos = fs_picker_js.find("clearChildren(entriesList)", browse_pos)
+    assert 0 <= browse_pos < fetch_pos < clear_pos
+
+    assert "manual-queue-path-error" in panels_js
+    assert "handleManualAdd" in panels_js
+    assert 'val.includes("\\0")' in panels_js
+    manual_pos = panels_js.find("handleManualAdd")
+    preval_pos = panels_js.find('apiFetch("/api/queue/preview-schedule"', manual_pos)
+    add_pos = panels_js.find("addInputs([val])", manual_pos)
+    assert 0 <= manual_pos < preval_pos < add_pos
+    assert "queueErrorPaths" in panels_js
+
+    assert "validateBatchSizeInput" in panels_js
+    assert "Number.isFinite(batchVal)" in panels_js
+    assert "output_dir: optOutDir?.value.trim() || null" in panels_js
+    assert "force: Boolean(optForce?.checked)" in panels_js
+
+    assert "isActiveUpscale" in app_js and "isCpActive" in app_js
+    assert "▶ Đang xử lý…" in app_js
+    assert "isCustomOutputDir" in app_js and "focusWithPath" in panels_js
+    assert "scheduleDirty = true" in panels_js
+
+    assert "syncStartUpscaleLabel" in panels_js
+    assert "Boolean(optSubsAfter?.checked)" in panels_js
+    assert "+ Dịch VI" in panels_js
+
+    assert "queueCtrl?.setSystemBusy?.(isRunning, busyReason)" in app_js
+    assert "subtransCtrl?.setSystemBusy?.(isRunning, busyReason)" in app_js
+    assert "syncQueueLaunchButtons" in panels_js and "syncSubtransLaunchButtons" in panels_js
+    assert "pendingSubsCount === 0" in panels_js
+
+    assert "tiết kiệm" in app_js and "dedup)" in app_js
+    assert "tiết kiệm" in panels_js and "dedup)" in panels_js
+    assert "job.last_job" in app_js and "job.last_finished_job" in app_js
+    assert "lastJobMatchesLive" in app_js
+    assert "parseElapsedSeconds(startedIso, endedIso)" in app_js
+
+    assert "isProgrammaticLogScroll" in app_js
+    assert "distanceFromBottom > 36" in app_js
+    assert "distanceFromBottom <= 12" in app_js
+    assert "logAutoscroll.checked = false" in app_js
+    assert "logAutoscroll.checked = true" in app_js
+
+    assert "extractSeq" in compare_js
+    assert "isCurrentExtract()" in compare_js
+    assert "++extractSeq" in compare_js
+    assert 'btnExtract.setAttribute("aria-busy", "true")' in compare_js
+
+    assert "{ showUserWarning = false } = {}" in panels_js
+    assert "showUserWarning: true" in panels_js
+    assert "if (showUserWarning)" in panels_js
+
+    assert '"aria-disabled": "true"' in panels_js
+    assert '"aria-pressed"' in panels_js
+    assert "if (!docPath)" in panels_js
+    assert "/api/night-report" in panels_js
+    assert "nightReportSeq" in panels_js
+    assert "nightReportCode.textContent" in panels_js

@@ -1412,6 +1412,7 @@ def scan_dedup_plan(
 
     plan_data = {
         "source_file": os.path.basename(input_path),
+        "source_path": os.path.abspath(input_path),
         "ffmpeg_version": ffmpeg_ver,
         "dedup_policy": policy_clean,
         "dedup_params": {
@@ -1998,6 +1999,7 @@ class RollingDedupPlanner:
             )
             plan_data: Dict[str, Any] = {
                 "source_file": os.path.basename(self.input_path),
+                "source_path": os.path.abspath(self.input_path),
                 "ffmpeg_version": "rolling-segment-v2",
                 "dedup_policy": self.policy,
                 "dedup_params": {

@@ -40,12 +40,14 @@ function setSelectValueSafely(selectEl, targetValue, fallbackValue = "") {
 export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const listEl = document.getElementById("queue-inputs-list");
   const manualInput = document.getElementById("manual-queue-path");
+  const manualErrorEl = document.getElementById("manual-queue-path-error");
   const btnAddManual = document.getElementById("btn-add-manual-path");
   const btnOpenFs = document.getElementById("btn-open-fs-queue");
   const btnClear = document.getElementById("btn-clear-queue");
   const form = document.getElementById("upscale-config-form");
   const btnCalc = document.getElementById("btn-calc-schedule");
   const btnPreview10s = document.getElementById("btn-run-preview-10s");
+  const btnStartUpscale = document.getElementById("btn-start-upscale");
   const summaryPill = document.getElementById("schedule-summary-pill");
   const scheduleTable = document.getElementById("schedule-table");
   const panelQueue = document.getElementById("panel-queue");
@@ -70,10 +72,14 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const optDryRun = document.getElementById("opt-dry-run");
 
   let queueInputs = [];
+  let queueErrorPaths = new Set();
   let calcTimer = null;
   let hasComputedInitial = false;
   let scheduleDirty = false;
   let scheduleSeq = 0;
+  let systemBusy = false;
+  let systemBusyReason = "";
+  let localLaunchInFlight = false;
 
   const setFieldError = (inputEl, errorEl, msg) => {
     if (msg) {
@@ -89,6 +95,58 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         errorEl.hidden = true;
       }
     }
+  };
+
+  const syncStartUpscaleLabel = () => {
+    if (!(btnStartUpscale instanceof HTMLButtonElement)) return;
+    const subsOn = Boolean(optSubsAfter?.checked);
+    clearChildren(btnStartUpscale);
+    btnStartUpscale.append(
+      el("span", { "aria-hidden": "true", textContent: "🚀" }),
+      " ",
+      subsOn ? "Bắt đầu Nâng cấp 4K + Dịch VI" : "Bắt đầu Nâng cấp 4K"
+    );
+    if (systemBusy) {
+      btnStartUpscale.title = systemBusyReason || "Hệ thống đang có tiến trình chạy.";
+    } else if (subsOn && new Date().getHours() >= 14) {
+      btnStartUpscale.title =
+        "Cảnh báo: Đang trong khung giờ cao điểm (>= 14:00 VN), dịch Gemini tự động sau khi upscale có thể chậm hoặc chạm hạn mức.";
+    } else {
+      btnStartUpscale.title = "";
+    }
+  };
+
+  const syncQueueLaunchButtons = () => {
+    const busyOrLaunching = systemBusy || localLaunchInFlight;
+    if (btnPreview10s instanceof HTMLButtonElement) {
+      btnPreview10s.disabled = busyOrLaunching;
+      btnPreview10s.title = systemBusy ? systemBusyReason || "Hệ thống đang có tiến trình chạy." : "";
+    }
+    if (btnStartUpscale instanceof HTMLButtonElement) {
+      btnStartUpscale.disabled = busyOrLaunching;
+    }
+    syncStartUpscaleLabel();
+  };
+
+  const validateBatchSizeInput = ({ focusOnError = false, toastOnError = false } = {}) => {
+    const rawBatch = optBatch?.value.trim() ?? "";
+    const isInt = rawBatch === "" || /^[+-]?\d+$/.test(rawBatch);
+    const batchVal = rawBatch === "" ? 8 : isInt ? Number(rawBatch) : Number.NaN;
+    if (!Number.isFinite(batchVal) || !Number.isInteger(batchVal) || batchVal < 1 || batchVal > 32) {
+      const msg = "Batch Size phải là số nguyên từ 1 đến 32.";
+      if (optBatch instanceof HTMLInputElement) {
+        optBatch.setCustomValidity(msg);
+      }
+      setFieldError(optBatch, optBatchError, msg);
+      if (focusOnError) optBatch?.focus();
+      if (toastOnError) showToast(msg, "warn");
+      return null;
+    }
+    if (optBatch instanceof HTMLInputElement) {
+      optBatch.setCustomValidity("");
+    }
+    setFieldError(optBatch, optBatchError, null);
+    return batchVal;
   };
 
   const validateDeadlineInput = () => {
@@ -147,7 +205,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   };
 
   const removeInputAt = (index) => {
-    queueInputs.splice(index, 1);
+    const removed = queueInputs.splice(index, 1);
+    for (const r of removed) {
+      queueErrorPaths.delete(String(r).toLowerCase());
+    }
     persistInputs();
     renderInputsList();
     schedulePreviewDebounced();
@@ -175,10 +236,15 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         textContent: "✕",
         onClick: () => removeInputAt(idx),
       });
-      const li = el("li", { className: "selected-input-item" }, [
-        el("code", { textContent: p }),
-        removeBtn,
-      ]);
+      const isErr = queueErrorPaths.has(String(p).toLowerCase());
+      const li = el(
+        "li",
+        {
+          className: "selected-input-item",
+          ...(isErr ? { dataset: { error: "true" } } : {}),
+        },
+        [el("code", { textContent: p }), removeBtn]
+      );
       listEl.append(li);
     });
   };
@@ -201,15 +267,30 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     hasComputedInitial = true;
     scheduleDirty = false;
     if (queueInputs.length === 0) {
+      if (queueErrorPaths.size > 0) {
+        queueErrorPaths.clear();
+        renderInputsList();
+      }
       if (summaryPill) {
+        summaryPill.classList.remove("text-error");
         summaryPill.textContent = "Chọn tập phim để xem dự báo tự động theo shows.yaml";
       }
       renderEmptySchedule("Chưa có dữ liệu dự báo. Hãy thêm ít nhất 1 file hoặc thư mục ở mục 1.");
       return;
     }
 
+    const batchVal = validateBatchSizeInput();
+    if (batchVal === null) {
+      if (summaryPill) {
+        summaryPill.classList.add("text-error");
+        summaryPill.textContent = "Batch Size không hợp lệ (cần số nguyên từ 1 đến 32).";
+      }
+      return;
+    }
+
     if (!validateDeadlineInput()) {
       if (summaryPill) {
+        summaryPill.classList.add("text-error");
         summaryPill.textContent = "Định dạng hạn chót không hợp lệ (cần HH:MM, ví dụ 07:00).";
       }
       return;
@@ -217,6 +298,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
     const reqId = ++scheduleSeq;
     if (summaryPill) {
+      summaryPill.classList.remove("text-error");
       summaryPill.textContent = "Đang tính toán lịch…";
     }
     scheduleTable?.setAttribute("aria-busy", "true");
@@ -228,9 +310,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         allow_partial: Boolean(optAllowPartial?.checked),
         model: optModel?.value || null,
         dedup_policy: optDedup?.value || null,
+        batch_size: batchVal,
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
-        subs_after_upscale: Boolean(optSubsAfter?.checked ?? true),
+        subs_after_upscale: Boolean(optSubsAfter?.checked),
         output_dir: optOutDir?.value.trim() || null,
         force: Boolean(optForce?.checked),
       };
@@ -241,7 +324,13 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       });
       if (reqId !== scheduleSeq) return;
 
+      if (queueErrorPaths.size > 0) {
+        queueErrorPaths.clear();
+        renderInputsList();
+      }
+
       if (summaryPill) {
+        summaryPill.classList.remove("text-error");
         const dlText = data.deadline_str ? ` • Deadline ${data.deadline_str}` : "";
         summaryPill.textContent =
           `Tổng ${data.total_episodes} tập: Sẽ chạy ${data.accepted_count} | ` +
@@ -270,7 +359,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           ]),
           el("td", { textContent: ep.dedup_policy }),
           el("td", {
-            textContent: `${ep.n_unique.toLocaleString("vi-VN")} / ${ep.total_frames.toLocaleString("vi-VN")} (-${ep.dedup_ratio_percent}%)`,
+            textContent: `${ep.n_unique.toLocaleString("vi-VN")} / ${ep.total_frames.toLocaleString("vi-VN")} (tiết kiệm ${ep.dedup_ratio_percent}% dedup)`,
           }),
           el("td", { textContent: `${ep.ref_fps} fps` }),
           el("td", { textContent: ep.already_done ? "0 phút" : `${ep.eta_minutes} phút` }),
@@ -282,9 +371,22 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     } catch (err) {
       if (reqId !== scheduleSeq) return;
       if (summaryPill) {
+        summaryPill.classList.add("text-error");
         summaryPill.textContent = `Lỗi dự báo lịch trình: ${err.message}`;
       }
+      const errLow = String(err.message || "").toLowerCase();
+      queueErrorPaths.clear();
+      for (const p of queueInputs) {
+        if (errLow.includes(String(p).toLowerCase())) {
+          queueErrorPaths.add(String(p).toLowerCase());
+        }
+      }
+      if (queueErrorPaths.size === 0 && queueInputs.length === 1) {
+        queueErrorPaths.add(String(queueInputs[0]).toLowerCase());
+      }
+      renderInputsList();
       renderEmptySchedule(`Không thể tính dự báo: ${err.message}`);
+      showToast(err.message, "error");
     } finally {
       if (reqId === scheduleSeq) {
         scheduleTable?.removeAttribute("aria-busy");
@@ -309,15 +411,51 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     }
   });
 
-  const handleManualAdd = () => {
+  const handleManualAdd = async () => {
     if (!manualInput) return;
     const val = manualInput.value.trim();
     if (!val) return;
-    addInputs([val]);
-    manualInput.value = "";
+    if (/^(\\\\|\/\/)/.test(val) || val.includes("\0")) {
+      const msg = "Không hỗ trợ đường dẫn mạng UNC (\\\\server\\share) hoặc ký tự không hợp lệ.";
+      setFieldError(manualInput, manualErrorEl, msg);
+      manualInput.focus();
+      showToast(msg, "error");
+      return;
+    }
+    const norm = val.toLowerCase();
+    if (queueInputs.some((existing) => existing.toLowerCase() === norm)) {
+      setFieldError(manualInput, manualErrorEl, null);
+      showToast("Đường dẫn này đã có trong hàng đợi.", "info", 2400);
+      manualInput.value = "";
+      return;
+    }
+
+    if (btnAddManual instanceof HTMLButtonElement) btnAddManual.disabled = true;
+    manualInput.setAttribute("aria-busy", "true");
+    try {
+      await apiFetch("/api/queue/preview-schedule", {
+        method: "POST",
+        body: {
+          inputs: [val],
+          deadline: null,
+          batch_size: 8,
+        },
+      });
+      setFieldError(manualInput, manualErrorEl, null);
+      addInputs([val]);
+      manualInput.value = "";
+    } catch (err) {
+      setFieldError(manualInput, manualErrorEl, err.message);
+      manualInput.focus();
+      showToast(err.message, "error");
+    } finally {
+      manualInput.removeAttribute("aria-busy");
+      if (btnAddManual instanceof HTMLButtonElement) btnAddManual.disabled = false;
+    }
   };
 
   btnAddManual?.addEventListener("click", handleManualAdd);
+  manualInput?.addEventListener("input", () => setFieldError(manualInput, manualErrorEl, null));
   manualInput?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       if (ev.isComposing || ev.keyCode === 229) return;
@@ -328,6 +466,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   btnClear?.addEventListener("click", () => {
     queueInputs = [];
+    queueErrorPaths.clear();
+    setFieldError(manualInput, manualErrorEl, null);
     persistInputs();
     renderInputsList();
     computeScheduleNow();
@@ -344,11 +484,21 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   optDeadline?.addEventListener("blur", () => {
     validateDeadlineInput();
   });
-  optBatch?.addEventListener("input", () => setFieldError(optBatch, optBatchError, null));
+  optBatch?.addEventListener("input", () => {
+    if (optBatch instanceof HTMLInputElement) optBatch.setCustomValidity("");
+    setFieldError(optBatch, optBatchError, null);
+  });
+  optBatch?.addEventListener("blur", () => {
+    validateBatchSizeInput();
+  });
+  optSubsAfter?.addEventListener("change", () => {
+    syncStartUpscaleLabel();
+  });
 
   for (const ctrl of [
     optModel,
     optDedup,
+    optBatch,
     optDeadline,
     optOutDir,
     optZeroDisk,
@@ -361,23 +511,33 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   }
 
   btnPreview10s?.addEventListener("click", async () => {
+    if (systemBusy) {
+      showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+      return;
+    }
     if (queueInputs.length === 0) {
       showToast("Hãy chọn ít nhất 1 file video hoặc thư mục để chạy Xem trước 10s.", "warn");
       return;
     }
-    if (btnPreview10s instanceof HTMLButtonElement) btnPreview10s.disabled = true;
+    const batchVal = validateBatchSizeInput({ focusOnError: true, toastOnError: true });
+    if (batchVal === null) return;
+
+    localLaunchInFlight = true;
+    syncQueueLaunchButtons();
     try {
       const res = await apiFetch("/api/jobs/preview", {
         method: "POST",
         body: {
           video_path: queueInputs[0],
           seconds: 10,
+          output_dir: optOutDir?.value.trim() || null,
           model: optModel?.value || null,
           dedup_policy: optDedup?.value || null,
           nvenc_multipass: optNvencMultipass?.value || "auto",
+          batch_size: batchVal,
           zero_disk: Boolean(optZeroDisk?.checked ?? true),
           use_tensorrt: Boolean(optTensorrt?.checked ?? true),
-          force: true,
+          force: Boolean(optForce?.checked),
           auto_open_player: false,
         },
       });
@@ -387,32 +547,31 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     } catch (err) {
       showToast(err.message, "error");
     } finally {
-      if (btnPreview10s instanceof HTMLButtonElement) btnPreview10s.disabled = false;
+      localLaunchInFlight = false;
+      syncQueueLaunchButtons();
     }
   });
 
   form?.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    if (systemBusy) {
+      showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+      return;
+    }
     if (queueInputs.length === 0) {
       showToast("Vui lòng chọn ít nhất 1 video hoặc thư mục nguồn trước khi bắt đầu.", "warn");
       return;
     }
-    const rawBatch = optBatch?.value.trim() ?? "";
-    const batchVal = rawBatch === "" ? 8 : Number(rawBatch);
-    if (!Number.isFinite(batchVal) || !Number.isInteger(batchVal) || batchVal < 1 || batchVal > 32) {
-      setFieldError(optBatch, optBatchError, "Batch Size phải là số nguyên từ 1 đến 32.");
-      optBatch?.focus();
-      showToast("Batch Size phải là số nguyên từ 1 đến 32.", "warn");
-      return;
-    }
-    setFieldError(optBatch, optBatchError, null);
+    const batchVal = validateBatchSizeInput({ focusOnError: true, toastOnError: true });
+    if (batchVal === null) return;
     if (!validateDeadlineInput()) {
       optDeadline?.focus();
       showToast("Định dạng giờ hạn chót phải là HH:MM (ví dụ 07:00).", "warn");
       return;
     }
-    const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
-    if (submitBtn) submitBtn.disabled = true;
+
+    localLaunchInFlight = true;
+    syncQueueLaunchButtons();
     try {
       const payload = {
         inputs: queueInputs,
@@ -425,7 +584,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         allow_partial: Boolean(optAllowPartial?.checked),
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
-        subs_after_upscale: Boolean(optSubsAfter?.checked ?? true),
+        subs_after_upscale: Boolean(optSubsAfter?.checked),
         subs_quality: optSubsQuality?.value || "normal",
         async_subs: Boolean(optAsyncSubs?.checked),
         prefer_whisper: Boolean(optPreferWhisper?.checked),
@@ -446,11 +605,13 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     } catch (err) {
       showToast(err.message, "error");
     } finally {
-      if (submitBtn) submitBtn.disabled = false;
+      localLaunchInFlight = false;
+      syncQueueLaunchButtons();
     }
   });
 
   renderInputsList();
+  syncQueueLaunchButtons();
   if (queueInputs.length > 0 && summaryPill) {
     summaryPill.textContent = `Đã khôi phục ${queueInputs.length} mục đã chọn — mở tab Hàng đợi để tính lịch trình.`;
   }
@@ -468,9 +629,43 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       }
       computeScheduleNow();
     },
-    focusWithPath(pathStr) {
-      if (pathStr) {
-        addInputs([pathStr]);
+    setSystemBusy(isBusy, reason = "") {
+      const nextBusy = Boolean(isBusy);
+      const nextReason = String(reason || "");
+      if (systemBusy === nextBusy && systemBusyReason === nextReason) return;
+      systemBusy = nextBusy;
+      systemBusyReason = nextReason;
+      syncQueueLaunchButtons();
+    },
+    focusWithPath(opts) {
+      const isObj = typeof opts === "object" && opts !== null;
+      const sourceFile = isObj ? String(opts.sourceFile || "").trim() : String(opts || "").trim();
+      const outputDir = isObj ? String(opts.outputDir || "").trim() : "";
+      const isCustomOut = isObj
+        ? typeof opts.isCustomOutputDir === "boolean"
+          ? opts.isCustomOutputDir
+          : Boolean(outputDir && !/[\\/]out$/i.test(outputDir))
+        : false;
+
+      let outDirChanged = false;
+      if (isObj && optOutDir instanceof HTMLInputElement) {
+        const nextOutDir = isCustomOut ? outputDir : "";
+        if (optOutDir.value.trim() !== nextOutDir) {
+          optOutDir.value = nextOutDir;
+          outDirChanged = true;
+        }
+      }
+
+      if (sourceFile) {
+        const added = addInputs([sourceFile]);
+        if (added === 0 && outDirChanged) {
+          scheduleDirty = true;
+        }
+      } else if (isObj) {
+        showToast(
+          "Checkpoint cũ thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại file nguồn.",
+          "warn"
+        );
       }
       selectTabById?.("tab-queue");
     },
@@ -529,9 +724,15 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
     setShowsYamlError(null);
   });
 
-  const runTestMatch = async () => {
+  const runTestMatch = async ({ showUserWarning = false } = {}) => {
     const sample = testInput?.value.trim() || "";
-    if (!sample) return;
+    if (!sample) {
+      if (showUserWarning) {
+        testInput?.focus();
+        showToast("Vui lòng nhập tên file hoặc đường dẫn mẫu để kiểm tra quy tắc shows.yaml.", "warn");
+      }
+      return;
+    }
     try {
       const res = await apiFetch("/api/config/test-match", {
         method: "POST",
@@ -709,12 +910,12 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
     );
   });
 
-  btnTestMatch?.addEventListener("click", runTestMatch);
+  btnTestMatch?.addEventListener("click", () => runTestMatch({ showUserWarning: true }));
   testInput?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       if (ev.isComposing || ev.keyCode === 229) return;
       ev.preventDefault();
-      runTestMatch();
+      runTestMatch({ showUserWarning: true });
     }
   });
 
@@ -766,6 +967,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const subUpgrade = document.getElementById("sub-upgrade");
   const subNoEmbed = document.getElementById("sub-no-embed");
   const subDryRun = document.getElementById("sub-dry-run");
+  const btnStartSubtrans = document.getElementById("btn-start-subtrans");
   const btnRunPending = document.getElementById("btn-run-subs-pending");
   const pendingCountSpan = document.getElementById("pending-subs-count");
 
@@ -790,7 +992,34 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const auditSwitcher = document.getElementById("audit-doc-switcher");
   const auditCode = document.getElementById("audit-detail-code");
 
+  const nightReportDetails = document.getElementById("night-report-details");
+  const btnRefreshNightReport = document.getElementById("btn-refresh-night-report");
+  const btnCopyNightReport = document.getElementById("btn-copy-night-report");
+  const nightReportCode = document.getElementById("night-report-code");
+
   let auditLoadSeq = 0;
+  let pendingSubsCount = 0;
+  let systemBusy = false;
+  let systemBusyReason = "";
+  let localSubLaunchInFlight = false;
+  let nightReportLoaded = false;
+  let nightReportSeq = 0;
+
+  const syncSubtransLaunchButtons = () => {
+    const busyOrLaunching = systemBusy || localSubLaunchInFlight;
+    if (btnStartSubtrans instanceof HTMLButtonElement) {
+      btnStartSubtrans.disabled = busyOrLaunching;
+      btnStartSubtrans.title = systemBusy ? systemBusyReason || "Hệ thống đang có tiến trình chạy." : "";
+    }
+    if (btnRunPending instanceof HTMLButtonElement) {
+      btnRunPending.disabled = busyOrLaunching || pendingSubsCount === 0;
+      btnRunPending.title = systemBusy
+        ? systemBusyReason || "Hệ thống đang có tiến trình chạy."
+        : pendingSubsCount === 0
+          ? "Không có tập nào trong hàng đợi tồn đọng."
+          : "";
+    }
+  };
 
   if (auditDialog instanceof HTMLDialogElement) {
     initDialogLightDismiss(auditDialog);
@@ -876,9 +1105,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       if (pendingCountSpan) {
         const count = Array.isArray(data.pending_subs) ? data.pending_subs.length : 0;
         pendingCountSpan.textContent = String(count);
-        if (btnRunPending instanceof HTMLButtonElement) {
-          btnRunPending.disabled = count === 0;
-        }
+        pendingSubsCount = count;
+        syncSubtransLaunchButtons();
       }
 
       if (subGlossary instanceof HTMLSelectElement) {
@@ -948,6 +1176,10 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     };
 
     const loadDoc = async (docPath) => {
+      if (!docPath) {
+        auditCode.textContent = "Không có tệp biên bản hợp lệ để hiển thị.";
+        return;
+      }
       const reqId = ++auditLoadSeq;
       setActiveSwitcher(docPath);
       auditCode.textContent = "Đang đọc biên bản…";
@@ -969,7 +1201,19 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     if (auditSwitcher) {
       clearChildren(auditSwitcher);
       for (const d of docsList) {
-        if (!d.path) continue;
+        if (!d.path) {
+          auditSwitcher.append(
+            el("button", {
+              type: "button",
+              className: "btn btn-ghost",
+              disabled: true,
+              "aria-disabled": "true",
+              title: "Chưa có tệp kiểm định cho mục này (chưa dịch phụ đề hoặc chưa xuất cast).",
+              textContent: d.label,
+            })
+          );
+          continue;
+        }
         const isInitial = d.path === initialPath;
         const btn = el("button", {
           type: "button",
@@ -1029,7 +1273,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           { label: "📄 Mux Audit (.json)", path: a.audit_json_path },
           { label: "📝 Subtrans Audit (.md)", path: a.sub_audit_md_path },
           { label: "🎭 Hồ sơ Cast (.yaml)", path: a.cast_yaml_path },
-        ].filter((d) => Boolean(d.path));
+        ];
 
         const actionBtns = el("div", { className: "button-cluster" }, [
           el(
@@ -1161,6 +1405,10 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
 
   subForm?.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    if (systemBusy) {
+      showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+      return;
+    }
     const target = subInputPath?.value.trim() || "";
     if (!target) {
       setSubFieldError(subInputPath, subInputError, "Vui lòng chọn tệp video hoặc phụ đề cần dịch.");
@@ -1178,8 +1426,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       return;
     }
     setSubFieldError(subOffset, subOffsetError, null);
-    const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
-    if (submitBtn) submitBtn.disabled = true;
+    localSubLaunchInFlight = true;
+    syncSubtransLaunchButtons();
     try {
       const res = await apiFetch("/api/jobs/subtrans", {
         method: "POST",
@@ -1202,12 +1450,18 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     } catch (err) {
       showToast(err.message, "error");
     } finally {
-      if (submitBtn) submitBtn.disabled = false;
+      localSubLaunchInFlight = false;
+      syncSubtransLaunchButtons();
     }
   });
 
   btnRunPending?.addEventListener("click", async () => {
-    if (btnRunPending instanceof HTMLButtonElement) btnRunPending.disabled = true;
+    if (systemBusy) {
+      showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+      return;
+    }
+    localSubLaunchInFlight = true;
+    syncSubtransLaunchButtons();
     try {
       const res = await apiFetch("/api/jobs/subs-pending", {
         method: "POST",
@@ -1222,7 +1476,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     } catch (err) {
       showToast(err.message, "error");
     } finally {
-      if (btnRunPending instanceof HTMLButtonElement) btnRunPending.disabled = false;
+      localSubLaunchInFlight = false;
+      syncSubtransLaunchButtons();
     }
   });
 
@@ -1290,7 +1545,63 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     loadAudits().then(() => showToast("Đã làm mới Kho Kiểm định.", "info", 2600));
   });
 
+  const loadNightReport = async ({ showToastOnDone = false } = {}) => {
+    if (!nightReportCode) return;
+    const reqId = ++nightReportSeq;
+    if (btnRefreshNightReport instanceof HTMLButtonElement) {
+      btnRefreshNightReport.disabled = true;
+      btnRefreshNightReport.setAttribute("aria-busy", "true");
+    }
+    nightReportCode.textContent = "Đang tổng hợp báo cáo ca đêm từ logs/ & out/…";
+    try {
+      const res = await apiFetch("/api/night-report");
+      if (reqId !== nightReportSeq) return;
+      nightReportCode.textContent = String(res.markdown || "Chưa có dữ liệu báo cáo ca đêm.");
+      nightReportLoaded = true;
+      if (showToastOnDone) {
+        showToast("Đã làm mới Báo cáo Ca đêm.", "info", 2400);
+      }
+    } catch (err) {
+      if (reqId !== nightReportSeq) return;
+      nightReportCode.textContent = `Không thể tạo báo cáo ca đêm: ${err.message}`;
+      showToast(err.message, "error");
+    } finally {
+      if (reqId === nightReportSeq && btnRefreshNightReport instanceof HTMLButtonElement) {
+        btnRefreshNightReport.disabled = false;
+        btnRefreshNightReport.removeAttribute("aria-busy");
+      }
+    }
+  };
+
+  nightReportDetails?.addEventListener("toggle", () => {
+    if (nightReportDetails instanceof HTMLDetailsElement && nightReportDetails.open && !nightReportLoaded) {
+      loadNightReport();
+    }
+  });
+
+  btnRefreshNightReport?.addEventListener("click", () => {
+    if (nightReportDetails instanceof HTMLDetailsElement && !nightReportDetails.open) {
+      nightReportDetails.open = true;
+    }
+    loadNightReport({ showToastOnDone: true });
+  });
+
+  btnCopyNightReport?.addEventListener("click", async () => {
+    const text = nightReportCode?.textContent || "";
+    if (!text.trim()) {
+      showToast("Chưa có nội dung báo cáo để sao chép.", "warn");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Đã sao chép Báo cáo Ca đêm vào bộ nhớ tạm.", "success", 2500);
+    } catch {
+      showToast("Trình duyệt không cho phép sao chép tự động.", "warn");
+    }
+  });
+
   lastRefreshMs = Date.now();
+  syncSubtransLaunchButtons();
   loadSubtransOverview();
   loadAudits();
 
@@ -1305,5 +1616,13 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       loadAudits();
     },
     refreshAudits: loadAudits,
+    setSystemBusy(isBusy, reason = "") {
+      const nextBusy = Boolean(isBusy);
+      const nextReason = String(reason || "");
+      if (systemBusy === nextBusy && systemBusyReason === nextReason) return;
+      systemBusy = nextBusy;
+      systemBusyReason = nextReason;
+      syncSubtransLaunchButtons();
+    },
   };
 }

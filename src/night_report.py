@@ -550,19 +550,35 @@ def _discover_session_logs(
     return sorted(selected, key=lambda ep: ep["started_dt"])
 
 
-def generate_night_report_text(session_name: str = "night1") -> str:
-    """Sinh toàn bộ nội dung báo cáo đêm dưới dạng Markdown văn bản theo dữ liệu log/CSV thực tế."""
+def generate_night_report_text(
+    session_name: str = "night1",
+    workspace_root: Optional[Path | str] = None,
+) -> str:
+    """Generate Markdown overnight run summary from session logs, telemetry CSV, and SQLite stats."""
+    base_root = Path(workspace_root).resolve() if workspace_root is not None else None
     lines = []
     lines.append(f"# BÁO CÁO TỔNG KẾT CA CHẠY QUA ĐÊM ({session_name.upper()})")
     lines.append("")
 
     # 1. Cửa sổ phiên chạy (ưu tiên đọc từ CSV telemetry của session; fallback từ log mới nhất)
-    candidate_csvs = [
-        f"logs/soak_telemetry_{session_name}.csv",
-        f"logs/{session_name}_telemetry.csv",
-        f"logs/telemetry_{session_name}.csv",
-        f"out/benchmarks/{session_name}_telemetry.csv",
-    ]
+    if base_root is not None:
+        logs_dir_path = base_root / "logs"
+        bench_dir_path = base_root / "out" / "benchmarks"
+        candidate_csvs = [
+            str(logs_dir_path / f"soak_telemetry_{session_name}.csv"),
+            str(logs_dir_path / f"{session_name}_telemetry.csv"),
+            str(logs_dir_path / f"telemetry_{session_name}.csv"),
+            str(bench_dir_path / f"{session_name}_telemetry.csv"),
+        ]
+        logs_dir_arg = str(logs_dir_path)
+    else:
+        candidate_csvs = [
+            f"logs/soak_telemetry_{session_name}.csv",
+            f"logs/{session_name}_telemetry.csv",
+            f"logs/telemetry_{session_name}.csv",
+            f"out/benchmarks/{session_name}_telemetry.csv",
+        ]
+        logs_dir_arg = "logs"
     csv_file = next((p for p in candidate_csvs if os.path.exists(p)), candidate_csvs[0])
     start_epoch: Optional[int] = None
     end_epoch: Optional[int] = None
@@ -579,7 +595,7 @@ def generate_night_report_text(session_name: str = "night1") -> str:
 
     csv_start_dt = datetime.fromtimestamp(start_epoch) if start_epoch is not None else None
     csv_end_dt = datetime.fromtimestamp(end_epoch) if end_epoch is not None else None
-    episodes_info = _discover_session_logs("logs", start_dt=csv_start_dt, end_dt=csv_end_dt)
+    episodes_info = _discover_session_logs(logs_dir_arg, start_dt=csv_start_dt, end_dt=csv_end_dt)
 
     if csv_start_dt is not None and csv_end_dt is not None:
         start_dt = csv_start_dt
@@ -682,10 +698,15 @@ def generate_night_report_text(session_name: str = "night1") -> str:
 
     start_utc_str = _utc_sql_bound(start_dt, start_epoch)
     end_utc_str = _utc_sql_bound(end_dt, end_epoch)
+    db_kwargs = (
+        {"db_path": str(base_root / "subtrans" / ".cache" / "translations.db")}
+        if base_root is not None
+        else {}
+    )
     api_stats = (
-        query_subtrans_api_stats(start_utc=start_utc_str, end_utc=end_utc_str)
+        query_subtrans_api_stats(start_utc=start_utc_str, end_utc=end_utc_str, **db_kwargs)
         if ((start_epoch is not None or episodes_info) and start_utc_str and end_utc_str)
-        else query_subtrans_api_stats()
+        else query_subtrans_api_stats(**db_kwargs)
     )
     if api_stats:
         lines.append("### (a) Phân bổ câu thoại đã dịch theo Model:")

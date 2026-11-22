@@ -8,24 +8,36 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, Any, Iterator, Optional
 
-from src.config import LOGS_DIR, HEVC_ENCODER, DEVICE_NAME
+from src.config import LOGS_DIR as _CONFIG_LOGS_DIR, HEVC_ENCODER, DEVICE_NAME
 
+LOGS_DIR = _CONFIG_LOGS_DIR
 _LAST_GRACEFUL_PAUSE_TRIGGERED: bool = False
+
+
+def get_logs_dir() -> str:
+    """Resolve active logs directory, honoring LOGS_DIR monkeypatches and UPSCALER_LOGS_DIR."""
+    if LOGS_DIR != _CONFIG_LOGS_DIR:
+        return LOGS_DIR
+    env_dir = os.environ.get("UPSCALER_LOGS_DIR", "").strip()
+    if env_dir:
+        return os.path.abspath(os.path.expanduser(env_dir))
+    return LOGS_DIR
 
 
 def get_live_status_path() -> str:
     """Path to logs/live_status.json realtime status file for Web GUI and CLI."""
-    return os.path.join(LOGS_DIR, "live_status.json")
+    return os.path.join(get_logs_dir(), "live_status.json")
 
 
 def get_graceful_pause_flag_path() -> str:
     """Path to the flag file requesting graceful pause after completing current chunk."""
-    return os.path.join(LOGS_DIR, ".graceful_pause.flag")
+    return os.path.join(get_logs_dir(), ".graceful_pause.flag")
 
 
 def request_graceful_pause(reason: str = "user_request") -> str:
     """Create a flag file requesting graceful pause at the next 8s chunk boundary (checkpoint safe)."""
-    os.makedirs(LOGS_DIR, exist_ok=True)
+    logs_dir = get_logs_dir()
+    os.makedirs(logs_dir, exist_ok=True)
     flag_path = get_graceful_pause_flag_path()
     tmp_path = f"{flag_path}.{os.getpid()}.tmp"
     payload = {
@@ -153,19 +165,22 @@ class RunLogger:
     """Manage structured console/log-file output and atomic Web Studio telemetry JSON."""
 
     def __init__(self, video_name: str):
-        os.makedirs(LOGS_DIR, exist_ok=True)
+        logs_dir = get_logs_dir()
+        os.makedirs(logs_dir, exist_ok=True)
         now_dt = datetime.now()
         timestamp = now_dt.strftime("%Y%m%d_%H%M%S")
         now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%S")
         safe_name = os.path.splitext(os.path.basename(video_name))[0]
         self.log_filename = f"{safe_name}_{timestamp}.log"
-        self.log_filepath = os.path.join(LOGS_DIR, self.log_filename)
-        self.latest_symlink = os.path.join(LOGS_DIR, "latest.log")
+        self.log_filepath = os.path.join(logs_dir, self.log_filename)
+        self.latest_symlink = os.path.join(logs_dir, "latest.log")
         self.live_status_path = get_live_status_path()
         self._chunk_map: Dict[int, Dict[str, Any]] = {}
         self._live_state: Dict[str, Any] = {
             "video_name": video_name,
             "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "job_id": os.environ.get("UPSCALER_WEB_JOB_ID", "").strip() or None,
             "started_at": now_iso,
             "updated_at": now_iso,
             "stage": "initializing",

@@ -271,9 +271,10 @@
 
                 <div class="manual-path-row">
                   <label for="manual-queue-path" class="visually-hidden">Nhập đường dẫn file hoặc thư mục</label>
-                  <input type="text" id="manual-queue-path" placeholder="Dán đường dẫn file .mkv/.mp4 hoặc cả thư mục anime…">
+                  <input type="text" id="manual-queue-path" aria-describedby="manual-queue-path-error" placeholder="Dán đường dẫn file .mkv/.mp4 hoặc cả thư mục anime…">
                   <button type="button" id="btn-add-manual-path" class="btn btn-secondary">Thêm</button>
                 </div>
+                <p id="manual-queue-path-error" class="field-error" role="alert" hidden></p>
 
                 <ul id="queue-inputs-list" class="selected-inputs-list" aria-label="Danh sách nguồn đã chọn">
                   <li class="empty-hint">Chưa có file hay thư mục nào. Nhấn “Duyệt Ổ đĩa &amp; Thư mục” để chọn nhanh các tập anime.</li>
@@ -336,7 +337,7 @@
                     <label class="inline-check"><input type="checkbox" id="opt-zero-disk" checked> <span>Turbo Zero-Disk Pipe (0 PNG đĩa)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-tensorrt" checked> <span>Biên dịch / Chạy TensorRT 10 FP16</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-allow-partial"> <span>Cho phép chạy 1 phần khi chạm deadline (--allow-partial)</span></label>
-                    <label class="inline-check"><input type="checkbox" id="opt-subs-after" checked> <span>Tự dịch &amp; nhúng phụ đề VI sau khi Upscale</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-subs-after"> <span>Tự dịch &amp; nhúng phụ đề VI sau khi Upscale</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-async-subs"> <span>Dịch gối đầu song song tập kế (--async-subs)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-prefer-whisper"> <span>Ưu tiên Whisper 5.1 FC STT (--prefer-whisper)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-force"> <span>Ghi đè nếu đã có bản _4K (--force)</span></label>
@@ -718,6 +719,22 @@
                   </tbody>
                 </table>
               </div>
+            </section>
+
+            <section class="card-panel" aria-labelledby="night-report-heading">
+              <details id="night-report-details" class="api-keys-disclosure">
+                <summary id="night-report-heading"><span aria-hidden="true">📊</span> Báo cáo Tổng hợp Ca đêm (Night Report)</summary>
+                <div class="disclosure-body">
+                  <div class="section-header-inline night-report-toolbar">
+                    <p class="muted-meta">Tổng hợp chỉ đọc từ <code>logs/</code> &amp; <code>out/</code> (không gọi API Gemini, không tải mô hình GPU).</p>
+                    <div class="button-cluster">
+                      <button type="button" id="btn-refresh-night-report" class="btn btn-secondary">↻ Làm mới</button>
+                      <button type="button" id="btn-copy-night-report" class="btn btn-ghost">📋 Sao chép</button>
+                    </div>
+                  </div>
+                  <pre id="night-report-pre" class="log-console" role="region" aria-labelledby="night-report-heading" tabindex="0"><code id="night-report-code">Mở mục này hoặc nhấn Làm mới để tạo báo cáo tổng hợp ca đêm.</code></pre>
+                </div>
+              </details>
             </section>
           </div>
         </div>

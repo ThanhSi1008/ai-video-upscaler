@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import json
+import math
 import shutil
 import subprocess
 from datetime import datetime
@@ -148,6 +149,7 @@ def run_upscale_pipeline(
     # Xử lý chế độ Preview nhanh nếu người dùng yêu cầu
     is_preview = bool(preview_seconds and preview_seconds > 0)
     preview_temp_input = None
+    preview_start_sec: Optional[float] = None
 
     try:
         if is_preview:
@@ -157,8 +159,20 @@ def run_upscale_pipeline(
                 start_pt = 0
             else:
                 start_pt = max(0, min(int(meta["duration"] * 0.3), max_dur - preview_dur))
-            preview_temp_input = os.path.join(DEFAULT_OUTPUT_DIR, f".preview_clip_{base_name}.mkv")
-            os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
+            preview_start_sec = float(start_pt)
+
+            preview_base_name = f"{base_name}_preview_{preview_dur}s"
+            preview_ref_path = os.path.join(
+                os.path.dirname(original_input_path), f"{preview_base_name}.mkv"
+            )
+            resolved_preview_out = resolve_expected_4k_output_path(
+                preview_ref_path,
+                output_arg=output_path,
+                model_id=model_info.get("id"),
+            )
+            preview_target_dir = os.path.dirname(os.path.abspath(resolved_preview_out)) or DEFAULT_OUTPUT_DIR
+            os.makedirs(preview_target_dir, exist_ok=True)
+            preview_temp_input = os.path.join(preview_target_dir, f".preview_clip_{base_name}.mkv")
             print(f"\n🔍 [PREVIEW] Đang trích xuất đoạn xem trước {preview_dur}s (từ {format_time(start_pt)})...")
             cut_cmd = [
                 "ffmpeg", "-y", "-ss", str(start_pt), "-i", input_path,
@@ -166,9 +180,105 @@ def run_upscale_pipeline(
                 preview_temp_input
             ]
             subprocess.run(cut_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Resolve actual preview start PTS post-cut via frame-0 matching so B-frame / container offset quirks never desync.
+            if not hasattr(subprocess.run, "_mock_name") and os.path.exists(preview_temp_input):
+                try:
+                    import av
+
+                    _clip_fr0_gray = None
+                    with av.open(preview_temp_input) as _c_clip:
+                        if _c_clip.streams.video:
+                            for _fr in _c_clip.decode(_c_clip.streams.video[0]):
+                                _clip_fr0_gray = (
+                                    _fr.reformat(width=160, height=90, format="gray")
+                                    .to_ndarray()
+                                    .astype(np.float32)
+                                )
+                                break
+
+                    if _clip_fr0_gray is not None:
+                        _matched_rel_s: Optional[float] = None
+                        for _skip_mode in ("NONKEY", "DEFAULT"):
+                            _best_mae = float("inf")
+                            _best_rel_s: Optional[float] = None
+                            with av.open(original_input_path) as _c_orig:
+                                if not _c_orig.streams.video:
+                                    break
+                                _vs_orig = _c_orig.streams.video[0]
+                                _c_start_s = (
+                                    float(_c_orig.start_time / av.time_base)
+                                    if _c_orig.start_time is not None
+                                    else 0.0
+                                )
+                                _win_lo = max(0.0, float(start_pt) - 15.0) + _c_start_s
+                                _win_hi = float(start_pt) + 2.0 + _c_start_s
+                                try:
+                                    _vs_orig.codec_context.skip_frame = _skip_mode
+                                except Exception:
+                                    pass
+                                _c_orig.seek(
+                                    int(_win_lo * av.time_base),
+                                    backward=True,
+                                    any_frame=False,
+                                )
+                                for _cand_fr in _c_orig.decode(_vs_orig):
+                                    if _cand_fr.pts is None or _cand_fr.time_base is None:
+                                        continue
+                                    _cand_pts_s = float(_cand_fr.pts * _cand_fr.time_base)
+                                    if _cand_pts_s > _win_hi:
+                                        break
+                                    if not _cand_fr.key_frame:
+                                        continue
+                                    _cand_gray = (
+                                        _cand_fr.reformat(width=160, height=90, format="gray")
+                                        .to_ndarray()
+                                        .astype(np.float32)
+                                    )
+                                    _mae = float(np.mean(np.abs(_cand_gray - _clip_fr0_gray)))
+                                    _rel_s = max(0.0, _cand_pts_s - _c_start_s)
+                                    if _mae < _best_mae - 1e-3 or (
+                                        abs(_mae - _best_mae) <= 1e-3
+                                        and _best_rel_s is not None
+                                        and abs(_rel_s - float(start_pt)) < abs(_best_rel_s - float(start_pt))
+                                    ):
+                                        _best_mae = _mae
+                                        _best_rel_s = _rel_s
+                            if _best_rel_s is not None and _best_mae < 2.0:
+                                _matched_rel_s = _best_rel_s
+                                break
+
+                        if _matched_rel_s is not None:
+                            preview_start_sec = math.floor(max(0.0, _matched_rel_s) * 1000.0 + 1e-6) / 1000.0
+                        elif start_pt > 0:
+                            with av.open(original_input_path) as _c_probe:
+                                if _c_probe.streams.video:
+                                    _vs_probe = _c_probe.streams.video[0]
+                                    _c_start_s = (
+                                        float(_c_probe.start_time / av.time_base)
+                                        if _c_probe.start_time is not None
+                                        else 0.0
+                                    )
+                                    _c_probe.seek(
+                                        int((float(start_pt) + _c_start_s) * av.time_base),
+                                        backward=True,
+                                        any_frame=False,
+                                    )
+                                    for _pkt in _c_probe.demux(_vs_probe):
+                                        if _pkt.pts is None or getattr(_pkt, "is_discard", False):
+                                            continue
+                                        _tb = _pkt.time_base or _vs_probe.time_base
+                                        if _tb is not None:
+                                            _probed_s = float(_pkt.pts * _tb) - _c_start_s
+                                            if _probed_s >= 0.0:
+                                                preview_start_sec = math.floor(max(0.0, _probed_s) * 1000.0 + 1e-6) / 1000.0
+                                        break
+                except Exception:
+                    preview_start_sec = float(start_pt)
+
             input_path = preview_temp_input
             meta = probe_video(input_path)
-            base_name = f"{base_name}_preview_{preview_dur}s"
+            base_name = preview_base_name
 
         # Khởi tạo logger cho phiên chạy
         mark_graceful_pause_triggered(False)
@@ -197,6 +307,11 @@ def run_upscale_pipeline(
             engine=str(engine),
             is_preview=bool(is_preview),
             total_frames=int(meta.get("nb_frames") or 0),
+            **(
+                {"preview_start_sec": round(float(preview_start_sec), 3)}
+                if (is_preview and preview_start_sec is not None)
+                else {}
+            ),
         )
         logger.set_stage("probing", "Đang kiểm tra video nguồn & môi trường...")
 
@@ -278,6 +393,8 @@ def run_upscale_pipeline(
 
                 # Ghi nhận manifest mới
                 manifest_data = {
+                    "source_file": original_input_path,
+                    "output_dir": os.path.dirname(os.path.abspath(output_path)),
                     "model_id": model_info["id"],
                     "model_name": model_info["name"],
                     "sha256": model_sha256,
@@ -400,7 +517,8 @@ def run_upscale_pipeline(
                         "precision": precision,
                     }
                     if dedup:
-                        effective_dedup_policy = resolve_dedup_policy(input_path, dedup_policy)
+                        effective_dedup_policy = resolve_dedup_policy(original_input_path, dedup_policy)
+                        logger.update_live_context(dedup_policy=effective_dedup_policy)
                         t_pref_start = time.time()
                         plan_requires_sync_loader = False
                         if resume and os.path.exists(plan_file):
@@ -2104,7 +2222,18 @@ def run_upscale_pipeline(
                     audit_data = {
                         "status": mux_res.get("status", "PASS"),
                         "source_file": original_input_path,
-                        **({"preview_clip_file": os.path.abspath(preview_temp_input)} if (is_preview and preview_temp_input) else {}),
+                        **(
+                            {
+                                "preview_clip_file": os.path.abspath(preview_temp_input),
+                                **(
+                                    {"preview_start_sec": round(float(preview_start_sec), 3)}
+                                    if preview_start_sec is not None
+                                    else {}
+                                ),
+                            }
+                            if (is_preview and preview_temp_input)
+                            else {}
+                        ),
                         "output_file": os.path.abspath(output_path),
                         "model_id": model_info["id"],
                         "model_name": model_info["name"],

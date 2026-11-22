@@ -52,6 +52,37 @@ def _parse_iso_timestamp(raw: Any) -> float:
             return 0.0
 
 
+def live_matches_web_job(
+    live_data: Dict[str, Any],
+    job_dict: Dict[str, Any],
+    live_file_mtime: float = 0.0,
+) -> bool:
+    """Return True when live_status.json belongs to job_dict via job_id, PID, or parent-child lineage."""
+    if not isinstance(live_data, dict) or not isinstance(job_dict, dict):
+        return False
+    live_jid = str(live_data.get("job_id") or "").strip()
+    job_jid = str(job_dict.get("job_id") or "").strip()
+    if live_jid and job_jid:
+        return live_jid == job_jid
+    started_ts = _parse_iso_timestamp(job_dict.get("started_at"))
+    if started_ts > 0.0 and live_file_mtime > 0.0 and live_file_mtime < started_ts - 1.5:
+        return False
+    job_pid = _coerce_pid(job_dict.get("pid"))
+    live_pid = _coerce_pid(live_data.get("pid"))
+    if job_pid is None or live_pid is None:
+        return False
+    if live_pid == job_pid:
+        return True
+    if _coerce_pid(live_data.get("ppid")) == job_pid:
+        return True
+    try:
+        import psutil
+        proc_ppid = psutil.Process(live_pid).ppid()
+        return _coerce_pid(proc_ppid) == job_pid
+    except Exception:
+        return False
+
+
 def _query_gpu_static_info() -> Dict[str, Any]:
     """Đọc 1 lần thông tin tĩnh của GPU NVIDIA (tên card, driver, tổng VRAM MiB)."""
     cmd = [
@@ -139,11 +170,13 @@ def scan_temp_checkpoints(
     search_dirs: List[Path] = [workspace_root, workspace_root / "out"]
 
     # Bổ sung thư mục đích tùy chỉnh từ logs/live_status.json nếu người dùng dùng -o ngoài thư mục mặc định
+    live_data_disk: Dict[str, Any] = {}
     live_file = workspace_root / "logs" / "live_status.json"
     if live_file.is_file():
         try:
             ldata = json.loads(live_file.read_text(encoding="utf-8"))
             if isinstance(ldata, dict):
+                live_data_disk = ldata
                 out_dir = _resolve_checkpoint_search_dir(workspace_root, ldata.get("output_path"))
                 if out_dir is not None:
                     search_dirs.append(out_dir)
@@ -214,13 +247,21 @@ def scan_temp_checkpoints(
                         except OSError:
                             pass
 
+            episode_name = entry.name[len(".temp_"):]
             model_id = ""
             source_file = ""
+            output_dir_str = ""
             if manifest_path.is_file():
                 try:
                     mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    model_id = str(mdata.get("model_id") or "")
-                    source_file = str(mdata.get("source_file") or mdata.get("input_path") or "")
+                    if isinstance(mdata, dict):
+                        model_id = str(mdata.get("model_id") or "")
+                        output_dir_str = str(mdata.get("output_dir") or "").strip()
+                        for key in ("original_source_file", "source_file", "input_path"):
+                            cand = str(mdata.get(key) or "").strip()
+                            if cand and not os.path.basename(cand).startswith(".preview_clip_"):
+                                source_file = cand
+                                break
                 except Exception:
                     pass
 
@@ -228,17 +269,56 @@ def scan_temp_checkpoints(
             if plan_path.is_file():
                 try:
                     pdata = json.loads(plan_path.read_text(encoding="utf-8"))
-                    if total_chunks == 0:
-                        total_chunks = len(pdata.get("chunks") or [])
-                    if not source_file and pdata.get("source_file"):
-                        source_file = str(pdata.get("source_file") or "")
+                    if isinstance(pdata, dict):
+                        if total_chunks == 0:
+                            total_chunks = len(pdata.get("chunks") or [])
+                        if not source_file:
+                            cand_plan_path = str(pdata.get("source_path") or "").strip()
+                            if cand_plan_path and not os.path.basename(cand_plan_path).startswith(".preview_clip_"):
+                                source_file = cand_plan_path
+                            else:
+                                cand_plan_file = str(pdata.get("source_file") or "").strip()
+                                if (
+                                    cand_plan_file
+                                    and os.path.isabs(cand_plan_file)
+                                    and not os.path.basename(cand_plan_file).startswith(".preview_clip_")
+                                ):
+                                    source_file = cand_plan_file
                 except Exception:
                     pass
 
+            if not source_file and live_data_disk:
+                cand_live_in = str(live_data_disk.get("input_path") or "").strip()
+                live_vid = str(live_data_disk.get("video_name") or "").strip()
+                if (
+                    cand_live_in
+                    and not os.path.basename(cand_live_in).startswith(".preview_clip_")
+                    and (
+                        Path(cand_live_in).stem == episode_name
+                        or live_vid == episode_name
+                        or (live_vid and Path(live_vid).stem == episode_name)
+                    )
+                ):
+                    source_file = cand_live_in
+
+            if not output_dir_str:
+                try:
+                    output_dir_str = str(t_path.parent.resolve())
+                except OSError:
+                    output_dir_str = str(t_path.parent)
+            default_out_norm = os.path.normcase(os.path.abspath(str(workspace_root / "out")))
+            try:
+                out_dir_norm = os.path.normcase(os.path.abspath(output_dir_str))
+                is_custom_output_dir = out_dir_norm != default_out_norm
+            except OSError:
+                is_custom_output_dir = False
+
             results.append({
                 "name": entry.name,
-                "episode_name": entry.name[len(".temp_"):],
+                "episode_name": episode_name,
                 "source_file": source_file,
+                "output_dir": output_dir_str,
+                "is_custom_output_dir": is_custom_output_dir,
                 "path": str(t_path),
                 "completed_chunks": up_count,
                 "total_chunks": total_chunks,
@@ -250,6 +330,14 @@ def scan_temp_checkpoints(
 
 class TelemetryHub:
     """Bộ thu thập viễn trắc 1.0 Hz & phân phối SSE tới mọi trình duyệt đang mở."""
+
+    @staticmethod
+    def _live_matches_web_job(
+        live_data: Dict[str, Any],
+        job_dict: Dict[str, Any],
+        live_file_mtime: float = 0.0,
+    ) -> bool:
+        return live_matches_web_job(live_data, job_dict, live_file_mtime)
 
     def __init__(
         self,
@@ -481,7 +569,10 @@ class TelemetryHub:
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
-            elif (active_pid_val := _coerce_pid(active_pid)) is not None and live_pid != active_pid_val:
+            elif (
+                ((live_data.get("job_id") and active_job.get("job_id")) or _coerce_pid(active_pid) is not None)
+                and not self._live_matches_web_job(live_data, active_job, live_file_mtime)
+            ):
                 # Tập mới vừa được Web GUI khởi chạy nhưng chưa kịp tạo RunLogger mới -> tránh báo nhầm 'completed' của tập cũ
                 effective_stage = "initializing"
                 live_data = {
@@ -525,27 +616,17 @@ class TelemetryHub:
                 last_status = str(last_job.get("status") or "")
                 fin_str = str(last_job.get("finished_at") or "")
                 last_finished_ts = _parse_iso_timestamp(fin_str)
-                last_started_ts = _parse_iso_timestamp(last_job.get("started_at"))
-                last_job_pid = _coerce_pid(last_job.get("pid"))
                 live_from_newer_upscale = bool(
                     live_file.is_file()
                     and last_finished_ts > 0.0
-                    and live_file_mtime > last_finished_ts + 0.5
-                    and live_pid != last_job_pid
+                    and live_file_mtime > last_finished_ts + 1.05
+                    and not self._live_matches_web_job(live_data, last_job, live_file_mtime)
                     and str(live_data.get("stage") or "idle") != "idle"
                 )
-                live_job_id = live_data.get("job_id")
-                last_job_id = last_job.get("job_id")
-                if live_job_id and last_job_id:
-                    live_matches_last_job = str(live_job_id) == str(last_job_id)
-                elif last_job_pid is not None:
-                    live_matches_last_job = bool(
-                        live_file.is_file()
-                        and live_pid == last_job_pid
-                        and (last_started_ts <= 0.0 or live_file_mtime >= last_started_ts - 1.5)
-                    )
-                else:
-                    live_matches_last_job = False
+                live_matches_last_job = bool(
+                    live_file.is_file()
+                    and self._live_matches_web_job(live_data, last_job, live_file_mtime)
+                )
                 q_items_last = last_job.get("queue_items") or []
                 target_label_last = (
                     os.path.basename(str(q_items_last[0]))
@@ -643,6 +724,37 @@ class TelemetryHub:
                             "effective_fps": 0.0,
                             "eta_seconds": None,
                         }
+                elif (
+                    last_type == "upscale"
+                    and bool((last_job.get("options") or {}).get("dry_run"))
+                    and last_status == "completed"
+                    and not live_from_newer_upscale
+                ):
+                    effective_stage = "completed"
+                    live_data = {
+                        "video_name": target_label_last,
+                        "pid": last_job.get("pid"),
+                        "job_id": last_job.get("job_id"),
+                        "job_type": last_type,
+                        "dry_run": True,
+                        "started_at": last_job.get("started_at"),
+                        "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "stage": "completed",
+                        "stage_detail": "Hoàn tất mô phỏng lập lịch (--dry-run) — xem bảng quyết định tại Nhật ký.",
+                        "model_id": str((last_job.get("options") or {}).get("model") or ""),
+                        "zero_disk": bool((last_job.get("options") or {}).get("zero_disk", True)),
+                        "total_frames": 0,
+                        "unique_frames": 0,
+                        "total_chunks": 0,
+                        "completed_chunks": 0,
+                        "chunks": [],
+                        "resumed_chunks": [],
+                        "active_chunk": None,
+                        "steady_fps": 0.0,
+                        "latest_fps": 0.0,
+                        "effective_fps": 0.0,
+                        "eta_seconds": None,
+                    }
                 elif (
                     last_type in {"upscale", "preview"}
                     and last_status in {"failed", "error"}
@@ -821,8 +933,61 @@ class TelemetryHub:
                 if cand_active.is_file():
                     return cand_active
 
+        live_file = logs_dir / "live_status.json"
+        live_mtime = 0.0
+        if live_file.is_file():
+            try:
+                live_mtime = live_file.stat().st_mtime
+            except OSError:
+                live_mtime = 0.0
+
+        recent_logs: List[Path] = []
+        try:
+            recent_logs = sorted(
+                (p for p in logs_dir.glob("*.log") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            recent_logs = []
+
+        history_list = job_state.get("history") or []
+        last_hist = (
+            history_list[0]
+            if (history_list and isinstance(history_list[0], dict))
+            else (
+                job_state.get("last_finished_job")
+                if isinstance(job_state.get("last_finished_job"), dict)
+                else None
+            )
+        )
+        if isinstance(last_hist, dict):
+            hist_lp = str(last_hist.get("log_path") or "").strip()
+            if hist_lp:
+                hist_path = Path(hist_lp)
+                if hist_path.is_file():
+                    try:
+                        hist_lp_mtime = hist_path.stat().st_mtime
+                    except OSError:
+                        hist_lp_mtime = 0.0
+                    hist_fin_ts = _parse_iso_timestamp(last_hist.get("finished_at"))
+                    hist_ref_ts = max(hist_lp_mtime, hist_fin_ts)
+                    hist_key = self._safe_resolve_str(hist_path)
+                    newest_other_mtime = 0.0
+                    for cand_recent in recent_logs:
+                        if self._safe_resolve_str(cand_recent) != hist_key:
+                            try:
+                                newest_other_mtime = cand_recent.stat().st_mtime
+                            except OSError:
+                                newest_other_mtime = 0.0
+                            break
+                    if (
+                        (live_mtime <= 0.0 or hist_ref_ts >= live_mtime - 1.0)
+                        and newest_other_mtime <= hist_ref_ts + 1.0
+                    ):
+                        return hist_path
+
         raw_candidates: List[Path] = []
-        last_hist = (job_state.get("history") or [None])[0]
         if isinstance(last_hist, dict):
             hist_lp = str(last_hist.get("log_path") or "").strip()
             if hist_lp and Path(hist_lp).is_file():
@@ -830,7 +995,6 @@ class TelemetryHub:
         if web_job_log.is_file():
             raw_candidates.append(web_job_log)
 
-        live_file = logs_dir / "live_status.json"
         if live_file.is_file():
             try:
                 ldata = json.loads(live_file.read_text(encoding="utf-8"))
@@ -846,15 +1010,7 @@ class TelemetryHub:
         if latest_link.is_file():
             raw_candidates.append(latest_link)
 
-        try:
-            recent_logs = sorted(
-                (p for p in logs_dir.glob("*.log") if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            raw_candidates.extend(recent_logs[:2])
-        except OSError:
-            pass
+        raw_candidates.extend(recent_logs[:2])
 
         seen: set[str] = set()
         unique: List[Path] = []

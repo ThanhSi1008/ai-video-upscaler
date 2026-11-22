@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import string
 import sys
 from typing import Any, Dict, List, Optional, Sequence
@@ -16,6 +17,14 @@ from src.show_routing import match_show_pattern, match_show_rule
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt"}
+_WINDOWS_PROTECTED_DIR_NAMES = frozenset({
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "config.msi",
+    "msocache",
+    "documents and settings",
+})
 
 # Pure-stdlib mirror of src.dedup.DEDUP_POLICY_PARAMS to avoid importing torch in the web process.
 _DEDUP_HI = 768
@@ -322,6 +331,15 @@ class SafeLocalFSBrowser:
                 continue
             if name.startswith(".") or name in {"__pycache__", ".venv", "venv", "node_modules"}:
                 continue
+            if name.lower() in _WINDOWS_PROTECTED_DIR_NAMES:
+                continue
+            if sys.platform == "win32":
+                try:
+                    attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+                    if attrs & (stat.FILE_ATTRIBUTE_SYSTEM | stat.FILE_ATTRIBUTE_HIDDEN):
+                        continue
+                except OSError:
+                    continue
 
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)

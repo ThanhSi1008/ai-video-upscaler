@@ -39,6 +39,7 @@ from web.fs_browser import (
     SafeLocalFSBrowser,
     is_secret_filename,
     is_unc_path,
+    is_upscaled_output_stem,
     is_valid_dedup_policy,
     match_show_pattern,
     match_show_rule,
@@ -64,6 +65,12 @@ def _validate_no_nul_str(val: Optional[str], field_name: str = "path", reject_un
     return val
 
 
+def _reject_bool_or_float_int(val: Any, field_name: str) -> Any:
+    if isinstance(val, (bool, float)):
+        raise ValueError(f"{field_name} phải là số nguyên hợp lệ (không nhận boolean/số thực).")
+    return val
+
+
 def _validate_deadline_str(val: Optional[str]) -> Optional[str]:
     if val is None:
         return None
@@ -86,11 +93,17 @@ class SchedulePreviewRequest(BaseModel):
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
+    batch_size: int = Field(default=8, ge=1, le=32)
     zero_disk: bool = True
     use_tensorrt: bool = True
     subs_after_upscale: bool = True
     output_dir: Optional[str] = None
     force: bool = False
+
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def _validate_batch_size_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "batch_size")
 
     @field_validator("inputs")
     @classmethod
@@ -121,7 +134,7 @@ class StartUpscaleRequest(BaseModel):
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
-    batch_size: int = 8
+    batch_size: int = Field(default=8, ge=1, le=32)
     deadline: Optional[str] = None
     allow_partial: bool = False
     zero_disk: bool = True
@@ -143,6 +156,11 @@ class StartUpscaleRequest(BaseModel):
             _validate_no_nul_str(item, "inputs")
         return v
 
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def _validate_batch_size_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "batch_size")
+
     @field_validator("output_dir")
     @classmethod
     def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
@@ -162,18 +180,35 @@ class StartUpscaleRequest(BaseModel):
 class StartPreviewRequest(BaseModel):
     video_path: str
     seconds: int = 10
+    output_dir: Optional[str] = None
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
+    batch_size: int = Field(default=8, ge=1, le=32)
     zero_disk: bool = True
     use_tensorrt: bool = True
-    force: bool = True
+    force: bool = False
     auto_open_player: bool = False
 
     @field_validator("video_path")
     @classmethod
     def _validate_vp(cls, v: str) -> str:
         return _validate_no_nul_str(v, "video_path") or ""
+
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "output_dir")
+
+    @field_validator("batch_size", mode="before")
+    @classmethod
+    def _validate_batch_size_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "batch_size")
+
+    @field_validator("seconds", mode="before")
+    @classmethod
+    def _validate_sec_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "seconds")
 
     @field_validator("seconds")
     @classmethod
@@ -374,7 +409,7 @@ def _write_dotenv_keys(dotenv_path: Path, updates: Dict[str, Optional[str]]) -> 
     tmp_path = dotenv_path.parent / f".env.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
     content = "\n".join(new_lines).rstrip("\n") + ("\n" if new_lines else "")
     try:
-        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.write_text(content, encoding="utf-8", newline="\n")
         os.replace(tmp_path, dotenv_path)
     except Exception:
         try:
@@ -666,14 +701,21 @@ def _resolve_dir_from_raw(
         return None
     cleaned = str(raw_val).strip()
     _validate_no_nul_str(cleaned, "output_dir")
-    p = Path(os.path.expanduser(cleaned))
-    if not p.is_absolute():
-        p = root / p
+    raw_path = Path(os.path.expanduser(cleaned))
+    if (
+        is_secret_filename(cleaned)
+        or is_secret_filename(raw_path.name)
+        or any(is_secret_filename(part) for part in raw_path.parts)
+    ):
+        if strict_secret:
+            raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
+        return None
+    p = raw_path if raw_path.is_absolute() else root / raw_path
     try:
         resolved = p.resolve()
     except OSError:
         return None
-    if is_secret_filename(resolved.name):
+    if is_secret_filename(resolved.name) or any(is_secret_filename(part) for part in resolved.parts):
         if strict_secret:
             raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
         return None
@@ -691,6 +733,67 @@ def _read_live_status_dict(root: Path) -> Dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
+
+
+def _parse_valid_preview_start_sec(raw_val: Any) -> Optional[float]:
+    if raw_val is None or isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)):
+        return None
+    val = float(raw_val)
+    if not math.isfinite(val) or val < 0.0:
+        return None
+    return val
+
+
+def _lookup_preview_start_sec(root: Path, src_p: Path, up_p: Path) -> Optional[float]:
+    for audit_cand in (
+        up_p.with_suffix(".audit.json"),
+        up_p.parent / "audit" / f"{up_p.stem}.audit.json",
+    ):
+        if not audit_cand.is_file():
+            continue
+        try:
+            adata = json.loads(audit_cand.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(adata, dict):
+            parsed = _parse_valid_preview_start_sec(adata.get("preview_start_sec"))
+            if parsed is not None:
+                return parsed
+
+    live_data = _read_live_status_dict(root)
+    if not live_data or live_data.get("is_preview") is False:
+        return None
+    live_parsed = _parse_valid_preview_start_sec(live_data.get("preview_start_sec"))
+    if live_parsed is None:
+        return None
+
+    def _norm_resolved(raw_path: str) -> Optional[str]:
+        if not raw_path:
+            return None
+        cand_p = Path(os.path.expanduser(raw_path))
+        if not cand_p.is_absolute():
+            cand_p = root / cand_p
+        try:
+            return os.path.normcase(str(cand_p.resolve()))
+        except OSError:
+            return os.path.normcase(os.path.normpath(str(cand_p)))
+
+    norm_up = os.path.normcase(str(up_p))
+    norm_src = os.path.normcase(str(src_p))
+    raw_out = str(live_data.get("output_path") or "").strip()
+    if raw_out:
+        if _norm_resolved(raw_out) == norm_up:
+            return live_parsed
+        return None
+
+    live_vname = str(live_data.get("video_name") or "").strip()
+    up_base_stem = re.sub(r"_4K(?:_animejanai)?$", "", up_p.stem, flags=re.IGNORECASE)
+    if not live_vname or live_vname.lower() not in {up_p.stem.lower(), up_base_stem.lower()}:
+        return None
+    raw_in = str(live_data.get("input_path") or "").strip()
+    if raw_in and _norm_resolved(raw_in) != norm_src:
+        return None
+    return live_parsed
 
 
 def _collect_known_output_dirs(
@@ -1332,6 +1435,12 @@ def create_app(
 
     @app.post("/api/queue/preview-schedule")
     def api_preview_schedule(req: SchedulePreviewRequest) -> Dict[str, Any]:
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not req.inputs:
             try:
                 norm_dl = _validate_deadline_str(req.deadline)
@@ -1386,6 +1495,12 @@ def create_app(
 
     @app.post("/api/jobs/start")
     def api_start_upscale(req: StartUpscaleRequest) -> Dict[str, Any]:
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if is_mock and popen_factory is None:
             if not req.inputs:
                 raise HTTPException(status_code=400, detail="Vui lòng chọn ít nhất một file video hoặc thư mục nguồn.")
@@ -1395,11 +1510,19 @@ def create_app(
             return {"ok": True, "job": job}
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except (ValueError, FileNotFoundError, PermissionError) as exc:
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/preview")
     def api_start_preview(req: StartPreviewRequest) -> Dict[str, Any]:
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if is_mock and popen_factory is None:
             if not (req.video_path or "").strip():
                 raise HTTPException(status_code=400, detail="Thiếu video_path.")
@@ -1409,7 +1532,9 @@ def create_app(
             return {"ok": True, "job": job}
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except (ValueError, FileNotFoundError, PermissionError) as exc:
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/subtrans")
@@ -1704,14 +1829,26 @@ def create_app(
             offset_s = float(req.source_offset_sec)
         else:
             m_prev = re.match(r"^(.*)_preview_(\d+)s_4K(?:_animejanai)?$", up_p.stem, flags=re.IGNORECASE)
-            if m_prev and src_meta["duration"] > 0:
+            if m_prev:
                 prev_dur = int(m_prev.group(2))
-                max_dur = max(1, int(round(src_meta["duration"])))
-                offset_s = (
-                    0.0
-                    if prev_dur >= max_dur
-                    else float(max(0, min(int(src_meta["duration"] * 0.3), max_dur - prev_dur)))
-                )
+                recorded_start = _lookup_preview_start_sec(root, src_p, up_p)
+                if recorded_start is not None:
+                    if src_meta["duration"] > 0:
+                        offset_s = min(
+                            max(0.0, recorded_start),
+                            max(0.0, float(src_meta["duration"]) - float(prev_dur)),
+                        )
+                    else:
+                        offset_s = max(0.0, recorded_start)
+                elif src_meta["duration"] > 0:
+                    max_dur = max(1, int(round(src_meta["duration"])))
+                    offset_s = (
+                        0.0
+                        if prev_dur >= max_dur
+                        else float(max(0, min(int(src_meta["duration"] * 0.3), max_dur - prev_dur)))
+                    )
+                else:
+                    offset_s = 0.0
             else:
                 offset_s = 0.0
 
@@ -1985,8 +2122,8 @@ def create_app(
 
         shows_path = root / "shows.yaml"
         tmp_path = root / f".shows.yaml.{os.getpid()}.tmp"
-        text = req.yaml_content.replace("\r\n", "\n").rstrip("\n") + "\n"
-        tmp_path.write_text(text, encoding="utf-8")
+        text = req.yaml_content.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+        tmp_path.write_text(text, encoding="utf-8", newline="\n")
         os.replace(tmp_path, shows_path)
         return {"ok": True, "rules_count": len(rules)}
 
@@ -2376,7 +2513,10 @@ def create_app(
 
         discovered_entries.sort(key=_safe_audit_mtime, reverse=True)
 
-        for af, base_out in discovered_entries[:60]:
+        uncollapsed_items: List[tuple[tuple[float, int], Dict[str, Any]]] = []
+        deduped_items: Dict[tuple[str, str, str], tuple[tuple[bool, float, int], tuple[float, int], Dict[str, Any]]] = {}
+
+        for entry_idx, (af, base_out) in enumerate(discovered_entries):
             try:
                 st = af.stat()
                 mtime_val = st.st_mtime
@@ -2386,10 +2526,11 @@ def create_app(
                 size_kb_val = 0.0
             raw_stem = af.name[:-len(".audit.json")] if af.name.endswith(".audit.json") else af.stem
             corrupt_ep_label = re.sub(r"_4K(?:_animejanai)?$", "", raw_stem, flags=re.IGNORECASE)
+            sort_key = (mtime_val, -entry_idx)
             try:
                 adata = json.loads(af.read_text(encoding="utf-8"))
             except Exception as exc:
-                audits.append({
+                uncollapsed_items.append((sort_key, {
                     "episode": corrupt_ep_label,
                     "audit_json_path": str(af.resolve()),
                     "output_file": "",
@@ -2412,10 +2553,10 @@ def create_app(
                     "sub_audit_md_path": "",
                     "cast_yaml_path": "",
                     "mtime": mtime_val,
-                })
+                }))
                 continue
             if not isinstance(adata, dict):
-                audits.append({
+                uncollapsed_items.append((sort_key, {
                     "episode": corrupt_ep_label,
                     "audit_json_path": str(af.resolve()),
                     "output_file": "",
@@ -2438,10 +2579,10 @@ def create_app(
                     "sub_audit_md_path": "",
                     "cast_yaml_path": "",
                     "mtime": mtime_val,
-                })
+                }))
                 continue
 
-            stem_4k = af.name[:-len(".audit.json")]
+            stem_4k = raw_stem
             stem_src = re.sub(r"_4K(?:_animejanai)?$", "", stem_4k, flags=re.IGNORECASE)
 
             sub_audit_md = ""
@@ -2508,10 +2649,12 @@ def create_app(
                     resolved_audit_src = src_cand
                     break
 
-            audits.append({
+            raw_output_file = str(adata.get("output_file") or "")
+            completed_at_val = str(adata.get("completed_at") or "")
+            item = {
                 "episode": episode_label,
                 "audit_json_path": str(af.resolve()),
-                "output_file": str(adata.get("output_file") or ""),
+                "output_file": raw_output_file,
                 "source_file": resolved_audit_src,
                 "status": str(adata.get("status") or mux_info.get("status") or "UNKNOWN"),
                 "sanity_status": str(sanity_info.get("status") or "N/A"),
@@ -2525,10 +2668,42 @@ def create_app(
                 "subtitle_tracks_count": sub_count,
                 "fonts_count": fonts_count,
                 "output_file_size_mb": adata.get("output_file_size_mb", 0.0),
-                "completed_at": str(adata.get("completed_at") or ""),
+                "completed_at": completed_at_val,
                 "sub_audit_md_path": sub_audit_md,
                 "cast_yaml_path": cast_yaml,
-            })
+            }
+
+            try:
+                norm_parent_dir = os.path.normcase(str(af.parent.resolve()))
+            except OSError:
+                norm_parent_dir = os.path.normcase(os.path.normpath(str(af.parent)))
+            stripped_out = raw_output_file.strip()
+            if stripped_out:
+                out_cand_p = Path(os.path.expanduser(stripped_out))
+                if not out_cand_p.is_absolute():
+                    out_cand_p = root / out_cand_p
+                try:
+                    norm_output_file = os.path.normcase(str(out_cand_p.resolve()))
+                except OSError:
+                    norm_output_file = os.path.normcase(os.path.normpath(str(out_cand_p)))
+            else:
+                norm_output_file = ""
+            stripped_completed = completed_at_val.strip()
+
+            if norm_parent_dir and norm_output_file and stripped_completed:
+                dedup_key = (norm_parent_dir, norm_output_file, stripped_completed)
+                pref_key = (is_upscaled_output_stem(raw_stem), mtime_val, -entry_idx)
+                existing = deduped_items.get(dedup_key)
+                if existing is None or pref_key > existing[0]:
+                    deduped_items[dedup_key] = (pref_key, sort_key, item)
+            else:
+                uncollapsed_items.append((sort_key, item))
+
+        combined_audits: List[tuple[tuple[float, int], Dict[str, Any]]] = list(uncollapsed_items)
+        for _pref_key, sort_key, item in deduped_items.values():
+            combined_audits.append((sort_key, item))
+        combined_audits.sort(key=lambda pair: pair[0], reverse=True)
+        audits = [pair[1] for pair in combined_audits[:60]]
 
         if is_mock and not audits:
             audits.append({
@@ -2631,5 +2806,50 @@ def create_app(
                 )
             return {"type": "json", "path": str(cand), "data": parsed_json}
         return {"type": "text", "path": str(cand), "content": raw_text}
+
+    @app.get("/api/night-report")
+    def api_night_report(
+        session_name: str = Query(default="night1", pattern=r"^[A-Za-z0-9_-]{1,64}$"),
+    ) -> Dict[str, Any]:
+        if is_mock:
+            mock_md = "\n".join([
+                f"# BÁO CÁO TỔNG KẾT CA CHẠY QUA ĐÊM ({session_name.upper()})",
+                "",
+                "## 1. Thông Tin Phiên Chạy & Cửa Sổ Giám Sát",
+                "* **Chế độ:** Mock Studio Telemetry (Offline Demo)",
+                "",
+                "## 2. Viễn Trắc Hệ Thống (Phần Cứng & Ổ Cứng)",
+                "* **GPU Utilization (TB):** **82.0%** (P-State: P0 | Mẫu: 120)",
+                "* **Đỉnh VRAM (RTX 3060):** **6,384 MiB**",
+                "",
+                "## 3. Trạng Thái & Hiệu Năng Từng Tập Video",
+                "### Tập 1: [Demo] Anime_EP01 (1080p).mkv",
+                "* **Trạng thái:** ✅ HOÀN TẤT TRỌN VẸN (100%)",
+                "* **Tốc độ AI:** Trung vị **41.20 fps** | P5 **39.80 fps**",
+                "",
+                "## 4. Thống Kê Phụ Đề & Hạn Mức Gemini API",
+                "* **gemini-3.5-flash-lite:** Tổng 14 requests | Thành công: 14 (100.0%) | 503 Spike: 0 (0.0%)",
+                "",
+                "## 5. Danh Sách Việc Cần Làm Bằng Tay (Action Items)",
+                "1. **Kiểm tra phụ đề tiếng Việt:** Đã sẵn sàng trong chế độ mô phỏng.",
+                "",
+            ])
+            return {
+                "ok": True,
+                "session_name": session_name,
+                "markdown": mock_md,
+                "mock_mode": True,
+            }
+        from src.night_report import generate_night_report_text
+        try:
+            markdown = generate_night_report_text(session_name=session_name, workspace_root=root)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Không thể tạo báo cáo ca đêm: {exc}") from exc
+        return {
+            "ok": True,
+            "session_name": session_name,
+            "markdown": markdown,
+            "mock_mode": False,
+        }
 
     return app

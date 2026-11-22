@@ -5,7 +5,7 @@
  * - Displays natural episode order, shows.yaml routing badges, drive free space, and already-upscaled hints.
  */
 
-import { apiFetch, clearChildren, el, initDialogLightDismiss, showToast } from "./ui.js";
+import { apiFetch, clearChildren, el, initDialogLightDismiss } from "./ui.js";
 
 let initialized = false;
 let activeSession = null;
@@ -51,6 +51,7 @@ export function initFsPickerModal() {
   dialog.addEventListener("close", () => {
     const outcome = dialog.returnValue;
     dialog.returnValue = "";
+    document.getElementById("fs-entries-list")?.removeAttribute("aria-busy");
     if (dialog.open || !activeSession) return;
     const sess = activeSession;
     activeSession = null;
@@ -121,8 +122,10 @@ export function openFsPicker(options = {}) {
         const isCurrent = () =>
           activeSession === this && !this.resolved && dialog.open && reqId === this.browseSeq;
 
-        clearChildren(entriesList);
-        entriesList.append(el("p", { className: "empty-hint", textContent: "Đang đọc thư mục…" }));
+        entriesList.setAttribute("aria-busy", "true");
+        if (entriesList.childElementCount === 0) {
+          entriesList.append(el("p", { className: "empty-hint", textContent: "Đang đọc thư mục…" }));
+        }
 
         try {
           const qs = new URLSearchParams();
@@ -182,11 +185,24 @@ export function openFsPicker(options = {}) {
           this.updateFooter();
         } catch (err) {
           if (!isCurrent()) return;
-          clearChildren(entriesList);
-          entriesList.append(
-            el("p", { className: "empty-hint", textContent: `Lỗi đọc thư mục: ${err.message}` })
+          for (const stale of entriesList.querySelectorAll(".fs-error-banner")) {
+            stale.remove();
+          }
+          if (!entriesList.querySelector(".fs-entry-row")) {
+            clearChildren(entriesList);
+          }
+          entriesList.prepend(
+            el("div", {
+              className: "fs-error-banner",
+              role: "alert",
+              textContent: `Không thể mở thư mục: ${err.message}`,
+            })
           );
-          showToast(err.message, "error");
+          entriesList.scrollTop = 0;
+        } finally {
+          if (isCurrent()) {
+            entriesList.removeAttribute("aria-busy");
+          }
         }
       },
       _renderEntryRow(item) {
@@ -201,7 +217,10 @@ export function openFsPicker(options = {}) {
             {
               type: "button",
               className: "fs-open-dir-btn",
-              onClick: () => this.browse(item.path),
+              onClick: (ev) => {
+                ev.stopPropagation();
+                this.browse(item.path);
+              },
             },
             [`${icon} ${item.name}`]
           );
@@ -219,7 +238,8 @@ export function openFsPicker(options = {}) {
               type: "button",
               className: "btn btn-ghost",
               textContent: "+ Chọn thư mục",
-              onClick: () => {
+              onClick: (ev) => {
+                ev.stopPropagation();
                 if (!cfg.multi) this.selected.clear();
                 this.selected.add(item.path);
                 this.resolved = true;
@@ -245,6 +265,9 @@ export function openFsPicker(options = {}) {
             name: "fs-picker-choice",
             checked: this.selected.has(item.path),
             "aria-label": `Chọn ${item.name}`,
+            onClick: (ev) => {
+              ev.stopPropagation();
+            },
             onChange: (ev) => {
               if (!cfg.multi) {
                 this.selected.clear();
@@ -263,7 +286,8 @@ export function openFsPicker(options = {}) {
             {
               type: "button",
               className: "fs-open-dir-btn",
-              onClick: () => {
+              onClick: (ev) => {
+                ev.stopPropagation();
                 if (!cfg.multi) {
                   this.selected.clear();
                   this.selected.add(item.path);
@@ -324,6 +348,14 @@ export function openFsPicker(options = {}) {
     }
     activeSession = session;
     session.updateFooter();
+
+    if (entriesList) {
+      clearChildren(entriesList);
+      entriesList.removeAttribute("aria-busy");
+    }
+    if (folderBanner) {
+      folderBanner.hidden = true;
+    }
 
     dialog.returnValue = "";
     if (!dialog.open) {

@@ -8,6 +8,23 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolate_logs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Isolate UPSCALER_LOGS_DIR/LOGS_DIR per test so synthetic runs never write to repo logs/."""
+    test_logs = str(tmp_path / "_test_logs")
+    monkeypatch.setenv("UPSCALER_LOGS_DIR", test_logs)
+    cfg_mod = sys.modules.get("src.config")
+    if cfg_mod is not None and hasattr(cfg_mod, "LOGS_DIR"):
+        monkeypatch.setattr(cfg_mod, "LOGS_DIR", test_logs)
+    logger_mod = sys.modules.get("src.logger")
+    if logger_mod is not None:
+        if hasattr(logger_mod, "_CONFIG_LOGS_DIR"):
+            monkeypatch.setattr(logger_mod, "_CONFIG_LOGS_DIR", test_logs)
+        if hasattr(logger_mod, "LOGS_DIR"):
+            monkeypatch.setattr(logger_mod, "LOGS_DIR", test_logs)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_shared_rate_limiters():
     """Clear any already-imported subtrans RateLimiter registry without adding import overhead."""
     mod = sys.modules.get("subtrans.throttle")

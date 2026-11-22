@@ -78,7 +78,9 @@ configure_nvme_jit_caches()
 BIN_DIR = os.path.join(ROOT_DIR, "bin", "realesrgan")
 REALESRGAN_BIN = os.path.join(BIN_DIR, "realesrgan-ncnn-vulkan")
 MODELS_DIR = os.path.join(BIN_DIR, "models")
-LOGS_DIR = os.path.join(ROOT_DIR, "logs")
+DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
+_env_logs_dir = os.environ.get("UPSCALER_LOGS_DIR", "").strip()
+LOGS_DIR = os.path.abspath(os.path.expanduser(_env_logs_dir)) if _env_logs_dir else DEFAULT_LOGS_DIR
 GPU_LOCK_FILE = os.path.join(ROOT_DIR, ".gpu_active.lock")
 
 _GPU_LOCK_OWNED: bool = False

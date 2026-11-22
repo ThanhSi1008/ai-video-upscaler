@@ -12,11 +12,17 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
-from web.fs_browser import VALID_NVENC_MULTIPASS_POLICIES, SafeLocalFSBrowser, is_unc_path
-from web.sse_hub import check_active_gpu_lock
+from web.fs_browser import (
+    VALID_NVENC_MULTIPASS_POLICIES,
+    SafeLocalFSBrowser,
+    is_secret_filename,
+    is_unc_path,
+)
+from web.sse_hub import _coerce_pid, check_active_gpu_lock, live_matches_web_job
 
 # Tốc độ suy luận khung hình độc nhất tham chiếu trên RTX 3060 TensorRT 10 FP16 Zero-Disk (từ STATE.md R3)
 MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
@@ -153,6 +159,49 @@ def _validate_deadline(val: Optional[str]) -> Optional[str]:
     return f"{hh:02d}:{mm:02d}"
 
 
+def _validate_batch_size(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        raise ValueError("batch_size phải là số nguyên từ 1 đến 32 (không nhận boolean).")
+    if isinstance(val, int):
+        bs = val
+    elif isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        if not re.fullmatch(r"[+-]?\d+", s):
+            raise ValueError("batch_size phải là số nguyên từ 1 đến 32.")
+        bs = int(s)
+    else:
+        raise ValueError("batch_size phải là số nguyên từ 1 đến 32.")
+    if bs < 1 or bs > 32:
+        raise ValueError("batch_size phải nằm trong khoảng 1..32.")
+    return bs
+
+
+def _validate_output_dir(workspace_root: Path, val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    raw = str(val).strip()
+    if not raw:
+        return None
+    _validate_no_nul(raw, "output_dir")
+    p = Path(os.path.expanduser(raw))
+    try:
+        target = (p if p.is_absolute() else workspace_root / p).resolve()
+    except OSError:
+        target = p
+    if (
+        is_secret_filename(raw)
+        or is_secret_filename(p.name)
+        or is_secret_filename(target.name)
+        or any(is_secret_filename(part) for part in p.parts)
+    ):
+        raise PermissionError("Từ chối đường dẫn đích trỏ tới tệp cấu hình nhạy cảm.")
+    return raw
+
+
 def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> tuple[Path, Optional[Path]]:
     """
     Chuẩn hóa đường dẫn output (-o):
@@ -273,14 +322,15 @@ class JobManager:
         if not self._active_job or self._active_job.get("finished_at") is not None:
             return
         prev_status = self._active_job.get("status")
-        job_pid = self._active_job.get("pid")
+        job_type = str(self._active_job.get("job_type") or "")
 
         live_stage = ""
         live_file = self.workspace_root / "logs" / "live_status.json"
-        if live_file.is_file():
+        if job_type in {"upscale", "preview"} and live_file.is_file():
             try:
+                live_mtime = live_file.stat().st_mtime
                 ldata = json.loads(live_file.read_text(encoding="utf-8"))
-                if isinstance(ldata, dict) and job_pid and ldata.get("pid") == job_pid:
+                if isinstance(ldata, dict) and live_matches_web_job(ldata, self._active_job, live_mtime):
                     live_stage = str(ldata.get("stage") or "")
             except Exception:
                 live_stage = ""
@@ -545,11 +595,13 @@ class JobManager:
         logs_dir.mkdir(parents=True, exist_ok=True)
         pause_flag = logs_dir / ".graceful_pause.flag"
 
+        job_id = uuid.uuid4().hex[:10]
         env = dict(os.environ)
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         if extra_env:
             env.update(extra_env)
+        env["UPSCALER_WEB_JOB_ID"] = job_id
 
         popen_kwargs: Dict[str, Any] = {
             "cwd": str(self.workspace_root),
@@ -577,7 +629,6 @@ class JobManager:
             proc = self.popen_factory(cmd, **popen_kwargs)
             if proc is None:
                 raise RuntimeError("Không thể khởi tạo tiến trình con (popen_factory trả về None).")
-            job_id = uuid.uuid4().hex[:10]
             web_log_path = logs_dir / f"web_job_{job_id}.log"
             now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             web_log_path.write_text(
@@ -644,8 +695,8 @@ class JobManager:
             raise ValueError("Vui lòng chọn ít nhất một file video hoặc thư mục nguồn.")
         for item in raw_inputs:
             _validate_no_nul(str(item), "inputs")
-        if payload.get("output_dir"):
-            _validate_no_nul(str(payload.get("output_dir")), "output_dir")
+        out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"))
+        batch_size = _validate_batch_size(payload.get("batch_size"))
 
         subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         deadline_norm = _validate_deadline(payload.get("deadline"))
@@ -662,19 +713,16 @@ class JobManager:
         else:
             cmd.append(videos[0])
 
-        if payload.get("output_dir"):
-            cmd.extend(["-o", str(payload["output_dir"]).strip()])
+        if out_dir_val:
+            cmd.extend(["-o", out_dir_val])
         if payload.get("model"):
             cmd.extend(["--model", str(payload["model"]).strip()])
         if payload.get("dedup_policy"):
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
         if nvenc_mp_norm:
             cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
-        if payload.get("batch_size") is not None:
-            bs = int(payload["batch_size"])
-            if bs < 1:
-                raise ValueError("batch_size phải >= 1.")
-            cmd.extend(["--batch-size", str(bs)])
+        if batch_size is not None:
+            cmd.extend(["--batch-size", str(batch_size)])
         if deadline_norm:
             cmd.extend(["--deadline", deadline_norm])
         if payload.get("allow_partial"):
@@ -709,6 +757,8 @@ class JobManager:
         _validate_no_nul(video_raw, "video_path")
         if not video_raw:
             raise ValueError("Vui lòng chọn một file video để trích xuất Preview.")
+        out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"))
+        batch_size = _validate_batch_size(payload.get("batch_size"))
         videos = self.fs_browser.expand_inputs([video_raw])
         target_video = videos[0]
         raw_sec = payload.get("seconds", 10)
@@ -727,17 +777,21 @@ class JobManager:
             str(seconds),
             "--no-subs",
         ]
+        if out_dir_val:
+            cmd.extend(["-o", out_dir_val])
         if payload.get("model"):
             cmd.extend(["--model", str(payload["model"]).strip()])
         if payload.get("dedup_policy"):
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
         if nvenc_mp_norm:
             cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
+        if batch_size is not None:
+            cmd.extend(["--batch-size", str(batch_size)])
         if payload.get("zero_disk") is False:
             cmd.append("--no-zero-disk")
         if payload.get("use_tensorrt") is False:
             cmd.append("--no-tensorrt")
-        if payload.get("force", True):
+        if payload.get("force", False):
             cmd.append("--force")
 
         extra_env = {}
@@ -875,10 +929,36 @@ class JobManager:
     def abort_job(self) -> Dict[str, Any]:
         """Buộc dừng ngay tiến trình con do Web GUI khởi chạy và dọn khóa GPU mồ côi."""
         killed_pid: Optional[int] = None
+        killed_proc: Optional[Any] = None
+        owned_tree_pids: set[int] = set()
         with self._lock:
             proc = self._proc
             if proc is not None and proc.poll() is None:
                 killed_pid = getattr(proc, "pid", None)
+                killed_proc = proc
+                killed_pid_int = _coerce_pid(killed_pid)
+                if killed_pid_int is not None:
+                    owned_tree_pids.add(killed_pid_int)
+                    try:
+                        import psutil
+                        parent_proc = psutil.Process(killed_pid_int)
+                        for child in parent_proc.children(recursive=True):
+                            c_pid = _coerce_pid(getattr(child, "pid", None))
+                            if c_pid is not None:
+                                owned_tree_pids.add(c_pid)
+                    except Exception:
+                        pass
+                live_file = self.workspace_root / "logs" / "live_status.json"
+                if live_file.is_file() and self._active_job is not None:
+                    try:
+                        live_mtime = live_file.stat().st_mtime
+                        ldata = json.loads(live_file.read_text(encoding="utf-8"))
+                        if isinstance(ldata, dict) and live_matches_web_job(ldata, self._active_job, live_mtime):
+                            l_pid = _coerce_pid(ldata.get("pid"))
+                            if l_pid is not None:
+                                owned_tree_pids.add(l_pid)
+                    except Exception:
+                        pass
                 if self._active_job:
                     self._active_job["status"] = "aborted"
                 try:
@@ -905,18 +985,44 @@ class JobManager:
                     except Exception:
                         pass
 
-        # Thu hồi khóa .gpu_active.lock nếu thuộc PID vừa kết thúc hoặc phát hiện tiến trình CLI ngoài
+        if killed_proc is not None:
+            try:
+                killed_proc.wait(timeout=2.0)
+            except TypeError:
+                if killed_proc.poll() is not None:
+                    try:
+                        killed_proc.wait()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if owned_tree_pids:
+            try:
+                import psutil
+                deadline = time.monotonic() + 0.4
+                while time.monotonic() < deadline:
+                    if not any(psutil.pid_exists(p) for p in owned_tree_pids):
+                        break
+                    time.sleep(0.05)
+            except Exception:
+                pass
+
+        # Reclaim .gpu_active.lock only if owned by the killed tree or a dead PID; preserve external CLI owners.
         lock_file = self.workspace_root / ".gpu_active.lock"
         external_lock_pid: Optional[int] = None
         if lock_file.is_file():
             lock_state = check_active_gpu_lock(self.workspace_root)
-            if lock_state.get("locked"):
-                external_lock_pid = lock_state.get("pid")
-            else:
+            lock_pid = _coerce_pid(lock_state.get("pid"))
+            if not lock_state.get("locked") or (
+                killed_pid is not None and lock_pid is not None and lock_pid in owned_tree_pids
+            ):
                 try:
-                    lock_file.unlink()
+                    lock_file.unlink(missing_ok=True)
                 except OSError:
                     pass
+            else:
+                external_lock_pid = lock_state.get("pid")
 
         if killed_pid is not None:
             return {
