@@ -900,16 +900,36 @@ class JobManager:
     def request_graceful_pause(self) -> Dict[str, Any]:
         """Ghi cờ dừng êm logs/.graceful_pause.flag cho cả tiến trình Web lẫn CLI ngoài."""
         logs_dir = self.workspace_root / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
         flag_path = logs_dir / ".graceful_pause.flag"
-        tmp_path = logs_dir / f".graceful_pause.flag.{os.getpid()}.tmp"
-        data = {
-            "requested_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            "reason": "web_gui_graceful_pause",
-        }
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp_path, flag_path)
         with self._lock:
+            if self._active_job and self._proc is not None:
+                rc = self._proc.poll()
+                if rc is not None and self._active_job.get("status") in {"running", "pausing", "aborted"}:
+                    self._finalize_locked(int(rc))
+            if self._active_job and self._active_job.get("status") == "aborted":
+                return {
+                    "ok": False,
+                    "graceful_pause_pending": flag_path.is_file(),
+                    "status": "aborted",
+                    "flag_path": str(flag_path),
+                    "message": "Tác vụ đã bị buộc dừng; không thể đặt cờ dừng êm.",
+                }
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = logs_dir / (
+                f".graceful_pause.flag.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp"
+            )
+            data = {
+                "requested_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "reason": "web_gui_graceful_pause",
+            }
+            try:
+                tmp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp_path, flag_path)
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if (
                 self._active_job
                 and self._active_job.get("status") == "running"
@@ -921,12 +941,15 @@ class JobManager:
     def clear_graceful_pause(self) -> Dict[str, Any]:
         """Hủy cờ dừng êm nếu chunk hiện tại chưa kết thúc."""
         flag_path = self.workspace_root / "logs" / ".graceful_pause.flag"
-        try:
-            if flag_path.exists():
-                flag_path.unlink()
-        except OSError:
-            pass
         with self._lock:
+            if self._active_job and self._proc is not None:
+                rc = self._proc.poll()
+                if rc is not None and self._active_job.get("status") in {"running", "pausing", "aborted"}:
+                    self._finalize_locked(int(rc))
+            try:
+                flag_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             if self._active_job and self._active_job.get("status") == "pausing":
                 self._active_job["status"] = "running"
         return {"ok": True, "graceful_pause_pending": False}
@@ -968,6 +991,11 @@ class JobManager:
                         pass
                 if self._active_job:
                     self._active_job["status"] = "aborted"
+                pause_flag = self.workspace_root / "logs" / ".graceful_pause.flag"
+                try:
+                    pause_flag.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 try:
                     if (
                         sys.platform == "win32"

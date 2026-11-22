@@ -5231,3 +5231,183 @@ def test_abort_job_before_drain_finalization_preserves_paused_telemetry(
     assert not drain_thread2.is_alive()
     assert len(jm2.get_state()["history"]) == 1
     assert hub_jm2.read_pipeline_state()["effective_stage"] == "paused"
+
+
+def test_concurrent_graceful_pause_and_clear_zero_permission_error_or_desync(tmp_path: Path):
+    """Concurrent pause/clear calls must never raise PermissionError or desync status vs flag."""
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "pause_clear_race_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    holder: Dict[str, FakePopenProcess] = {}
+
+    def running_factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        proc = FakePopenProcess(cmd, pid=52520, running=True, return_code=0)
+        holder["proc"] = proc
+        return proc
+
+    jm = JobManager(root, popen_factory=running_factory)
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    job = jm.start_upscale_job({"inputs": [src_ep], "dry_run": True})
+    assert job["status"] == "running"
+
+    rounds = 40
+    start_barrier = threading.Barrier(5)
+    end_barrier = threading.Barrier(5)
+    errors: List[BaseException] = []
+
+    def pause_worker() -> None:
+        try:
+            for _ in range(rounds):
+                start_barrier.wait(timeout=5.0)
+                res = jm.request_graceful_pause()
+                assert res["ok"] is True
+                end_barrier.wait(timeout=5.0)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def clear_worker() -> None:
+        try:
+            for _ in range(rounds):
+                start_barrier.wait(timeout=5.0)
+                res = jm.clear_graceful_pause()
+                assert res["ok"] is True
+                end_barrier.wait(timeout=5.0)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=pause_worker, daemon=True),
+        threading.Thread(target=pause_worker, daemon=True),
+        threading.Thread(target=pause_worker, daemon=True),
+        threading.Thread(target=clear_worker, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+
+    for _ in range(rounds):
+        start_barrier.wait(timeout=5.0)
+        end_barrier.wait(timeout=5.0)
+        cur_status = jm.get_state()["status"]
+        assert cur_status in {"running", "pausing"}
+        assert (cur_status == "pausing") == flag_path.is_file()
+        assert not list((root / "logs").glob(".graceful_pause.flag.*.tmp"))
+
+    for t in threads:
+        t.join(timeout=15.0)
+        assert not t.is_alive()
+    assert not errors
+
+    # Clear pause cleanly back to running, then complete normally; external-CLI pause remains allowed
+    assert jm.clear_graceful_pause()["graceful_pause_pending"] is False
+    assert jm.get_state()["status"] == "running"
+    assert not flag_path.exists()
+    holder["proc"]._running = False
+    holder["proc"]._return_code = 0
+    holder["proc"]._done.set()
+    for _ in range(40):
+        if jm.get_state()["status"] == "completed":
+            break
+        threading.Event().wait(0.01)
+    assert jm.get_state()["status"] == "completed"
+    ext_after_done = jm.request_graceful_pause()
+    assert ext_after_done["ok"] is True
+    assert ext_after_done["graceful_pause_pending"] is True
+    assert flag_path.is_file()
+    assert jm.clear_graceful_pause()["graceful_pause_pending"] is False
+    assert not flag_path.exists()
+
+    root_cli = _seed_workspace(tmp_path / "pause_cli_compat_ws")
+    jm_cli = JobManager(root_cli, popen_factory=running_factory)
+    ext_res = jm_cli.request_graceful_pause()
+    assert ext_res["ok"] is True
+    assert ext_res["graceful_pause_pending"] is True
+    assert (root_cli / "logs" / ".graceful_pause.flag").is_file()
+    clr_res = jm_cli.clear_graceful_pause()
+    assert clr_res["ok"] is True
+    assert clr_res["graceful_pause_pending"] is False
+    assert not (root_cli / "logs" / ".graceful_pause.flag").exists()
+
+
+def test_graceful_pause_racing_abort_job_never_orphans_flag(tmp_path: Path):
+    """Racing request_graceful_pause() against abort_job() must never leave .graceful_pause.flag orphaned."""
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "pause_abort_race_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+
+    def running_factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        return FakePopenProcess(cmd, pid=53530, running=True, return_code=-1)
+
+    def _pause(b: threading.Barrier, out: List[Dict[str, Any]]) -> None:
+        b.wait(timeout=5.0)
+        out.append(jm.request_graceful_pause())
+
+    def _abort(b: threading.Barrier, out: List[Dict[str, Any]]) -> None:
+        b.wait(timeout=5.0)
+        out.append(jm.abort_job())
+
+    jm = JobManager(root, popen_factory=running_factory)
+    for _ in range(30):
+        jm.start_upscale_job({"inputs": [src_ep], "dry_run": True})
+        barrier = threading.Barrier(2)
+        pause_results: List[Dict[str, Any]] = []
+        abort_results: List[Dict[str, Any]] = []
+
+        t1 = threading.Thread(target=_pause, args=(barrier, pause_results), daemon=True)
+        t2 = threading.Thread(target=_abort, args=(barrier, abort_results), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
+        assert not t1.is_alive() and not t2.is_alive()
+        assert abort_results[0]["ok"] is True
+        if pause_results[0]["ok"]:
+            assert pause_results[0]["graceful_pause_pending"] is True
+        else:
+            assert pause_results[0]["status"] == "aborted"
+            assert pause_results[0]["graceful_pause_pending"] is False
+
+        state = jm.get_state()
+        assert state["status"] == "aborted"
+        assert state["active_job"]["finished_at"] is not None
+        assert not flag_path.exists()
+        assert not list((root / "logs").glob(".graceful_pause.flag.*.tmp"))
+
+    # Deterministic mid-abort teardown test: request_graceful_pause() during terminate()/wait() window
+    mid_started = threading.Event()
+    mid_release = threading.Event()
+
+    class _MidAbortProc(FakePopenProcess):
+        def terminate(self) -> None:
+            mid_started.set()
+            assert mid_release.wait(timeout=5.0)
+            super().terminate()
+
+    jm_mid = JobManager(root, popen_factory=lambda cmd, **kw: _MidAbortProc(cmd, pid=54540, running=True))
+    jm_mid.start_upscale_job({"inputs": [src_ep], "dry_run": True})
+    abort_done: List[Dict[str, Any]] = []
+    t_abort = threading.Thread(target=lambda: abort_done.append(jm_mid.abort_job()), daemon=True)
+    t_abort.start()
+    assert mid_started.wait(timeout=5.0)
+
+    mid_pause = jm_mid.request_graceful_pause()
+    assert mid_pause["ok"] is False
+    assert mid_pause["status"] == "aborted"
+    assert mid_pause["graceful_pause_pending"] is False
+    assert not flag_path.exists()
+
+    mid_release.set()
+    t_abort.join(timeout=5.0)
+    assert not t_abort.is_alive()
+    assert abort_done[0]["ok"] is True
+    assert jm_mid.get_state()["status"] == "aborted"
+    assert not flag_path.exists()
+
+    # Post-abort call after finalization must also refuse writing .graceful_pause.flag
+    post_pause = jm_mid.request_graceful_pause()
+    assert post_pause["ok"] is False
+    assert post_pause["status"] == "aborted"
+    assert post_pause["graceful_pause_pending"] is False
+    assert not flag_path.exists()
