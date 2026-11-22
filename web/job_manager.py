@@ -308,7 +308,7 @@ class JobManager:
         with self._lock:
             if self._active_job and self._proc is not None:
                 rc = self._proc.poll()
-                if rc is not None and self._active_job["status"] in {"running", "pausing"}:
+                if rc is not None and self._active_job["status"] in {"running", "pausing", "aborted"}:
                     self._finalize_locked(rc)
             active = dict(self._active_job) if self._active_job else None
             hist = [dict(x) for x in self._history]
@@ -621,6 +621,11 @@ class JobManager:
         # Giữ self._lock xuyên suốt kiểm tra sẵn sàng + khởi tạo tiến trình con + đăng ký state để triệt tiêu TOCTOU race
         with self._lock:
             self._ensure_ready_to_launch_locked(requires_gpu=requires_gpu)
+            # Finalize an exited prior job if the new launch races ahead of _drain_output().
+            if self._active_job and self._proc is not None:
+                prev_rc = self._proc.poll()
+                if prev_rc is not None:
+                    self._finalize_locked(int(prev_rc))
             if pause_flag.exists():
                 try:
                     pause_flag.unlink()
@@ -930,12 +935,14 @@ class JobManager:
         """Buộc dừng ngay tiến trình con do Web GUI khởi chạy và dọn khóa GPU mồ côi."""
         killed_pid: Optional[int] = None
         killed_proc: Optional[Any] = None
+        killed_job_id: Optional[str] = None
         owned_tree_pids: set[int] = set()
         with self._lock:
             proc = self._proc
             if proc is not None and proc.poll() is None:
                 killed_pid = getattr(proc, "pid", None)
                 killed_proc = proc
+                killed_job_id = str(self._active_job.get("job_id") or "") if self._active_job else None
                 killed_pid_int = _coerce_pid(killed_pid)
                 if killed_pid_int is not None:
                     owned_tree_pids.add(killed_pid_int)
@@ -1023,6 +1030,18 @@ class JobManager:
                     pass
             else:
                 external_lock_pid = lock_state.get("pid")
+
+        # Finalize deterministically once killed_proc has exited instead of waiting for _drain_output().
+        if killed_proc is not None:
+            with self._lock:
+                if (
+                    self._active_job
+                    and self._proc is killed_proc
+                    and (not killed_job_id or self._active_job.get("job_id") == killed_job_id)
+                ):
+                    rc = killed_proc.poll()
+                    if rc is not None:
+                        self._finalize_locked(int(rc))
 
         if killed_pid is not None:
             return {

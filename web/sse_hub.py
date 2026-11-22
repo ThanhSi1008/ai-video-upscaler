@@ -52,6 +52,39 @@ def _parse_iso_timestamp(raw: Any) -> float:
             return 0.0
 
 
+def _resolve_last_job(
+    job_state: Dict[str, Any], active_job: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Return latest finished job, falling back to an unfinalized aborted active_job."""
+    history_list = job_state.get("history") or []
+    last_hist = (
+        history_list[0]
+        if (history_list and isinstance(history_list[0], dict))
+        else (
+            job_state.get("last_finished_job")
+            if isinstance(job_state.get("last_finished_job"), dict)
+            else None
+        )
+    )
+    if active_job is not None and str(active_job.get("status") or "") == "aborted":
+        active_jid = str(active_job.get("job_id") or "").strip()
+        in_history = bool(
+            active_jid
+            and any(
+                isinstance(h, dict) and str(h.get("job_id") or "").strip() == active_jid
+                for h in history_list
+            )
+        )
+        # Check job_id / finished_at so an older history[0] job never masks a newly aborted job.
+        if not in_history and (
+            last_hist is None
+            or active_jid
+            or active_job.get("finished_at") is None
+        ):
+            return active_job
+    return last_hist
+
+
 def live_matches_web_job(
     live_data: Dict[str, Any],
     job_dict: Dict[str, Any],
@@ -597,16 +630,7 @@ class TelemetryHub:
                     "eta_seconds": None,
                 }
         else:
-            history_list = job_state.get("history") or []
-            last_job = (
-                history_list[0]
-                if (history_list and isinstance(history_list[0], dict))
-                else (
-                    job_state.get("last_finished_job")
-                    if isinstance(job_state.get("last_finished_job"), dict)
-                    else None
-                )
-            )
+            last_job = _resolve_last_job(job_state, active_job)
             if (
                 last_job is not None
                 and not pid_alive
@@ -951,16 +975,7 @@ class TelemetryHub:
         except OSError:
             recent_logs = []
 
-        history_list = job_state.get("history") or []
-        last_hist = (
-            history_list[0]
-            if (history_list and isinstance(history_list[0], dict))
-            else (
-                job_state.get("last_finished_job")
-                if isinstance(job_state.get("last_finished_job"), dict)
-                else None
-            )
-        )
+        last_hist = _resolve_last_job(job_state, active_job)
         if isinstance(last_hist, dict):
             hist_lp = str(last_hist.get("log_path") or "").strip()
             if hist_lp:

@@ -3987,12 +3987,16 @@ def test_windows_venv_child_pid_live_telemetry_not_frozen(tmp_path: Path, monkey
 
         abort_resp = client.post("/api/jobs/abort")
         assert abort_resp.status_code == 200
+        snap: Dict[str, Any] = {}
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             snap = app.state.job_manager.get_state()
-            if snap.get("status") != "running":
+            active = snap.get("active_job")
+            if (not active or active.get("finished_at") is not None) and snap.get("history"):
                 break
             time.sleep(0.02)
+        assert snap.get("status") == "aborted"
+        assert snap.get("history"), f"Aborted job did not finalize before deadline: {snap}"
 
         post_abort = client.get("/api/status").json()["pipeline"]
         assert post_abort["effective_stage"] == "paused"
@@ -4995,3 +4999,235 @@ def test_frontend_ui_upgrade_contracts_issue_02_to_20(studio_env: Dict[str, Any]
     assert "/api/night-report" in panels_js
     assert "nightReportSeq" in panels_js
     assert "nightReportCode.textContent" in panels_js
+
+
+def test_abort_job_before_drain_finalization_preserves_paused_telemetry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ensure post-abort finalization and TelemetryHub fallback survive blocked _drain_output()."""
+    import psutil
+    from web.job_manager import JobManager
+    from web.sse_hub import TelemetryHub
+
+    class _BlockingStdout:
+        def __init__(self, started: threading.Event, release: threading.Event) -> None:
+            self._started = started
+            self._release = release
+
+        def __iter__(self):
+            yield "[INFO] Booting...\n"
+            self._started.set()
+            assert self._release.wait(timeout=5.0), "_drain_output release event timed out"
+            yield "[INFO] Drain complete\n"
+
+    class _AbortRaceProc(FakePopenProcess):
+        def __init__(
+            self,
+            cmd: List[str],
+            pid: int,
+            alive_set: set[int],
+            started: threading.Event,
+            release: threading.Event,
+            *,
+            delay_exit_on_terminate: bool = False,
+        ) -> None:
+            super().__init__(cmd, pid=pid, running=True)
+            self._alive_set = alive_set
+            self._delay_exit_on_terminate = delay_exit_on_terminate
+            self.stdout = _BlockingStdout(started, release)  # type: ignore[assignment]
+
+        def wait(self, timeout: float | None = None) -> int:
+            if self._running:
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired(self.cmd, timeout)
+                self._done.wait(timeout=5.0)
+            self._running = False
+            return self._return_code
+
+        def terminate(self) -> None:
+            self._alive_set.discard(25000)
+            self._alive_set.discard(27000)
+            if not self._delay_exit_on_terminate:
+                self._running = False
+                self._return_code = -1
+                self._done.set()
+
+        def mark_exited(self, rc: int = -1) -> None:
+            self._running = False
+            self._return_code = rc
+            self._done.set()
+
+    def _idle_gpu_metrics() -> Dict[str, Any]:
+        return {
+            "pstate": "P8",
+            "gpu_util_pct": 0.0,
+            "mem_util_pct": 0.0,
+            "enc_util_pct": 0.0,
+            "dec_util_pct": 0.0,
+            "mem_clock_mhz": 405.0,
+            "core_clock_mhz": 210.0,
+            "power_w": 12.0,
+            "temp_c": 38.0,
+            "vram_used_mib": 256.0,
+            "vram_free_mib": 12032.0,
+            "vram_total_mib": 12288.0,
+        }
+
+    def _write_live_status(root_dir: Path, job_dict: Dict[str, Any]) -> None:
+        (root_dir / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": "Frieren_10",
+                    "pid": 27000,
+                    "ppid": 25000,
+                    "job_id": job_dict["job_id"],
+                    "started_at": job_dict["started_at"],
+                    "stage": "upscaling",
+                    "total_chunks": 4,
+                    "completed_chunks": 2,
+                    "active_chunk": 1,
+                    "steady_fps": 21.5,
+                    "chunks": [
+                        {"idx": 0, "status": "done"},
+                        {"idx": 1, "status": "done"},
+                        {"idx": 2, "status": "running"},
+                        {"idx": 3, "status": "pending"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    # Case 1: abort_job() completes while _drain_output() is parked in stdout iteration.
+    root1 = _seed_workspace(tmp_path / "abort_race_ws1")
+    alive_pids: set[int] = {25000, 27000}
+    drain_started1 = threading.Event()
+    drain_release1 = threading.Event()
+    procs1: List[_AbortRaceProc] = []
+
+    def popen1(cmd: List[str], **kwargs: Any) -> _AbortRaceProc:
+        p = _AbortRaceProc(cmd, pid=25000, alive_set=alive_pids, started=drain_started1, release=drain_release1)
+        procs1.append(p)
+        return p
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+    jm1 = JobManager(root1, popen_factory=popen1)
+    job1 = jm1.start_upscale_job({"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]})
+    assert drain_started1.wait(timeout=5.0)
+    _write_live_status(root1, job1)
+
+    abort_res = jm1.abort_job()
+    assert abort_res["ok"] is True
+    assert abort_res["status"] == "aborted"
+    assert procs1[0].poll() == -1
+
+    # Verify TelemetryHub unfinalized "aborted" fallback directly (empty history and prior-job history).
+    unfinalized_active = {**job1, "status": "aborted", "finished_at": None, "return_code": None}
+    hub_empty = TelemetryHub(
+        root1,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {"status": "aborted", "active_job": dict(unfinalized_active), "history": []},
+    )
+    pipe_empty = hub_empty.read_pipeline_state()
+    assert pipe_empty["effective_stage"] == "paused"
+    assert pipe_empty["live"]["stage"] == "paused"
+    assert pipe_empty["live"]["last_stage"] == "upscaling"
+    assert pipe_empty["live"]["completed_chunks"] == 2
+    assert pipe_empty["live"]["steady_fps"] == 21.5
+    assert hub_empty._select_active_log_file() == Path(job1["log_path"])
+
+    prior_job = {
+        "job_id": "prior0001",
+        "job_type": "upscale",
+        "status": "completed",
+        "started_at": "2026-11-22T00:00:00",
+        "finished_at": "2026-11-22T00:05:00",
+        "return_code": 0,
+    }
+    hub_prior = TelemetryHub(
+        root1,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "status": "aborted",
+            "active_job": dict(unfinalized_active),
+            "history": [prior_job],
+        },
+    )
+    pipe_prior = hub_prior.read_pipeline_state()
+    assert pipe_prior["effective_stage"] == "paused"
+    assert pipe_prior["live"]["completed_chunks"] == 2
+    assert pipe_prior["live"]["steady_fps"] == 21.5
+
+    # Verify jm1.get_state() finalized cleanly once while _drain_output() is still blocked.
+    hub_jm1 = TelemetryHub(root1, gpu_query_fn=_idle_gpu_metrics, job_state_provider=jm1.get_state)
+    state1 = jm1.get_state()
+    assert state1["status"] == "aborted"
+    assert state1["active_job"]["finished_at"] is not None
+    assert state1["active_job"]["return_code"] == -1
+    assert len(state1["history"]) == 1
+    assert state1["history"][0]["job_id"] == job1["job_id"]
+    assert hub_jm1.read_pipeline_state()["effective_stage"] == "paused"
+
+    # Release _drain_output() and join thread to prove zero duplicate history entries.
+    drain_thread1 = next(t for t in threading.enumerate() if t.name == f"WebJobDrain-{job1['job_id']}")
+    drain_release1.set()
+    drain_thread1.join(timeout=5.0)
+    assert not drain_thread1.is_alive()
+
+    state1_after = jm1.get_state()
+    assert len(state1_after["history"]) == 1
+    assert state1_after["status"] == "aborted"
+    assert hub_jm1.read_pipeline_state()["effective_stage"] == "paused"
+
+    # Case 2: proc finishes exiting AFTER abort_job() returns while _drain_output() is still blocked;
+    # TelemetryHub preserves "paused" pre-finalization and jm2.get_state() finalizes cleanly once.
+    root2 = _seed_workspace(tmp_path / "abort_race_ws2")
+    alive_pids2: set[int] = {25000, 27000}
+    drain_started2 = threading.Event()
+    drain_release2 = threading.Event()
+    procs2: List[_AbortRaceProc] = []
+
+    def popen2(cmd: List[str], **kwargs: Any) -> _AbortRaceProc:
+        p = _AbortRaceProc(
+            cmd,
+            pid=25000,
+            alive_set=alive_pids2,
+            started=drain_started2,
+            release=drain_release2,
+            delay_exit_on_terminate=True,
+        )
+        procs2.append(p)
+        return p
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids2)
+    jm2 = JobManager(root2, popen_factory=popen2)
+    job2 = jm2.start_upscale_job({"inputs": ["anime_season/[SubsPlease] Frieren - 10 (1080p).mkv"]})
+    assert drain_started2.wait(timeout=5.0)
+    _write_live_status(root2, job2)
+
+    abort_res2 = jm2.abort_job()
+    assert abort_res2["ok"] is True
+    assert procs2[0].poll() is None
+
+    hub_jm2 = TelemetryHub(root2, gpu_query_fn=_idle_gpu_metrics, job_state_provider=jm2.get_state)
+    pre_exit_state = jm2.get_state()
+    assert pre_exit_state["status"] == "aborted"
+    assert pre_exit_state["active_job"]["finished_at"] is None
+    assert pre_exit_state["history"] == []
+    assert hub_jm2.read_pipeline_state()["effective_stage"] == "paused"
+
+    procs2[0].mark_exited(-1)
+    assert procs2[0].poll() == -1
+    post_exit_state = jm2.get_state()
+    assert post_exit_state["status"] == "aborted"
+    assert post_exit_state["active_job"]["finished_at"] is not None
+    assert post_exit_state["active_job"]["return_code"] == -1
+    assert len(post_exit_state["history"]) == 1
+    assert hub_jm2.read_pipeline_state()["effective_stage"] == "paused"
+
+    drain_thread2 = next(t for t in threading.enumerate() if t.name == f"WebJobDrain-{job2['job_id']}")
+    drain_release2.set()
+    drain_thread2.join(timeout=5.0)
+    assert not drain_thread2.is_alive()
+    assert len(jm2.get_state()["history"]) == 1
+    assert hub_jm2.read_pipeline_state()["effective_stage"] == "paused"
