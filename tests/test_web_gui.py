@@ -5536,3 +5536,169 @@ def test_pause_graceful_after_aborted_web_job_allows_live_external_cli(
         assert flag_path.is_file()
         assert client.post("/api/jobs/clear-pause").status_code == 200
         assert not flag_path.exists()
+
+
+def test_pause_graceful_during_abort_teardown_dying_child_lock_refuses_with_409(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Dying child holding .gpu_active.lock during or after abort_job() teardown must return HTTP 409."""
+    import psutil
+
+    root = _seed_workspace(tmp_path / "pause_abort_dying_child_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    lock_file = root / ".gpu_active.lock"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+
+    launcher_pid = 91000
+    child_pid = 91001
+    teardown_entered = threading.Event()
+    teardown_release = threading.Event()
+    child_alive = {"value": True}
+
+    orig_process = psutil.Process
+
+    class _FakeChildProc:
+        pid = child_pid
+
+        def ppid(self) -> int:
+            return launcher_pid
+
+    class _FakeLauncherProc:
+        pid = launcher_pid
+
+        def children(self, recursive: bool = True) -> List[Any]:
+            return [_FakeChildProc()]
+
+    def fake_process(pid: int | None = None) -> Any:
+        if pid == launcher_pid:
+            return _FakeLauncherProc()
+        if pid == child_pid:
+            return _FakeChildProc()
+        return orig_process(pid)
+
+    def fake_pid_exists(pid: int) -> bool:
+        if pid == child_pid:
+            return child_alive["value"]
+        return False
+
+    class _TeardownRaceProc(FakePopenProcess):
+        def wait(self) -> int:
+            teardown_entered.set()
+            assert teardown_release.wait(timeout=5.0)
+            return super().wait()
+
+    monkeypatch.setattr(psutil, "Process", fake_process)
+    monkeypatch.setattr(psutil, "pid_exists", fake_pid_exists)
+
+    app = create_app(
+        workspace_root=root,
+        popen_factory=lambda cmd, **_kw: _TeardownRaceProc(cmd, pid=launcher_pid, running=True, return_code=-1),
+    )
+    with TestClient(app) as client:
+        start_resp = client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": True})
+        assert start_resp.status_code == 200
+        job = start_resp.json()["job"]
+
+        lock_file.write_text(f"{child_pid}\n", encoding="utf-8")
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"job_id": job["job_id"], "pid": child_pid, "ppid": launcher_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+
+        abort_holder: List[Any] = []
+        t_abort = threading.Thread(target=lambda: abort_holder.append(client.post("/api/jobs/abort")), daemon=True)
+        t_abort.start()
+        assert teardown_entered.wait(timeout=5.0)
+
+        # Even if get_state() observes launcher exit and finalizes _active_job during teardown,
+        # pause-graceful must still refuse with 409 and never orphan .graceful_pause.flag.
+        assert client.get("/api/status").status_code == 200
+        pause_during = client.post("/api/jobs/pause-graceful")
+        assert pause_during.status_code == 409
+        assert pause_during.json()["ok"] is False
+        assert pause_during.json()["status"] == "aborted"
+        assert pause_during.json()["graceful_pause_pending"] is False
+        assert not flag_path.exists()
+
+        child_alive["value"] = False
+        teardown_release.set()
+        t_abort.join(timeout=5.0)
+        assert not t_abort.is_alive()
+        assert abort_holder[0].status_code == 200
+        assert abort_holder[0].json()["ok"] is True
+        assert not lock_file.exists()
+        assert not flag_path.exists()
+        assert app.state.job_manager.get_state()["status"] == "aborted"
+
+        # A lingering descendant holding .gpu_active.lock or live_status.json after abort_job() returns must still return 409.
+        child_alive["value"] = True
+        lock_file.write_text(f"{child_pid}\n", encoding="utf-8")
+        pause_lingering = client.post("/api/jobs/pause-graceful")
+        assert pause_lingering.status_code == 409
+        assert pause_lingering.json()["ok"] is False
+        assert not flag_path.exists()
+
+        lock_file.unlink()
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": child_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+        pause_lingering_live = client.post("/api/jobs/pause-graceful")
+        assert pause_lingering_live.status_code == 409
+        assert pause_lingering_live.json()["ok"] is False
+        assert not flag_path.exists()
+
+
+def test_pause_graceful_after_abort_rejects_foreign_job_id_and_aborted_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Post-abort external CLI detection rejects non-empty foreign job_id and 'aborted' stage in live_status.json."""
+    import psutil
+
+    root = _seed_workspace(tmp_path / "pause_abort_foreign_edge_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    ext_pid = os.getpid()
+    alive_pids: set[int] = {63630, ext_pid}
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+    app = create_app(
+        workspace_root=root,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=63630, running=True, return_code=-1),
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": True}).status_code == 200
+        assert client.post("/api/jobs/abort").status_code == 200
+        alive_pids.discard(63630)
+
+        # Case 1: Foreign non-empty job_id in live_status.json (not an external CLI) -> HTTP 409
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"job_id": "prev_web_job_99", "pid": ext_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+        foreign_resp = client.post("/api/jobs/pause-graceful")
+        assert foreign_resp.status_code == 409
+        assert foreign_resp.json()["ok"] is False
+        assert not flag_path.exists()
+
+        # Case 2: Terminal 'aborted' stage in live_status.json -> HTTP 409
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": ext_pid, "stage": "aborted"}),
+            encoding="utf-8",
+        )
+        aborted_stage_resp = client.post("/api/jobs/pause-graceful")
+        assert aborted_stage_resp.status_code == 409
+        assert aborted_stage_resp.json()["ok"] is False
+        assert not flag_path.exists()
+
+        # Case 3: Genuine external CLI (blank job_id + active stage) -> HTTP 200
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"job_id": "   ", "pid": ext_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+        cli_resp = client.post("/api/jobs/pause-graceful")
+        assert cli_resp.status_code == 200
+        assert cli_resp.json()["ok"] is True
+        assert flag_path.is_file()
+        assert client.post("/api/jobs/clear-pause").status_code == 200
+        assert not flag_path.exists()
