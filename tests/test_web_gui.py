@@ -4999,6 +4999,9 @@ def test_frontend_ui_upgrade_contracts_issue_02_to_20(studio_env: Dict[str, Any]
     assert "/api/night-report" in panels_js
     assert "nightReportSeq" in panels_js
     assert "nightReportCode.textContent" in panels_js
+    assert "res && res.ok === false" in app_js
+    assert 'err?.status === 409 ? "warn" : "error"' in app_js
+    assert "innerHTML" not in app_js
 
 
 def test_abort_job_before_drain_finalization_preserves_paused_telemetry(
@@ -5411,3 +5414,125 @@ def test_graceful_pause_racing_abort_job_never_orphans_flag(tmp_path: Path):
     assert post_pause["status"] == "aborted"
     assert post_pause["graceful_pause_pending"] is False
     assert not flag_path.exists()
+
+
+def test_pause_graceful_after_aborted_web_job_refuses_without_external_cli_with_409(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """POST /api/jobs/pause-graceful returns HTTP 409 and writes no flag after abort when idle."""
+    import psutil
+
+    root = _seed_workspace(tmp_path / "pause_abort_409_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    alive_pids: set[int] = {61610}
+
+    def running_factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        return FakePopenProcess(cmd, pid=61610, running=True, return_code=-1)
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+    app = create_app(workspace_root=root, popen_factory=running_factory)
+    with TestClient(app) as client:
+        start_resp = client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": True})
+        assert start_resp.status_code == 200
+        job = start_resp.json()["job"]
+
+        # Simulate live_status.json written by the aborted Web Job before teardown
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"job_id": job["job_id"], "pid": 61610, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+
+        abort_resp = client.post("/api/jobs/abort")
+        assert abort_resp.status_code == 200
+        assert abort_resp.json()["ok"] is True
+        alive_pids.discard(61610)
+
+        pause_resp = client.post("/api/jobs/pause-graceful")
+        assert pause_resp.status_code == 409
+        payload = pause_resp.json()
+        assert payload["ok"] is False
+        assert payload["status"] == "aborted"
+        assert payload["graceful_pause_pending"] is False
+        assert payload["flag_path"] == str(flag_path)
+        assert isinstance(payload.get("message"), str) and payload["message"]
+        assert not flag_path.exists()
+
+        # Even if a stale live_status.json has a terminal stage for another PID, refuse with 409
+        alive_pids.add(os.getpid())
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": os.getpid(), "stage": "paused"}),
+            encoding="utf-8",
+        )
+        stale_resp = client.post("/api/jobs/pause-graceful")
+        assert stale_resp.status_code == 409
+        assert stale_resp.json()["ok"] is False
+        assert not flag_path.exists()
+
+
+def test_pause_graceful_after_aborted_web_job_allows_live_external_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """POST /api/jobs/pause-graceful returns HTTP 200 and creates flag for live external CLI post-abort."""
+    import psutil
+
+    root = _seed_workspace(tmp_path / "pause_abort_ext_cli_ws")
+    flag_path = root / "logs" / ".graceful_pause.flag"
+    src_ep = str(root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv")
+    ext_pid = os.getpid()
+    alive_pids: set[int] = {62620, ext_pid}
+
+    def running_factory(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        return FakePopenProcess(cmd, pid=62620, running=True, return_code=-1)
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda p: p in alive_pids)
+    app = create_app(workspace_root=root, popen_factory=running_factory)
+    with TestClient(app) as client:
+        start_resp = client.post("/api/jobs/start", json={"inputs": [src_ep], "dry_run": True})
+        assert start_resp.status_code == 200
+        abort_resp = client.post("/api/jobs/abort")
+        assert abort_resp.status_code == 200
+        assert abort_resp.json()["ok"] is True
+        alive_pids.discard(62620)
+        assert app.state.job_manager.get_state()["status"] == "aborted"
+
+        # Case 1: external CLI holds .gpu_active.lock + live_status.json
+        lock_file = root / ".gpu_active.lock"
+        lock_file.write_text(f"{ext_pid}\n", encoding="utf-8")
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": ext_pid, "stage": "upscaling"}),
+            encoding="utf-8",
+        )
+        pipe_before = app.state.telemetry_hub.read_pipeline_state()
+        assert pipe_before["active_source"] == "cli"
+        assert pipe_before["gpu_lock"]["locked"] is True
+
+        pause_resp = client.post("/api/jobs/pause-graceful")
+        assert pause_resp.status_code == 200
+        pause_json = pause_resp.json()
+        assert pause_json["ok"] is True
+        assert pause_json["graceful_pause_pending"] is True
+        assert flag_path.is_file()
+        assert app.state.job_manager.get_state()["status"] == "aborted"
+        pipe_paused = app.state.telemetry_hub.read_pipeline_state()
+        assert pipe_paused["active_source"] == "cli"
+        assert pipe_paused["graceful_pause_pending"] is True
+
+        clear_resp = client.post("/api/jobs/clear-pause")
+        assert clear_resp.status_code == 200
+        assert clear_resp.json()["graceful_pause_pending"] is False
+        assert not flag_path.exists()
+
+        # Case 2: external CLI in active pre-lock stage (live_status.json only, no .gpu_active.lock)
+        lock_file.unlink()
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps({"pid": ext_pid, "stage": "probing"}),
+            encoding="utf-8",
+        )
+        pause_resp_2 = client.post("/api/jobs/pause-graceful")
+        assert pause_resp_2.status_code == 200
+        assert pause_resp_2.json()["ok"] is True
+        assert pause_resp_2.json()["graceful_pause_pending"] is True
+        assert flag_path.is_file()
+        assert client.post("/api/jobs/clear-pause").status_code == 200
+        assert not flag_path.exists()

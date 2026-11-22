@@ -897,6 +897,34 @@ class JobManager:
             cmd.append("--dry-run")
         return self._spawn_command("subs_pending", cmd, ["pending_subs.json"], payload, requires_gpu=False)
 
+    def _has_live_external_cli_locked(self, aborted_job: Dict[str, Any]) -> bool:
+        """Return True when a live external CLI process is active after an aborted Web Job."""
+        aborted_pid = _coerce_pid(aborted_job.get("pid"))
+        lock_state = check_active_gpu_lock(self.workspace_root)
+        lock_pid = _coerce_pid(lock_state.get("pid"))
+        if lock_state.get("locked") and lock_pid is not None and lock_pid != aborted_pid:
+            return True
+
+        live_file = self.workspace_root / "logs" / "live_status.json"
+        if live_file.is_file():
+            try:
+                live_mtime = live_file.stat().st_mtime
+                ldata = json.loads(live_file.read_text(encoding="utf-8"))
+                if isinstance(ldata, dict) and not live_matches_web_job(ldata, aborted_job, live_mtime):
+                    live_pid = _coerce_pid(ldata.get("pid"))
+                    live_stage = str(ldata.get("stage") or "").strip().lower()
+                    if (
+                        live_pid is not None
+                        and live_pid != aborted_pid
+                        and live_stage not in {"", "idle", "completed", "paused", "error"}
+                    ):
+                        import psutil
+                        if psutil.pid_exists(live_pid):
+                            return True
+            except Exception:
+                pass
+        return False
+
     def request_graceful_pause(self) -> Dict[str, Any]:
         """Ghi cờ dừng êm logs/.graceful_pause.flag cho cả tiến trình Web lẫn CLI ngoài."""
         logs_dir = self.workspace_root / "logs"
@@ -907,13 +935,17 @@ class JobManager:
                 if rc is not None and self._active_job.get("status") in {"running", "pausing", "aborted"}:
                     self._finalize_locked(int(rc))
             if self._active_job and self._active_job.get("status") == "aborted":
-                return {
-                    "ok": False,
-                    "graceful_pause_pending": flag_path.is_file(),
-                    "status": "aborted",
-                    "flag_path": str(flag_path),
-                    "message": "Tác vụ đã bị buộc dừng; không thể đặt cờ dừng êm.",
-                }
+                is_finalized = (
+                    self._proc is None and self._active_job.get("finished_at") is not None
+                )
+                if not is_finalized or not self._has_live_external_cli_locked(self._active_job):
+                    return {
+                        "ok": False,
+                        "graceful_pause_pending": flag_path.is_file(),
+                        "status": "aborted",
+                        "flag_path": str(flag_path),
+                        "message": "Tác vụ đã bị buộc dừng; không thể đặt cờ dừng êm.",
+                    }
             logs_dir.mkdir(parents=True, exist_ok=True)
             tmp_path = logs_dir / (
                 f".graceful_pause.flag.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp"

@@ -250,14 +250,20 @@ function bootstrapStudio() {
 
   btnPauseGraceful?.addEventListener("click", async () => {
     try {
-      await apiFetch("/api/jobs/pause-graceful", { method: "POST" });
-      showToast(
-        "Đã đặt cờ Dừng êm: Pipeline sẽ hoàn tất nốt chunk 24s hiện tại, bảo toàn checkpoint và tạm dừng sạch.",
-        "info"
-      );
+      const res = await apiFetch("/api/jobs/pause-graceful", { method: "POST" });
+      if (res && res.ok === false) {
+        showToast(res.message || "Không thể đặt cờ dừng êm cho tác vụ hiện tại.", "warn");
+      } else {
+        showToast(
+          "Đã đặt cờ Dừng êm: Pipeline sẽ hoàn tất nốt chunk 24s hiện tại, bảo toàn checkpoint và tạm dừng sạch.",
+          "info"
+        );
+      }
       fetchSnapshotFallback();
     } catch (err) {
-      showToast(err.message, "error");
+      const tone = err?.status === 409 ? "warn" : "error";
+      showToast(err?.message || "Không thể đặt cờ dừng êm.", tone);
+      fetchSnapshotFallback();
     }
   });
 

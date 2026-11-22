@@ -1565,11 +1565,14 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/pause-graceful")
-    def api_pause_graceful() -> Dict[str, Any]:
+    def api_pause_graceful() -> Any:
         if is_mock and popen_factory is None and mock_controls is not None:
             return mock_controls["pause_graceful"]()
         try:
-            return job_manager.request_graceful_pause()
+            result = job_manager.request_graceful_pause()
+            if not result.get("ok", True):
+                return JSONResponse(status_code=409, content=result)
+            return result
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
