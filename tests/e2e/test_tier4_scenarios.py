@@ -189,43 +189,37 @@ def test_t4_03_interrupted_run_and_checkpoint_resume(mock_pipeline_env, tmp_path
 def test_t4_04_overnight_batch_queue_with_deadline(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """
     Scenario 4: Overnight Batch Queue with Mixed Specs and Deadline Termination.
-    Verifies clean pause at chunk boundary for in-flight episode and skip for subsequent episodes.
+    Verifies real chunk-boundary pause for ep2 and deadline skip for ep3.
     """
+    from datetime import datetime, timedelta
+
     ep1 = create_synthetic_video(tmp_path / "ep1.mkv", num_frames=8, width=320, height=180)
-    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=8, width=240, height=136)
+    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=48, fps=24, keyint=8, width=240, height=136)
     ep3 = create_synthetic_video(tmp_path / "ep3.mkv", num_frames=8, width=320, height=180)
     out_dir = tmp_path / "out"
 
-    real_run_pipeline = upscale.run_upscale_pipeline
+    def _fake_eta(video_path, *_args, **_kwargs):
+        name = str(video_path)
+        if "ep1" in name:
+            return (True, False, datetime.now() + timedelta(hours=1))
+        if "ep2" in name:
+            return (True, True, datetime.now() - timedelta(seconds=1))
+        return (False, False, datetime.now() - timedelta(seconds=1))
 
-    def mock_pipeline_multi_queue(input_path, *args, **kwargs):
-        if "ep1" in str(input_path):
-            return real_run_pipeline(input_path=input_path, *args, **kwargs)
-        if "ep2" in str(input_path):
-            # Simulate deadline pause during ep2
-            temp_dir = out_dir / ".temp_ep2"
-            up_segs_dir = temp_dir / "upscaled_segs"
-            up_segs_dir.mkdir(parents=True, exist_ok=True)
-            (up_segs_dir / "up_0000.mp4").write_bytes(b"VALID_PARTIAL_SEGMENT")
-            return str(up_segs_dir)
-        # ep3 skipped
-        return str(out_dir / "ep3_4K.mkv")
-
-    with patch("upscale.run_upscale_pipeline", side_effect=mock_pipeline_multi_queue):
+    with patch("upscale.check_deadline_and_eta", side_effect=_fake_eta):
         exit_code, out, err = run_upscale_cli(
-            ["--queue", str(ep1), str(ep2), str(ep3), "--deadline", "07:00", "--allow-partial", "-o", str(out_dir)],
+            ["--queue", str(ep1), str(ep2), str(ep3), "--deadline", "07:00", "--allow-partial", "-s", "1", "-o", str(out_dir)],
             monkeypatch,
             capsys,
         )
 
-    # Incomplete queue exits with code 1
     assert exit_code == 1
-    # ep1 completed
     assert (out_dir / "ep1_4K.mkv").exists()
-    # ep2 paused without corrupt mux
     assert not (out_dir / "ep2_4K.mkv").exists()
-    assert (out_dir / ".temp_ep2" / "upscaled_segs" / "up_0000.mp4").exists()
-    # ep3 not processed
+    seg0 = out_dir / ".temp_ep2" / "upscaled_segs" / "up_0000.mp4"
+    seg1 = out_dir / ".temp_ep2" / "upscaled_segs" / "up_0001.mp4"
+    assert seg0.is_file() and seg0.stat().st_size > 1000
+    assert not seg1.exists()
     assert not (out_dir / "ep3_4K.mkv").exists()
 
 

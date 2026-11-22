@@ -6,7 +6,9 @@ Comprehensive test suite verifying SQLite persistence, normalization, series iso
 keyword matching, error bank cautions, and multi-file triplet import.
 """
 
+import contextlib
 from pathlib import Path
+import sqlite3
 import unicodedata
 import pytest
 import pysubs2
@@ -414,3 +416,46 @@ def test_learn_from_linter_violations_auto_feedback(tmp_path):
     # Re-learning the same violations should be idempotent (count = 0)
     relearned = kb.learn_from_linter_violations(violations, cues, series="tenken")
     assert relearned == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KnowledgeBase._init_db (subtrans/rag.py:326-330) updates gold_units.ja_ngram before "
+        "INSERT OR REPLACE INTO gold_units_fts, leaving old FTS5 tokens orphaned"
+    ),
+)
+def test_fts5_reindex_after_update_purges_stale_tokens(tmp_path):
+    """Lock FTS5 external-content index drift when gold_units.ja_text is updated and reindexed."""
+    db_path = tmp_path / "fts_drift.db"
+    kb = KnowledgeBase(db_path=db_path)
+    assert kb.add_gold_unit("魔法少女", "Ma pháp thiếu nữ", series="s1", status="gold") is True
+
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("UPDATE gold_units SET ja_text = '聖杯戦争', ja_ngram = '' WHERE id = 1")
+        conn.commit()
+
+    kb2 = KnowledgeBase(db_path=db_path)
+    assert kb2.search_gold_units("魔法", series="s1") == []
+    assert len(kb2.search_gold_units("聖杯", series="s1")) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KnowledgeBase._init_db (subtrans/rag.py:321-330) re-queries and re-writes rows where "
+        "_generate_ngram_string returns '' (e.g. digits/punctuation) on every startup"
+    ),
+)
+def test_rag_init_skips_redundant_write_on_empty_ngram_rows(tmp_path):
+    """Lock redundant startup write transaction on gold_units rows with empty ja_ngram."""
+    db_path = tmp_path / "empty_ngram.db"
+    kb = KnowledgeBase(db_path=db_path)
+    assert kb.add_gold_unit("12345", "12345", series="s1", status="gold") is True
+
+    with contextlib.closing(sqlite3.connect(db_path)) as observer:
+        dv1 = observer.execute("PRAGMA data_version").fetchone()[0]
+        KnowledgeBase(db_path=db_path)
+        dv2 = observer.execute("PRAGMA data_version").fetchone()[0]
+
+    assert dv1 == dv2

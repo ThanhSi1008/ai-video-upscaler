@@ -10,6 +10,7 @@ Unit tests for ffmpeg_ops optimizations:
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 import subprocess
 from unittest import mock
@@ -22,8 +23,11 @@ from src.ffmpeg_ops import (
     _count_segment_packets_pyav,
     _probe_video_ffprobe,
     _probe_video_pyav,
+    _recover_open_gop_leading_frames,
+    extract_frames_raw_yuv420,
     get_segments_frame_counts,
     probe_video,
+    split_video_segments,
     verify_segment_resume_frames,
 )
 
@@ -263,3 +267,91 @@ def test_verify_segment_resume_frames_pyav(tmp_path: Path):
 
         assert verify_segment_resume_frames(str(seg), 192) is True
         assert verify_segment_resume_frames(str(seg), 200) is False
+
+
+def test_real_open_gop_x265_cra_rasl_split_and_recovery(tmp_path: Path):
+    """Verify real Open-GOP x265 CRA/RASL splitting, discard packet detection, and lossless frame recovery."""
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    src_mkv = tmp_path / "open_gop_src.mkv"
+    segs_dir = tmp_path / "segs"
+    subprocess.run(
+        [
+            ffmpeg_bin, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=2",
+            "-vf", "format=yuv420p10le",
+            "-frames:v", "48",
+            "-c:v", "libx265", "-preset", "ultrafast",
+            "-x265-params", "log-level=error:open-gop=1:keyint=24:min-keyint=24:bframes=2:b-adapt=0",
+            "-pix_fmt", "yuv420p10le",
+            str(src_mkv),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    segs = split_video_segments(str(src_mkv), str(segs_dir), segment_time=1)
+    assert len(segs) == 2
+
+    counts = get_segments_frame_counts(segs)
+    assert sum(counts) == 48
+    assert _count_leading_discard_packets(segs[1]) > 0
+
+    extracted_counts = [
+        len(
+            extract_frames_raw_yuv420(
+                seg,
+                width=160,
+                height=90,
+                source_video_path=str(src_mkv),
+                chunk_start_sec=1.0 if idx > 0 else 0.0,
+                source_codec="hevc",
+                source_pix_fmt="yuv420p10le",
+            )
+        )
+        for idx, seg in enumerate(segs)
+    ]
+    assert sum(extracted_counts) == 48
+    assert extracted_counts == counts
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "src/ffmpeg_ops.py:_recover_open_gop_leading_frames aliases first identical black frame "
+        "in 18s window instead of matching near CRA timestamp"
+    ),
+)
+def test_recover_open_gop_leading_frames_black_fade_aliasing(tmp_path: Path):
+    """Lock Open-GOP CRA solid-black fade anchor aliasing bug on real ffmpeg rawvideo decode."""
+    import numpy as np
+
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    src_mkv = tmp_path / "black_fade.mkv"
+    # 12 black frames, 4 red frames, 12 black frames (CRA black anchor at frame 16)
+    black = np.zeros((90, 160, 3), dtype=np.uint8)
+    red = np.zeros((90, 160, 3), dtype=np.uint8)
+    red[:, :, 0] = 255
+    raw_bytes = b"".join([black.tobytes()] * 12 + [red.tobytes()] * 4 + [black.tobytes()] * 12)
+    subprocess.run(
+        [
+            ffmpeg_bin, "-y", "-v", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "160x90", "-r", "24", "-i", "pipe:0",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "0", "-pix_fmt", "yuv420p",
+            str(src_mkv),
+        ],
+        input=raw_bytes,
+        check=True,
+        capture_output=True,
+    )
+
+    recovered = _recover_open_gop_leading_frames(
+        str(src_mkv),
+        chunk_start_sec=16.0 / 24.0,
+        cra_anchor_frame=black,
+        n_discard=2,
+        width=160,
+        height=90,
+        pix_fmt="rgb24",
+    )
+    assert len(recovered) == 2
+    assert all(float(frame[:, :, 0].mean()) > 150.0 for frame in recovered)

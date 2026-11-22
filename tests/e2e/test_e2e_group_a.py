@@ -100,31 +100,40 @@ class TestFeature1DeadlineMathTier1:
             assert ep["n_unique"] == n_unique
             assert ep["ai_seconds_median"] == pytest.approx(1000.0, rel=1e-2)
 
-    def test_f1_single_episode_eta_calculation(self):
-        """2. Verify check_deadline_and_eta produces expected ETA under baseline unique frame count."""
-        mock_plan = {
-            "total_frames": 24000,
-            "total_kept_frames": 12000,
-            "dedup_ratio_percent": 50.0,
-        }
+    def test_f1_single_episode_eta_calculation(self, tmp_path):
+        """2. Verify check_deadline_and_eta produces expected ETA using real on-disk plan.json."""
+        out_dir = tmp_path / "out"
+        plan_path = out_dir / ".temp_ep1" / "plan.json"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(
+            json.dumps(
+                {
+                    "total_frames": 24000,
+                    "total_kept_frames": 12000,
+                    "dedup_ratio_percent": 50.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        vid = tmp_path / "ep1.mkv"
+        vid.touch()
         # Set generous deadline 10 hours in future to avoid late-night clock boundary
         generous_deadline = (datetime.now() + timedelta(hours=10)).strftime("%H:%M")
-        with mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(mock_plan))), \
-             mock.patch("os.path.exists", return_value=True):
-            can_run, is_partial, deadline_dt = check_deadline_and_eta(
-                video_path="ep1.mkv",
-                deadline_str=generous_deadline,
-                fps_median=12.0,
-                fps_p5=10.0,
-                video_overhead=930.0,
-                subtitles_overhead=300.0,
-                allow_partial=False,
-            )
-            assert isinstance(can_run, bool)
-            assert isinstance(is_partial, bool)
-            assert deadline_dt is not None
-            assert can_run is True
-            assert is_partial is False
+        can_run, is_partial, deadline_dt = check_deadline_and_eta(
+            video_path=str(vid),
+            deadline_str=generous_deadline,
+            fps_median=12.0,
+            fps_p5=10.0,
+            video_overhead=930.0,
+            subtitles_overhead=300.0,
+            allow_partial=False,
+            output_dir=str(out_dir),
+        )
+        assert isinstance(can_run, bool)
+        assert isinstance(is_partial, bool)
+        assert deadline_dt is not None
+        assert can_run is True
+        assert is_partial is False
 
     def test_f1_overnight_schedule_allocation(self):
         """3. Verify compute_overnight_schedule plans queue correctly with unique FPS."""

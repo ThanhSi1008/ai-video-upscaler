@@ -31,9 +31,15 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.dedup import deduplicate_cyclic_frames  # noqa: E402
 from src.env_isolation import configure_e_drive_isolation  # noqa: E402
-from src.ffmpeg_ops import embed_subtitle_track, mux_final_container, mux_segments_directly  # noqa: E402
+from src.ffmpeg_ops import (  # noqa: E402
+    embed_subtitle_track,
+    extract_frames_raw_yuv420,
+    mux_final_container,
+    mux_segments_directly,
+)
 from src.mux_audit import verify_mux_integrity  # noqa: E402
 from src.output_sanity import check_frame_sanity_arrays  # noqa: E402
+from src.trt_zero_copy_upscaler import GPUColorConverterP010LE, _yuv420_to_nchw_fp16_bt709  # noqa: E402
 
 
 def _resolve_ffmpeg_tools() -> tuple[str, str]:
@@ -191,6 +197,35 @@ def run_smoke_test() -> dict[str, Any]:
             raise AssertionError(f"Expected 10-bit pixel format (yuv420p10le/p010le), got '{pix_fmt}'")
         if not sub_default:
             raise AssertionError(f"Expected default subtitle stream disposition=1, got {s_stream}")
+
+        # 7. Lightweight CPU 4-frame extract_frames_raw_yuv420 -> _yuv420_to_nchw_fp16_bt709 -> GPUColorConverterP010LE check
+        import torch
+
+        yuv_frames = extract_frames_raw_yuv420(
+            seg_files[0],
+            width=up_w,
+            height=up_h,
+            kept_indices=[0, 1, 2, 3],
+            hwaccel=False,
+            total_frames=half,
+            source_codec="hevc",
+            source_pix_fmt="yuv420p10le",
+        )
+        if len(yuv_frames) != 4:
+            raise AssertionError(f"Expected 4 raw P010LE frames, got {len(yuv_frames)}")
+        yuv_t = torch.from_numpy(np.stack([f.view(np.int16) for f in yuv_frames], axis=0))
+        rgb_t = _yuv420_to_nchw_fp16_bt709(
+            yuv_t,
+            is_p010=True,
+            chroma_siting="left",
+            out_dtype=torch.float32,
+            use_triton=False,
+        )
+        if not torch.isfinite(rgb_t).all():
+            raise AssertionError("Non-finite values produced by _yuv420_to_nchw_fp16_bt709")
+        p010_out = GPUColorConverterP010LE(device=torch.device("cpu"), chroma_siting="left", dither=True).rgb_to_p010le(rgb_t)
+        if p010_out.shape != (4, up_h * 3 // 2, up_w) or p010_out.dtype != torch.int16:
+            raise AssertionError(f"Unexpected P010LE roundtrip output: {p010_out.shape}, {p010_out.dtype}")
 
     elapsed_s = round(time.perf_counter() - t0, 2)
     return {

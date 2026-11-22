@@ -1,7 +1,11 @@
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pysubs2
+import pytest
 
 from subtrans.cache import TranslationCache, compute_contextual_cue_sig, compute_cue_cache_key
 from subtrans.glossary import compute_glossary_hash
@@ -202,3 +206,271 @@ def test_subs_upgrade_rejects_lite_local_and_preserves_repair_provenance(tmp_pat
 
     assert res_custom["stats"]["cache_hits"] == 0
     assert custom_flash.translate_batch.call_count == 1
+
+
+def _isolate_pipeline_env(tmp_path, monkeypatch):
+    import src.config as app_config
+    import subtrans.rag as rag_mod
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaTestKey1")
+    monkeypatch.setattr(app_config, "PENDING_SUBS_FILE", str(tmp_path / "pending_subs.json"))
+    monkeypatch.setattr(rag_mod, "KNOWLEDGE_DB_PATH", tmp_path / "knowledge.db")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "compute_cue_cache_key (subtrans/cache.py:85-110) and TranslationPipeline.run "
+        "(subtrans/pipeline.py:617-627) omit gloss_skill_names, serving stale cached "
+        "translation when --gloss-skill-names is toggled"
+    ),
+)
+def test_cache_key_differentiates_gloss_skill_names(tmp_path, monkeypatch):
+    """Lock stale cache hit when toggling gloss_skill_names on identical JA/EN cues."""
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    ja_srt = tmp_path / "ep_skill.ja.srt"
+    en_srt = tmp_path / "ep_skill.en.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\n絶対零度！\n", encoding="utf-8")
+    en_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nAbsolute Zero!\n", encoding="utf-8")
+
+    mock_client = MagicMock()
+
+    def _fake_generate(model, contents, config):
+        resp = MagicMock()
+        resp.text = json.dumps([{"id": 0, "vi": "Độ Không Tuyệt Đối!"}])
+        return resp
+
+    mock_client.models.generate_content.side_effect = _fake_generate
+    db_path = tmp_path / "skill.db"
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            gloss_skill_names=False,
+            output_dir=tmp_path / "o1",
+            cache_db_path=db_path,
+        ).run(ja_srt, en_srt)
+        res2 = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            gloss_skill_names=True,
+            output_dir=tmp_path / "o2",
+            cache_db_path=db_path,
+        ).run(ja_srt, en_srt)
+
+    assert res2["stats"]["cache_hits"] == 0
+    assert mock_client.models.generate_content.call_count == 2
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "compute_cue_cache_key (subtrans/cache.py:85-110) and TranslationPipeline.run "
+        "(subtrans/pipeline.py:617-627) omit en_only_source, colliding ASCII cues across JA and EN-only episodes"
+    ),
+)
+def test_cache_key_differentiates_en_only_source(tmp_path, monkeypatch):
+    """Lock cache key collision between JA-mixed and EN-only episodes sharing ASCII lines."""
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    mix_srt = tmp_path / "mix.ja.srt"
+    enonly_srt = tmp_path / "enonly.ja.srt"
+    mix_srt.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nはい\n\n"
+        "2\n00:00:02,500 --> 00:00:03,500\nAlright.\n\n"
+        "3\n00:00:04,000 --> 00:00:05,000\nOK.\n",
+        encoding="utf-8",
+    )
+    enonly_srt.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nHello.\n\n"
+        "2\n00:00:02,500 --> 00:00:03,500\nAlright.\n\n"
+        "3\n00:00:04,000 --> 00:00:05,000\nOK.\n",
+        encoding="utf-8",
+    )
+
+    mock_client = MagicMock()
+
+    def _fake_generate(model, contents, config):
+        payload = json.loads(contents.splitlines()[-1])
+        items = payload.get("cues_to_translate", [])
+        resp = MagicMock()
+        resp.text = json.dumps([{"id": item["id"], "vi": f"Dịch {item['id']}"} for item in items])
+        return resp
+
+    mock_client.models.generate_content.side_effect = _fake_generate
+    db_path = tmp_path / "enonly.db"
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        rm = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "om",
+            cache_db_path=db_path,
+        ).run(mix_srt)
+        re_only = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "oe",
+            cache_db_path=db_path,
+        ).run(enonly_srt)
+
+    assert rm["stats"]["en_only_source"] is False
+    assert re_only["stats"]["en_only_source"] is True
+    assert re_only["stats"]["cache_hits"] == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Cascade repair writes Flash rows under Lite's cue_cache_keys_by_id[rc.id] "
+        "(subtrans/pipeline.py:880-902), so --subs-upgrade querying model='gemini-3.8-flash' "
+        "(subtrans/pipeline.py:617-634) misses them and re-calls Flash"
+    ),
+)
+def test_subs_upgrade_reuses_lite_keyed_cascade_repair(tmp_path, monkeypatch):
+    """Lock cache miss when --subs-upgrade runs after normal Lite + Cascade Flash repair."""
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    ja_srt = tmp_path / "ep_cascade_up.ja.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nフラン、行くぞ！\n", encoding="utf-8")
+
+    mock_client = MagicMock()
+
+    def _fake_generate(model, contents, config):
+        text = str(contents)
+        if "<cues>" in text and "</cues>" in text:
+            raw_json = text.rsplit("<cues>", 1)[1].rsplit("</cues>", 1)[0].strip()
+        else:
+            raw_json = text.splitlines()[-1]
+        payload = json.loads(raw_json)
+        resp = MagicMock()
+        if "cues_to_review" in payload:
+            resp.text = json.dumps([
+                {"id": 0, "vi": "Fran, đi thôi!", "changed": True, "change_reason": "fixed"}
+            ])
+        else:
+            resp.text = json.dumps([
+                {"id": 0, "vi": "Em, đi thôi!", "uncertain": "pronoun"}
+            ])
+        return resp
+
+    mock_client.models.generate_content.side_effect = _fake_generate
+    db_path = tmp_path / "cascade_upgrade.db"
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        r1 = TranslationPipeline(
+            dry_run=False,
+            subs_quality="normal",
+            enable_cascade=True,
+            enable_rag=False,
+            output_dir=tmp_path / "r1",
+            cache_db_path=db_path,
+        ).run(ja_srt)
+        assert r1["stats"]["cascade_repaired"] == 1
+
+        mock_client.models.generate_content.reset_mock()
+        r2 = TranslationPipeline(
+            dry_run=False,
+            subs_upgrade=True,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "r2",
+            cache_db_path=db_path,
+        ).run(ja_srt)
+
+    assert r2["stats"]["cache_hits"] == 1
+    assert mock_client.models.generate_content.call_count == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "TranslationPipeline.run (subtrans/pipeline.py:939-952) persists only scalar sub_offset_ms "
+        "to pending_subs.json without piecewise_ja_offsets, dropping segment-1 offset on retry "
+        "(upscale.py:774-847, pipeline.py:243)"
+    ),
+)
+def test_pending_subs_preserves_piecewise_offsets(tmp_path, monkeypatch):
+    """Lock loss of piecewise_ja_offsets when pending_subs.json records an incomplete episode."""
+    from src.pending_queue import load_pending_subs
+
+    _isolate_pipeline_env(tmp_path, monkeypatch)
+    ja_ssa = pysubs2.SSAFile()
+    en_ssa = pysubs2.SSAFile()
+    cur_t = 5000
+    for i in range(20):
+        dur = 1800 + (i * 173) % 900
+        en_ssa.append(pysubs2.SSAEvent(start=cur_t, end=cur_t + dur, text=f"Cold open line {i}"))
+        ja_ssa.append(pysubs2.SSAEvent(start=cur_t, end=cur_t + dur, text=f"アバンのセリフ{i}"))
+        cur_t += dur + 1400 + (i * 617) % 2300
+    cur_t += 90000
+    for i in range(25):
+        dur = 1900 + (i * 211) % 850
+        en_ssa.append(pysubs2.SSAEvent(start=cur_t, end=cur_t + dur, text=f"Post-OP line {i}"))
+        ja_ssa.append(pysubs2.SSAEvent(start=cur_t - 10000, end=cur_t - 10000 + dur, text=f"本編のセリフ{i}"))
+        cur_t += dur + 1500 + (i * 733) % 2500
+
+    ja_p = tmp_path / "pw.ja.srt"
+    en_p = tmp_path / "pw.en.srt"
+    ja_ssa.save(str(ja_p))
+    en_ssa.save(str(en_p))
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = RuntimeError("400 Bad Request")
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=mock_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=tmp_path / "opw",
+            cache_db_path=tmp_path / "pw.db",
+        ).run(ja_p, en_p, output_basename="ep_piecewise_pending")
+
+    recs = load_pending_subs()
+    assert len(recs) == 1
+    assert "piecewise_ja_offsets" in recs[0]
+    assert len(recs[0]["piecewise_ja_offsets"]) == 2
+
+
+def test_concurrent_cache_writers_and_night_report_reader_wal(tmp_path):
+    """Verify concurrent WAL writes from TranslationCache and reads from night_report succeed cleanly."""
+    from src.night_report import query_subtrans_api_stats
+
+    cdb = tmp_path / "wal_stress.db"
+    TranslationCache(db_path=cdb)
+    errors = []
+
+    def writer(tid: int):
+        try:
+            c = TranslationCache(db_path=cdb)
+            for i in range(15):
+                c.set_cue(f"k_{tid}_{i}", "gemini", "gemini-3.5-flash-lite", f"Câu {tid}-{i}")
+                c.log_request(model="gemini-3.5-flash-lite", backend="gemini", cues_count=1, status="success")
+        except Exception as exc:
+            errors.append(exc)
+
+    def reader():
+        try:
+            for _ in range(20):
+                query_subtrans_api_stats(str(cdb))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(t,)) for t in range(4)]
+    threads.append(threading.Thread(target=reader))
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert errors == []
+    stats = query_subtrans_api_stats(str(cdb))
+    assert stats["model_summary"]["gemini-3.5-flash-lite"]["total"] == 60

@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 import pysubs2
 from subtrans.models import Cue
-from subtrans.writer import wrap_subtitle_line, write_subtitles
+from subtrans.writer import clean_and_normalize_vietnamese, wrap_subtitle_line, write_subtitles
 
 
 def test_wrap_subtitle_line_short():
@@ -227,6 +227,27 @@ def test_smart_semantic_line_wrapping_disabled_keeps_single_line(tmp_path):
     blocks = [b.strip() for b in content.strip().split("\n\n") if b.strip()]
     lines_b1 = blocks[0].split("\n")
     assert len(lines_b1) == 3  # id, timing, single_long_line
+
+
+def test_clean_vietnamese_preserve_dual_retains_real_dual_dashes():
+    """Verify preserve_dual=True preserves genuine two-speaker '- ' dual dialogue."""
+    dual = "- Anh đi trước đi.\n- Em theo sau."
+    assert clean_and_normalize_vietnamese(dual, preserve_dual=True) == dual
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "clean_and_normalize_vietnamese(..., preserve_dual=True) (subtrans/writer.py:102-110) "
+        "unconditionally forces '- ' dual-dialogue prefixes on any 2-line text lacking speaker dashes"
+    ),
+)
+def test_clean_vietnamese_preserve_dual_keeps_single_speaker_two_lines():
+    """Lock single-speaker 2-line wrap receiving spurious '- ' speaker dashes under preserve_dual=True."""
+    single = "Nếu như ngày hôm đó cậu không đến,\ntôi đã không thể vượt qua."
+    cleaned = clean_and_normalize_vietnamese(single, preserve_dual=True)
+    assert not cleaned.startswith("- ")
+    assert "\n- " not in cleaned
 
 
 

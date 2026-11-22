@@ -539,7 +539,7 @@ def test_t1_f08_01_standalone_subtitle_translation_subs_only(mock_pipeline_env, 
 
 def test_t1_f08_02_subtitle_quality_presets(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F08-02: Subtitle Quality Presets (--subs-quality high)"""
-    src_vid = create_synthetic_video(tmp_path / "sub02.mkv", num_frames=8, subtitles=["Arigatou"])
+    src_vid = create_synthetic_video(tmp_path / "sub02.mkv", num_frames=8, subtitles=["Konnichiwa"])
     out_dir = tmp_path / "out"
 
     exit_code, out, err = run_upscale_cli(
@@ -552,7 +552,7 @@ def test_t1_f08_02_subtitle_quality_presets(mock_pipeline_env, tmp_path, monkeyp
 
 def test_t1_f08_03_external_subtitle_output_no_embed(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F08-03: External Subtitle Output without Container Embedding (--no-embed)"""
-    src_vid = create_synthetic_video(tmp_path / "sub03.mkv", num_frames=8, subtitles=["Sayonara"])
+    src_vid = create_synthetic_video(tmp_path / "sub03.mkv", num_frames=8, subtitles=["Konnichiwa"])
     out_dir = tmp_path / "out"
 
     exit_code, out, err = run_upscale_cli(
@@ -565,7 +565,7 @@ def test_t1_f08_03_external_subtitle_output_no_embed(mock_pipeline_env, tmp_path
 
 def test_t1_f08_04_auto_align_english_dtw_synchronization(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F08-04: Auto-Align English DTW Synchronization flag"""
-    src_vid = create_synthetic_video(tmp_path / "sub04.mkv", num_frames=8, subtitles=["Dialogue 1"])
+    src_vid = create_synthetic_video(tmp_path / "sub04.mkv", num_frames=8, subtitles=["Konnichiwa"])
     out_dir = tmp_path / "out"
 
     exit_code, out, err = run_upscale_cli(
@@ -578,7 +578,7 @@ def test_t1_f08_04_auto_align_english_dtw_synchronization(mock_pipeline_env, tmp
 
 def test_t1_f08_05_manual_subtitle_millisecond_offset(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F08-05: Manual Subtitle Millisecond Offset (--sub-offset-ms -500)"""
-    src_vid = create_synthetic_video(tmp_path / "sub05.mkv", num_frames=8, subtitles=["Dialogue offset"])
+    src_vid = create_synthetic_video(tmp_path / "sub05.mkv", num_frames=8, subtitles=["Konnichiwa"])
     out_dir = tmp_path / "out"
 
     exit_code, out, err = run_upscale_cli(
@@ -666,7 +666,8 @@ def test_t1_f09_05_audit_artifact_organization(mock_pipeline_env, tmp_path, monk
 def test_t1_f10_01_benchmark_pipeline_preview_tier(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F10-01: Benchmark Pipeline Preview Tier Execution"""
     from scripts.benchmark_pipeline import run_benchmark
-    src_vid = create_synthetic_video(tmp_path / "bench01.mkv", num_frames=8)
+    src_vid = tmp_path / "bench01.mkv"
+    src_vid.touch()
     bench_out = tmp_path / "bench_out"
 
     summary = run_benchmark(
@@ -684,7 +685,8 @@ def test_t1_f10_01_benchmark_pipeline_preview_tier(mock_pipeline_env, tmp_path, 
 def test_t1_f10_02_benchmark_pipeline_climax_tier(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T1-F10-02: Benchmark Pipeline Climax Tier Execution"""
     from scripts.benchmark_pipeline import run_benchmark
-    src_vid = create_synthetic_video(tmp_path / "bench02.mkv", num_frames=8)
+    src_vid = tmp_path / "bench02.mkv"
+    src_vid.touch()
     bench_out = tmp_path / "bench_out"
 
     summary = run_benchmark(
@@ -724,7 +726,8 @@ def test_t1_f10_03_telemetry_csv_schema_conformance(mock_pipeline_env, tmp_path)
 def test_t1_f10_04_benchmark_summary_json_schema(mock_pipeline_env, tmp_path):
     """T1-F10-04: Benchmark Summary JSON Schema Conformance"""
     from scripts.benchmark_pipeline import run_benchmark
-    src_vid = create_synthetic_video(tmp_path / "schema.mkv", num_frames=8)
+    src_vid = tmp_path / "schema.mkv"
+    src_vid.touch()
     bench_out = tmp_path / "schema_out"
 
     summary = run_benchmark(

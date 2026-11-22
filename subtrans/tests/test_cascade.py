@@ -4,6 +4,9 @@ subtrans/tests/test_cascade.py
 Comprehensive unit tests for Smart Cloud Cascade (subtrans/cascade.py).
 """
 
+import contextlib
+import sqlite3
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pytest
 from subtrans.cache import TranslationCache
@@ -323,5 +326,35 @@ def test_cascade_metadata_disagreement_telemetry():
     stats = run_cascade_repair_pass(cues, repair_translator=mock_translator)
     assert stats["repaired_count"] == 1
     assert cues[0].metadata_disagreement is True
+
+
+def test_cascade_logs_usage_metadata_tokens_to_real_sqlite_cache(tmp_path):
+    """Verify run_cascade_repair_pass records usage_metadata token telemetry to SQLite api_requests."""
+    db_path = tmp_path / "cascade_tokens.db"
+    cache = TranslationCache(db_path=db_path)
+    translator = GeminiTranslator(api_key="AIzaTestKey1", model="gemini-3.8-flash", cache=cache)
+    translator.client = MagicMock()
+    translator.client.models.generate_content.return_value = SimpleNamespace(
+        text='[{"id": 1, "vi": "Fran, đi thôi!", "fix_rationale": "Keep Fran"}]',
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=25,
+            candidates_token_count=8,
+            total_token_count=37,
+            thinking_token_count=4,
+            cached_content_token_count=10,
+        ),
+    )
+
+    cues = [
+        Cue(id=1, start=0, end=2000, ja="フラン、行くぞ！", vi="Em, đi thôi!", uncertain=True),
+    ]
+    stats = run_cascade_repair_pass(cues, repair_translator=translator)
+    assert stats["repaired_count"] == 1
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT model, status, prompt_tokens, thinking_tokens, cached_tokens "
+            "FROM api_requests ORDER BY id ASC"
+        ).fetchall()
+    assert rows == [("gemini-3.8-flash", "success", 25, 4, 10)]
 
 

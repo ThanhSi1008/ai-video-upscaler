@@ -7,10 +7,12 @@ banned calques & transliterations, Romaji vocative retention (built-in, Glossary
 zero-overlap gap boundary checks, deterministic auto-fixing, and markdown reports.
 """
 
+from pathlib import Path
 import unicodedata
 from unittest.mock import MagicMock
 import pytest
 
+from subtrans.glossary import load_glossary
 from subtrans.models import Cue, Glossary, Character
 from subtrans.linter import (
     lint_cue,
@@ -23,6 +25,7 @@ from subtrans.linter import (
     RULE_ROMAJI_MISSING,
     RULE_BANNED_TERM,
     RULE_EMPTY_TEXT,
+    RULE_PRONOUN_CONSISTENCY,
     RULE_ZERO_OVERLAP,
     BANNED_TERMS_MAP,
 )
@@ -236,3 +239,44 @@ def test_format_lint_report_empty_and_mixed():
     assert "🟡 WARNING" in report
     assert "LINT_CJK_LEAK" in report
     assert "LINT_HIGH_CPS" in report
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "RULE_PRONOUN_CONSISTENCY (subtrans/linter.py:344-371) skips mode='comm' and compares "
+        "st.listener.lower()==addr_low without resolving addressee aliases/name_vi/name_ja "
+        "(glossary.tenken.yaml Shishou vs Sư phụ)"
+    ),
+)
+def test_lint_pronoun_consistency_tenken_alias_and_comm_mode():
+    """Lock addressee alias resolution and telepathy mode='comm' bypass in RULE_PRONOUN_CONSISTENCY."""
+    g_tenken = load_glossary(Path("glossaries/glossary.tenken.yaml"))
+
+    c_alias = Cue(
+        id=1,
+        start=0,
+        end=2000,
+        ja="師匠、ありがとう",
+        vi="Sư phụ, tôi cảm ơn ông.",
+        speaker="Fran",
+        addressee="Sư phụ",
+        mode="spoken",
+        p1="tôi",
+        p2="ông",
+    )
+    assert RULE_PRONOUN_CONSISTENCY in [v.rule_id for v in lint_cue(c_alias, glossary=g_tenken)]
+
+    c_comm = Cue(
+        id=2,
+        start=0,
+        end=2000,
+        ja="師匠、ありがとう",
+        vi="Sư phụ, tôi cảm ơn ông.",
+        speaker="Fran",
+        addressee="Shishou",
+        mode="comm",
+        p1="tôi",
+        p2="ông",
+    )
+    assert RULE_PRONOUN_CONSISTENCY in [v.rule_id for v in lint_cue(c_comm, glossary=g_tenken)]

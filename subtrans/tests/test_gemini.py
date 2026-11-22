@@ -11,7 +11,10 @@ Unit tests for Gemini translation backend with mocking and comprehensive scenari
 - Thinking configuration across model families
 """
 
+import contextlib
 import json
+import sqlite3
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -253,3 +256,64 @@ def test_gemini_thinking_config_mapping():
     cfg_flash_25 = get_thinking_config("gemini-2.5-flash")
     assert cfg_flash_25 is not None
     assert cfg_flash_25.thinking_budget == 0
+
+
+def test_gemini_json_decode_error_bisects_and_logs_token_telemetry(tmp_path):
+    """Verify real GeminiTranslator bisects on JSONDecodeError and logs token telemetry to SQLite."""
+    from subtrans.cache import TranslationCache
+
+    db_path = tmp_path / "gem.db"
+    cache = TranslationCache(db_path=db_path)
+
+    bad_json_resp = SimpleNamespace(text='[{"id": 1, "vi": "Truncated', usage_metadata=None)
+    good_1_resp = SimpleNamespace(
+        text='[{"id": 1, "vi": "Xin chào"}]',
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=10,
+            candidates_token_count=4,
+            total_token_count=16,
+            thinking_token_count=2,
+            cached_content_token_count=4,
+        ),
+    )
+    good_2_resp = SimpleNamespace(
+        text='[{"id": 2, "vi": "Tạm biệt"}]',
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=12,
+            candidates_token_count=5,
+            total_token_count=20,
+            thinking_token_count=3,
+            cached_content_token_count=0,
+        ),
+    )
+
+    with patch("subtrans.gemini_backend.genai.Client") as m_cls:
+        m_cls.return_value.models.generate_content.side_effect = [
+            bad_json_resp,
+            good_1_resp,
+            good_2_resp,
+        ]
+        tr = GeminiTranslator(
+            api_key="AIzaTestKey1",
+            model="gemini-3.8-flash",
+            cache=cache,
+            enable_rag=False,
+        )
+        cues = [
+            Cue(id=1, start=0, end=1000, ja="こんにちは"),
+            Cue(id=2, start=1000, end=2000, ja="さようなら"),
+        ]
+        res = tr.translate_batch(cues, [])
+
+    assert res == ["Xin chào", "Tạm biệt"]
+    assert tr.stats["split_batches"] == 1
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT status, prompt_tokens, thinking_tokens, cached_tokens "
+            "FROM api_requests ORDER BY id ASC"
+        ).fetchall()
+    assert rows == [
+        ("success", 0, 0, 0),
+        ("success", 10, 2, 4),
+        ("success", 12, 3, 0),
+    ]

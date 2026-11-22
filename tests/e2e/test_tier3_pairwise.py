@@ -84,39 +84,32 @@ def test_t3_02_zero_disk_and_dedup_policy(mock_pipeline_env, tmp_path, monkeypat
 # =============================================================================
 
 def test_t3_03_queue_deadline_and_allow_partial(mock_pipeline_env, tmp_path, monkeypatch, capsys):
-    """T3-03: Overnight Queue + Deadline + Allow-Partial pauses in-flight episode at chunk boundary."""
+    """T3-03: Overnight Queue + Deadline + Allow-Partial pauses in-flight episode at real chunk boundary."""
+    from datetime import datetime, timedelta
+
     ep1 = create_synthetic_video(tmp_path / "ep1.mkv", num_frames=8, audio_tracks=1)
-    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=8, audio_tracks=1)
+    ep2 = create_synthetic_video(tmp_path / "ep2.mkv", num_frames=48, fps=24, keyint=8, audio_tracks=1)
     out_dir = tmp_path / "out"
 
-    # Mock pipeline so ep1 finishes cleanly, but ep2 triggers allow-partial pause
-    real_run_pipeline = upscale.run_upscale_pipeline
+    def _fake_eta(video_path, *_args, **_kwargs):
+        if "ep1" in str(video_path):
+            return (True, False, datetime.now() + timedelta(hours=1))
+        return (True, True, datetime.now() - timedelta(seconds=1))
 
-    def mock_pipeline_selector(input_path, *args, **kwargs):
-        if "ep1" in str(input_path):
-            return real_run_pipeline(input_path=input_path, *args, **kwargs)
-        # For ep2, simulate allow-partial pause returning up_segs_dir
-        temp_dir = out_dir / ".temp_ep2"
-        up_segs_dir = temp_dir / "upscaled_segs"
-        up_segs_dir.mkdir(parents=True, exist_ok=True)
-        (up_segs_dir / "up_0000.mp4").write_bytes(b"VALID_CHUNK_0")
-        return str(up_segs_dir)
-
-    with patch("upscale.run_upscale_pipeline", side_effect=mock_pipeline_selector):
+    with patch("upscale.check_deadline_and_eta", side_effect=_fake_eta):
         exit_code, out, err = run_upscale_cli(
-            ["--queue", str(ep1), str(ep2), "--deadline", "07:00", "--allow-partial", "-o", str(out_dir)],
+            ["--queue", str(ep1), str(ep2), "--deadline", "07:00", "--allow-partial", "-s", "1", "-o", str(out_dir)],
             monkeypatch,
             capsys,
         )
 
-    # Incomplete queue returns exit code 1
     assert exit_code == 1
-    # ep1 completed and muxed
     assert (out_dir / "ep1_4K.mkv").exists()
-    # ep2 was not muxed into final container
     assert not (out_dir / "ep2_4K.mkv").exists()
-    # ep2 chunk segments preserved
-    assert (out_dir / ".temp_ep2" / "upscaled_segs" / "up_0000.mp4").exists()
+    seg0 = out_dir / ".temp_ep2" / "upscaled_segs" / "up_0000.mp4"
+    seg1 = out_dir / ".temp_ep2" / "upscaled_segs" / "up_0001.mp4"
+    assert seg0.is_file() and seg0.stat().st_size > 1000
+    assert not seg1.exists()
 
 
 # =============================================================================

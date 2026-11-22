@@ -348,3 +348,114 @@ def test_dedup_policy_dis_synthetic_offcenter_zoom():
         # Yêu cầu B7: zoom lệch tâm giữ >= 90%
         assert kept >= int(0.90 * total), f"dis-0.3 phải giữ >= 90% frames khi zoom lệch tâm, thực tế giữ {kept}/{total} ({kept/total*100:.1f}%)"
 
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "upscale.py:1063-1119 omits dedup_policy in compute_overnight_schedule calls "
+        "and check_deadline_and_eta (L130-191) ignores plan dedup_policy"
+    ),
+)
+def test_upscale_cli_forwards_dedup_policy_to_scheduler(monkeypatch, tmp_path):
+    """Lock upscale.py CLI --dry-run omission of dedup_policy when calling compute_overnight_schedule."""
+    import src.scheduler as scheduler_mod
+    import upscale
+
+    ep = tmp_path / "ep_sched.mkv"
+    ep.touch()
+    out_dir = tmp_path / "out"
+    temp_dir = out_dir / ".temp_ep_sched"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    (temp_dir / "plan.json").write_text(
+        json.dumps({
+            "source_file": str(ep),
+            "dedup_policy": "off",
+            "total_frames": 30000,
+            "total_kept_frames": 30000,
+            "dedup_ratio_percent": 0.0,
+            "chunks": [{"total_frames": 30000, "runs": []}],
+        }),
+        encoding="utf-8",
+    )
+
+    captured_calls = []
+    orig_compute = scheduler_mod.compute_overnight_schedule
+
+    def spy_compute(*args, **kwargs):
+        captured_calls.append(dict(kwargs))
+        res = orig_compute(*args, **kwargs)
+        captured_calls[-1]["_result"] = res
+        return res
+
+    monkeypatch.setattr(scheduler_mod, "compute_overnight_schedule", spy_compute)
+    monkeypatch.setattr(
+        scheduler_mod,
+        "probe_video",
+        lambda _p: {"nb_frames": 30000, "duration": 1250.0, "fps": 24.0},
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "upscale.py",
+            str(ep),
+            "-o", str(out_dir),
+            "--dry-run",
+            "--deadline", "23:59",
+            "--dedup-policy", "dis-auto",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 0
+    assert len(captured_calls) == 1
+    assert captured_calls[0].get("dedup_policy") == "dis-auto"
+    assert captured_calls[0]["_result"]["episodes"][0]["is_exact_plan"] is False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "upscale.py:1063-1119 omits dedup_policy in compute_overnight_schedule calls "
+        "and check_deadline_and_eta (L130-191) ignores plan dedup_policy"
+    ),
+)
+def test_check_deadline_and_eta_rejects_mismatched_plan_policy(monkeypatch, tmp_path):
+    """Lock check_deadline_and_eta missing dedup_policy validation against stale plan.json."""
+    from datetime import datetime
+    import upscale
+
+    ep = tmp_path / "ep_eta.mkv"
+    ep.touch()
+    out_dir = tmp_path / "out"
+    temp_dir = out_dir / ".temp_ep_eta"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    # Frozen 20m window (23:39 -> 23:59): stale "off" plan (30000 kept -> 75.8m > 20m) fails,
+    # whereas probe fallback (288/480 -> 13.4m <= 20m incl. 720s*1.07 overhead) fits.
+    (temp_dir / "plan.json").write_text(
+        json.dumps({
+            "source_file": str(ep),
+            "dedup_policy": "off",
+            "total_frames": 30000,
+            "total_kept_frames": 30000,
+            "chunks": [{"total_frames": 30000}],
+        }),
+        encoding="utf-8",
+    )
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 22, 23, 39, 0)
+
+    monkeypatch.setattr(upscale, "datetime", _FakeDatetime)
+    monkeypatch.setattr(upscale, "probe_video", lambda _p: {"nb_frames": 480, "duration": 20.0, "fps": 24.0})
+    can_run, _is_partial, _dt = upscale.check_deadline_and_eta(
+        str(ep),
+        "23:59",
+        output_dir=str(out_dir),
+        dedup_policy="dis-auto",
+    )
+    assert can_run is True
+

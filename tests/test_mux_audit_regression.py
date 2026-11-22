@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.mux_audit import (
     verify_mux_integrity,
     check_window_interleaving,
+    get_all_audio_streams_md5,
+    get_audio_stream_md5,
     get_detailed_stream_info,
     count_subtitle_packets,
     _count_video_packets,
@@ -263,6 +265,51 @@ def test_check_window_interleaving_pyav():
         )
         assert res_fail["passed"] is False
         assert len(res_fail["failed_windows"]) > 0
+
+
+def test_pyav_vs_ffmpeg_audio_md5_parity_across_containers(tmp_path):
+    """Verify PyAV packet MD5 matches ffmpeg -c copy -f md5 across MP4 (AAC) and MKV (FLAC+AC3)."""
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    mp4_path = tmp_path / "audio_aac.mp4"
+    mkv_path = tmp_path / "audio_multi.mkv"
+
+    subprocess.run(
+        [
+            ffmpeg_bin, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k",
+            "-shortest",
+            str(mp4_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            ffmpeg_bin, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1",
+            "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a:0", "flac", "-c:a:1", "ac3",
+            "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    mp4_tracks = get_all_audio_streams_md5(str(mp4_path), 1)
+    assert len(mp4_tracks) == 1
+    assert mp4_tracks[0]["md5"] == get_audio_stream_md5(str(mp4_path), 0)
+
+    mkv_tracks = get_all_audio_streams_md5(str(mkv_path), 2)
+    assert len(mkv_tracks) == 2
+    assert mkv_tracks[0]["md5"] == get_audio_stream_md5(str(mkv_path), 0)
+    assert mkv_tracks[1]["md5"] == get_audio_stream_md5(str(mkv_path), 1)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,10 @@ Offline resilience tests for the subtitle translation stage:
 (d) Stage watchdog timeout -> safe stop, partial marking, and output write.
 """
 
+import contextlib
+import json
 import os
+import sqlite3
 import sys
 import time
 import socket
@@ -253,6 +256,134 @@ class TestSubtransResilience(unittest.TestCase):
         self.assertTrue(cues[1].uncertain)
         self.assertTrue(cues[2].uncertain)
         print(f"✅ [Test D PASS] Watchdog toàn stage ngắt đúng hạn, bảo toàn phân đoạn và ghi file thành công.")
+
+
+def test_e_real_native_gemini_persistent_503_fallback_chain(tmp_path, monkeypatch):
+    """Verify real GeminiTranslator instances traverse the 503 fallback chain and write partial/audit files."""
+    import src.config as app_config
+    import subtrans.rag as rag_mod
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaTestKey1")
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setattr(app_config, "PENDING_SUBS_FILE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(rag_mod, "KNOWLEDGE_DB_PATH", tmp_path / "knowledge.db")
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr("subtrans.throttle.time.sleep", lambda _s: None)
+
+    ja_srt = tmp_path / "ep_503.ja.srt"
+    ja_srt.write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\nこんにちは\n\n"
+        "2\n00:00:03,500 --> 00:00:05,500\nさようなら\n",
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "out_503"
+    cache_db = tmp_path / "c503.db"
+    models_invoked = []
+
+    fake_client = MagicMock()
+
+    def _always_503(model, contents, config):
+        models_invoked.append(model)
+        raise RuntimeError(f"503 UNAVAILABLE: High demand for {model}")
+
+    fake_client.models.generate_content.side_effect = _always_503
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=fake_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        pipeline = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=out_dir,
+            output_format="srt",
+            cache_db_path=cache_db,
+        )
+        pipeline.rate_limiter = None
+        pipeline.candidate_gemini_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+        pipeline._init_primary_backend()
+        assert all(isinstance(b, GeminiTranslator) for b in pipeline.gemini_backends.values())
+        res = pipeline.run(ja_path=ja_srt)
+
+    assert "gemini-3.5-flash-lite" in models_invoked
+    assert "gemini-3.8-flash" in models_invoked
+    assert res["is_partial"] is True
+    assert res["real_rate"] == 0.0
+    assert res["stats"]["model_counts"]["untranslated"] == 2
+    out_srt = Path(res["output_path"])
+    assert out_srt.is_file() and out_srt.name.endswith(".vi.partial.srt")
+    assert "[Chưa dịch]" not in out_srt.read_text(encoding="utf-8")
+    assert Path(res["report_path"]).is_file()
+    with contextlib.closing(sqlite3.connect(cache_db)) as conn:
+        err_rows = conn.execute(
+            "SELECT status, error_type FROM api_requests WHERE status = 'error_503_unavailable'"
+        ).fetchall()
+    assert len(err_rows) >= 2
+
+
+def test_f_real_native_gemini_daily_quota_429_immediate_failover(tmp_path, monkeypatch):
+    """Verify real GeminiTranslator raises DailyQuotaExhaustedError on 429 PerDay and fails over immediately."""
+    import src.config as app_config
+    import subtrans.rag as rag_mod
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaTestKey1")
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.setattr(app_config, "PENDING_SUBS_FILE", str(tmp_path / "pending.json"))
+    monkeypatch.setattr(rag_mod, "KNOWLEDGE_DB_PATH", tmp_path / "knowledge.db")
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr("subtrans.throttle.time.sleep", lambda _s: None)
+
+    ja_srt = tmp_path / "ep_429.ja.srt"
+    ja_srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nこんにちは\n", encoding="utf-8")
+
+    out_dir = tmp_path / "out_429"
+    cache_db = tmp_path / "c429.db"
+    lite_calls = 0
+    flash_calls = 0
+
+    def _perday_or_ok(model, contents, config):
+        nonlocal lite_calls, flash_calls
+        if "lite" in model:
+            lite_calls += 1
+            raise Exception(
+                "429 RESOURCE_EXHAUSTED quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier quotaValue: 500"
+            )
+        flash_calls += 1
+        resp = MagicMock()
+        resp.text = json.dumps([{"id": 0, "vi": "Xin chào"}])
+        return resp
+
+    fake_client = MagicMock()
+    fake_client.models.generate_content.side_effect = _perday_or_ok
+
+    with patch("subtrans.gemini_backend.genai.Client", return_value=fake_client), \
+         patch("subtrans.pipeline.load_or_generate_series_cast_sheet", return_value=Glossary()):
+        pipeline = TranslationPipeline(
+            dry_run=False,
+            enable_cascade=False,
+            enable_rag=False,
+            output_dir=out_dir,
+            output_format="srt",
+            cache_db_path=cache_db,
+        )
+        pipeline.rate_limiter = None
+        pipeline.candidate_gemini_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+        pipeline._init_primary_backend()
+        res = pipeline.run(ja_path=ja_srt)
+
+    assert lite_calls == 1
+    assert flash_calls == 1
+    assert pipeline.cache.is_model_exhausted("gemini-3.5-flash-lite") is True
+    assert res["stats"]["model_counts"]["gemini-3.8-flash"] == 1
+    srt_files = list(out_dir.glob("*.vi.srt"))
+    assert len(srt_files) == 1
+    assert "Xin chào" in srt_files[0].read_text(encoding="utf-8")
+    with contextlib.closing(sqlite3.connect(cache_db)) as conn:
+        rows = conn.execute(
+            "SELECT model, status, error_type FROM api_requests ORDER BY id ASC"
+        ).fetchall()
+    assert ("gemini-3.5-flash-lite", "exhausted_429_perday", "429_PerDay") in rows
+    assert ("gemini-3.8-flash", "success", "") in rows
 
 
 if __name__ == "__main__":

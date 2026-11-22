@@ -280,3 +280,56 @@ def test_parse_and_align_whisper_auto_detection(tmp_path):
     assert cues_studio[0].start == 1250  # Giữ nguyên mốc phòng thu gốc của tiếng Nhật
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "parse_and_align_subtitles (subtrans/parser.py:496-519,628-634) and snap_whisper_cues_to_en "
+        "(subtrans/parser.py:297-331) pass unsorted en_cues into monotonic DTW"
+    ),
+)
+def test_parse_and_align_sorts_unsorted_en_ssa_before_dtw(tmp_path):
+    """Lock unsorted ASS event ordering breaking monotonic DTW whisper snap."""
+    ja_p = tmp_path / "sample.whisper_ja.srt"
+    en_p = tmp_path / "sample.en.ass"
+
+    ja_ssa = pysubs2.SSAFile()
+    ja_ssa.events.append(pysubs2.SSAEvent(start=1200, end=2800, text="おはよう"))
+    ja_ssa.events.append(pysubs2.SSAEvent(start=5200, end=6800, text="おやすみ"))
+    ja_ssa.save(str(ja_p))
+
+    en_ssa = pysubs2.SSAFile()
+    en_ssa.events.append(pysubs2.SSAEvent(start=5000, end=7000, text="Good night.", style="Default"))
+    en_ssa.events.append(pysubs2.SSAEvent(start=1000, end=3000, text="Good morning.", style="Default"))
+    en_ssa.save(str(en_p))
+
+    cues, _, _ = parse_and_align_subtitles(str(ja_p), str(en_p), auto_align_whisper_to_en=True)
+    assert (cues[0].start, cues[0].end) == (1000, 3000)
+    assert (cues[1].start, cues[1].end) == (5000, 7000)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "parse_and_align_subtitles (subtrans/parser.py:498-519) omits should_skip_cue on en_ssa events, "
+        "leaking Sign/OP text into cue.en"
+    ),
+)
+def test_parse_and_align_skips_en_sign_and_op_styles(tmp_path):
+    """Lock Sign/OP EN ASS events leaking into dialogue cue.en during 1:1 alignment."""
+    ja_p = tmp_path / "sign_leak.ja.ass"
+    en_p = tmp_path / "sign_leak.en.ass"
+
+    ja_ssa = pysubs2.SSAFile()
+    ja_ssa.events.append(pysubs2.SSAEvent(start=1200, end=2800, text="こんにちは", style="Default"))
+    ja_ssa.save(str(ja_p))
+
+    en_ssa = pysubs2.SSAFile()
+    en_ssa.events.append(pysubs2.SSAEvent(start=1000, end=5000, text=r"{\pos(100,200)}CHAPTER 1", style="Sign"))
+    en_ssa.events.append(pysubs2.SSAEvent(start=1200, end=2800, text="Hello!", style="Default"))
+    en_ssa.save(str(en_p))
+
+    cues, _, _ = parse_and_align_subtitles(str(ja_p), str(en_p))
+    assert "CHAPTER 1" not in (cues[0].en or "")
+    assert cues[0].en == "Hello!"
+
+

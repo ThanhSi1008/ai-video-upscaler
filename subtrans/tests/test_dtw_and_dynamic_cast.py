@@ -191,3 +191,20 @@ def test_hysteresis_cast_manager_from_glossary_and_to_prompt_context():
     assert "ARC OVERRIDES" in prompt_ctx_arc
     assert "Fern -> Stark: vợ/chồng" in prompt_ctx_arc
 
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "_split_2_to_1_timing (subtrans/dtw_auto_align.py:112-119) clamps total_en_dur >= 600 and "
+        "part1/part2 >= 200, overflowing en_cue.end_ms when en_cue duration < 450ms"
+    ),
+)
+def test_dtw_2_to_1_short_en_cue_no_end_overflow():
+    """Lock 2:1 DTW timing overflow past en_cue.end_ms on short (< 450ms) EN cues."""
+    ja = [SubCue(1000, 1200, "あ"), SubCue(1210, 1400, "い")]
+    en = [SubCue(1000, 1400, "Hey!")]
+    aligned = align_ja_to_en_monotonic_dtw(ja, en)
+    assert len(aligned) == 2
+    assert aligned[0][0].end_ms < aligned[1][0].start_ms
+    assert aligned[1][0].end_ms <= 1400
+

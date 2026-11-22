@@ -2537,3 +2537,241 @@ def test_batch4_security_env_parity_scheduler_and_cli_hardening(tmp_path: Path):
     parser = upscale.build_arg_parser()
     assert parser.parse_args(["ep01.mkv", "--dedup-policy", "dis-0.25"]).dedup_policy == "dis-0.25"
     assert parser.parse_args(["ep01.mkv", "--dedup-policy", "drift-0.6"]).dedup_policy == "drift-0.6"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/sse_hub.py:944,967 emits non-RFC8259 NaN/Inf via json.dumps(allow_nan=True) "
+        "without sanitizing live_status.json"
+    ),
+)
+def test_sse_nan_in_live_status_strict_json_contract(tmp_path: Path):
+    """Lock non-RFC8259 NaN/Infinity JSON emission in /api/events SSE snapshot."""
+    root = _seed_workspace(tmp_path / "sse_nan")
+    live_file = root / "logs" / "live_status.json"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "stage": "upscaling",
+                "steady_fps": float("nan"),
+                "latest_fps": float("inf"),
+            },
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+
+    def _reject_nan(tok: str):
+        raise ValueError(f"Non-RFC8259 JSON constant: {tok}")
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        resp = client.get("/api/events?once=1")
+    assert resp.status_code == 200
+
+    data_line = next(
+        (ln[len("data: "):] for ln in resp.text.splitlines() if ln.startswith("data: ")),
+        None,
+    )
+    assert data_line is not None
+    parsed = json.loads(data_line, parse_constant=_reject_nan)
+    assert parsed["pipeline"]["live"]["steady_fps"] is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/sse_hub.py:564-583 copies stale live_status.json from prior episode when new "
+        "upscale/preview job fails before RunLogger writes live_status.json"
+    ),
+)
+def test_pre_runlogger_upscale_failure_does_not_leak_prior_live_status(tmp_path: Path):
+    """Lock stale prior-episode live_status.json bleed when a new upscale job fails before RunLogger."""
+    from datetime import datetime
+    import time as _time
+    from web.sse_hub import TelemetryHub
+
+    root = _seed_workspace(tmp_path / "pre_runlogger_leak")
+    live_file = root / "logs" / "live_status.json"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text(
+        json.dumps(
+            {
+                "video_name": "OldCompletedEpisode.mkv",
+                "pid": 999999,
+                "stage": "completed",
+                "total_chunks": 18,
+                "completed_chunks": 18,
+                "chunks": [{"chunk_idx": 0, "frames": 192}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_ts = _time.time() - 30.0
+    os.utime(live_file, (old_ts, old_ts))
+
+    hub = TelemetryHub(
+        root,
+        gpu_query_fn=_idle_gpu_metrics,
+        job_state_provider=lambda: {
+            "active_job": None,
+            "history": [
+                {
+                    "job_id": "fail1",
+                    "job_type": "upscale",
+                    "status": "failed",
+                    "pid": 60602,
+                    "finished_at": datetime.now().isoformat(),
+                    "return_code": 1,
+                    "queue_items": [str(root / "anime_season" / "NewFailedEp.mkv")],
+                    "options": {},
+                }
+            ],
+        },
+    )
+    pipe = hub.read_pipeline_state()
+    assert pipe["effective_stage"] == "error"
+    assert pipe["live"]["video_name"] == "NewFailedEp.mkv"
+    assert pipe["live"]["pid"] == 60602
+    assert pipe["live"]["total_chunks"] == 0
+    assert pipe["live"]["chunks"] == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/app.py:1258 POST /api/jobs/pause-graceful delegates to JobManager.request_graceful_pause "
+        "in --mock mode and writes logs/.graceful_pause.flag to disk"
+    ),
+)
+def test_mock_pause_graceful_does_not_mutate_disk_flag(tmp_path: Path):
+    """Lock --mock mode mutating workspace logs/.graceful_pause.flag on POST /api/jobs/pause-graceful."""
+    app = create_app(workspace_root=tmp_path, mock_mode=True)
+    with TestClient(app) as client:
+        resp = client.post("/api/jobs/pause-graceful")
+    assert resp.status_code == 200
+    assert not (tmp_path / "logs" / ".graceful_pause.flag").exists()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/app.py:892-896 _mock_read_pipeline_state mutates tick_counter on GET /api/status "
+        "and wraps completed_chunks backwards 8->4"
+    ),
+)
+def test_mock_get_status_is_idempotent_and_monotonic(tmp_path: Path):
+    """Lock GET /api/status server state mutation and backwards chunk wraparound in --mock mode."""
+    app = create_app(workspace_root=tmp_path, mock_mode=True)
+    with TestClient(app) as client:
+        snaps = [client.get("/api/status").json()["pipeline"]["live"] for _ in range(6)]
+    assert all(s["completed_chunks"] == snaps[0]["completed_chunks"] for s in snaps[1:])
+    assert all(snaps[i]["completed_chunks"] >= snaps[i - 1]["completed_chunks"] for i in range(1, 6))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/job_manager.py:175-194,342 _find_cached_plan ignores dedup_policy mismatch "
+        "when dedup_override changes"
+    ),
+)
+def test_job_manager_schedule_preview_ignores_stale_policy_plan_json(tmp_path: Path):
+    """Lock JobManager.compute_schedule_preview serving stale plan.json across dedup_override changes."""
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "jm_pol")
+    ep = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    plan_file = root / "out" / ".temp_[BD 1080p] Fate_Ep22" / "plan.json"
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text(
+        json.dumps(
+            {
+                "source_file": ep.name,
+                "dedup_policy": "dis",
+                "total_frames": 24000,
+                "total_kept_frames": 9600,
+                "dedup_ratio_percent": 60.0,
+                "chunks": [{"total_frames": 24000}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    jm = JobManager(root)
+    sched = jm.compute_schedule_preview([str(ep)], dedup_override="off")
+    ep_info = sched["episodes"][0]
+    assert ep_info["dedup_policy"] == "off"
+    assert ep_info["n_unique"] != 9600
+    assert ep_info["dedup_ratio_percent"] == 0.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/job_manager.py:717-738 standalone subtitle branch omits --subs-upgrade "
+        "despite subtrans/cli.py:170 and MKV branch L754 parity"
+    ),
+)
+def test_job_manager_subtrans_srt_forwards_subs_upgrade(tmp_path: Path):
+    """Lock JobManager.start_subtrans_job dropping subs_upgrade=True for standalone .srt files."""
+    from web.job_manager import JobManager
+
+    root = _seed_workspace(tmp_path / "jm_sub")
+    srt_path = root / "anime_season" / "Frieren_02.ja.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nテスト\n", encoding="utf-8")
+
+    captured_cmds: List[List[str]] = []
+
+    def capture_popen(cmd: List[str], **_kwargs: Any) -> FakePopenProcess:
+        captured_cmds.append(list(cmd))
+        return FakePopenProcess(cmd, pid=70001, running=False)
+
+    jm = JobManager(root, popen_factory=capture_popen)
+    jm.start_subtrans_job({"input_path": str(srt_path), "subs_upgrade": True, "dry_run": True})
+    assert len(captured_cmds) == 1
+    assert "--subs-upgrade" in captured_cmds[0]
+
+
+def test_models_and_shows_exposes_auto_pareto_and_nvenc_multipass_backend_contract(studio_env):
+    """Verify backend /api/config/models-and-shows and /api/jobs/start support auto-pareto and nvenc_multipass."""
+    client = studio_env["client"]
+    resp = client.get("/api/config/models-and-shows")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "auto-pareto" in {m["id"] for m in data["routing_modes"]}
+    assert data["nvenc_multipass_policies"] == ["auto", "fullres", "qres"]
+
+    ep1 = studio_env["root"] / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    start_resp = client.post(
+        "/api/jobs/start",
+        json={
+            "inputs": [str(ep1)],
+            "model": "auto-pareto",
+            "nvenc_multipass": "fullres",
+            "dry_run": True,
+        },
+    )
+    assert start_resp.status_code == 200
+    cmd = studio_env["spawned"][-1]["cmd"]
+    assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "auto-pareto"
+    assert "--nvenc-multipass" in cmd and cmd[cmd.index("--nvenc-multipass") + 1] == "fullres"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "web/static/index.html & web/static/js/panels.js:415-434,553-575 omit "
+        "routing_modes (auto-pareto) and nvenc_multipass UI controls"
+    ),
+)
+def test_frontend_wires_auto_pareto_and_nvenc_multipass_controls(studio_env):
+    """Lock missing auto-pareto routing_modes and nvenc_multipass selector in Web Studio UI."""
+    client = studio_env["client"]
+    html = client.get("/").text
+    panels_js = client.get("/static/js/panels.js").text
+    assert "routing_modes" in panels_js
+    assert ("nvenc_multipass" in html or "nvenc-multipass" in html) and "nvenc_multipass" in panels_js

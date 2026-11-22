@@ -153,3 +153,56 @@ def test_queue_retry_succeeds_at_end_of_queue(monkeypatch, capsys):
     assert "Thử lại thành công: 'ep2.mkv' đã hoàn tất 4K!" in captured
     assert "Toàn bộ công việc trong hàng đợi đã hoàn tất thành công!" in captured
 
+
+@pytest.mark.parametrize("extra_args", [[], ["-s", "8"]])
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "upscale.py:1295-1317 retry pass uses args.segment instead of eff_segment_time "
+        "and omits nvenc_multipass and segment_time_explicit"
+    ),
+)
+def test_queue_retry_preserves_effective_segment_multipass_and_explicit_flag(
+    monkeypatch, tmp_path, extra_args
+):
+    """Lock queue retry pass bug dropping eff_segment_time, nvenc_multipass, and segment_time_explicit."""
+    import upscale
+
+    ep1 = tmp_path / "ep1_retry.mkv"
+    ep1.touch()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "upscale.py",
+            "--queue", str(ep1),
+            "-o", str(out_dir),
+            "--no-subs",
+            "--benchmark-mode",
+            "--nvenc-multipass", "qres",
+            *extra_args,
+        ],
+    )
+
+    recorded_calls = []
+
+    def fake_run_upscale(input_path, **kwargs):
+        recorded_calls.append(dict(kwargs))
+        if len(recorded_calls) == 1:
+            raise FailedResumableError("ENOSPC simulated", chunk_idx=0, up_segs_dir=str(tmp_path / "up"))
+        return str(out_dir / "ep1_retry_4K.mkv")
+
+    monkeypatch.setattr(upscale, "run_upscale_pipeline", fake_run_upscale)
+    monkeypatch.setattr(os.path, "isfile", lambda p: "_4K" in str(p))
+
+    with pytest.raises(SystemExit) as exc_info:
+        upscale.main()
+
+    assert exc_info.value.code == 0
+    assert len(recorded_calls) == 2
+    call1, call2 = recorded_calls
+    assert call2["segment_time"] == call1["segment_time"]
+    assert call2["nvenc_multipass"] == "qres"
+    assert call2["segment_time_explicit"] == call1["segment_time_explicit"]
+

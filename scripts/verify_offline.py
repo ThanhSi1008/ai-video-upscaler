@@ -119,6 +119,109 @@ def _rmtree_force(path: Path) -> None:
     shutil.rmtree(path, onerror=_clear_readonly)
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if a positive OS process ID is currently running."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        STILL_ACTIVE = 259
+        WAIT_OBJECT_0 = 0x00000000
+        WAIT_TIMEOUT = 0x00000102
+        ERROR_ACCESS_DENIED = 5
+
+        # Fresh WinDLL + explicit HANDLE restype avoids global windll mutation and 64-bit handle truncation.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if not handle:
+            if ctypes.get_last_error() == ERROR_ACCESS_DENIED:
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not handle:
+                    return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+                try:
+                    exit_code = wintypes.DWORD()
+                    return bool(
+                        kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                        and exit_code.value == STILL_ACTIVE
+                    )
+                finally:
+                    kernel32.CloseHandle(handle)
+            return False
+        try:
+            # WaitForSingleObject distinguishes still-running processes from exited zombie handles.
+            wait_res = kernel32.WaitForSingleObject(handle, 0)
+            if wait_res == WAIT_TIMEOUT:
+                return True
+            if wait_res == WAIT_OBJECT_0:
+                return False
+            exit_code = wintypes.DWORD()
+            return bool(
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                and exit_code.value == STILL_ACTIVE
+            )
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _write_active_pid(pid_file: Path, pid: int) -> None:
+    """Atomically write the active-run PID marker inside a validation directory."""
+    tmp_file = pid_file.with_name(f"{pid_file.name}.tmp")
+    tmp_file.write_text(f"{pid}\n", encoding="utf-8")
+    os.replace(tmp_file, pid_file)
+
+
+def _is_active_run_dir(run_dir: Path) -> bool:
+    """Return True if run_dir holds a live .active.pid marker (or is locked mid-write)."""
+    pid_file = run_dir / ".active.pid"
+    try:
+        raw = pid_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    if not raw:
+        return False
+    try:
+        pid = int(raw.splitlines()[0].strip())
+    except ValueError:
+        return False
+    if pid == os.getpid():
+        return True
+    return _is_pid_alive(pid)
+
+
+def _dir_sort_key(path: Path) -> tuple[int, str]:
+    """Return (st_mtime_ns, name) without crashing if a concurrent runner prunes path."""
+    try:
+        return (path.stat().st_mtime_ns, path.name)
+    except OSError:
+        return (-1, path.name)
+
+
 def _detect_dirty_paths(root: Path) -> list[str]:
     """Return modified and untracked repository-relative POSIX paths."""
     paths: set[str] = set()
@@ -238,35 +341,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _MEASURED_FILE_WEIGHT_MS: dict[str, int] = {
-    "tests/e2e/test_tier1_features.py": 53000,
-    "tests/e2e/test_tier2_boundaries.py": 46000,
-    "tests/e2e/test_e2e_group_b.py": 22500,
-    "tests/test_web_gui.py": 15300,
-    "tests/e2e/test_tier4_scenarios.py": 13500,
-    "tests/e2e/test_tier3_pairwise.py": 11500,
-    "tests/test_dedup_policy.py": 9500,
-    "tests/test_dedup.py": 9500,
-    "tests/test_export_review_bundle.py": 7000,
-    "tests/test_output_sanity.py": 5200,
-    "tests/e2e/test_e2e_integration_t3_t4.py": 5000,
-    "tests/test_benchmark_infra.py": 4400,
-    "tests/test_rtx3060_unlocks.py": 4100,
-    "subtrans/tests/test_subtrans_deep_upgrades.py": 3700,
-    "tests/test_mux_audit_regression.py": 3700,
-    "subtrans/tests/test_pipeline_dynamic_batch.py": 3500,
-    "subtrans/tests/test_audit_fixes_subtrans.py": 3500,
-    "tests/test_algorithmic_optimizations.py": 3200,
-    "tests/test_architecture_boundaries.py": 3100,
-    "tests/test_agent_context.py": 3100,
-    "tests/test_nvme_cache_and_input_triton.py": 3000,
-    "tests/test_model_spandrel_and_whisper.py": 2600,
-    "tests/test_cli_lock_and_pipeline_regressions.py": 2400,
-    "tests/e2e/test_e2e_group_a.py": 2100,
-    "tests/test_zero_disk_and_trt_export.py": 1900,
-    "tests/test_agent_setup.py": 1500,
-    "tests/test_gop_rle_and_3stage_overlap.py": 1500,
-    "tests/test_audit_fixes_video.py": 1500,
-    "tests/test_model_selection_and_safety.py": 1400,
+    "tests/e2e/test_tier1_features.py": 16500,
+    "tests/e2e/test_tier2_boundaries.py": 11000,
+    "tests/test_allow_partial.py": 10500,
+    "tests/e2e/test_e2e_group_b.py": 7300,
+    "tests/test_export_review_bundle.py": 6900,
+    "tests/e2e/test_tier3_pairwise.py": 6000,
+    "tests/test_web_gui.py": 5900,
+    "tests/test_nvme_cache_and_input_triton.py": 4400,
+    "tests/test_dedup_policy.py": 4100,
+    "tests/e2e/test_tier4_scenarios.py": 3800,
+    "tests/test_benchmark_infra.py": 3400,
+    "tests/test_mux_audit_regression.py": 3200,
+    "tests/test_agent_context.py": 3200,
+    "tests/test_pareto_o1_o6.py": 2800,
+    "subtrans/tests/test_cache.py": 2800,
+    "tests/e2e/test_e2e_integration_t3_t4.py": 2400,
+    "tests/test_zero_disk_and_trt_export.py": 2000,
+    "tests/test_rtx3060_unlocks.py": 1800,
+    "tests/test_algorithmic_optimizations.py": 1600,
+    "tests/test_architecture_boundaries.py": 1500,
+    "tests/test_pipeline.py": 1300,
+    "tests/test_output_sanity.py": 1300,
+    "subtrans/tests/test_subtrans_resilience.py": 1300,
+    "tests/test_model_spandrel_and_whisper.py": 1200,
+    "tests/test_agent_setup.py": 1200,
+    "subtrans/tests/test_pipeline_dynamic_batch.py": 1200,
+    "subtrans/tests/test_audit_fixes_subtrans.py": 1200,
+    "subtrans/tests/test_subtrans_deep_upgrades.py": 1100,
+    "tests/test_audit_fixes_video.py": 850,
+    "tests/test_smoke_pipeline.py": 800,
+    "tests/test_verify_offline.py": 800,
+    "subtrans/tests/test_subtrans_v2_max_quality.py": 650,
+    "tests/test_dedup.py": 600,
+    "tests/e2e/test_e2e_group_a.py": 600,
+    "tests/test_ffmpeg_ops.py": 500,
+    "tests/test_gop_rle_and_3stage_overlap.py": 450,
+    "tests/test_cli_lock_and_pipeline_regressions.py": 450,
+    "subtrans/tests/test_subtrans_v2_5_ceiling_polish.py": 450,
 }
 
 
@@ -317,10 +429,19 @@ def _lpt_pack(units: list[tuple[int, list[str]]], k: int) -> list[list[str]]:
     return [sorted(b) for b in buckets if b]
 
 
+_SPLIT_MONOLITH_PARTS: dict[str, int] = {
+    "tests/e2e/test_tier1_features.py": 3,
+    "tests/e2e/test_tier2_boundaries.py": 3,
+    "tests/e2e/test_e2e_group_b.py": 3,
+    "tests/test_web_gui.py": 2,
+    "tests/e2e/test_tier3_pairwise.py": 2,
+    "tests/e2e/test_tier4_scenarios.py": 2,
+}
+
+
 def _partition_test_shards(snapshot: Path, num_workers: int) -> list[list[str]]:
-    """Keep subtrans isolated in Shard 0 and pack all unit + E2E slices evenly across remaining P-core shards."""
-    subtrans_units: list[tuple[int, list[str]]] = []
-    main_units: list[tuple[int, list[str]]] = []
+    """Split heavy pure-function test monoliths and LPT-pack all units evenly across P-core shards."""
+    all_units: list[tuple[int, list[str]]] = []
     file_count = 0
     for base_rel in ("tests", "subtrans/tests"):
         base = snapshot / base_rel
@@ -330,27 +451,13 @@ def _partition_test_shards(snapshot: Path, num_workers: int) -> list[list[str]]:
             file_count += 1
             rel = p.relative_to(snapshot).as_posix()
             weight = _MEASURED_FILE_WEIGHT_MS.get(rel, max(600, p.stat().st_size // 10))
-            if rel.startswith("subtrans/tests/") or rel in (
-                "tests/test_export_review_bundle.py",
-                "tests/test_agent_context.py",
-                "tests/test_architecture_boundaries.py",
-            ):
-                subtrans_units.append((weight, [rel]))
-            elif rel == "tests/e2e/test_tier1_features.py":
-                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2, first_ratio=0.42))
-            elif rel == "tests/e2e/test_tier2_boundaries.py":
-                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2, first_ratio=0.58))
-            elif rel == "tests/e2e/test_tier3_pairwise.py":
-                main_units.extend(_split_e2e_into_n(p, rel, weight, parts=2))
+            parts = _SPLIT_MONOLITH_PARTS.get(rel, 1)
+            if parts > 1:
+                all_units.extend(_split_e2e_into_n(p, rel, weight, parts=parts))
             else:
-                main_units.append((weight, [rel]))
+                all_units.append((weight, [rel]))
     if file_count < 8 or num_workers <= 1:
         return []
-    if num_workers >= 5 and subtrans_units and main_units:
-        sub_k = 1
-        main_k = num_workers - sub_k
-        return _lpt_pack(subtrans_units, sub_k) + _lpt_pack(main_units, min(main_k, len(main_units)))
-    all_units = subtrans_units + main_units
     return _lpt_pack(all_units, min(num_workers, len(all_units)))
 
 
@@ -398,14 +505,16 @@ def main(argv: list[str] | None = None) -> int:
     scratch = ROOT / "scratch"
     scratch.mkdir(exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="agent-validation-", dir=scratch))
+    active_pid_file = run_dir / ".active.pid"
     snapshot = run_dir / "repo"
-    snapshot.mkdir()
     tmp_dir = run_dir / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     code = 1
     extra_snapshots: list[Path] = []
     try:
+        _write_active_pid(active_pid_file, os.getpid())
+        snapshot.mkdir()
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         count = snapshot_sources(ROOT, snapshot)
         guard_dir = run_dir / "guard"
         guard_dir.mkdir(parents=True, exist_ok=True)
@@ -457,9 +566,8 @@ def main(argv: list[str] | None = None) -> int:
                     code = process.wait()
         else:
             shard_dirs: list[Path] = []
-            for idx, s_targets in enumerate(shards):
-                needs_own_cwd = any(t.startswith("tests/e2e/test_tier") for t in s_targets)
-                if idx == 0 or not needs_own_cwd:
+            for idx, _s_targets in enumerate(shards):
+                if idx == 0:
                     shard_dirs.append(snapshot)
                 else:
                     w_snap = run_dir / f"repo_w{idx}"
@@ -517,25 +625,36 @@ def main(argv: list[str] | None = None) -> int:
             code = next((rc for rc in codes if rc != 0), 0)
         print(f"Evidence: {run_dir}\nPytest exit code: {code}")
     finally:
-        cleanup_paths: list[Path] = []
-        if code == 0:
-            cleanup_paths.extend(extra_snapshots)
-        if is_fast_mode or code == 0:
-            cleanup_paths.extend([snapshot, run_dir / "guard", tmp_dir])
-        if cleanup_paths:
-            with ThreadPoolExecutor(max_workers=min(8, len(cleanup_paths))) as clean_pool:
-                list(clean_pool.map(_rmtree_force, cleanup_paths))
-        if is_fast_mode or code == 0:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cleanup_paths: list[Path] = []
             if code == 0:
-                validation_dirs = sorted(
-                    (p for p in scratch.glob("agent-validation-*") if p.is_dir()),
-                    key=lambda p: (p.stat().st_mtime_ns, p.name),
-                    reverse=True,
-                )
-                for old_dir in validation_dirs[2:]:
-                    if old_dir != run_dir:
-                        _rmtree_force(old_dir)
+                cleanup_paths.extend(extra_snapshots)
+            if is_fast_mode or code == 0:
+                cleanup_paths.extend([snapshot, run_dir / "guard", tmp_dir])
+            if cleanup_paths:
+                with ThreadPoolExecutor(max_workers=min(8, len(cleanup_paths))) as clean_pool:
+                    list(clean_pool.map(_rmtree_force, cleanup_paths))
+            if is_fast_mode or code == 0:
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                if code == 0:
+                    validation_dirs = sorted(
+                        (p for p in scratch.glob("agent-validation-*") if p.is_dir()),
+                        key=_dir_sort_key,
+                        reverse=True,
+                    )
+                    inactive_dirs = [
+                        d for d in validation_dirs
+                        if d == run_dir or not _is_active_run_dir(d)
+                    ]
+                    for old_dir in inactive_dirs[2:]:
+                        if old_dir != run_dir and not _is_active_run_dir(old_dir):
+                            _rmtree_force(old_dir)
+        finally:
+            try:
+                active_pid_file.unlink(missing_ok=True)
+                active_pid_file.with_name(f"{active_pid_file.name}.tmp").unlink(missing_ok=True)
+            except OSError:
+                pass
     return code
 
 

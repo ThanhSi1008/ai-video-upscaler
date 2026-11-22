@@ -108,7 +108,8 @@ def test_t2_f02_03_negative_preview_duration(mock_pipeline_env, tmp_path, monkey
 
 def test_t2_f02_04_non_integer_preview_argument(tmp_path, monkeypatch, capsys):
     """T2-F02-04: Non-Integer Preview Argument (argparse exit 2)"""
-    src_vid = create_synthetic_video(tmp_path / "clip_str.mkv", num_frames=8)
+    src_vid = tmp_path / "clip_str.mkv"
+    src_vid.touch()
 
     exit_code, out, err = run_upscale_cli([str(src_vid), "--preview", "ten_sec"], monkeypatch, capsys)
     assert exit_code == 2
@@ -181,7 +182,8 @@ def test_t2_f03_05_empty_queue_dry_run(monkeypatch, capsys):
 
 def test_t2_f04_01_unregistered_model_rejection(tmp_path, monkeypatch, capsys):
     """T2-F04-01: Unregistered Model ID Rejection (raises ValueError / exits 1)"""
-    src_vid = create_synthetic_video(tmp_path / "vid_bad_model.mkv", num_frames=8)
+    src_vid = tmp_path / "vid_bad_model.mkv"
+    src_vid.touch()
 
     exit_code, out, err = run_upscale_cli([str(src_vid), "-m", "nonexistent_model_xyz"], monkeypatch, capsys)
     assert exit_code == 1
@@ -190,7 +192,8 @@ def test_t2_f04_01_unregistered_model_rejection(tmp_path, monkeypatch, capsys):
 
 def test_t2_f04_02_invalid_engine_choice_rejection(tmp_path, monkeypatch, capsys):
     """T2-F04-02: Invalid Engine Choice Rejection (argparse exit 2)"""
-    src_vid = create_synthetic_video(tmp_path / "vid_bad_engine.mkv", num_frames=8)
+    src_vid = tmp_path / "vid_bad_engine.mkv"
+    src_vid.touch()
 
     exit_code, out, err = run_upscale_cli([str(src_vid), "--engine", "opencl"], monkeypatch, capsys)
     assert exit_code == 2
@@ -255,7 +258,8 @@ def test_t2_f04_05_alias_mapping_for_legacy_model_names(mock_pipeline_env, tmp_p
 
 def test_t2_f05_01_deadline_skip_without_allow_partial(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F05-01: Deadline Skip without Allow-Partial exits 1 with summary"""
-    src_vid = create_synthetic_video(tmp_path / "skip_vid.mkv", num_frames=8)
+    src_vid = tmp_path / "skip_vid.mkv"
+    src_vid.touch()
     out_dir = tmp_path / "out"
 
     # Deadline of 00:01 in the past causes tight budget skip
@@ -295,7 +299,8 @@ def test_t2_f05_03_empty_queue_flag(monkeypatch, capsys):
 
 def test_t2_f05_04_user_sigint_interruption_in_queue(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F05-04: User SIGINT Interruption (Ctrl+C) Handling in Queue"""
-    src_vid = create_synthetic_video(tmp_path / "sigint_vid.mkv", num_frames=8)
+    src_vid = tmp_path / "sigint_vid.mkv"
+    src_vid.touch()
 
     with patch("upscale.run_upscale_pipeline", side_effect=KeyboardInterrupt):
         exit_code, out, err = run_upscale_cli([str(src_vid), "-o", str(tmp_path)], monkeypatch, capsys)
@@ -304,7 +309,8 @@ def test_t2_f05_04_user_sigint_interruption_in_queue(mock_pipeline_env, tmp_path
 
 def test_t2_f05_05_failed_resumable_enospc_queue_retry(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F05-05: Failed-Resumable ENOSPC Simulation & Queue Retry Pass"""
-    v1 = create_synthetic_video(tmp_path / "enospc_ep1.mkv", num_frames=8)
+    v1 = tmp_path / "enospc_ep1.mkv"
+    v1.touch()
     out_dir = tmp_path / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -333,7 +339,8 @@ def test_t2_f05_05_failed_resumable_enospc_queue_retry(mock_pipeline_env, tmp_pa
 
 def test_t2_f06_01_invalid_dedup_policy_name_rejection(tmp_path, monkeypatch, capsys):
     """T2-F06-01: Invalid Dedup Policy Name Rejection (argparse exit 2)"""
-    src_vid = create_synthetic_video(tmp_path / "vid_bad_policy.mkv", num_frames=8)
+    src_vid = tmp_path / "vid_bad_policy.mkv"
+    src_vid.touch()
 
     exit_code, out, err = run_upscale_cli([str(src_vid), "--dedup-policy", "ultra_aggressive"], monkeypatch, capsys)
     assert exit_code == 2
@@ -341,21 +348,43 @@ def test_t2_f06_01_invalid_dedup_policy_name_rejection(tmp_path, monkeypatch, ca
 
 def test_t2_f06_02_custom_dis_thresh_flag_conversion(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F06-02: Custom DIS Threshold Flag Conversion (--dis-thresh 0.2 -> dis-0.2)"""
-    src_vid = create_synthetic_video(tmp_path / "vid_dis_thresh.mkv", num_frames=8)
+    src_vid = tmp_path / "vid_dis_thresh.mkv"
+    src_vid.touch()
     out_dir = tmp_path / "out"
+    captured_kwargs = []
 
-    exit_code, out, err = run_upscale_cli([str(src_vid), "--dis-thresh", "0.2", "-o", str(out_dir)], monkeypatch, capsys)
+    def _stub_pipeline(**kwargs):
+        captured_kwargs.append(dict(kwargs))
+        out_file = out_dir / "vid_dis_thresh_4K.mkv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.touch()
+        return str(out_file)
+
+    with patch("upscale.run_upscale_pipeline", side_effect=_stub_pipeline):
+        exit_code, out, err = run_upscale_cli([str(src_vid), "--dis-thresh", "0.2", "-o", str(out_dir)], monkeypatch, capsys)
     assert exit_code == 0
+    assert captured_kwargs and captured_kwargs[0]["dedup_policy"] == "dis-0.2"
     assert (out_dir / "vid_dis_thresh_4K.mkv").exists()
 
 
 def test_t2_f06_03_custom_drift_delta_flag_conversion(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F06-03: Custom Drift Delta Flag Conversion (--drift-delta 0.50 -> drift-0.5)"""
-    src_vid = create_synthetic_video(tmp_path / "vid_drift.mkv", num_frames=8)
+    src_vid = tmp_path / "vid_drift.mkv"
+    src_vid.touch()
     out_dir = tmp_path / "out"
+    captured_kwargs = []
 
-    exit_code, out, err = run_upscale_cli([str(src_vid), "--drift-delta", "0.50", "-o", str(out_dir)], monkeypatch, capsys)
+    def _stub_pipeline(**kwargs):
+        captured_kwargs.append(dict(kwargs))
+        out_file = out_dir / "vid_drift_4K.mkv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.touch()
+        return str(out_file)
+
+    with patch("upscale.run_upscale_pipeline", side_effect=_stub_pipeline):
+        exit_code, out, err = run_upscale_cli([str(src_vid), "--drift-delta", "0.50", "-o", str(out_dir)], monkeypatch, capsys)
     assert exit_code == 0
+    assert captured_kwargs and captured_kwargs[0]["dedup_policy"] == "drift-0.5"
     assert (out_dir / "vid_drift_4K.mkv").exists()
 
 
@@ -508,38 +537,68 @@ def test_t2_f08_01_missing_japanese_subtitle_and_audio_failure(mock_pipeline_env
 
 def test_t2_f08_02_untargeted_manual_subtitle_offset_in_multi_queue(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F08-02: Untargeted Manual Subtitle Offset in Multi-Video Queue logs warning"""
-    v1 = create_synthetic_video(tmp_path / "q_sub1.mkv", num_frames=8, subtitles=["Sub 1"])
-    v2 = create_synthetic_video(tmp_path / "q_sub2.mkv", num_frames=8, subtitles=["Sub 2"])
+    v1 = tmp_path / "q_sub1.mkv"
+    v2 = tmp_path / "q_sub2.mkv"
+    v1.touch()
+    v2.touch()
     out_dir = tmp_path / "out"
 
-    exit_code, out, err = run_upscale_cli(
-        ["--queue", str(v1), str(v2), "--sub-offset-ms", "-5000", "-o", str(out_dir)],
-        monkeypatch,
-        capsys,
-    )
+    def _stub_pipeline(input_path, **_kwargs):
+        out_file = out_dir / f"{Path(input_path).stem}_4K.mkv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.touch()
+        return str(out_file)
+
+    with patch("upscale.run_upscale_pipeline", side_effect=_stub_pipeline):
+        exit_code, out, err = run_upscale_cli(
+            ["--queue", str(v1), str(v2), "--sub-offset-ms", "-5000", "-o", str(out_dir)],
+            monkeypatch,
+            capsys,
+        )
     assert exit_code == 0
     assert "QUEUE OFFSET WARNING" in out
 
 
 def test_t2_f08_03_targeted_manual_subtitle_offset_in_queue(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F08-03: Targeted Manual Subtitle Offset in Queue"""
-    v1 = create_synthetic_video(tmp_path / "target_ep1.mkv", num_frames=8, subtitles=["Ep1"])
-    v2 = create_synthetic_video(tmp_path / "target_ep2.mkv", num_frames=8, subtitles=["Ep2"])
+    v1 = tmp_path / "target_ep1.mkv"
+    v2 = tmp_path / "target_ep2.mkv"
+    v1.touch()
+    v2.touch()
     out_dir = tmp_path / "out"
+    stage_b_cmds = []
+    orig_build_cmd = upscale._build_stage_b_sub_cmd
 
-    exit_code, out, err = run_upscale_cli(
-        ["--queue", str(v1), str(v2), "--sub-offset-ms", "-11154", "--sub-offset-target", "target_ep2", "-o", str(out_dir)],
-        monkeypatch,
-        capsys,
-    )
+    def _stub_pipeline(input_path, **_kwargs):
+        out_file = out_dir / f"{Path(input_path).stem}_4K.mkv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.touch()
+        return str(out_file)
+
+    def _spy_build_cmd(args, videos, vid, out_file):
+        cmd = orig_build_cmd(args, videos, vid, out_file)
+        stage_b_cmds.append((Path(vid).name, list(cmd)))
+        return cmd
+
+    with patch("upscale.run_upscale_pipeline", side_effect=_stub_pipeline), \
+         patch("upscale._build_stage_b_sub_cmd", side_effect=_spy_build_cmd):
+        exit_code, out, err = run_upscale_cli(
+            ["--queue", str(v1), str(v2), "--sub-offset-ms", "-11154", "--sub-offset-target", "target_ep2", "-o", str(out_dir)],
+            monkeypatch,
+            capsys,
+        )
     assert exit_code == 0
     assert (out_dir / "target_ep1_4K.mkv").exists()
     assert (out_dir / "target_ep2_4K.mkv").exists()
+    ep1_cmd = next(cmd for name, cmd in stage_b_cmds if name == "target_ep1.mkv")
+    ep2_cmd = next(cmd for name, cmd in stage_b_cmds if name == "target_ep2.mkv")
+    assert "--sub-offset-ms" not in ep1_cmd
+    assert "--sub-offset-ms" in ep2_cmd and "-11154" in ep2_cmd
 
 
 def test_t2_f08_04_partial_subtitle_embedding_guard(mock_pipeline_env, tmp_path, monkeypatch, capsys):
     """T2-F08-04: Partial Subtitle (.partial.srt) Embedding Guard"""
-    src_vid = create_synthetic_video(tmp_path / "partial_sub_clip.mkv", num_frames=8, subtitles=["Incomplete line"])
+    src_vid = create_synthetic_video(tmp_path / "partial_sub_clip.mkv", num_frames=8, subtitles=["Konnichiwa"])
     out_dir = tmp_path / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -643,7 +702,8 @@ def test_t2_f09_05_mux_failure_preserves_checkpoint(mock_pipeline_env, tmp_path,
 def test_t2_f10_01_benchmark_harness_invalid_tier_selection(tmp_path):
     """T2-F10-01: Benchmark Harness Invalid Tier Selection"""
     from scripts.benchmark_pipeline import run_benchmark
-    src_vid = create_synthetic_video(tmp_path / "bench_bad_tier.mkv", num_frames=8)
+    src_vid = tmp_path / "bench_bad_tier.mkv"
+    src_vid.touch()
 
     with pytest.raises(ValueError, match="Invalid tier"):
         run_benchmark(
