@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
 from web.fs_browser import (
+    VALID_GRAIN_RESTORE_POLICIES,
     VALID_NVENC_MULTIPASS_POLICIES,
     SafeLocalFSBrowser,
     is_secret_filename,
@@ -27,14 +28,17 @@ from web.sse_hub import _coerce_pid, check_active_gpu_lock, live_matches_web_job
 # Tốc độ suy luận khung hình độc nhất tham chiếu trên RTX 3060 TensorRT 10 FP16 Zero-Disk (từ STATE.md R3)
 MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
     "animevideov3": (10.5, 8.5),
-    "animejanai-hd-v3-compact": (10.8, 8.8),
+    "animejanai-hd-v3-compact": (12.8, 10.2),
     "animejanai-hd-v3-ultracompact": (18.5, 15.5),
     "animejanai-hd-v3-sharp1-ultracompact": (18.5, 15.5),
     "animejanai-hd-v3-superultracompact": (20.8, 17.5),
     "animejanai-hd-v3-sharp1-superultracompact": (20.8, 17.5),
     "auto-pareto": (16.5, 13.5),
-    "span-2x": (14.5, 12.0),
-    "2x_AnimeJaNai_V3": (14.5, 12.0),
+    "span-2x": (10.5, 8.5),
+    "2x_AnimeJaNai_V3": (10.5, 8.5),
+    "modernspanimation-v2-2x": (10.5, 8.5),
+    "realcugan-pro-conservative-2x": (8.5, 7.0),
+    "realcugan-pro-denoise3x-2x": (8.5, 7.0),
 }
 
 
@@ -140,6 +144,19 @@ def _validate_nvenc_multipass(val: Optional[str]) -> Optional[str]:
     if norm not in VALID_NVENC_MULTIPASS_POLICIES:
         raise ValueError(
             f"Giá trị nvenc_multipass '{val}' không hợp lệ (chỉ chấp nhận auto, fullres hoặc qres)."
+        )
+    return norm
+
+
+def _validate_grain_restore(val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    norm = str(val).strip().lower()
+    if not norm:
+        return None
+    if norm not in VALID_GRAIN_RESTORE_POLICIES:
+        raise ValueError(
+            f"Giá trị grain_restore '{val}' không hợp lệ (chỉ chấp nhận auto, off, light hoặc heavy)."
         )
     return norm
 
@@ -258,10 +275,12 @@ def _find_cached_plan(
     video_path: str,
     output_dir: Optional[str] = None,
     expected_policy: Optional[str] = None,
+    expected_grain_restore: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     out_base, _ = _resolve_output_target(workspace_root, output_dir)
     vid_dir = Path(video_path).resolve().parent
+    norm_grain = _validate_grain_restore(expected_grain_restore)
     candidates = [
         out_base / f".temp_{base_name}" / "plan.json",
         workspace_root / "out" / f".temp_{base_name}" / "plan.json",
@@ -277,6 +296,13 @@ def _find_cached_plan(
                     plan_pol = data.get("dedup_policy")
                     if expected_policy and plan_pol is not None:
                         if str(plan_pol).strip().lower() != str(expected_policy).strip().lower():
+                            continue
+                    if norm_grain is not None:
+                        c_params = data.get("dedup_params") or {}
+                        c_grain = c_params.get("grain_restore")
+                        if c_grain is not None and str(c_grain).strip().lower() != norm_grain:
+                            continue
+                        if c_grain is None and norm_grain != "auto":
                             continue
                     return data
             except Exception:
@@ -371,6 +397,7 @@ class JobManager:
         allow_partial: bool = False,
         model_override: Optional[str] = None,
         dedup_override: Optional[str] = None,
+        grain_restore: Optional[str] = None,
         zero_disk: bool = True,
         use_tensorrt: bool = True,
         subs_after_upscale: bool = True,
@@ -380,6 +407,7 @@ class JobManager:
         """Dự báo chi tiết danh sách tập, model phân giải từ shows.yaml và thời gian hoàn thành theo --deadline."""
         videos = self.fs_browser.expand_inputs(inputs)
         deadline_str = _validate_deadline(deadline_str)
+        grain_norm = _validate_grain_restore(grain_restore)
         now = datetime.now()
         deadline_dt: Optional[datetime] = None
         if deadline_str:
@@ -437,6 +465,7 @@ class JobManager:
                 vid,
                 str(out_base),
                 expected_policy=routing["dedup_policy"],
+                expected_grain_restore=grain_norm,
             )
             if already_done:
                 if plan:
@@ -710,6 +739,7 @@ class JobManager:
         subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         deadline_norm = _validate_deadline(payload.get("deadline"))
         nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
+        grain_norm = _validate_grain_restore(payload.get("grain_restore"))
 
         videos = self.fs_browser.expand_inputs(raw_inputs)
         dry_run = bool(payload.get("dry_run", False))
@@ -730,6 +760,8 @@ class JobManager:
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
         if nvenc_mp_norm:
             cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
+        if grain_norm:
+            cmd.extend(["--grain-restore", grain_norm])
         if batch_size is not None:
             cmd.extend(["--batch-size", str(batch_size)])
         if deadline_norm:
@@ -776,6 +808,7 @@ class JobManager:
             raise ValueError("seconds phải là số hữu hạn.")
         seconds = max(3, min(60, int(sec_f)))
         nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
+        grain_norm = _validate_grain_restore(payload.get("grain_restore"))
         self._ensure_ready_to_launch(requires_gpu=True)
 
         cmd = [
@@ -794,6 +827,8 @@ class JobManager:
             cmd.extend(["--dedup-policy", str(payload["dedup_policy"]).strip()])
         if nvenc_mp_norm:
             cmd.extend(["--nvenc-multipass", nvenc_mp_norm])
+        if grain_norm:
+            cmd.extend(["--grain-restore", grain_norm])
         if batch_size is not None:
             cmd.extend(["--batch-size", str(batch_size)])
         if payload.get("zero_disk") is False:

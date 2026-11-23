@@ -1,6 +1,6 @@
 # Validation & Testing Guide
 
-> **Updated:** 2026-11-22 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [PROJECT_MAP](PROJECT_MAP.md)
+> **Updated:** 2026-11-23 | **Related:** [GEMINI](../../GEMINI.md) | [STATE](STATE.md) | [PROJECT_MAP](PROJECT_MAP.md)
 
 ## Default Offline Verification Sequence (PowerShell)
 
@@ -13,7 +13,7 @@ Always invoke the repository `.venv` interpreter from the repo root (system `PAT
 git diff --check
 ```
 
-- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), caps BLAS/OMP threads (`OMP/MKL/OPENBLAS/NUMEXPR=1`) with Win11 P-core QoS (`_configure_win32_pcore_qos`), forces CPU software HEVC encoding (`UPSCALER_HEVC_ENCODER=libx265`), strips API keys/tokens, disables `.env`, blocks external Python sockets across the entire subprocess tree via `sitecustomize.py` + `agent_offline_guard` (preserving loopback/socketpair for local ASGI/EventLoop tests), and executes calibrated 6-worker LPT `pytest -m "not gpu"` (`--show-capture=no`, `~55–70s` wall time, `1022 passed, 6 skipped, 0 xfailed, 0 xpassed`).
+- `verify_offline.py` copies tracked/untracked source/config/fixtures into a disposable snapshot (`scratch/agent-validation-*/repo`), hides CUDA (`CUDA_VISIBLE_DEVICES=-1`), caps BLAS/OMP threads (`OMP/MKL/OPENBLAS/NUMEXPR=1`) with Win11 P-core QoS (`_configure_win32_pcore_qos`), forces CPU software HEVC encoding (`UPSCALER_HEVC_ENCODER=libx265`), strips API keys/tokens, disables `.env`, blocks external Python sockets across the entire subprocess tree via `sitecustomize.py` + `agent_offline_guard` (preserving loopback/socketpair for local ASGI/EventLoop tests), and executes calibrated 6-worker LPT `pytest -m "not gpu"` (`--show-capture=no`, `~55–70s` wall time, `1038 passed, 9 skipped, 0 xfailed, 0 xpassed`).
 - Fast iteration modes (`< 5s`, always clean up `repo/` snapshot even on failure): `scripts/verify_offline.py --target <PATH_OR_NODEID>` and `scripts/verify_offline.py --impacted` (auto-resolving dirty paths via `agent_context.py` 2-hop + cross-boundary contracts, `--maxfail=3` default). Use `agent_context.py --pack`, `--symbols`, `--slice`, and `--impact` to inspect code cleanly before testing.
 - Logs (`pytest.log`, `junit.xml`) remain under `scratch/agent-validation-*/` (up to 2 recent passing runs retained); snapshot `repo/` and `tmp/pytest/` are deleted automatically on pass.
 
@@ -38,6 +38,7 @@ Run targeted tests directly ONLY for pure stdlib/web/smoke allowlisted suites, o
 | **E2E Acceptance Suite** (`tests/test_e2e_acceptance_p0_p2.py`, `tests/e2e/`) | `pytest -m "e2e and not gpu" -q` *(or `--target tests/test_e2e_acceptance_p0_p2.py` inside `verify_offline` snapshot)* |
 | **Subtrans Engine & Evals** (`subtrans/*.py`, `glossaries/`) | `pytest -m "subtrans and not gpu" -q` *(inside `verify_offline` snapshot; `.\.venv\Scripts\python.exe subtrans.py eval` & `benchmarks/subtrans/eval_golden_pronouns*.py --dry-run`; delegate to [subtrans-evaluator](../../.agents/agents/subtrans-evaluator.md))* |
 | **Video Core / Dedup / TRT / Mux** (`src/`, `upscale.py`) | `pytest -m "unit and not subtrans and not gpu" -q` *(inside `verify_offline` snapshot)* |
+| **Live Local GPU / TRT / Benchmarks** (`src/build_trt_engine.py`, `scripts/benchmark_pipeline.py`, `scripts/silicon_roofline_probe.py`) | Autonomous when `.gpu_active.lock` is idle: `.\.venv\Scripts\python.exe src/build_trt_engine.py`, `.\.venv\Scripts\python.exe scripts/silicon_roofline_probe.py`, or `$env:RUN_GPU_TESTS=1; .\.venv\Scripts\python.exe -m pytest -m gpu -q` |
 | **Static Linter** | `.\.venv\Scripts\ruff.exe check .` |
 
 ## Subagent Delegation & Pytest Markers
@@ -47,5 +48,5 @@ Run targeted tests directly ONLY for pure stdlib/web/smoke allowlisted suites, o
 ## Acceptance & Reporting Rules
 - Record exact commands, interpreter (`.venv`), `passed`/`failed`/`skipped`/`deselected` counts, wall-clock duration, and `scratch/agent-validation-*` evidence path.
 - For tooling/docs/offline code changes without real video output, report Mux Audit / Frame Count / FPS as **`N/A — no media artifact produced`**.
-- Never relax assertions to force green tests; never run GPU or live API tests without explicit user scope approval.
+- Never relax assertions to force green tests. Full autonomous authority is granted for local CPU/RAM/NVMe/TensorRT/CUDA/NVENC runs, full-episode upscales (`--no-subs`), hardware benchmarks, and `@pytest.mark.gpu` (`RUN_GPU_TESTS=1`) tests when `.gpu_active.lock` is idle; never invoke live paid Cloud Gemini API calls without explicit user approval.
 - **Live `/browser` E2E Evidence (`2026-11-22`, real `web_gui.py --no-browser` without `--mock`, isolated `scratch/live_ui_test_out`):** Verified headless Chrome CDP across 5 tabs + 2 dialogs (`0` JS/console/CSP errors), `1440x900`/`970x900`/`390x844` zero overflow (`103.6px` mobile header), `#fs-picker-dialog` browse & inline error + `.env` `403`, real 10s GPU preview (`9.97 fps`, `dis-auto`, `preview_start_sec=529.077`, `0` files in `out/`), real GPU episode heatmap (`17.05 fps`) + graceful pause + Resume CTA sync + `abort_job` `.gpu_active.lock` cleanup, Tab 3 Compare (`topDiff=0`, boundary `999999`), Tab 4 `shows.yaml` LF round-trip, Tab 5 deduplicated audits (`5` `benchmark_group_b` `_4K` / `10` total) + Night Report HTTP `200`, and clean shutdown.

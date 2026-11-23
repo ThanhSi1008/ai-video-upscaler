@@ -87,8 +87,14 @@ def list_models_formatted() -> str:
     ]
     for m_id, m in registry.items():
         is_def = "⭐ [Mặc định]" if m.get("default", False) else ""
-        arch_desc = f"{m['arch']['num_feat']}f{m['arch']['num_conv']}c (x{m['arch']['upscale']})"
-        lines.append(f"{m_id:<40} | {m['name']:<34} | {arch_desc:<12} | {is_def}")
+        arch = m.get("arch") or {}
+        arch_type = str(arch.get("type") or "")
+        up_scale = arch.get("upscale", 2)
+        if arch_type == "UpCunet2x":
+            arch_desc = f"CUGAN-Pro (x{up_scale})" if arch.get("pro") else f"UpCunet2x (x{up_scale})"
+        else:
+            arch_desc = f"{arch.get('num_feat', '?')}f{arch.get('num_conv', '?')}c (x{up_scale})"
+        lines.append(f"{m_id:<40} | {m.get('name', m_id):<34} | {arch_desc:<12} | {is_def}")
     lines.append("=" * 96)
     lines.append("Chế độ thích ứng: --model auto-pareto (kết hợp cùng họ AnimeJaNai HD V3 Compact 16c + UltraCompact 8c theo cảnh).")
     lines.append("Ghi chú: Để ánh xạ tự động cho từng bộ phim, cấu hình mẫu trong shows.yaml.")

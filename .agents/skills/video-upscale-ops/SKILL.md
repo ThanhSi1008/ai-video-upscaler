@@ -10,8 +10,7 @@ description: >-
 
 ## 1. Non-Negotiable Hardware & Quality Invariants
 
-- **100% Local Execution:** Windows 11, Intel Core i5-12600K (P-Core HighQoS, AVX2 `cv2.imwrite`), NVIDIA RTX 3060 12GB (TensorRT 10 FP16 / PyTorch `cuda` FP16, `batch_size=8`, `--zero-disk` default `True` with `--no-zero-disk` fallback). Never propose Cloud GPUs or load local LLMs concurrently.
-- **Approval Gate:** Ask the user before running real GPU inference > 100 frames or changing default SR models / NVENC quality flags.
+- **100% Local Execution & Autonomous Hardware Authority:** Windows 11, multi-core Intel Core i5-12600K (P-Core HighQoS, AVX2 `cv2.imwrite`), 32GB RAM / NVMe Gen4, NVIDIA RTX 3060 12GB (TensorRT 10 FP16 `src/build_trt_engine.py` / PyTorch `cuda` FP16, 10-bit `hevc_nvenc`, `batch_size=8`, `--zero-disk` default `True` with `--no-zero-disk` fallback). Full autonomous authority is granted across 100% of local hardware without asking for approval on GPU frame counts, TensorRT engine builds, full-episode upscales (pass `--no-subs` unless Cloud Gemini subtrans is approved), or hardware benchmarks (`scripts/benchmark_pipeline.py`, `scripts/silicon_roofline_probe.py`, `RUN_GPU_TESTS=1`) whenever `.gpu_active.lock` is idle. Never propose Cloud GPUs, load local LLMs concurrently, or persistently alter repo default `animevideov3` / NVENC `CQ 18` configs without user confirmation.
 - **Checkpoint Safety:** Never delete or modify `.temp_<basename>/` (`manifest.json`, `plan.json`, `raw_segs/`, `upscaled_segs/`) without explicit user confirmation.
 - **Two-Way BT.709 Matrix:**
   - Extract: `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc`
@@ -33,6 +32,11 @@ description: >-
 # Run < 5s CPU-safe 24f pipeline smoke check:
 .\.venv\Scripts\python.exe scripts/smoke_test_pipeline.py
 
+# Autonomous TensorRT FP16 build, hardware benchmarks, or full-episode local upscale:
+.\.venv\Scripts\python.exe src/build_trt_engine.py
+.\.venv\Scripts\python.exe scripts/silicon_roofline_probe.py
+.\.venv\Scripts\python.exe upscale.py "path/to/episode.mkv" -o out/ --no-subs
+
 # Probe source container streams & frame count (read-only):
 ffprobe -v error -show_entries stream=index,codec_name,codec_type,channels,pix_fmt,r_frame_rate -of json "path/to/source.mkv"
 ```
@@ -46,7 +50,7 @@ ffprobe -v error -show_entries stream=index,codec_name,codec_type,channels,pix_f
 
 ## 4. Production Output Verification Checklist
 
-Whenever real video output is produced (with user permission):
+Whenever real video output is produced:
 1. `src/output_sanity.py` passes ($|\Delta Y| \le 6/255$, Pearson $r \ge 0.98$).
 2. `src/mux_audit.py:verify_mux_integrity` returns `"PASS"` (matching audio MD5/streams, subtitle tracks, font attachments).
 3. `ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames` matches source and 4K output bit-for-bit.

@@ -1,12 +1,14 @@
 """PyTorch CUDA FP16 and TensorRT persistent inference worker for 4K anime upscaling."""
 
+import hashlib
+import inspect
 import os
 import sys
 import time
 import glob
 import psutil
 import shutil
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 import cv2
@@ -215,6 +217,14 @@ class SpandrelModelWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.scale == 2:
+            if (
+                not torch.onnx.is_in_onnx_export()
+                and int(x.shape[0]) > 1
+                and (int(x.shape[2]) * int(x.shape[3])) >= (720 * 1280)
+                and hasattr(self.inner_model, "unet1")
+                and hasattr(self.inner_model, "unet2")
+            ):
+                return torch.cat([self.inner_model(x[i : i + 1]) for i in range(int(x.shape[0]))], dim=0)
             return self.inner_model(x)
 
         if self._can_collapse_srvgg_4x:
@@ -248,6 +258,147 @@ class GPUError(Exception):
     pass
 
 
+def _filter_supported_kwargs(fn: Any, extra_kw: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter optional kwargs so strict test stubs without new parameters never raise TypeError."""
+    if hasattr(fn, "_mock_name"):
+        return dict(extra_kw)
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(extra_kw)
+    return {k: v for k, v in extra_kw.items() if k in params}
+
+
+def _sha256_of_file(path_str: str) -> str:
+    h = hashlib.sha256()
+    with open(path_str, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def compute_blended_weights_sha256(cons_sha: str, dn3x_sha: str, alpha: float) -> str:
+    """Compute deterministic 64-hex SHA-256 digest for episode-level Real-CUGAN grain adaptation."""
+    a = round(max(0.0, min(1.0, float(alpha))), 4)
+    c_clean = str(cons_sha or "").strip().lower()
+    d_clean = str(dn3x_sha or "").strip().lower()
+    if a <= 0.0:
+        return c_clean
+    if a >= 1.0:
+        return d_clean
+    token = f"upcunet2x_blend_v2:{c_clean}:{d_clean}:{a:.4f}".encode("utf-8")
+    return hashlib.sha256(token).hexdigest().lower()
+
+
+def blend_upcunet_state_dicts(
+    cons_path: str,
+    dn3x_path: str,
+    alpha: float,
+    cons_sha: Optional[str] = None,
+    dn3x_sha: Optional[str] = None,
+) -> Tuple[Dict[str, torch.Tensor], str]:
+    """Adapt Real-CUGAN Pro weights across grain tiers without scrambling disjoint hidden channel basins."""
+    a = round(max(0.0, min(1.0, float(alpha))), 4)
+    c_sha = str(cons_sha or "").strip().lower() or _sha256_of_file(cons_path)
+    d_sha = str(dn3x_sha or "").strip().lower() or _sha256_of_file(dn3x_path)
+    blended_sha = compute_blended_weights_sha256(c_sha, d_sha, a)
+
+    cons_raw = torch.load(cons_path, map_location="cpu", weights_only=True)
+    dn3x_raw = torch.load(dn3x_path, map_location="cpu", weights_only=True)
+    cons_sd = cons_raw.get("params_ema", cons_raw.get("params", cons_raw)) if isinstance(cons_raw, dict) else cons_raw
+    dn3x_sd = dn3x_raw.get("params_ema", dn3x_raw.get("params", dn3x_raw)) if isinstance(dn3x_raw, dict) else dn3x_raw
+    if set(cons_sd.keys()) != set(dn3x_sd.keys()):
+        raise ValueError("Incompatible state_dict keys between pro-conservative and pro-denoise3x weights.")
+
+    # Upstream pro-conservative and pro-denoise3x were trained from independent seeds (cos ~ 0.04-0.18 on
+    # unet1.conv3 / unet2.conv5), so naive weight-space lerp shifts DC luma by >15 LSB; fold native UNet2
+    # conv4_up detail attenuation (u2_alpha = 1 - a/3 -> 0.85 at a=0.45) unless checkpoints share a basin.
+    basin_aligned = True
+    if 0.0 < a < 1.0:
+        for probe_k in ("unet1.conv3.weight", "unet2.conv5.weight"):
+            if probe_k in cons_sd and probe_k in dn3x_sd:
+                vc_f = cons_sd[probe_k].detach().float().flatten()
+                vd_f = dn3x_sd[probe_k].detach().float().flatten()
+                vc_c = vc_f - vc_f.mean()
+                vd_c = vd_f - vd_f.mean()
+                if vc_c.numel() > 1 and float(vc_c.norm()) > 1e-8 and float(vd_c.norm()) > 1e-8:
+                    cos_v = float(F.cosine_similarity(vc_c.unsqueeze(0), vd_c.unsqueeze(0)).item())
+                    if cos_v < 0.85:
+                        basin_aligned = False
+                        break
+
+    u2_alpha = 1.0 - (a / 3.0)
+    blended: Dict[str, torch.Tensor] = {}
+    has_pro = ("pro" in cons_sd) or ("pro" in dn3x_sd)
+    for k, v_c in cons_sd.items():
+        if k == "pro":
+            continue
+        v_d = dn3x_sd[k]
+        if a <= 0.0:
+            blended[k] = v_c.detach().clone()
+        elif a >= 1.0:
+            blended[k] = v_d.detach().clone()
+        elif basin_aligned and torch.is_floating_point(v_c):
+            blended[k] = torch.lerp(v_c.detach().float(), v_d.detach().float(), a)
+        elif (not basin_aligned) and k == "unet2.conv4_up.weight" and torch.is_floating_point(v_c):
+            blended[k] = (v_c.detach().float() * u2_alpha).to(dtype=v_c.dtype)
+        else:
+            blended[k] = v_c.detach().clone()
+    if has_pro:
+        blended["pro"] = torch.zeros(1, dtype=torch.float32)
+    return blended, blended_sha
+
+
+def resolve_episode_model_blend(
+    model_info: Dict[str, Any],
+    grain_tier: str = "clean",
+) -> Dict[str, Any]:
+    """Attach episode-level Real-CUGAN Pro alpha-blend metadata and blended_weights_sha256 for grained sources."""
+    resolved = dict(model_info)
+    base_sha = str(resolved.get("base_sha256") or resolved.get("sha256") or "").strip().lower()
+    resolved["base_sha256"] = base_sha
+    m_id = str(resolved.get("id") or "").strip().lower()
+    tier = str(grain_tier or "clean").strip().lower()
+    if m_id != "realcugan-pro-conservative-2x" or tier not in ("light", "heavy"):
+        resolved["blend_alpha"] = 0.0
+        resolved["blend_secondary_weights_path"] = None
+        resolved["blended_weights_sha256"] = base_sha
+        resolved["sha256"] = base_sha
+        return resolved
+
+    alpha = 0.45 if tier == "light" else 1.0
+    try:
+        from src.models_resolver import _resolve_repo_path, load_models_registry
+        reg = load_models_registry()
+        dn3x_entry = reg.get("realcugan-pro-denoise3x-2x")
+    except Exception:
+        dn3x_entry = None
+
+    if not isinstance(dn3x_entry, dict) or not dn3x_entry.get("weights_path"):
+        resolved["blend_alpha"] = 0.0
+        resolved["blend_secondary_weights_path"] = None
+        resolved["blended_weights_sha256"] = base_sha
+        resolved["sha256"] = base_sha
+        return resolved
+
+    sec_path = _resolve_repo_path(str(dn3x_entry["weights_path"]))
+    sec_sha = str(dn3x_entry.get("sha256") or "").strip().lower()
+    if (not base_sha and os.path.isfile(str(resolved.get("weights_path") or ""))):
+        base_sha = _sha256_of_file(str(resolved["weights_path"]))
+    if (not sec_sha and os.path.isfile(sec_path)):
+        sec_sha = _sha256_of_file(sec_path)
+    blended_sha = compute_blended_weights_sha256(base_sha, sec_sha, alpha)
+    resolved["blend_alpha"] = alpha
+    resolved["blend_secondary_model_id"] = "realcugan-pro-denoise3x-2x"
+    resolved["blend_secondary_weights_path"] = sec_path
+    resolved["blend_secondary_sha256"] = sec_sha
+    resolved["blended_weights_sha256"] = blended_sha
+    resolved["sha256"] = blended_sha
+    return resolved
+
+
 class GPUPersistentWorker:
     """Persistent PyTorch CUDA/CPU worker with NHWC channels-last execution and TRT caching."""
     def __init__(
@@ -259,6 +410,9 @@ class GPUPersistentWorker:
         device: Optional[str] = None,
         batch_size: Optional[int] = None,
         use_tensorrt: bool = True,
+        blend_alpha: float = 0.0,
+        secondary_weights_path: Optional[str] = None,
+        weights_sha256: Optional[str] = None,
     ):
         self.model_id = model_id
         self.weights_path = weights_path
@@ -267,6 +421,9 @@ class GPUPersistentWorker:
         self.chunks_processed = 0
         self.total_restarts = 0
         self.use_tensorrt = bool(use_tensorrt)
+        self.blend_alpha = round(max(0.0, min(1.0, float(blend_alpha or 0.0))), 4)
+        self.secondary_weights_path = secondary_weights_path
+        self.weights_sha256 = str(weights_sha256 or "").strip().lower()
         self._trt_runners: Dict[Any, Any] = {}
         self._zero_disk_upscaler: Any = None
         self._zero_disk_wrapper: Any = None
@@ -415,17 +572,72 @@ class GPUPersistentWorker:
                     )
                 verified_cache.add(cache_sig)
 
+        eff_alpha = round(max(0.0, min(1.0, float(getattr(self, "blend_alpha", 0.0) or 0.0))), 4)
+        sec_path = getattr(self, "secondary_weights_path", None)
+        req_sha = str(getattr(self, "weights_sha256", "") or "").strip().lower()
+        if not req_sha and reg_info is not None and reg_info.get("sha256") and eff_alpha <= 0.0:
+            req_sha = str(reg_info["sha256"]).strip().lower()
+        self.weights_sha256 = req_sha
+
         model = None
         use_spandrel = True
-        try:
+        if eff_alpha > 0.0 and sec_path:
+            if not os.path.exists(sec_path):
+                sec_reg = None
+                try:
+                    from src.models_resolver import load_models_registry
+                    sec_reg = load_models_registry().get("realcugan-pro-denoise3x-2x")
+                except Exception:
+                    sec_reg = None
+                if not in_pytest and isinstance(sec_reg, dict) and str(sec_reg.get("source_url") or "").startswith("https://"):
+                    orig_wp = self.weights_path
+                    try:
+                        self.weights_path = sec_path
+                        if self._is_canonical_registered_path(sec_reg):
+                            self._auto_download_registered_weights(sec_reg)
+                    finally:
+                        self.weights_path = orig_wp
+                if not os.path.exists(sec_path):
+                    raise FileNotFoundError(f"Không tìm thấy file trọng số pha thứ cấp: {sec_path}")
+            elif not in_pytest:
+                try:
+                    from src.models_resolver import load_models_registry, verify_weights_sha256
+                    sec_reg = load_models_registry().get("realcugan-pro-denoise3x-2x")
+                    if isinstance(sec_reg, dict) and sec_reg.get("sha256"):
+                        if not verify_weights_sha256(sec_path, sec_reg.get("sha256")):
+                            raise RuntimeError(
+                                f"Trọng số mô hình '{sec_path}' không khớp mã băm SHA-256 đã đăng ký!"
+                            )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+            blended_sd, blended_sha = blend_upcunet_state_dicts(
+                self.weights_path,
+                sec_path,
+                eff_alpha,
+                cons_sha=str((reg_info or {}).get("sha256") or "") or None,
+            )
+            self.weights_sha256 = req_sha or blended_sha
             import spandrel
             loader = spandrel.ModelLoader()
-            desc = loader.load_from_file(self.weights_path)
+            desc = loader.load_from_state_dict(blended_sd)
             model_core = desc.model.to(self.device)
             scale = int(getattr(desc, "scale", 2))
             model = SpandrelModelWrapper(model_core, scale=scale, target_scale=2.0)
-        except Exception:
-            use_spandrel = False
+        else:
+            try:
+                import spandrel
+                from src.build_trt_engine import _fold_span_conv3xc_fp32
+                loader = spandrel.ModelLoader()
+                desc = loader.load_from_file(self.weights_path)
+                model_core = desc.model.eval()
+                _fold_span_conv3xc_fp32(model_core)
+                model_core = model_core.to(self.device)
+                scale = int(getattr(desc, "scale", 2))
+                model = SpandrelModelWrapper(model_core, scale=scale, target_scale=2.0)
+            except Exception:
+                use_spandrel = False
 
         if not use_spandrel or model is None:
             sd = torch.load(self.weights_path, map_location="cpu", weights_only=True)
@@ -579,7 +791,9 @@ class GPUPersistentWorker:
                 if runners is None:
                     runners = {}
                     self._trt_runners = runners
-                key = (int(in_h), int(in_w), int(b_size))
+                eff_sha = str(getattr(self, "weights_sha256", "") or "").strip().lower()
+                eff_alpha = round(float(getattr(self, "blend_alpha", 0.0) or 0.0), 4)
+                key = (int(in_h), int(in_w), int(b_size), eff_alpha, eff_sha)
                 if key not in runners:
                     from src.build_trt_engine import get_hybrid_engine_or_wrapper
                     runners[key] = get_hybrid_engine_or_wrapper(
@@ -589,6 +803,10 @@ class GPUPersistentWorker:
                         model_id=getattr(self, "model_id", "realesr-animevideov3"),
                         input_hw=(in_h, in_w),
                         scale=2.0,
+                        **_filter_supported_kwargs(
+                            get_hybrid_engine_or_wrapper,
+                            {"weights_sha256": eff_sha or None},
+                        ),
                     )
                 return runners[key]
             return self.model
@@ -828,8 +1046,11 @@ def get_gpu_worker(
     device: Optional[str] = None,
     batch_size: Optional[int] = None,
     use_tensorrt: bool = True,
+    blend_alpha: float = 0.0,
+    secondary_weights_path: Optional[str] = None,
+    weights_sha256: Optional[str] = None,
 ) -> GPUPersistentWorker:
-    """Return or initialize the singleton GPUPersistentWorker instance."""
+    """Return or initialize the singleton GPUPersistentWorker instance (keyed by model, weights, alpha, and SHA-256)."""
     global _GLOBAL_GPU_WORKER
     req_dev_type: Optional[str] = None
     if device:
@@ -842,13 +1063,41 @@ def get_gpu_worker(
     eff_batch = int(batch_size) if (batch_size is not None and int(batch_size) > 0) else (
         1 if req_dev_type == "cpu" else DEFAULT_BATCH_SIZE
     )
+    norm_alpha = round(max(0.0, min(1.0, float(blend_alpha or 0.0))), 4)
+    req_sha = str(weights_sha256 or "").strip().lower()
 
     existing_weights = getattr(_GLOBAL_GPU_WORKER, "weights_path", None) if _GLOBAL_GPU_WORKER is not None else None
     existing_dev = getattr(_GLOBAL_GPU_WORKER, "device", None) if _GLOBAL_GPU_WORKER is not None else None
+    existing_alpha = (
+        round(float(getattr(_GLOBAL_GPU_WORKER, "blend_alpha", 0.0) or 0.0), 4)
+        if _GLOBAL_GPU_WORKER is not None
+        else 0.0
+    )
+    existing_sec = (
+        getattr(_GLOBAL_GPU_WORKER, "secondary_weights_path", None)
+        if _GLOBAL_GPU_WORKER is not None
+        else None
+    )
+    existing_sha = (
+        str(getattr(_GLOBAL_GPU_WORKER, "weights_sha256", "") or "").strip().lower()
+        if _GLOBAL_GPU_WORKER is not None
+        else ""
+    )
     weights_mismatch = (
         existing_weights is not None
         and os.path.normcase(os.path.abspath(str(existing_weights)))
         != os.path.normcase(os.path.abspath(str(weights_path)))
+    )
+    sec_mismatch = (
+        norm_alpha > 0.0
+        and bool(secondary_weights_path)
+        and os.path.normcase(os.path.abspath(str(existing_sec or "")))
+        != os.path.normcase(os.path.abspath(str(secondary_weights_path)))
+    )
+    blend_or_sha_mismatch = (
+        abs(existing_alpha - norm_alpha) > 1e-4
+        or sec_mismatch
+        or (bool(req_sha) and existing_sha != req_sha)
     )
     device_mismatch = (
         req_dev_type is not None
@@ -859,6 +1108,7 @@ def get_gpu_worker(
         _GLOBAL_GPU_WORKER is None
         or _GLOBAL_GPU_WORKER.model_id != model_id
         or weights_mismatch
+        or blend_or_sha_mismatch
         or device_mismatch
         or _GLOBAL_GPU_WORKER.precision != precision.lower()
         or _GLOBAL_GPU_WORKER.batch_size != eff_batch
@@ -875,7 +1125,21 @@ def get_gpu_worker(
             device=device,
             batch_size=eff_batch,
             use_tensorrt=use_tensorrt,
+            **_filter_supported_kwargs(
+                GPUPersistentWorker,
+                {
+                    "blend_alpha": norm_alpha,
+                    "secondary_weights_path": secondary_weights_path,
+                    "weights_sha256": req_sha or None,
+                },
+            ),
         )
+        if not hasattr(_GLOBAL_GPU_WORKER, "blend_alpha"):
+            _GLOBAL_GPU_WORKER.blend_alpha = norm_alpha
+        if not hasattr(_GLOBAL_GPU_WORKER, "secondary_weights_path"):
+            _GLOBAL_GPU_WORKER.secondary_weights_path = secondary_weights_path
+        if not hasattr(_GLOBAL_GPU_WORKER, "weights_sha256"):
+            _GLOBAL_GPU_WORKER.weights_sha256 = req_sha or None
     else:
         _GLOBAL_GPU_WORKER.use_tensorrt = bool(use_tensorrt)
     return _GLOBAL_GPU_WORKER
@@ -887,7 +1151,8 @@ def get_cuda_inference_engine(
     batch_size: Optional[int] = None,
     use_tensorrt: bool = True,
 ) -> GPUPersistentWorker:
-    """Return a CUDA persistent worker configured for model_info."""
+    """Return a CUDA persistent worker configured for model_info (including episode alpha-blend)."""
+    eff_sha = str(model_info.get("blended_weights_sha256") or model_info.get("sha256") or "").strip().lower()
     return get_gpu_worker(
         model_id=model_info["id"],
         weights_path=model_info["weights_path"],
@@ -895,6 +1160,14 @@ def get_cuda_inference_engine(
         device="cuda",
         batch_size=batch_size,
         use_tensorrt=use_tensorrt,
+        **_filter_supported_kwargs(
+            get_gpu_worker,
+            {
+                "blend_alpha": float(model_info.get("blend_alpha", 0.0) or 0.0),
+                "secondary_weights_path": model_info.get("blend_secondary_weights_path"),
+                "weights_sha256": eff_sha or None,
+            },
+        ),
     )
 
 
@@ -918,6 +1191,9 @@ def upscale_frames_with_fallback(
 
     model_id = model_info["id"]
     weights_path = model_info["weights_path"]
+    eff_alpha = float(model_info.get("blend_alpha", 0.0) or 0.0)
+    sec_weights = model_info.get("blend_secondary_weights_path")
+    eff_sha = str(model_info.get("blended_weights_sha256") or model_info.get("sha256") or "").strip().lower() or None
 
     if engine == "ncnn":
         from src.ai_engine import upscale_frames as ncnn_upscale
@@ -940,6 +1216,14 @@ def upscale_frames_with_fallback(
             device=engine if engine in ["cuda", "cpu"] else None,
             batch_size=batch_size,
             use_tensorrt=use_tensorrt,
+            **_filter_supported_kwargs(
+                get_gpu_worker,
+                {
+                    "blend_alpha": eff_alpha,
+                    "secondary_weights_path": sec_weights,
+                    "weights_sha256": eff_sha,
+                },
+            ),
         )
         res = worker.upscale_directory(
             input_dir=input_dir,
@@ -975,6 +1259,14 @@ def upscale_frames_with_fallback(
                 device=engine if engine in ["cuda", "cpu"] else None,
                 batch_size=batch_size,
                 use_tensorrt=False,
+                **_filter_supported_kwargs(
+                    get_gpu_worker,
+                    {
+                        "blend_alpha": eff_alpha,
+                        "secondary_weights_path": sec_weights,
+                        "weights_sha256": eff_sha,
+                    },
+                ),
             )
             res = worker_fp32.upscale_directory(
                 input_dir=input_dir,

@@ -337,6 +337,8 @@ HEVC_BUFSIZE = "90M"
 HEVC_MULTIPASS = "fullres"
 HEVC_MULTIPASS_POLICY = "auto"
 VALID_NVENC_MULTIPASS_POLICIES = ("auto", "fullres", "qres")
+VALID_GRAIN_RESTORE_POLICIES = ("auto", "off", "light", "heavy")
+DEFAULT_GRAIN_RESTORE = "auto"
 HEVC_RC_LOOKAHEAD = 32
 HEVC_SPATIAL_AQ = 1
 HEVC_AQ_STRENGTH = 6
@@ -352,15 +354,18 @@ HEVC_COLOR_TRC = "bt709"
 HEVC_TAG = "hvc1"
 
 _MODEL_TRT_INFER_FPS_ESTIMATE: dict[str, float] = {
-    "animevideov3": 11.5,
-    "realesr-animevideov3": 11.5,
-    "animejanai-hd-v3-compact": 11.8,
+    "animevideov3": 10.5,
+    "realesr-animevideov3": 10.5,
+    "animejanai-hd-v3-compact": 12.8,
     "animejanai-hd-v3-ultracompact": 22.8,
     "animejanai-hd-v3-sharp1-ultracompact": 22.8,
     "animejanai-hd-v3-superultracompact": 44.9,
     "animejanai-hd-v3-sharp1-superultracompact": 44.9,
-    "span-2x": 15.5,
-    "2x_animejanai_v3": 15.5,
+    "span-2x": 10.5,
+    "2x_animejanai_v3": 10.5,
+    "modernspanimation-v2-2x": 10.5,
+    "realcugan-pro-conservative-2x": 8.5,
+    "realcugan-pro-denoise3x-2x": 8.5,
     "auto-pareto": 18.0,
 }
 
@@ -385,12 +390,12 @@ def resolve_episode_nvenc_multipass(
         )
     if engine != "cuda" or not zero_disk:
         return "fullres"
-    base_trt_fps = _MODEL_TRT_INFER_FPS_ESTIMATE.get(str(model_id or "").strip().lower(), 11.5)
+    base_trt_fps = _MODEL_TRT_INFER_FPS_ESTIMATE.get(str(model_id or "").strip().lower(), 10.5)
     if not use_tensorrt:
         base_trt_fps *= 0.52
     keep_frac = max(0.05, min(1.0, 1.0 - (float(dedup_ratio_pct or 0.0) / 100.0)))
     eff_ai_fps = base_trt_fps / keep_frac
-    return "qres" if eff_ai_fps > 24.0 else "fullres"
+    return "qres" if eff_ai_fps > 21.5 else "fullres"
 
 
 def get_hevc_rate_args(bitrate: str = "28M", multipass: str | None = None) -> list:

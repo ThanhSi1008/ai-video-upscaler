@@ -1,4 +1,4 @@
-"""PreToolUse safety & context-firewall hook for e:\\ai-video-upscaler.
+"""PreToolUse safety, context-firewall, and autonomous local-hardware hook for e:\\ai-video-upscaler.
 
 Enforces GEMINI.md, .agents/rules/*.md, and VALIDATION.md boundaries automatically:
 1. Allows free local .env reading; prompts (force_ask) on .env writes/edits; hard-denies git add/commit of .env.
@@ -7,8 +7,9 @@ Enforces GEMINI.md, .agents/rules/*.md, and VALIDATION.md boundaries automatical
    > 350-line files, and blocks unbounded shell dumps on > 350-line files.
 3. Hard-denies unapproved environment mutations (pip/uv/conda install/uninstall) protecting locked .venv ABI (and local untracked snapshot requirements.lock).
 4. Prompts (force_ask) before deleting .temp_* checkpoints.
-5. Hard-denies unapproved build_trt_engine.py or unflagged full-episode upscale/benchmark runs.
-6. Prompts (force_ask) before invoking live paid Gemini API commands or concurrent GPU runs.
+5. Grants full autonomous authority for local CPU/RAM/NVMe, TensorRT 10 FP16 builds (src/build_trt_engine.py),
+   PyTorch CUDA FP16, 10-bit HEVC NVENC full-episode upscales, and hardware benchmarks whenever .gpu_active.lock is idle.
+6. Prompts (force_ask) before invoking live paid Gemini API commands or colliding with an active .gpu_active.lock.
 """
 
 from __future__ import annotations
@@ -50,16 +51,25 @@ TEMP_DELETE_RE = re.compile(
     re.IGNORECASE,
 )
 UPSCALE_CLEAN_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b.*(?:--clean-temp|--cleanup|--force)\b",
+    r"^\s*(?:&\s+)?(?:[\w./\\:-]*python(?:\.exe)?\s+)?['\"]?[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)['\"]?(?:\s|$).*(?:--clean-temp|--cleanup|--force)\b",
     re.IGNORECASE,
 )
 _ENV_PREFIX_RE = r"(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|]*)\s+)*"
+_CMD_START_RE = r"^\s*(?:&\s+)?" + _ENV_PREFIX_RE
+_PY_RUNNER_RE = (
+    r"(?:(?:\"[^\"]*python(?:\.exe)?\"|'[^']*python(?:\.exe)?'|[\w./\\:-]*python(?:\.exe)?)\s+"
+    r"(?:-[uBEOs]+\s+)*(?:-m\s+)?)?"
+)
 BUILD_TRT_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[\w./\\:-]*[/\\])?(?:src[/\\.]build_trt_engine|build_trt_engine(?:\.py)?)\b",
+    _CMD_START_RE
+    + _PY_RUNNER_RE
+    + r"['\"]?(?:[\w./\\:-]*[/\\])?(?:src\.build_trt_engine|build_trt_engine(?:\.py)?)['\"]?(?:\s|$)",
     re.IGNORECASE,
 )
 SUBTRANS_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+(?:-m\s+)?)?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py|benchmarks[/\\]subtrans[/\\](?!validate_pronouns_regex\.py)[\w.-]+\.py)\b",
+    _CMD_START_RE
+    + _PY_RUNNER_RE
+    + r"['\"]?(?:[.\\/]*subtrans(?:\.py|\.bat|\.cli)|scripts[/\\]batch_translate_all\.py|benchmarks[/\\]subtrans[/\\](?!validate_pronouns_regex\.py)[\w.-]+\.py)['\"]?(?:\s|$)",
     re.IGNORECASE,
 )
 LOCAL_SUBTRANS_SUBCMD_RE = re.compile(
@@ -67,15 +77,21 @@ LOCAL_SUBTRANS_SUBCMD_RE = re.compile(
     re.IGNORECASE,
 )
 UPSCALE_SUBS_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+)?[.\\/]*upscale(?:\.py|\.bat)\b.*(?:--subs-only|--subs-upgrade)\b",
+    _CMD_START_RE
+    + _PY_RUNNER_RE
+    + r"['\"]?[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)['\"]?(?:\s|$).*(?:--subs-only|--subs-upgrade|--subs-pending|--subs-after-upscale|--async-subs)\b",
     re.IGNORECASE,
 )
 UPSCALE_GPU_EXEC_RE = re.compile(
-    r"(?:^|[;&|]\s*)" + _ENV_PREFIX_RE + r"(?:[\w./\\:-]*python(?:\.exe)?\s+)?(?:[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)|scripts[/\\](?:benchmark_pipeline|silicon_roofline_probe|upscale_x4_single)\.py)\b",
+    _CMD_START_RE
+    + _PY_RUNNER_RE
+    + r"['\"]?(?:[.\\/]*upscale(?:_turbo)?(?:\.py|\.bat)|scripts[/\\](?:benchmark_pipeline|silicon_roofline_probe|upscale_x4_single)\.py|benchmarks[/\\](?:upscale|research)[/\\][\w.-]+\.py|tests[/\\]test_gpu_throttling_overlap\.py)['\"]?(?:\s|$)",
     re.IGNORECASE,
 )
 BARE_PYTEST_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:[\w./\\:-]*python(?:\.exe)?\s+-m\s+)?pytest(?:\.exe)?\b",
+    r"(?:^|[;&|]\s*)(?:&\s+)?"
+    + _ENV_PREFIX_RE
+    + r"(?:(?:\"[^\"]*python(?:\.exe)?\"|'[^']*python(?:\.exe)?'|[\w./\\:-]*python(?:\.exe)?)\s+(?:-[uBEOs]+\s+)*-m\s+)?['\"]?[\w./\\:-]*pytest(?:\.exe)?['\"]?(?:\s|$)",
     re.IGNORECASE,
 )
 
@@ -84,7 +100,7 @@ SAFE_BUILD_TRT_FLAGS_RE = re.compile(
     re.IGNORECASE,
 )
 NON_GPU_FLAGS_RE = re.compile(
-    r"(?:^|\s)(?:--help|-h|--list-models|--dry-run|--subs-only)(?:\s|$)",
+    r"(?:^|\s)(?:--help|-h|--list-models|--dry-run|--subs-only|--night-report|--version|--engine(?:=|\s+)cpu)(?:\s|$)",
     re.IGNORECASE,
 )
 RUN_GPU_TESTS_RE = re.compile(
@@ -108,10 +124,6 @@ _PYTEST_VALUE_OPTS = frozenset({
     "-k", "-m", "-o", "-c", "-p", "-r", "--maxfail", "--basetemp", "--rootdir",
     "--confcutdir", "--import-mode", "--tb", "--capture", "--junitxml", "--durations",
 })
-SAFE_UPSCALE_FLAGS_RE = re.compile(
-    r"(?:^|\s)(?:--preview|--dry-run|--help|-h|--list-models|--clean-temp|--cleanup|--version|--subs-only|--subs-upgrade|--smoke)(?:\s|$)",
-    re.IGNORECASE,
-)
 
 
 def _repo_root() -> Path:
@@ -386,24 +398,113 @@ def _first_present(args: dict, keys: tuple[str, ...]) -> object:
     return None
 
 
+def _is_strict_gpu_or_smoke_marker(expr: str) -> tuple[bool, bool]:
+    """Return (is_safe_marker, uses_gpu) for a conjunction-only pytest -m expression."""
+    norm = re.sub(r"\s+", " ", expr.strip().strip("'\"")).lower()
+    if not norm or "(" in norm or ")" in norm:
+        return False, False
+    if re.search(r"\bor\b", norm) or re.search(r"\bnot\s+gpu\b", norm):
+        return False, False
+    tokens = re.findall(r"[a-z_]\w*", norm)
+    if "gpu" in tokens:
+        return True, True
+    if norm == "smoke":
+        return True, False
+    return False, False
+
+
+def _is_gpu_marked_test_file(root: Path, file_part: str) -> bool:
+    """Return True when file_part resolves to a dedicated @pytest.mark.gpu test module under tests/."""
+    resolved, rel_posix = _resolve_repo_path(root, file_part)
+    norm = (rel_posix or file_part.replace("\\", "/").lstrip("./")).lower()
+    if norm == "tests/test_gpu_throttling_overlap.py":
+        return True
+    if resolved is None or not resolved.is_file() or resolved.suffix.lower() != ".py":
+        return False
+    if not norm.startswith("tests/"):
+        return False
+    try:
+        text = resolved.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return bool(re.search(r"@pytest\.mark\.gpu\b|pytestmark\s*=.*pytest\.mark\.gpu\b", text))
+
+
+def _extract_pytest_tail_info(seg: str) -> tuple[bool, list[str], list[str], list[str]]:
+    """Return (found_pytest, tail_tokens, marker_exprs, target_args) for a shell segment."""
+    try:
+        raw_tokens = shlex.split(seg, posix=False)
+    except ValueError:
+        raw_tokens = seg.split()
+    tokens = [t.strip("'\"") for t in raw_tokens]
+    p_idx = -1
+    for idx, tok in enumerate(tokens):
+        if tok.startswith("-"):
+            continue
+        base = Path(tok.replace("\\", "/")).name.lower()
+        if base in {"pytest", "pytest.exe"}:
+            p_idx = idx
+            break
+    if p_idx < 0:
+        return False, [], [], []
+    tail = tokens[p_idx + 1 :]
+    markers: list[str] = []
+    targets: list[str] = []
+    i = 0
+    while i < len(tail):
+        tok = tail[i]
+        if tok == "--":
+            targets.extend(tail[i + 1 :])
+            break
+        if tok == "-m" and i + 1 < len(tail):
+            markers.append(tail[i + 1])
+            i += 2
+            continue
+        if tok.startswith("-m=") or (
+            tok.startswith("-m") and len(tok) > 2 and not tok.startswith("--")
+        ):
+            markers.append(tok[2:].lstrip("="))
+            i += 1
+            continue
+        if tok.startswith("-"):
+            opt_name = tok.split("=", 1)[0]
+            if opt_name in _PYTEST_VALUE_OPTS and "=" not in tok:
+                i += 2
+            else:
+                i += 1
+            continue
+        targets.append(tok)
+        i += 1
+    return True, tail, markers, targets
+
+
+def _segment_uses_gpu_pytest(seg: str, cmd: str, root: Path) -> bool:
+    """Return True when a pytest segment targets GPU benchmarks without CUDA_VISIBLE_DEVICES=-1."""
+    if not BARE_PYTEST_RE.search(seg) or "CUDA_VISIBLE_DEVICES=-1" in cmd:
+        return False
+    found, tail, markers, targets = _extract_pytest_tail_info(seg)
+    if not found:
+        return False
+    if any(t in {"--help", "-h", "--version", "--markers"} for t in tail) and not targets:
+        return False
+    if any(_is_strict_gpu_or_smoke_marker(m)[1] for m in markers):
+        return True
+    return any(_is_gpu_marked_test_file(root, raw_t.strip("'\"").split("::", 1)[0]) for raw_t in targets)
+
+
 def _is_safe_pytest_invocation(cmd: str, root: Path) -> bool:
-    """Return True only when every pytest segment uses isolated snapshot flags or strictly safe test files."""
+    """Return True when every pytest segment uses isolated snapshot flags, safe allowlist files, or GPU/smoke benchmark scopes."""
     saw_pytest = False
-    for seg in _split_shell_segments(cmd):
+    segments = _split_shell_segments(cmd)
+    has_gpu_env = any(RUN_GPU_TESTS_RE.search(s) for s in segments)
+    for seg in segments:
         if not BARE_PYTEST_RE.search(seg):
             continue
         saw_pytest = True
-        tokens = _shlex_tokens(seg)
-        p_idx = -1
-        for idx, tok in enumerate(tokens):
-            base = Path(tok.strip("'\"")).name.lower()
-            if base in {"pytest", "pytest.exe"}:
-                p_idx = idx
-                break
-        if p_idx < 0:
+        found, tail, markers, targets = _extract_pytest_tail_info(seg)
+        if not found:
             return False
-        tail = tokens[p_idx + 1:]
-        if any(t in {"--help", "-h", "--version"} for t in tail) and not any(
+        if any(t in {"--help", "-h", "--version", "--markers"} for t in tail) and not any(
             not t.startswith("-") and (".py" in t or "/" in t or "\\" in t) for t in tail
         ):
             continue
@@ -413,30 +514,22 @@ def _is_safe_pytest_invocation(cmd: str, root: Path) -> bool:
         ) or ("-pagent_offline_guard" in tail)
         if has_guard_plugin and "CUDA_VISIBLE_DEVICES=-1" in cmd:
             continue
-        targets: list[str] = []
-        i = 0
-        while i < len(tail):
-            tok = tail[i]
-            if tok == "--":
-                targets.extend(tail[i + 1:])
-                break
-            if tok.startswith("-"):
-                opt_name = tok.split("=", 1)[0]
-                if opt_name in _PYTEST_VALUE_OPTS and "=" not in tok:
-                    i += 2
-                else:
-                    i += 1
-                continue
-            targets.append(tok)
-            i += 1
+        has_strict_safe_marker = bool(markers) and all(
+            _is_strict_gpu_or_smoke_marker(m)[0] for m in markers
+        )
+        if has_strict_safe_marker and not targets:
+            continue
         if not targets:
             return False
         for raw_t in targets:
             file_part = raw_t.strip("'\"").split("::", 1)[0]
             _, rel_posix = _resolve_repo_path(root, file_part)
             norm = (rel_posix or file_part.replace("\\", "/").lstrip("./")).lower()
-            if norm not in SAFE_DIRECT_PYTEST_FILES:
-                return False
+            if norm in SAFE_DIRECT_PYTEST_FILES:
+                continue
+            if (has_gpu_env or has_strict_safe_marker) and _is_gpu_marked_test_file(root, file_part):
+                continue
+            return False
     return saw_pytest
 
 
@@ -626,12 +719,6 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "reason": "Checkpoint Guard (GEMINI.md §4): Deleting or overwriting .temp_* checkpoints requires confirmation.",
             }
 
-        if any(BUILD_TRT_EXEC_RE.search(seg) and not SAFE_BUILD_TRT_FLAGS_RE.search(seg) for seg in shell_segs):
-            return {
-                "decision": "deny",
-                "reason": "Blocked (video-gpu.md): Running build_trt_engine.py requires explicit user approval.",
-            }
-
         # Live Gemini API quota guard (allow purely local subcommands eval / compare / rag stats)
         if any(
             (SUBTRANS_EXEC_RE.search(seg) or UPSCALE_SUBS_EXEC_RE.search(seg))
@@ -644,24 +731,21 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "reason": "Gemini Quota Guard (GEMINI.md §4 & subtrans.md): Command may consume live Gemini API RPD; confirm intent.",
             }
 
-        # GPU exclusivity lock guard
+        # GPU exclusivity lock guard (single RTX 3060 12GB owner; autonomous when .gpu_active.lock is absent)
         if (root / ".gpu_active.lock").exists():
             if any(
-                (bool(UPSCALE_GPU_EXEC_RE.search(seg)) or bool(RUN_GPU_TESTS_RE.search(seg)))
-                and not NON_GPU_FLAGS_RE.search(seg)
+                (
+                    (bool(BUILD_TRT_EXEC_RE.search(seg)) and not SAFE_BUILD_TRT_FLAGS_RE.search(seg))
+                    or (bool(UPSCALE_GPU_EXEC_RE.search(seg)) and not NON_GPU_FLAGS_RE.search(seg))
+                    or bool(RUN_GPU_TESTS_RE.search(seg))
+                    or _segment_uses_gpu_pytest(seg, cmd, root)
+                )
                 for seg in shell_segs
             ):
                 return {
                     "decision": "force_ask",
                     "reason": "GPU Exclusivity Guard (video-gpu.md): .gpu_active.lock exists; confirm no other GPU job is running.",
                 }
-
-        # Unflagged full-episode upscale / benchmark guard
-        if any(UPSCALE_GPU_EXEC_RE.search(seg) and not SAFE_UPSCALE_FLAGS_RE.search(seg) for seg in shell_segs):
-            return {
-                "decision": "deny",
-                "reason": "Blocked (video-gpu.md): Full-episode upscale/benchmark runs require --preview, --dry-run, or scripts/smoke_test_pipeline.py.",
-            }
 
         # Bare pytest on production repo guard
         if BARE_PYTEST_RE.search(cmd) and not _is_safe_pytest_invocation(cmd, root):

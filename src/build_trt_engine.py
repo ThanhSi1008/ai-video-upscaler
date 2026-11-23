@@ -16,25 +16,53 @@ from src.trt_zero_copy_upscaler import SRVGGNetCompactTRTWrapper
 _FAILED_TRT_ENGINES: set[str] = set()
 
 
+def is_upcunet2x_model(model: Optional[nn.Module]) -> bool:
+    """Return True when model (or its inner_model) is a Real-CUGAN UpCunet2x architecture."""
+    if model is None or not isinstance(model, nn.Module):
+        return False
+    core = getattr(model, "inner_model", model)
+    if type(core).__name__ == "UpCunet2x":
+        return True
+    if hasattr(core, "unet1") and hasattr(core, "unet2") and not hasattr(core, "conv_final"):
+        cb = getattr(core.unet1, "conv_bottom", None)
+        ks = tuple(getattr(cb, "kernel_size", ())) if cb is not None else ()
+        return ks == (4, 4)
+    return False
+
+
+def _fold_span_conv3xc_fp32(module: nn.Module) -> None:
+    """Fold SPAN Conv3XC branches into eval_conv once in FP32 and freeze per-forward re-folding."""
+    for sub in module.modules():
+        upd = getattr(sub, "update_params", None)
+        eval_conv = getattr(sub, "eval_conv", None)
+        if callable(upd) and isinstance(eval_conv, nn.Conv2d) and hasattr(sub, "sk"):
+            if getattr(sub, "_span_params_folded", False):
+                continue
+            orig_dtype = eval_conv.weight.dtype
+            if orig_dtype != torch.float32:
+                sub.float()
+            sub.eval()
+            upd()
+            if orig_dtype != torch.float32:
+                sub.to(dtype=orig_dtype)
+            sub._span_params_folded = True
+            sub.update_params = lambda: None
+
+
 def resolve_trt_profile_max_batch(
     pytorch_model: Optional[nn.Module],
     max_batch: int = 8,
     input_hw: Tuple[int, int] = (1080, 1920),
     available_vram_gb: Optional[float] = None,
 ) -> int:
-    """
-    Giới hạn kích thước batch tối đa của TensorRT Optimization Profile theo kiến trúc mô hình và dung lượng VRAM:
-    - Mô hình PixelShuffle(4) trên nguồn >= 540p (vd: RealESR-AnimeVideoV3 tạo nhánh 8K 4320x7680 trung gian):
-      giới hạn profile max_batch <= 2 để đỉnh VRAM chỉ ~1.33 GB (khử hoàn toàn lỗi OOM 12.74 GB trên RTX 3060 12GB)
-      mà vẫn bão hòa nhân Tensor Core (~11.5+ fps); TRTRuntimeEngineWrapper tự cắt lát B=8 -> 4x2 zero-copy.
-    - Mô hình 2x thuần (AnimeJaNaiCompact2x, SPAN-2x, không có nhánh 8K): cho phép max_batch <= 4 về mặt kiến trúc,
-      nhưng trên GPU có VRAM < 15 GB (như RTX 3060 12GB) ở độ phân giải >= 720p, giới hạn max_batch <= 2 để tránh
-      TensorRT 10.16 cấp phát 12.15 GiB cho chiến thuật HMMA.16816.F16 gây lỗi CUDA OOM và tụt 42% tốc độ.
-    """
+    """Resolve safe TensorRT Optimization Profile max_batch by architecture and VRAM bounds."""
     req_b = max(1, int(max_batch))
     in_h, in_w = int(input_hw[0]), int(input_hw[1])
     if (in_h * in_w) < (540 * 960):
         return req_b
+
+    if is_upcunet2x_model(pytorch_model) and (in_h * in_w) >= (720 * 1280):
+        return min(req_b, 2)
 
     upscale = 2
     if pytorch_model is not None:
@@ -52,6 +80,170 @@ def resolve_trt_profile_max_batch(
     if available_vram_gb is not None and float(available_vram_gb) < 15.0 and (in_h * in_w) >= (720 * 1280):
         return min(req_b, 2)
     return min(req_b, 4)
+
+
+class _UpCunet2xTRTExportModule(nn.Module):
+    """ONNX/TensorRT & FP16-safe wrapper for Real-CUGAN UpCunet2x with PixelShuffle duality, dynamic reflect pad, and FP32 SEBlock."""
+
+    @staticmethod
+    def _deconv2x_to_subpixel_conv(deconv: nn.ConvTranspose2d) -> Tuple[nn.Conv2d, int]:
+        c_in, c_out = int(deconv.in_channels), int(deconv.out_channels)
+        kh, kw = int(deconv.kernel_size[0]), int(deconv.kernel_size[1])
+        ph, pw = int(deconv.padding[0]), int(deconv.padding[1])
+        dt, dev = deconv.weight.dtype, deconv.weight.device
+        has_bias = deconv.bias is not None
+        if (kh, kw) == (2, 2) and (ph, pw) == (0, 0):
+            conv = nn.Conv2d(c_in, c_out * 4, kernel_size=1, stride=1, padding=0, bias=has_bias)
+            w = deconv.weight.detach().float().permute(1, 2, 3, 0).reshape(c_out * 4, c_in, 1, 1).contiguous()
+            crop = 0
+        elif (kh, kw) == (4, 4) and (ph, pw) == (3, 3):
+            conv = nn.Conv2d(c_in, c_out * 4, kernel_size=2, stride=1, padding=1, bias=has_bias)
+            w = (
+                deconv.weight.detach()
+                .float()
+                .view(c_in, c_out, 2, 2, 2, 2)
+                .flip(2, 4)
+                .permute(1, 3, 5, 0, 2, 4)
+                .reshape(c_out * 4, c_in, 2, 2)
+                .contiguous()
+            )
+            crop = 3
+        else:
+            raise ValueError(f"Unsupported UpCunet2x ConvTranspose2d spec: k={(kh, kw)}, pad={(ph, pw)}")
+        conv.weight.data.copy_(w.to(dtype=dt, device=dev))
+        if has_bias and conv.bias is not None and deconv.bias is not None:
+            conv.bias.data.copy_(deconv.bias.detach().float().repeat_interleave(4).to(dtype=dt, device=dev))
+        return conv.to(device=dev, dtype=dt), crop
+
+    def __init__(self, model: nn.Module, target_scale: float = 2.0, scale: Optional[float] = None):
+        super().__init__()
+        if scale is not None:
+            target_scale = float(scale)
+        core = getattr(model, "inner_model", model)
+        self.unet1 = core.unet1
+        self.unet2 = core.unet2
+        self.u1_up2_conv, _ = self._deconv2x_to_subpixel_conv(self.unet1.conv2_up)
+        self.u1_bot_conv, self._u1_bot_crop = self._deconv2x_to_subpixel_conv(self.unet1.conv_bottom)
+        self.u2_up3_conv, _ = self._deconv2x_to_subpixel_conv(self.unet2.conv3_up)
+        self.u2_up4_conv, _ = self._deconv2x_to_subpixel_conv(self.unet2.conv4_up)
+        self.is_pro = bool(getattr(core, "is_pro", False) or getattr(core, "pro", None) is not None)
+        self.model_scale = 2.0
+        self.target_scale = float(target_scale)
+        self._export_hw: Optional[Tuple[int, int]] = None
+
+    @staticmethod
+    def _reflect_pad_2d(x: torch.Tensor, pad_l: int, pad_r: int, pad_t: int, pad_b: int) -> torch.Tensor:
+        if not torch.onnx.is_in_onnx_export():
+            h, w = int(x.shape[2]), int(x.shape[3])
+            if h <= max(pad_t, pad_b) or w <= max(pad_l, pad_r):
+                return F.pad(x, (pad_l, pad_r, pad_t, pad_b), mode="reflect")
+        if pad_l > 0 or pad_r > 0:
+            parts_w = []
+            if pad_l > 0:
+                parts_w.append(torch.flip(x[:, :, :, 1 : pad_l + 1], dims=[3]))
+            parts_w.append(x)
+            if pad_r > 0:
+                parts_w.append(torch.flip(x[:, :, :, -pad_r - 1 : -1], dims=[3]))
+            x = torch.cat(parts_w, dim=3)
+        if pad_t > 0 or pad_b > 0:
+            parts_h = []
+            if pad_t > 0:
+                parts_h.append(torch.flip(x[:, :, 1 : pad_t + 1, :], dims=[2]))
+            parts_h.append(x)
+            if pad_b > 0:
+                parts_h.append(torch.flip(x[:, :, -pad_b - 1 : -1, :], dims=[2]))
+            x = torch.cat(parts_h, dim=2)
+        return x
+
+    @staticmethod
+    def _se_forward(seblock: nn.Module, z: torch.Tensor) -> torch.Tensor:
+        s = z.float().mean(dim=(2, 3), keepdim=True)
+        if z.dtype == torch.float16 and not torch.onnx.is_in_onnx_export():
+            w1 = seblock.conv1.weight.float()
+            b1 = seblock.conv1.bias.float() if seblock.conv1.bias is not None else None
+            w2 = seblock.conv2.weight.float()
+            b2 = seblock.conv2.bias.float() if seblock.conv2.bias is not None else None
+            s = F.conv2d(s, w1, b1)
+            s = F.relu(s)
+            s = F.conv2d(s, w2, b2)
+            s = torch.sigmoid(s).to(dtype=z.dtype)
+            return z * s
+        s = s.to(dtype=seblock.conv1.weight.dtype)
+        s = seblock.conv1(s)
+        s = F.relu(s)
+        s = seblock.conv2(s)
+        s = torch.sigmoid(s).to(dtype=z.dtype)
+        return z * s
+
+    @classmethod
+    def _unet_conv_forward(cls, uconv: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        z = uconv.conv(x)
+        if getattr(uconv, "seblock", None) is not None:
+            z = cls._se_forward(uconv.seblock, z)
+        return z
+
+    def _unet1_forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self._unet_conv_forward(self.unet1.conv1, x)
+        x2 = F.leaky_relu(self.unet1.conv1_down(x1), 0.1)
+        x1 = x1[:, :, 4:-4, 4:-4]
+        x2 = self._unet_conv_forward(self.unet1.conv2, x2)
+        x2 = F.leaky_relu(F.pixel_shuffle(self.u1_up2_conv(x2), 2), 0.1)
+        x3 = F.leaky_relu(self.unet1.conv3(x1 + x2), 0.1)
+        bot = F.pixel_shuffle(self.u1_bot_conv(x3), 2)
+        c = self._u1_bot_crop
+        return bot[:, :, c:-c, c:-c] if c > 0 else bot
+
+    def _unet2_forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self._unet_conv_forward(self.unet2.conv1, x)
+        x2 = F.leaky_relu(self.unet2.conv1_down(x1), 0.1)
+        x1 = x1[:, :, 16:-16, 16:-16]
+        x2 = self._unet_conv_forward(self.unet2.conv2, x2)
+        x3 = F.leaky_relu(self.unet2.conv2_down(x2), 0.1)
+        x2 = x2[:, :, 4:-4, 4:-4]
+        x3 = self._unet_conv_forward(self.unet2.conv3, x3)
+        x3 = F.leaky_relu(F.pixel_shuffle(self.u2_up3_conv(x3), 2), 0.1)
+        x4 = self._unet_conv_forward(self.unet2.conv4, x2 + x3)
+        x4 = F.leaky_relu(F.pixel_shuffle(self.u2_up4_conv(x4), 2), 0.1)
+        x5 = F.leaky_relu(self.unet2.conv5(x1 + x4), 0.1)
+        return self.unet2.conv_bottom(x5)
+
+    def _forward_core(self, x: torch.Tensor) -> torch.Tensor:
+        if self._export_hw is not None:
+            h0, w0 = self._export_hw
+        else:
+            h0, w0 = int(x.shape[2]), int(x.shape[3])
+        if self.is_pro:
+            x = x * 0.7 + 0.15
+        ph = ((h0 - 1) // 2 + 1) * 2
+        pw = ((w0 - 1) // 2 + 1) * 2
+        x_pad = self._reflect_pad_2d(x, 18, 18 + pw - w0, 18, 18 + ph - h0)
+        u1 = self._unet1_forward(x_pad)
+        u2 = self._unet2_forward(u1)
+        out = u2 + u1[:, :, 20:-20, 20:-20]
+        out = out[:, :, : h0 * 2, : w0 * 2]
+        if self.is_pro:
+            out = (out - 0.15) / 0.7
+        if abs(self.model_scale - self.target_scale) > 1e-4:
+            interp_in = out.float() if (out.device.type == "cpu" and out.dtype == torch.float16) else out
+            scale_ratio = self.target_scale / self.model_scale
+            out_target = F.interpolate(
+                interp_in,
+                scale_factor=scale_ratio,
+                mode="bicubic",
+                align_corners=False,
+                antialias=(scale_ratio < 1.0),
+            )
+            return out_target.to(x.dtype) if out_target.dtype != x.dtype else out_target
+        return out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and int(x.shape[0]) > 1
+            and (int(x.shape[2]) * int(x.shape[3])) >= (720 * 1280)
+        ):
+            return torch.cat([self._forward_core(x[i : i + 1]) for i in range(int(x.shape[0]))], dim=0)
+        return self._forward_core(x)
 
 
 class _GenericTRTExportModule(nn.Module):
@@ -319,17 +511,29 @@ def export_model_to_onnx(
     else:
         model_to_wrap = model_copy
 
+    is_cugan2x = is_upcunet2x_model(model_copy)
+    export_dev = device if (device.type == "cuda" and has_body_srvgg) else torch.device("cpu")
+    if export_dev.type == "cpu" and device.type != "cpu":
+        model_copy = model_copy.cpu()
+        model_to_wrap = model_copy.inner_model if (hasattr(model_copy, "inner_model") and has_body_srvgg) else model_copy
+    if not has_body_srvgg:
+        _fold_span_conv3xc_fp32(model_copy)
+
     if has_body_srvgg:
-        wrapped = _PureFP16TRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(device)
+        wrapped = _PureFP16TRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(export_dev)
+    elif is_cugan2x:
+        wrapped = _UpCunet2xTRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(export_dev)
     else:
-        wrapped = _GenericTRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(device)
+        wrapped = _GenericTRTExportModule(model_to_wrap, target_scale=target_scale).eval().to(export_dev)
     dh, dw = int(dummy_shape[0]), int(dummy_shape[1])
-    if device.type == "cuda":
+    if isinstance(wrapped, _UpCunet2xTRTExportModule):
+        wrapped._export_hw = (dh, dw)
+    if export_dev.type == "cuda" and has_body_srvgg:
         wrapped = wrapped.half()
-        dummy_in = torch.randn(1, 3, dh, dw, device=device, dtype=torch.float16)
+        dummy_in = torch.randn(1, 3, dh, dw, device=export_dev, dtype=torch.float16)
     else:
         wrapped = wrapped.float()
-        dummy_in = torch.randn(1, 3, dh, dw, device=device, dtype=torch.float32)
+        dummy_in = torch.randn(1, 3, dh, dw, device=export_dev, dtype=torch.float32)
 
     export_kwargs = dict(
         export_params=True,
@@ -352,7 +556,8 @@ def export_model_to_onnx(
         pass
 
     try:
-        torch.onnx.export(wrapped, dummy_in, onnx_path, **export_kwargs)
+        with torch.no_grad():
+            torch.onnx.export(wrapped, dummy_in, onnx_path, **export_kwargs)
     finally:
         del wrapped, model_copy, dummy_in
         if device.type == "cuda" and torch.cuda.is_available():
@@ -415,6 +620,15 @@ def build_tensorrt_engine(
         config.set_flag(trt.BuilderFlag.FP16)
     if hasattr(trt.BuilderFlag, "TF32"):
         config.set_flag(trt.BuilderFlag.TF32)
+    if hasattr(trt.BuilderFlag, "PREFER_PRECISION_CONSTRAINTS"):
+        config.set_flag(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+        try:
+            for l_idx in range(network.num_layers):
+                layer = network.get_layer(l_idx)
+                if layer is not None and layer.type == trt.LayerType.REDUCE:
+                    layer.precision = trt.DataType.FLOAT
+        except Exception:
+            pass
 
     # Tái sử dụng & lưu Timing Cache bền vững trên NVMe Gen4 để tăng tốc 5-10x các lần build sau
     timing_cache_path = os.path.join(os.path.dirname(os.path.abspath(engine_path)), "trt_timing.cache")
@@ -496,6 +710,7 @@ class TRTRuntimeEngineWrapper:
         max_batch: int = 8,
         scale: int = 2,
         fallback_module: Optional[nn.Module] = None,
+        shared_batch_out_ring: Optional[list[torch.Tensor]] = None,
     ):
         import tensorrt as trt
         self.engine_path = engine_path
@@ -530,7 +745,8 @@ class TRTRuntimeEngineWrapper:
         self._use_v3 = hasattr(self.context, "execute_async_v3") and hasattr(self.context, "set_tensor_address")
         self._out_ring: list[torch.Tensor] = []
         self._ring_idx: int = 0
-        self._batch_out_ring: list[torch.Tensor] = []
+        self._shared_batch_out_ring = shared_batch_out_ring
+        self._batch_out_ring: list[torch.Tensor] = shared_batch_out_ring if shared_batch_out_ring is not None else []
         self._batch_ring_idx: int = 0
         self._last_input_shape: Optional[Tuple[int, int, int, int]] = None
         self._last_in_ptr: Optional[int] = None
@@ -584,11 +800,16 @@ class TRTRuntimeEngineWrapper:
             if self._out_ring:
                 self._out_ring = []
                 self._last_out_ptr = None
-            self._batch_out_ring = [
+            new_ring = [
                 torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
                 for _ in range(2)
             ]
+            if self._batch_out_ring is not None:
+                self._batch_out_ring[:] = new_ring
+            else:
+                self._batch_out_ring = new_ring
             self._batch_ring_idx = 0
+            self._last_out_ptr = None
         slot_buf = self._batch_out_ring[self._batch_ring_idx]
         self._batch_ring_idx ^= 1
         return slot_buf[:B]
@@ -662,12 +883,9 @@ def get_hybrid_engine_or_wrapper(
     input_hw: Tuple[int, int] = (1080, 1920),
     scale: float = 2.0,
     weights_sha256: Optional[str] = None,
+    shared_batch_out_ring: Optional[list[torch.Tensor]] = None,
 ) -> Any:
-    """
-    Khởi tạo engine suy luận nhanh nhất theo môi trường phần cứng:
-    1. Tầng 1 (Nhanh nhất - TensorRT 10 FP16): Biên dịch/nạp file .engine gộp Conv+PReLU & mở khóa 51 TFLOPS HMMA.F16.
-    2. Tầng 2 (Fallback thông minh): PyTorch SRVGGNetCompactTRTWrapper với channels_last FP16 & micro-sliced 8K tail.
-    """
+    """Build or load verified TensorRT FP16 engine, falling back safely to PyTorch FP16 wrapper."""
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     from src.cuda_engine import is_srvgg_compact_model
@@ -679,8 +897,11 @@ def get_hybrid_engine_or_wrapper(
     else:
         model_for_wrapper = pytorch_model
 
+    is_cugan2x = is_upcunet2x_model(pytorch_model)
     if has_body_srvgg:
         wrapper = SRVGGNetCompactTRTWrapper(model_for_wrapper, scale=scale).eval().to(device)
+    elif is_cugan2x:
+        wrapper = _UpCunet2xTRTExportModule(model_for_wrapper, target_scale=scale).eval().to(device)
     else:
         wrapper = _GenericTRTExportModule(model_for_wrapper, target_scale=scale).eval().to(device)
     if device.type == "cuda":
@@ -706,11 +927,13 @@ def get_hybrid_engine_or_wrapper(
             getattr(wrapper, "_use_collapsed_aa2x", False)
             or (getattr(wrapper, "model_scale", 2.0) > float(scale) + 1e-4)
         )
+        arch_tag_val = "aa2x" if is_collapsed_4x else ("ps2x" if is_cugan2x else None)
         engine_path = get_trt_engine_path(
             model_id=model_id,
             max_batch=trt_max_batch,
             input_hw=input_hw,
-            arch_tag="aa2x" if is_collapsed_4x else None,
+            weights_sha256=weights_sha256 if is_cugan2x else None,
+            arch_tag=arch_tag_val,
         )
         if engine_path not in _FAILED_TRT_ENGINES:
             onnx_path = engine_path.replace(".engine", ".onnx")
@@ -762,6 +985,7 @@ def get_hybrid_engine_or_wrapper(
                         max_batch=trt_max_batch,
                         scale=int(round(scale)),
                         fallback_module=wrapper,
+                        shared_batch_out_ring=shared_batch_out_ring,
                     )
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()

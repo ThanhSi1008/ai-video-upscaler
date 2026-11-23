@@ -79,6 +79,7 @@ if _HAS_TRITON:
         CHROMA_LEFT: tl.constexpr,
         BLOCK_X: tl.constexpr,
         BLOCK_Y: tl.constexpr,
+        PRE_DEBAND: tl.constexpr = False,
     ):
         pid_x = tl.program_id(axis=0)
         pid_y = tl.program_id(axis=1)
@@ -173,6 +174,123 @@ if _HAS_TRITON:
             c_off = 128.0
             c_inv = 1.0 / 224.0
 
+        if PRE_DEBAND:
+            lsb_u = 4.0 if IS_P010 else 1.0
+            thr_min_rng = 0.5 * lsb_u
+            thr_max_y = 2.2 * lsb_u
+            thr_rng_y = 3.0 * lsb_u
+            thr_avg_y = 1.25 * lsb_u
+
+            ym8 = tl.maximum(y0 - 8, 0)
+            yp8 = tl.minimum(y0 + 8, H - 1)
+            xm8 = tl.maximum(x0 - 8, 0)
+            xp8 = tl.minimum(x0 + 8, W - 1)
+            ny_l = tl.load(yuv_b + y0 * stride_yuv_h + xm8 * stride_yuv_w, mask=mask, other=0)
+            ny_r = tl.load(yuv_b + y0 * stride_yuv_h + xp8 * stride_yuv_w, mask=mask, other=0)
+            ny_u = tl.load(yuv_b + ym8 * stride_yuv_h + x0 * stride_yuv_w, mask=mask, other=0)
+            ny_d = tl.load(yuv_b + yp8 * stride_yuv_h + x0 * stride_yuv_w, mask=mask, other=0)
+            if IS_P010:
+                inv_64_db = 1.0 / 64.0
+                f_yl = (ny_l.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_db
+                f_yr = (ny_r.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_db
+                f_yu = (ny_u.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_db
+                f_yd = (ny_d.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_db
+            else:
+                f_yl = ny_l.to(tl.float32)
+                f_yr = ny_r.to(tl.float32)
+                f_yu = ny_u.to(tl.float32)
+                f_yd = ny_d.to(tl.float32)
+
+            avg4_y = 0.25 * (f_yl + f_yr + f_yu + f_yd)
+            max4_y = tl.maximum(tl.maximum(f_yl, f_yr), tl.maximum(f_yu, f_yd))
+            min4_y = tl.minimum(tl.minimum(f_yl, f_yr), tl.minimum(f_yu, f_yd))
+            rng4_y = max4_y - min4_y
+
+            # Micro IGN dither breaks residual 8-bit contour lines only inside flat non-watercolor bands
+            p_db00 = 0.06711056 * x0.to(tl.float32) + 0.00583715 * y0.to(tl.float32)
+            p_db01 = 0.06711056 * x1.to(tl.float32) + 0.00583715 * y0.to(tl.float32)
+            p_db10 = 0.06711056 * x0.to(tl.float32) + 0.00583715 * y1.to(tl.float32)
+            p_db11 = 0.06711056 * x1.to(tl.float32) + 0.00583715 * y1.to(tl.float32)
+            q_db00 = 52.9829189 * (p_db00 - tl.extra.cuda.libdevice.floor(p_db00))
+            q_db01 = 52.9829189 * (p_db01 - tl.extra.cuda.libdevice.floor(p_db01))
+            q_db10 = 52.9829189 * (p_db10 - tl.extra.cuda.libdevice.floor(p_db10))
+            q_db11 = 52.9829189 * (p_db11 - tl.extra.cuda.libdevice.floor(p_db11))
+            ign_amp = 0.45 * lsb_u
+            ign00 = ((q_db00 - tl.extra.cuda.libdevice.floor(q_db00)) - 0.5) * ign_amp
+            ign01 = ((q_db01 - tl.extra.cuda.libdevice.floor(q_db01)) - 0.5) * ign_amp
+            ign10 = ((q_db10 - tl.extra.cuda.libdevice.floor(q_db10)) - 0.5) * ign_amp
+            ign11 = ((q_db11 - tl.extra.cuda.libdevice.floor(q_db11)) - 0.5) * ign_amp
+
+            md00 = tl.maximum(tl.maximum(tl.abs(y00_c - f_yl), tl.abs(y00_c - f_yr)), tl.maximum(tl.abs(y00_c - f_yu), tl.abs(y00_c - f_yd)))
+            md01 = tl.maximum(tl.maximum(tl.abs(y01_c - f_yl), tl.abs(y01_c - f_yr)), tl.maximum(tl.abs(y01_c - f_yu), tl.abs(y01_c - f_yd)))
+            md10 = tl.maximum(tl.maximum(tl.abs(y10_c - f_yl), tl.abs(y10_c - f_yr)), tl.maximum(tl.abs(y10_c - f_yu), tl.abs(y10_c - f_yd)))
+            md11 = tl.maximum(tl.maximum(tl.abs(y11_c - f_yl), tl.abs(y11_c - f_yr)), tl.maximum(tl.abs(y11_c - f_yu), tl.abs(y11_c - f_yd)))
+
+            rng_band_y = (rng4_y >= thr_min_rng) & (rng4_y <= thr_rng_y)
+            g00_y = (md00 <= thr_max_y) & rng_band_y & (tl.abs(y00_c - avg4_y) <= thr_avg_y)
+            g01_y = (md01 <= thr_max_y) & rng_band_y & (tl.abs(y01_c - avg4_y) <= thr_avg_y)
+            g10_y = (md10 <= thr_max_y) & rng_band_y & (tl.abs(y10_c - avg4_y) <= thr_avg_y)
+            g11_y = (md11 <= thr_max_y) & rng_band_y & (tl.abs(y11_c - avg4_y) <= thr_avg_y)
+
+            y00_c = tl.where(g00_y, 0.35 * y00_c + 0.65 * avg4_y + ign00, y00_c)
+            y01_c = tl.where(g01_y, 0.35 * y01_c + 0.65 * avg4_y + ign01, y01_c)
+            y10_c = tl.where(g10_y, 0.35 * y10_c + 0.65 * avg4_y + ign10, y10_c)
+            y11_c = tl.where(g11_y, 0.35 * y11_c + 0.65 * avg4_y + ign11, y11_c)
+
+            # Interleaved UV pair-index offsets: U always at pair*2, V always at pair*2+1 (zero Cb<->Cr swap)
+            cy_m4 = tl.maximum(cy - 4, 0)
+            cy_p4 = tl.minimum(cy + 4, H_uv - 1)
+            cx_m4 = tl.maximum(offs_x[None, :] - 4, 0)
+            cx_p4 = tl.minimum(offs_x[None, :] + 4, W_uv - 1)
+            uv_rm4 = H + cy_m4
+            uv_rp4 = H + cy_p4
+            ux_m4 = cx_m4 * 2
+            vx_m4 = ux_m4 + 1
+            ux_p4 = cx_p4 * 2
+            vx_p4 = ux_p4 + 1
+
+            raw_ul = tl.load(yuv_b + uv_r_curr * stride_yuv_h + ux_m4 * stride_yuv_w, mask=mask, other=0)
+            raw_ur = tl.load(yuv_b + uv_r_curr * stride_yuv_h + ux_p4 * stride_yuv_w, mask=mask, other=0)
+            raw_uu = tl.load(yuv_b + uv_rm4 * stride_yuv_h + ux0 * stride_yuv_w, mask=mask, other=0)
+            raw_ud = tl.load(yuv_b + uv_rp4 * stride_yuv_h + ux0 * stride_yuv_w, mask=mask, other=0)
+
+            raw_vl = tl.load(yuv_b + uv_r_curr * stride_yuv_h + vx_m4 * stride_yuv_w, mask=mask, other=0)
+            raw_vr = tl.load(yuv_b + uv_r_curr * stride_yuv_h + vx_p4 * stride_yuv_w, mask=mask, other=0)
+            raw_vu = tl.load(yuv_b + uv_rm4 * stride_yuv_h + vx0 * stride_yuv_w, mask=mask, other=0)
+            raw_vd = tl.load(yuv_b + uv_rp4 * stride_yuv_h + vx0 * stride_yuv_w, mask=mask, other=0)
+
+            if IS_P010:
+                inv_64_uv = 1.0 / 64.0
+                f_ul = (raw_ul.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_ur = (raw_ur.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_uu = (raw_uu.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_ud = (raw_ud.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_vl = (raw_vl.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_vr = (raw_vr.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_vu = (raw_vu.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+                f_vd = (raw_vd.to(tl.int32) & 0xFFFF).to(tl.float32) * inv_64_uv
+            else:
+                f_ul = raw_ul.to(tl.float32)
+                f_ur = raw_ur.to(tl.float32)
+                f_uu = raw_uu.to(tl.float32)
+                f_ud = raw_ud.to(tl.float32)
+                f_vl = raw_vl.to(tl.float32)
+                f_vr = raw_vr.to(tl.float32)
+                f_vu = raw_vu.to(tl.float32)
+                f_vd = raw_vd.to(tl.float32)
+
+            avg4_u = 0.25 * (f_ul + f_ur + f_uu + f_ud)
+            rng4_u = tl.maximum(tl.maximum(f_ul, f_ur), tl.maximum(f_uu, f_ud)) - tl.minimum(tl.minimum(f_ul, f_ur), tl.minimum(f_uu, f_ud))
+            md_u = tl.maximum(tl.maximum(tl.abs(uc0 - f_ul), tl.abs(uc0 - f_ur)), tl.maximum(tl.abs(uc0 - f_uu), tl.abs(uc0 - f_ud)))
+            g_u = (md_u <= thr_max_y) & (rng4_u >= thr_min_rng) & (rng4_u <= thr_rng_y) & (tl.abs(uc0 - avg4_u) <= thr_avg_y)
+            uc0 = tl.where(g_u, 0.40 * uc0 + 0.60 * avg4_u, uc0)
+
+            avg4_v = 0.25 * (f_vl + f_vr + f_vu + f_vd)
+            rng4_v = tl.maximum(tl.maximum(f_vl, f_vr), tl.maximum(f_vu, f_vd)) - tl.minimum(tl.minimum(f_vl, f_vr), tl.minimum(f_vu, f_vd))
+            md_v = tl.maximum(tl.maximum(tl.abs(vc0 - f_vl), tl.abs(vc0 - f_vr)), tl.maximum(tl.abs(vc0 - f_vu), tl.abs(vc0 - f_vd)))
+            g_v = (md_v <= thr_max_y) & (rng4_v >= thr_min_rng) & (rng4_v <= thr_rng_y) & (tl.abs(vc0 - avg4_v) <= thr_avg_y)
+            vc0 = tl.where(g_v, 0.40 * vc0 + 0.60 * avg4_v, vc0)
+
         # Bilinear MPEG-2 'left' (0.0, 0.5) chroma upsampling (or nearest box when CHROMA_LEFT=False)
         if CHROMA_LEFT:
             u_top0 = 0.75 * uc0 + 0.25 * up0
@@ -255,17 +373,20 @@ if _HAS_TRITON:
     def _rgb_to_p010le_triton_kernel(
         rgb_ptr,
         out_ptr,
+        ref_lr_ptr,
         stride_rgb_b, stride_rgb_c, stride_rgb_h, stride_rgb_w,
         stride_out_b, stride_out_h, stride_out_w,
+        stride_lr_b, stride_lr_c, stride_lr_h, stride_lr_w,
         H, W,
         BLOCK_X: tl.constexpr,
         BLOCK_Y: tl.constexpr,
         CHROMA_LEFT: tl.constexpr = False,
         USE_DITHER: tl.constexpr = False,
+        SOFT_ANTIRING: tl.constexpr = False,
     ):
         pid_x = tl.program_id(axis=0)
         pid_y = tl.program_id(axis=1)
-        pid_b = tl.program_id(axis=2)
+        pid_b = tl.program_id(axis=2).to(tl.int64)
 
         H_uv = H // 2
         W_uv = W // 2
@@ -325,6 +446,61 @@ if _HAS_TRITON:
         b01 = tl.minimum(tl.maximum(b01, 0.0), 1.0)
         b10 = tl.minimum(tl.maximum(b10, 0.0), 1.0)
         b11 = tl.minimum(tl.maximum(b11, 0.0), 1.0)
+
+        if SOFT_ANTIRING:
+            lr_b = ref_lr_ptr + pid_b * stride_lr_b
+            cy_lr = offs_y[:, None]
+            cx_lr = offs_x[None, :]
+            ly_m1 = tl.maximum(cy_lr - 1, 0)
+            ly_p1 = tl.minimum(cy_lr + 1, H_uv - 1)
+            lx_m1 = tl.maximum(cx_lr - 1, 0)
+            lx_p1 = tl.minimum(cx_lr + 1, W_uv - 1)
+
+            y_lr_min = tl.full((BLOCK_Y, BLOCK_X), 1.0, dtype=tl.float32)
+            y_lr_max = tl.full((BLOCK_Y, BLOCK_X), 0.0, dtype=tl.float32)
+            for dy_i in tl.static_range(3):
+                ry_i = ly_m1 if dy_i == 0 else (cy_lr if dy_i == 1 else ly_p1)
+                for dx_i in tl.static_range(3):
+                    rx_i = lx_m1 if dx_i == 0 else (cx_lr if dx_i == 1 else lx_p1)
+                    off_lr = ry_i * stride_lr_h + rx_i * stride_lr_w
+                    lr_r = tl.load(lr_b + 0 * stride_lr_c + off_lr, mask=mask, other=0.0).to(tl.float32)
+                    lr_g = tl.load(lr_b + 1 * stride_lr_c + off_lr, mask=mask, other=0.0).to(tl.float32)
+                    lr_bl = tl.load(lr_b + 2 * stride_lr_c + off_lr, mask=mask, other=0.0).to(tl.float32)
+                    lr_r = tl.minimum(tl.maximum(tl.where(lr_r == lr_r, lr_r, 0.0), 0.0), 1.0)
+                    lr_g = tl.minimum(tl.maximum(tl.where(lr_g == lr_g, lr_g, 0.0), 0.0), 1.0)
+                    lr_bl = tl.minimum(tl.maximum(tl.where(lr_bl == lr_bl, lr_bl, 0.0), 0.0), 1.0)
+                    y_nb = 0.2126 * lr_r + 0.7152 * lr_g + 0.0722 * lr_bl
+                    y_lr_min = tl.minimum(y_lr_min, y_nb)
+                    y_lr_max = tl.maximum(y_lr_max, y_nb)
+
+            lo_env = y_lr_min - 0.035
+            hi_env = y_lr_max + 0.035
+
+            yn00 = 0.2126 * r00 + 0.7152 * g00 + 0.0722 * b00
+            yn01 = 0.2126 * r01 + 0.7152 * g01 + 0.0722 * b01
+            yn10 = 0.2126 * r10 + 0.7152 * g10 + 0.0722 * b10
+            yn11 = 0.2126 * r11 + 0.7152 * g11 + 0.0722 * b11
+
+            dar00 = 0.65 * (tl.minimum(tl.maximum(yn00, lo_env), hi_env) - yn00)
+            dar01 = 0.65 * (tl.minimum(tl.maximum(yn01, lo_env), hi_env) - yn01)
+            dar10 = 0.65 * (tl.minimum(tl.maximum(yn10, lo_env), hi_env) - yn10)
+            dar11 = 0.65 * (tl.minimum(tl.maximum(yn11, lo_env), hi_env) - yn11)
+
+            r00 = tl.minimum(tl.maximum(r00 + dar00, 0.0), 1.0)
+            g00 = tl.minimum(tl.maximum(g00 + dar00, 0.0), 1.0)
+            b00 = tl.minimum(tl.maximum(b00 + dar00, 0.0), 1.0)
+
+            r01 = tl.minimum(tl.maximum(r01 + dar01, 0.0), 1.0)
+            g01 = tl.minimum(tl.maximum(g01 + dar01, 0.0), 1.0)
+            b01 = tl.minimum(tl.maximum(b01 + dar01, 0.0), 1.0)
+
+            r10 = tl.minimum(tl.maximum(r10 + dar10, 0.0), 1.0)
+            g10 = tl.minimum(tl.maximum(g10 + dar10, 0.0), 1.0)
+            b10 = tl.minimum(tl.maximum(b10 + dar10, 0.0), 1.0)
+
+            r11 = tl.minimum(tl.maximum(r11 + dar11, 0.0), 1.0)
+            g11 = tl.minimum(tl.maximum(g11 + dar11, 0.0), 1.0)
+            b11 = tl.minimum(tl.maximum(b11 + dar11, 0.0), 1.0)
 
         # 1. Compute Luma Y for 4 pixels (ITU-R BT.709 Limited Range [64..940])
         y_val00 = 64.0 + 186.2376 * r00 + 626.5152 * g00 + 63.2472 * b00
@@ -484,6 +660,7 @@ def _yuv420_to_nchw_fp16_bt709(
     chroma_siting: str = "left",
     out_dtype: torch.dtype = torch.float16,
     use_triton: Optional[bool] = None,
+    pre_deband: bool = False,
 ) -> torch.Tensor:
     """Convert semi-planar P010LE (int16) or NV12 (uint8) [B, 3*H//2, W] into BT.709 RGB [B, 3, H, W]."""
     if yuv_semi.ndim != 3 or (yuv_semi.shape[1] % 3) != 0:
@@ -524,6 +701,7 @@ def _yuv420_to_nchw_fp16_bt709(
             CHROMA_LEFT=is_left,
             BLOCK_X=BLOCK_X,
             BLOCK_Y=BLOCK_Y,
+            PRE_DEBAND=bool(pre_deband),
         )
         return out_buf
 
@@ -536,9 +714,70 @@ def _yuv420_to_nchw_fp16_bt709(
         y_off, y_inv = 16.0, 1.0 / 219.0
         c_off, c_inv = 128.0, 1.0 / 224.0
 
-    y_plane = (f_all[:, :H, :] - y_off) * y_inv
+    y_raw = f_all[:, :H, :]
     u_sub = f_all[:, H:, 0::2]
     v_sub = f_all[:, H:, 1::2]
+
+    if pre_deband:
+        lsb_u = 4.0 if is_p010 else 1.0
+        thr_min_rng = 0.5 * lsb_u
+        thr_max_y = 2.2 * lsb_u
+        thr_rng_y = 3.0 * lsb_u
+        thr_avg_y = 1.25 * lsb_u
+
+        y_pad = F.pad(y_raw.unsqueeze(1), (8, 8, 8, 8), mode="replicate").squeeze(1)
+        yl = y_pad[:, 8 : 8 + H, 0:W]
+        yr = y_pad[:, 8 : 8 + H, 16 : 16 + W]
+        yu = y_pad[:, 0:H, 8 : 8 + W]
+        yd = y_pad[:, 16 : 16 + H, 8 : 8 + W]
+        avg4_y = 0.25 * (yl + yr + yu + yd)
+        max4_y = torch.maximum(torch.maximum(yl, yr), torch.maximum(yu, yd))
+        min4_y = torch.minimum(torch.minimum(yl, yr), torch.minimum(yu, yd))
+        rng4_y = max4_y - min4_y
+        md_y = torch.maximum(
+            torch.maximum((y_raw - yl).abs(), (y_raw - yr).abs()),
+            torch.maximum((y_raw - yu).abs(), (y_raw - yd).abs()),
+        )
+        gate_y = (md_y <= thr_max_y) & (rng4_y >= thr_min_rng) & (rng4_y <= thr_rng_y) & ((y_raw - avg4_y).abs() <= thr_avg_y)
+        ign_y = GPUColorConverterP010LE._ign_dither_grid(H, W, yuv_semi.device).unsqueeze(0) * (0.45 / 0.998 * lsb_u)
+        y_raw = torch.where(gate_y, 0.35 * y_raw + 0.65 * avg4_y + ign_y, y_raw)
+
+        # Pair-separated UV deband (u_sub is 0::2, v_sub is 1::2 -> zero Cb<->Cr channel cross-talk)
+        H_uv_fb, W_uv_fb = u_sub.shape[1], u_sub.shape[2]
+        if H_uv_fb >= 2 and W_uv_fb >= 2:
+            u_pad = F.pad(u_sub.unsqueeze(1), (4, 4, 4, 4), mode="replicate").squeeze(1)
+            ul = u_pad[:, 4 : 4 + H_uv_fb, 0:W_uv_fb]
+            ur = u_pad[:, 4 : 4 + H_uv_fb, 8 : 8 + W_uv_fb]
+            uu = u_pad[:, 0:H_uv_fb, 4 : 4 + W_uv_fb]
+            ud = u_pad[:, 8 : 8 + H_uv_fb, 4 : 4 + W_uv_fb]
+            avg4_u = 0.25 * (ul + ur + uu + ud)
+            rng4_u = torch.maximum(torch.maximum(ul, ur), torch.maximum(uu, ud)) - torch.minimum(
+                torch.minimum(ul, ur), torch.minimum(uu, ud)
+            )
+            md_u = torch.maximum(
+                torch.maximum((u_sub - ul).abs(), (u_sub - ur).abs()),
+                torch.maximum((u_sub - uu).abs(), (u_sub - ud).abs()),
+            )
+            gate_u = (md_u <= thr_max_y) & (rng4_u >= thr_min_rng) & (rng4_u <= thr_rng_y) & ((u_sub - avg4_u).abs() <= thr_avg_y)
+            u_sub = torch.where(gate_u, 0.40 * u_sub + 0.60 * avg4_u, u_sub)
+
+            v_pad = F.pad(v_sub.unsqueeze(1), (4, 4, 4, 4), mode="replicate").squeeze(1)
+            vl = v_pad[:, 4 : 4 + H_uv_fb, 0:W_uv_fb]
+            vr = v_pad[:, 4 : 4 + H_uv_fb, 8 : 8 + W_uv_fb]
+            vu = v_pad[:, 0:H_uv_fb, 4 : 4 + W_uv_fb]
+            vd = v_pad[:, 8 : 8 + H_uv_fb, 4 : 4 + W_uv_fb]
+            avg4_v = 0.25 * (vl + vr + vu + vd)
+            rng4_v = torch.maximum(torch.maximum(vl, vr), torch.maximum(vu, vd)) - torch.minimum(
+                torch.minimum(vl, vr), torch.minimum(vu, vd)
+            )
+            md_v = torch.maximum(
+                torch.maximum((v_sub - vl).abs(), (v_sub - vr).abs()),
+                torch.maximum((v_sub - vu).abs(), (v_sub - vd).abs()),
+            )
+            gate_v = (md_v <= thr_max_y) & (rng4_v >= thr_min_rng) & (rng4_v <= thr_rng_y) & ((v_sub - avg4_v).abs() <= thr_avg_y)
+            v_sub = torch.where(gate_v, 0.40 * v_sub + 0.60 * avg4_v, v_sub)
+
+    y_plane = (y_raw - y_off) * y_inv
 
     if is_left:
         u_prev = torch.cat((u_sub[:, :1, :], u_sub[:, :-1, :]), dim=1)
@@ -592,12 +831,14 @@ class GPUColorConverterP010LE:
         device: Optional[torch.device] = None,
         chroma_siting: str = "center",
         dither: bool = False,
+        soft_antiring: bool = False,
     ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device = device
         self.chroma_siting = str(chroma_siting or "center").strip().lower()
         self.dither = bool(dither)
+        self.soft_antiring = bool(soft_antiring)
         self._p010_ring: List[torch.Tensor] = []
         self._p010_ring_slot: int = 0
         self._has_triton = False
@@ -633,10 +874,28 @@ class GPUColorConverterP010LE:
         rgb_slice: torch.Tensor,
         chroma_siting: str = "center",
         dither: bool = False,
+        soft_antiring: bool = False,
+        ref_lr_slice: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, _, H, W = rgb_slice.shape
         out_fp16 = torch.nan_to_num(rgb_slice.float(), nan=0.0, posinf=1.0, neginf=0.0)
         rgb_clamped = out_fp16.clamp_(0.0, 1.0)
+        if (
+            soft_antiring
+            and ref_lr_slice is not None
+            and ref_lr_slice.ndim == 4
+            and ref_lr_slice.shape == (B, 3, H // 2, W // 2)
+        ):
+            lr_clean = torch.nan_to_num(ref_lr_slice.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp_(0.0, 1.0)
+            y_lr = 0.2126 * lr_clean[:, 0:1] + 0.7152 * lr_clean[:, 1:2] + 0.0722 * lr_clean[:, 2:3]
+            y_lr_pad = F.pad(y_lr, (1, 1, 1, 1), mode="replicate")
+            y_lr_max = F.max_pool2d(y_lr_pad, kernel_size=3, stride=1)
+            y_lr_min = -F.max_pool2d(-y_lr_pad, kernel_size=3, stride=1)
+            lo_env = (y_lr_min - 0.035).repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+            hi_env = (y_lr_max + 0.035).repeat_interleave(2, dim=2).repeat_interleave(2, dim=3)
+            yn = 0.2126 * rgb_clamped[:, 0:1] + 0.7152 * rgb_clamped[:, 1:2] + 0.0722 * rgb_clamped[:, 2:3]
+            delta_ar = 0.65 * (torch.clamp(yn, lo_env, hi_env) - yn)
+            rgb_clamped = torch.clamp(rgb_clamped + delta_ar, 0.0, 1.0)
         r = rgb_clamped[:, 0]
         g = rgb_clamped[:, 1]
         b = rgb_clamped[:, 2]
@@ -687,11 +946,26 @@ class GPUColorConverterP010LE:
         return torch.cat((y_p010, uv_p010), dim=1).contiguous()
 
     @torch.inference_mode()
-    def _convert_slice(self, rgb_slice: torch.Tensor) -> torch.Tensor:
-        return self._p010le_core(rgb_slice, chroma_siting=self.chroma_siting, dither=self.dither)
+    def _convert_slice(
+        self,
+        rgb_slice: torch.Tensor,
+        ref_lr_slice: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self._p010le_core(
+            rgb_slice,
+            chroma_siting=self.chroma_siting,
+            dither=self.dither,
+            soft_antiring=self.soft_antiring,
+            ref_lr_slice=ref_lr_slice,
+        )
 
     @torch.inference_mode()
-    def rgb_to_p010le(self, rgb_tensor: torch.Tensor, slot: Optional[int] = None) -> torch.Tensor:
+    def rgb_to_p010le(
+        self,
+        rgb_tensor: torch.Tensor,
+        slot: Optional[int] = None,
+        ref_lr_rgb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Convert RGB [B, 3, H, W] into 2-slot ring-buffered Semi-Planar P010LE [B, 3*H//2, W]."""
         B, _, H, W = rgb_tensor.shape
         self._ensure_ring(B, H, W, rgb_tensor.device)
@@ -700,31 +974,50 @@ class GPUColorConverterP010LE:
             self._p010_ring_slot = (self._p010_ring_slot + 1) % len(self._p010_ring)
 
         out_buf = self._p010_ring[ring_slot][:B]
+        use_ar = bool(
+            self.soft_antiring
+            and ref_lr_rgb is not None
+            and ref_lr_rgb.ndim == 4
+            and ref_lr_rgb.shape == (B, 3, H // 2, W // 2)
+            and ref_lr_rgb.device == rgb_tensor.device
+        )
 
         # Prefer Triton kernel on CUDA for single-pass conversion
         if self._has_triton and rgb_tensor.is_cuda and _rgb_to_p010le_triton_kernel is not None:
             BLOCK_X = 16
             BLOCK_Y = 16
             grid = (triton.cdiv(W // 2, BLOCK_X), triton.cdiv(H // 2, BLOCK_Y), B)
+            lr_arg = ref_lr_rgb if use_ar else rgb_tensor
+            s_lrb = ref_lr_rgb.stride(0) if use_ar else 0
+            s_lrc = ref_lr_rgb.stride(1) if use_ar else 0
+            s_lrh = ref_lr_rgb.stride(2) if use_ar else 0
+            s_lrw = ref_lr_rgb.stride(3) if use_ar else 0
             _rgb_to_p010le_triton_kernel[grid](
-                rgb_tensor, out_buf,
+                rgb_tensor, out_buf, lr_arg,
                 rgb_tensor.stride(0), rgb_tensor.stride(1), rgb_tensor.stride(2), rgb_tensor.stride(3),
                 out_buf.stride(0), out_buf.stride(1), out_buf.stride(2),
+                s_lrb, s_lrc, s_lrh, s_lrw,
                 H, W,
                 BLOCK_X=BLOCK_X, BLOCK_Y=BLOCK_Y,
                 CHROMA_LEFT=(self.chroma_siting == "left"),
                 USE_DITHER=self.dither,
+                SOFT_ANTIRING=use_ar,
             )
             return out_buf
 
         # CPU / non-Triton fallback
         if B <= 2:
-            out_buf.copy_(self._convert_slice(rgb_tensor))
+            out_buf.copy_(self._convert_slice(rgb_tensor, ref_lr_slice=ref_lr_rgb if use_ar else None))
             return out_buf
 
         for s in range(0, B, 2):
             e = min(s + 2, B)
-            out_buf[s:e].copy_(self._convert_slice(rgb_tensor[s:e]))
+            out_buf[s:e].copy_(
+                self._convert_slice(
+                    rgb_tensor[s:e],
+                    ref_lr_slice=ref_lr_rgb[s:e] if use_ar and ref_lr_rgb is not None else None,
+                )
+            )
         return out_buf
 
 
@@ -1233,6 +1526,8 @@ class DoubleBufferedPipeUpscaler:
         chroma_siting: str = "left",
         dither: bool = True,
         max_memo_frames: int = 64,
+        source_is_8bit: Optional[bool] = None,
+        soft_antiring: bool = True,
     ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1243,10 +1538,13 @@ class DoubleBufferedPipeUpscaler:
         self.chroma_siting = str(chroma_siting or "left").strip().lower()
         self.dither = bool(dither)
         self.max_memo_frames = max(1, int(max_memo_frames))
+        self.source_is_8bit = source_is_8bit
+        self.soft_antiring = bool(soft_antiring)
         self.color_conv = GPUColorConverterP010LE(
             self.device,
             chroma_siting=self.chroma_siting,
             dither=self.dither,
+            soft_antiring=self.soft_antiring,
         )
         self.input_hw = (0, 0)
         self.output_hw = (0, 0)
@@ -1376,14 +1674,22 @@ class DoubleBufferedPipeUpscaler:
                     dummy_p010, is_p010=True, out_nchw_fp16=dummy_in_buf, chroma_siting=self.chroma_siting
                 )
                 _yuv420_to_nchw_fp16_bt709(
-                    dummy_nv12, is_p010=False, out_nchw_fp16=dummy_in_buf, chroma_siting=self.chroma_siting
+                    dummy_nv12,
+                    is_p010=False,
+                    out_nchw_fp16=dummy_in_buf,
+                    chroma_siting=self.chroma_siting,
+                    pre_deband=bool(self.source_is_8bit),
                 )
                 dummy_in = _nhwc_u8_to_nchw_fp16_norm(dummy_nhwc, out_nchw_fp16=dummy_in_buf)
                 if callable(self.model):
                     dummy_out = self.model(dummy_in)
                 else:
                     dummy_out = torch.zeros((cur_bs, 3, out_h, out_w), dtype=torch.float16, device=self.device)
-                self.color_conv.rgb_to_p010le(dummy_out, slot=0)
+                self.color_conv.rgb_to_p010le(
+                    dummy_out,
+                    slot=0,
+                    ref_lr_rgb=dummy_in_buf if (self.soft_antiring and self.scale == 2) else None,
+                )
                 torch.cuda.synchronize(self.device)
         except Exception:
             try:
@@ -1687,6 +1993,7 @@ class DoubleBufferedPipeUpscaler:
                                 gpu_yuv = yuv_pin[:cur_B].to(self.device, non_blocking=True)
                             if record_micro and evt_h2d_dma_e is not None:
                                 evt_h2d_dma_e.record(self.stream_h2d)
+                            eff_pre_deband = bool(self.source_is_8bit) if self.source_is_8bit is not None else False
                             if self.gpu_in_ring:
                                 in_buf = self.gpu_in_ring[slot][:cur_B]
                                 gpu_tensor = _yuv420_to_nchw_fp16_bt709(
@@ -1694,12 +2001,14 @@ class DoubleBufferedPipeUpscaler:
                                     is_p010=is_p010,
                                     out_nchw_fp16=in_buf,
                                     chroma_siting=self.chroma_siting,
+                                    pre_deband=eff_pre_deband,
                                 )
                             else:
                                 gpu_tensor = _yuv420_to_nchw_fp16_bt709(
                                     gpu_yuv,
                                     is_p010=is_p010,
                                     chroma_siting=self.chroma_siting,
+                                    pre_deband=eff_pre_deband,
                                 )
                             if not is_trt:
                                 gpu_tensor = gpu_tensor.to(memory_format=torch.channels_last)
@@ -1767,7 +2076,23 @@ class DoubleBufferedPipeUpscaler:
                             )
                         if record_micro and evt_tri_s is not None:
                             evt_tri_s.record(self.stream_compute)
-                        gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb, slot=slot)
+                        ref_lr_slot = (
+                            self.gpu_in_ring[slot][:cur_B]
+                            if (self.soft_antiring and self.scale == 2 and self.gpu_in_ring)
+                            else None
+                        )
+                        if (
+                            ref_lr_slot is not None
+                            and getattr(self.color_conv.rgb_to_p010le, "__func__", None)
+                            is GPUColorConverterP010LE.rgb_to_p010le
+                        ):
+                            gpu_p010 = self.color_conv.rgb_to_p010le(
+                                upscaled_rgb,
+                                slot=slot,
+                                ref_lr_rgb=ref_lr_slot,
+                            )
+                        else:
+                            gpu_p010 = self.color_conv.rgb_to_p010le(upscaled_rgb, slot=slot)
                         if record_micro and evt_tri_e is not None:
                             evt_tri_e.record(self.stream_compute)
 
@@ -1905,12 +2230,14 @@ class DoubleBufferedPipeUpscaler:
                             for i in range(cur_B)
                         ]
                         yuv_batch = torch.stack(yuv_list, dim=0)
+                        eff_pre_deband_cpu = bool(self.source_is_8bit) if self.source_is_8bit is not None else False
                         tensor = _yuv420_to_nchw_fp16_bt709(
                             yuv_batch,
                             is_p010=is_p010_cpu,
                             chroma_siting=self.chroma_siting,
                             out_dtype=torch.float32,
                             use_triton=False,
+                            pre_deband=eff_pre_deband_cpu,
                         )
                     else:
                         batch_tensors = []
@@ -1944,7 +2271,11 @@ class DoubleBufferedPipeUpscaler:
                     while not slot_drain_events[slot].wait(timeout=0.1):
                         drain_worker.check_error()
                     t_cnv_s = time.perf_counter()
-                    out_p010 = self.color_conv.rgb_to_p010le(out_rgb, slot=slot)
+                    out_p010 = self.color_conv.rgb_to_p010le(
+                        out_rgb,
+                        slot=slot,
+                        ref_lr_rgb=tensor if (self.soft_antiring and self.scale == 2) else None,
+                    )
                     cpu_total_conv_ms += (time.perf_counter() - t_cnv_s) * 1000.0
                     out_np = out_p010.numpy()
 

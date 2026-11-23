@@ -20,16 +20,15 @@ def find_cached_plan(
     video_path: str,
     output_dir: Optional[str] = None,
     expected_policy: Optional[str] = None,
+    expected_grain_restore: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Tìm file plan.json đã quét trước đó cho video trong các đường dẫn tiêu chuẩn.
-    Trả về nội dung dictionary nếu hợp lệ, None nếu chưa có.
-    """
+    """Locate a compatible cached plan.json across standard checkpoint paths."""
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     out_dir = output_dir or "out"
     if str(out_dir).lower().endswith((".mkv", ".mp4")):
         out_dir = os.path.dirname(out_dir) or "out"
     vid_dir = os.path.dirname(os.path.abspath(video_path))
+    norm_grain = str(expected_grain_restore).strip().lower() if expected_grain_restore else None
 
     candidate_paths = [
         os.path.join(out_dir, f".temp_{base_name}", "plan.json"),
@@ -51,6 +50,13 @@ def find_cached_plan(
                     plan_pol = data.get("dedup_policy")
                     if expected_policy and plan_pol is not None:
                         if str(plan_pol).strip().lower() != str(expected_policy).strip().lower():
+                            continue
+                    if norm_grain is not None:
+                        c_params = data.get("dedup_params") or {}
+                        c_grain = c_params.get("grain_restore")
+                        if c_grain is not None and str(c_grain).strip().lower() != norm_grain:
+                            continue
+                        if c_grain is None and norm_grain != "auto":
                             continue
                     # Nếu là file generic full_ep_plan.json thì phải kiểm tra đúng source_file
                     if "full_ep_plan.json" in p:

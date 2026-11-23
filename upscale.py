@@ -43,6 +43,8 @@ from src.config import (
     HEVC_ENCODER,
     HEVC_MULTIPASS_POLICY,
     VALID_NVENC_MULTIPASS_POLICIES,
+    DEFAULT_GRAIN_RESTORE,
+    VALID_GRAIN_RESTORE_POLICIES,
 )
 from src.pending_queue import load_pending_subs, remove_pending_sub
 from src.pipeline import run_upscale_pipeline, FailedResumableError
@@ -72,13 +74,16 @@ from src.subtitles import find_or_extract_subtitles, transcribe_japanese_audio
 
 _MODEL_TRT_ZERO_DISK_FPS: Dict[str, Tuple[float, float]] = {
     "animevideov3": (10.5, 8.5),
-    "animejanai-hd-v3-compact": (10.8, 8.8),
+    "animejanai-hd-v3-compact": (12.8, 10.2),
     "animejanai-hd-v3-ultracompact": (18.5, 15.5),
     "animejanai-hd-v3-sharp1-ultracompact": (18.5, 15.5),
     "animejanai-hd-v3-superultracompact": (20.8, 17.5),
     "animejanai-hd-v3-sharp1-superultracompact": (20.8, 17.5),
-    "span-2x": (14.5, 12.0),
-    "2x_animejanai_v3": (14.5, 12.0),
+    "span-2x": (10.5, 8.5),
+    "2x_animejanai_v3": (10.5, 8.5),
+    "modernspanimation-v2-2x": (10.5, 8.5),
+    "realcugan-pro-conservative-2x": (8.5, 7.0),
+    "realcugan-pro-denoise3x-2x": (8.5, 7.0),
     "auto-pareto": (16.5, 13.5),
 }
 
@@ -375,7 +380,13 @@ def build_arg_parser():
         "--nvenc-multipass",
         default=HEVC_MULTIPASS_POLICY,
         choices=list(VALID_NVENC_MULTIPASS_POLICIES),
-        help="Chính sách NVENC 2-pass toàn tập (không trộn SPS/PPS giữa các chunk): auto (qres khi AI > 24 fps, fullres khi AI-bound), fullres, qres"
+        help="Chính sách NVENC 2-pass toàn tập (không trộn SPS/PPS giữa các chunk): auto (qres khi AI > 21.5 fps, fullres khi AI-bound), fullres, qres"
+    )
+    parser.add_argument(
+        "--grain-restore",
+        default=DEFAULT_GRAIN_RESTORE,
+        choices=list(VALID_GRAIN_RESTORE_POLICIES),
+        help="Chính sách khử hạt & pha trọng số cấp tập (auto: tự đo hạt phẳng-tĩnh <0.35s, off: tắt, light: nhẹ alpha=0.45, heavy: nặng alpha=1.0)"
     )
     parser.add_argument(
         "--drift-delta",
@@ -1253,6 +1264,8 @@ def main():
                     break
 
             try:
+                eff_cli_grain = str(getattr(args, "grain_restore", DEFAULT_GRAIN_RESTORE) or "auto").strip().lower()
+                grain_pipe_kw = {"grain_restore": eff_cli_grain} if eff_cli_grain != "auto" else {}
                 out_file = run_upscale_pipeline(
                     input_path=vid,
                     output_path=args.output,
@@ -1277,6 +1290,7 @@ def main():
                     use_tensorrt=not getattr(args, "no_tensorrt", False),
                     nvenc_multipass=getattr(args, "nvenc_multipass", HEVC_MULTIPASS_POLICY),
                     segment_time_explicit=explicit_segment_arg,
+                    **grain_pipe_kw,
                 )
                 # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
@@ -1379,6 +1393,11 @@ def main():
                         use_tensorrt=not getattr(args, "no_tensorrt", False),
                         nvenc_multipass=getattr(args, "nvenc_multipass", HEVC_MULTIPASS_POLICY),
                         segment_time_explicit=explicit_segment_arg,
+                        **(
+                            {"grain_restore": str(getattr(args, "grain_restore", "auto")).strip().lower()}
+                            if str(getattr(args, "grain_restore", "auto") or "auto").strip().lower() != "auto"
+                            else {}
+                        ),
                     )
                     if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                         completed_videos.append((vid, out_file))

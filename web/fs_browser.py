@@ -61,6 +61,7 @@ DEDUP_POLICY_PARAMS: Dict[str, Dict[str, Any]] = {
 AUTO_PARETO_MODEL_ID = "auto-pareto"
 AUTO_PARETO_MODEL_NAME = "AnimeJaNai HD V3 Auto-Pareto (Compact 16c + UltraCompact 8c)"
 VALID_NVENC_MULTIPASS_POLICIES = ("auto", "fullres", "qres")
+VALID_GRAIN_RESTORE_POLICIES = ("auto", "off", "light", "heavy")
 
 
 def is_valid_dedup_policy(policy: str) -> bool:

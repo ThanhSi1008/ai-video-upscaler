@@ -120,3 +120,50 @@ models:
     source_url: "https://huggingface.co/nuriyoo/openmodeldb-mirror/resolve/main/models/2x-AniSD-Suite/2x_AniSD_AC_G6i2b_SPAN_190K.pth"
     license: "CC-BY-NC-SA 4.0 (Non-commercial, Personal Use Only)"
     default: false
+
+  realcugan-pro-conservative-2x:
+    id: "realcugan-pro-conservative-2x"
+    name: "Real-CUGAN Pro Conservative 2x"
+    arch:
+      type: "UpCunet2x"
+      num_feat: 64
+      num_conv: 16
+      upscale: 2
+      pro: true
+    downsample: "none"
+    weights_path: "models_bench/pro-conservative-up2x.pth"
+    sha256: "b8ae5225d2d515aa3c33ef1318aadc532a42ea5ed8d564471b5a5b586783e964"
+    source_url: "https://huggingface.co/spaces/ASesYusuf1/r44alc6g4n/resolve/main/weights_v3/pro-conservative-up2x.pth"
+    license: "MIT"
+    default: false
+
+  realcugan-pro-denoise3x-2x:
+    id: "realcugan-pro-denoise3x-2x"
+    name: "Real-CUGAN Pro Denoise3x 2x"
+    arch:
+      type: "UpCunet2x"
+      num_feat: 64
+      num_conv: 16
+      upscale: 2
+      pro: true
+    downsample: "none"
+    weights_path: "models_bench/pro-denoise3x-up2x.pth"
+    sha256: "e80ca8fc7c261e3dc8f4c0ce0656ac5501d71a476543071615c43392dbeb4c0d"
+    source_url: "https://huggingface.co/spaces/ASesYusuf1/r44alc6g4n/resolve/main/weights_v3/pro-denoise3x-up2x.pth"
+    license: "MIT"
+    default: false
+
+  modernspanimation-v2-2x:
+    id: "modernspanimation-v2-2x"
+    name: "2x ModernSpanimation V2 (SPAN Native 2x)"
+    arch:
+      type: "SPAN"
+      num_feat: 48
+      num_conv: 6
+      upscale: 2
+    downsample: "none"
+    weights_path: "models_bench/2x_ModernSpanimationV2.pth"
+    sha256: "a13ae9fd8a72d0d320759472e4097eb58483c2ecc6232dec35b971e97275554c"
+    source_url: "https://github.com/TNTwise/Models/releases/download/2x_ModernSpanimationV2/2x_ModernSpanimationV2.pth"
+    license: "MIT"
+    default: false

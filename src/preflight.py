@@ -58,6 +58,23 @@ def configure_alder_lake_pcore_qos(enable_boost: bool = True) -> Optional[int]:
     return prev_prio
 
 
+def apply_current_process_eco_qos() -> bool:
+    """Route background worker subprocesses onto Alder Lake E-Cores (BELOW_NORMAL + EcoQoS)."""
+    if sys.platform != "win32" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    try:
+        import ctypes
+
+        configure_alder_lake_pcore_qos(enable_boost=False)
+        kernel32 = ctypes.windll.kernel32
+        h_proc = kernel32.GetCurrentProcess()
+        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+        kernel32.SetPriorityClass(h_proc, BELOW_NORMAL_PRIORITY_CLASS)
+        return True
+    except Exception:
+        return False
+
+
 class AntiSleepContext:
     """
     Context manager tự động ngăn Windows sleep khi đang chạy tác vụ nặng:

@@ -56,6 +56,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const optModel = document.getElementById("opt-model");
   const optDedup = document.getElementById("opt-dedup");
   const optNvencMultipass = document.getElementById("opt-nvenc-multipass");
+  const optGrainRestore = document.getElementById("opt-grain-restore");
   const optBatch = document.getElementById("opt-batch-size");
   const optBatchError = document.getElementById("opt-batch-size-error");
   const optDeadline = document.getElementById("opt-deadline");
@@ -310,6 +311,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         allow_partial: Boolean(optAllowPartial?.checked),
         model: optModel?.value || null,
         dedup_policy: optDedup?.value || null,
+        grain_restore: optGrainRestore?.value || "auto",
         batch_size: batchVal,
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
@@ -498,6 +500,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   for (const ctrl of [
     optModel,
     optDedup,
+    optGrainRestore,
     optBatch,
     optDeadline,
     optOutDir,
@@ -534,6 +537,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           model: optModel?.value || null,
           dedup_policy: optDedup?.value || null,
           nvenc_multipass: optNvencMultipass?.value || "auto",
+          grain_restore: optGrainRestore?.value || "auto",
           batch_size: batchVal,
           zero_disk: Boolean(optZeroDisk?.checked ?? true),
           use_tensorrt: Boolean(optTensorrt?.checked ?? true),
@@ -579,6 +583,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         model: optModel?.value || null,
         dedup_policy: optDedup?.value || null,
         nvenc_multipass: optNvencMultipass?.value || "auto",
+        grain_restore: optGrainRestore?.value || "auto",
         batch_size: batchVal,
         deadline: optDeadline?.value.trim() || null,
         allow_partial: Boolean(optAllowPartial?.checked),

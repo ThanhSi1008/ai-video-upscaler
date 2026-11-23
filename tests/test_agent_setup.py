@@ -312,53 +312,73 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
     )
     assert res_freeze["decision"] == "allow"
 
-    # 7. Unapproved TensorRT engine build & unflagged full-episode upscale guards
-    res_trt = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe src/build_trt_engine.py"}}},
-        repo_root=tmp_path,
-    )
-    assert res_trt["decision"] == "deny"
-
-    res_trt_inspect = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/agent_context.py --symbols src/build_trt_engine.py"}}},
-        repo_root=tmp_path,
-    )
-    assert res_trt_inspect["decision"] == "allow"
-
-    res_full = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": "python upscale.py ep1.mkv -o out/"}}},
-        repo_root=tmp_path,
-    )
-    assert res_full["decision"] == "deny"
-
-    for extra_gpu_cmd in (
+    # 7. Autonomous local PC hardware authority (TensorRT builds, full-episode upscales & GPU benchmarks)
+    for autonomous_hw_cmd in (
+        ".\\.venv\\Scripts\\python.exe src/build_trt_engine.py",
+        "& \".\\.venv\\Scripts\\python.exe\" -m src.build_trt_engine",
+        ".\\.venv\\Scripts\\python.exe scripts/agent_context.py --symbols src/build_trt_engine.py",
+        "python upscale.py ep1.mkv -o out/",
+        "python upscale.py ep1.mkv -o out/ --no-subs",
+        ".\\upscale.bat ep1.mkv",
         ".\\upscale_turbo.bat ep1.mkv",
         "python scripts/benchmark_pipeline.py",
         "python scripts/silicon_roofline_probe.py",
         "python scripts/upscale_x4_single.py ep1.mkv",
-    ):
-        res_gpu_extra = mod.evaluate_tool_call(
-            {"toolCall": {"name": "run_command", "args": {"CommandLine": extra_gpu_cmd}}},
-            repo_root=tmp_path,
-        )
-        assert res_gpu_extra["decision"] == "deny", f"Expected deny for: {extra_gpu_cmd}"
-
-    for bounded_up in (
+        "python benchmarks/upscale/benchmark_models_comparison.py",
+        "python benchmarks/research/measure_a1_a2_windows.py",
+        "python tests/test_gpu_throttling_overlap.py",
+        "RUN_GPU_TESTS=1 pytest -m gpu",
+        "$env:RUN_GPU_TESTS=1; .\\.venv\\Scripts\\python.exe -m pytest -m gpu -q",
+        "RUN_GPU_TESTS=1 pytest tests/test_gpu_throttling_overlap.py",
+        "pytest -m smoke",
         "python upscale.py ep1.mkv --preview 10",
         "python upscale.py ep1.mkv --dry-run",
         "python scripts/batch_translate_all.py --dry-run",
     ):
-        res_ok = mod.evaluate_tool_call(
-            {"toolCall": {"name": "run_command", "args": {"CommandLine": bounded_up}}},
+        res_hw = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": autonomous_hw_cmd}}},
             repo_root=tmp_path,
         )
-        assert res_ok["decision"] == "allow", f"Expected allow for: {bounded_up}"
+        assert res_hw["decision"] == "allow", f"Expected allow for: {autonomous_hw_cmd}"
 
-    res_live_batch = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": ".\\.venv\\Scripts\\python.exe scripts/batch_translate_all.py"}}},
+    # Custom @pytest.mark.gpu benchmark module in tests/ is also allowed under RUN_GPU_TESTS=1
+    custom_gpu_test = tmp_path / "tests" / "test_custom_trt_bench.py"
+    custom_gpu_test.parent.mkdir(parents=True, exist_ok=True)
+    custom_gpu_test.write_text("import pytest\n\n@pytest.mark.gpu\ndef test_bench():\n    pass\n", encoding="utf-8")
+    res_custom_gpu = mod.evaluate_tool_call(
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": "RUN_GPU_TESTS=1 pytest tests/test_custom_trt_bench.py"}}},
         repo_root=tmp_path,
     )
-    assert res_live_batch["decision"] == "force_ask"
+    assert res_custom_gpu["decision"] == "allow"
+
+    # Unisolated non-GPU pytest bypasses (missing -m gpu, direct pytest.exe, disjunctions, or De Morgan negation) still ask
+    for unsafe_gpu_pytest in (
+        "RUN_GPU_TESTS=1 pytest",
+        ".\\.venv\\Scripts\\pytest.exe",
+        "FOO=1 pytest tests/test_subtitle_guardrails.py",
+        "RUN_GPU_TESTS=1 pytest tests/test_subtitle_guardrails.py",
+        'RUN_GPU_TESTS=1 pytest -m "gpu or subtrans"',
+        'RUN_GPU_TESTS=1 pytest -m "not (unit and not gpu)"',
+        'RUN_GPU_TESTS=1 pytest -m gpu subtrans/tests/test_cache.py',
+    ):
+        res_unsafe_py = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": unsafe_gpu_pytest}}},
+            repo_root=tmp_path,
+        )
+        assert res_unsafe_py["decision"] == "ask", f"Expected ask for: {unsafe_gpu_pytest}"
+
+    # Explicit Cloud Gemini subtitle flags on upscale.py still require Gemini Quota Guard confirmation
+    for live_subs_cmd in (
+        ".\\.venv\\Scripts\\python.exe scripts/batch_translate_all.py",
+        "python upscale.py --subs-pending",
+        "python upscale.py ep1.mkv --subs-after-upscale",
+        "python upscale.py --queue ep1.mkv ep2.mkv --async-subs",
+    ):
+        res_live_subs = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": live_subs_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res_live_subs["decision"] == "force_ask", f"Expected force_ask for: {live_subs_cmd}"
 
 
 def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
@@ -406,22 +426,17 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
         )
         assert res["decision"] == "allow", f"Expected allow for: {bounded_pipe}"
 
-    # 3. Chained build_trt_engine execution is denied
-    for bad_trt in (
+    # 3. Chained build_trt_engine execution is allowed when .gpu_active.lock is idle
+    for trt_chain in (
         "python src/build_trt_engine.py --help && python src/build_trt_engine.py",
         "CUDA_VISIBLE_DEVICES=0 python src/build_trt_engine.py || echo fail",
+        "python src/build_trt_engine.py --help; python upscale.py --list-models",
     ):
         res = mod.evaluate_tool_call(
-            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_trt}}},
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": trt_chain}}},
             repo_root=tmp_path,
         )
-        assert res["decision"] == "deny", f"Expected deny for: {bad_trt}"
-
-    res_trt_safe = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": "python src/build_trt_engine.py --help; python upscale.py --list-models"}}},
-        repo_root=tmp_path,
-    )
-    assert res_trt_safe["decision"] == "allow"
+        assert res["decision"] == "allow", f"Expected allow for: {trt_chain}"
 
     # 4. Chained live Gemini API commands across ;, &&, ||, and | prompt (force_ask)
     for chained_sub in (
@@ -442,10 +457,15 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
     )
     assert res_sub_dry["decision"] == "allow"
 
-    # 5. GPU lock guard blocks chained GPU commands and RUN_GPU_TESTS=1
+    # 5. GPU lock guard blocks chained GPU commands, TRT builds, benchmarks, -m gpu, and RUN_GPU_TESTS=1
     (tmp_path / ".gpu_active.lock").write_text("9999", encoding="utf-8")
     for lock_cmd in (
         "python upscale.py --list-models && python upscale.py ep1.mkv",
+        "python src/build_trt_engine.py --help && python src/build_trt_engine.py",
+        "python scripts/benchmark_pipeline.py",
+        "python scripts/silicon_roofline_probe.py",
+        "python benchmarks/upscale/benchmark_models_comparison.py",
+        "pytest -m gpu",
         "RUN_GPU_TESTS=1 pytest tests/test_agent_setup.py",
         "$env:RUN_GPU_TESTS=1; pytest tests/test_agent_setup.py",
     ):
@@ -454,20 +474,35 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
             repo_root=tmp_path,
         )
         assert res["decision"] == "force_ask", f"Expected force_ask for: {lock_cmd}"
+
+    # Non-GPU commands and inline regex strings remain allowed even while .gpu_active.lock exists
+    for lock_safe_cmd in (
+        "python src/build_trt_engine.py --help",
+        "python upscale.py --list-models",
+        "python upscale.py --night-report",
+        "python -c \"import re; re.compile('approval|build_trt_engine|upscale.py')\"",
+        "pytest tests/test_agent_context.py",
+        "pytest -m smoke",
+    ):
+        res_lock_safe = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": lock_safe_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res_lock_safe["decision"] == "allow", f"Expected allow under lock for: {lock_safe_cmd}"
     (tmp_path / ".gpu_active.lock").unlink()
 
-    # 6. Chained unflagged upscale / benchmark segments are denied
-    for bad_up in (
-        "python upscale.py --list-models && python upscale.py ep1.mkv",
+    # 6. Chained full-episode upscale / benchmark segments are allowed when .gpu_active.lock is idle
+    for auto_up in (
+        "python upscale.py --list-models && python upscale.py ep1.mkv --no-subs",
         "python upscale.py --dry-run ep1.mkv || python upscale.py ep1.mkv",
         "python upscale.py ep1.mkv | Select-Object -First 10",
         "python upscale.py --list-models; python scripts/benchmark_pipeline.py",
     ):
         res = mod.evaluate_tool_call(
-            {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_up}}},
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": auto_up}}},
             repo_root=tmp_path,
         )
-        assert res["decision"] == "deny", f"Expected deny for: {bad_up}"
+        assert res["decision"] == "allow", f"Expected allow for: {auto_up}"
 
     # 7. Cross-segment CUDA_VISIBLE_DEVICES=-1 pytest isolation remains allowed
     for safe_py in (

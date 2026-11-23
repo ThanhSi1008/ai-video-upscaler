@@ -34,6 +34,7 @@ from web.fs_browser import (
     AUTO_PARETO_MODEL_NAME,
     DEDUP_POLICY_PARAMS,
     SUBTITLE_EXTENSIONS,
+    VALID_GRAIN_RESTORE_POLICIES,
     VALID_NVENC_MULTIPASS_POLICIES,
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
@@ -93,6 +94,7 @@ class SchedulePreviewRequest(BaseModel):
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
+    grain_restore: Optional[str] = None
     batch_size: int = Field(default=8, ge=1, le=32)
     zero_disk: bool = True
     use_tensorrt: bool = True
@@ -127,6 +129,16 @@ class SchedulePreviewRequest(BaseModel):
             raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
         return norm
 
+    @field_validator("grain_restore")
+    @classmethod
+    def _validate_gr(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_GRAIN_RESTORE_POLICIES:
+            raise ValueError("grain_restore phải là 'auto', 'off', 'light' hoặc 'heavy'.")
+        return norm
+
 
 class StartUpscaleRequest(BaseModel):
     inputs: List[str] = Field(default_factory=list)
@@ -134,6 +146,7 @@ class StartUpscaleRequest(BaseModel):
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
+    grain_restore: Optional[str] = None
     batch_size: int = Field(default=8, ge=1, le=32)
     deadline: Optional[str] = None
     allow_partial: bool = False
@@ -176,6 +189,16 @@ class StartUpscaleRequest(BaseModel):
             raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
         return norm
 
+    @field_validator("grain_restore")
+    @classmethod
+    def _validate_gr(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_GRAIN_RESTORE_POLICIES:
+            raise ValueError("grain_restore phải là 'auto', 'off', 'light' hoặc 'heavy'.")
+        return norm
+
 
 class StartPreviewRequest(BaseModel):
     video_path: str
@@ -184,6 +207,7 @@ class StartPreviewRequest(BaseModel):
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
+    grain_restore: Optional[str] = None
     batch_size: int = Field(default=8, ge=1, le=32)
     zero_disk: bool = True
     use_tensorrt: bool = True
@@ -225,6 +249,16 @@ class StartPreviewRequest(BaseModel):
         norm = str(v).strip().lower()
         if norm not in VALID_NVENC_MULTIPASS_POLICIES:
             raise ValueError("nvenc_multipass phải là 'auto', 'fullres' hoặc 'qres'.")
+        return norm
+
+    @field_validator("grain_restore")
+    @classmethod
+    def _validate_gr(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        norm = str(v).strip().lower()
+        if norm not in VALID_GRAIN_RESTORE_POLICIES:
+            raise ValueError("grain_restore phải là 'auto', 'off', 'light' hoặc 'heavy'.")
         return norm
 
 
@@ -1462,6 +1496,7 @@ def create_app(
                 allow_partial=req.allow_partial,
                 model_override=req.model,
                 dedup_override=req.dedup_policy,
+                grain_restore=req.grain_restore,
                 zero_disk=req.zero_disk,
                 use_tensorrt=req.use_tensorrt,
                 subs_after_upscale=req.subs_after_upscale,
@@ -1988,6 +2023,7 @@ def create_app(
             "models": models_list,
             "routing_modes": routing_modes,
             "nvenc_multipass_policies": list(VALID_NVENC_MULTIPASS_POLICIES),
+            "grain_restore_policies": list(VALID_GRAIN_RESTORE_POLICIES),
             "shows_yaml": shows_text,
             "shows_rules": shows_rules,
             "dedup_policies": dedup_policies,

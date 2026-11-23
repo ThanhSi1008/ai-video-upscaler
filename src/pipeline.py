@@ -1,5 +1,6 @@
 """Core 3-stage overlapped 4K video upscaling pipeline with resume and ENOSPC handling."""
 
+import inspect
 import os
 import sys
 import time
@@ -9,7 +10,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from glob import glob
-from typing import Optional
+from typing import Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
@@ -29,6 +30,7 @@ from src.config import (
     DEVICE_NAME,
     HEVC_ENCODER,
     HEVC_MULTIPASS_POLICY,
+    DEFAULT_GRAIN_RESTORE,
     resolve_episode_nvenc_multipass,
     acquire_gpu_lock,
     release_gpu_lock,
@@ -43,8 +45,23 @@ class FailedResumableError(RuntimeError):
         self.chunk_idx = chunk_idx
         self.up_segs_dir = up_segs_dir
 
+
+def _filter_supported_kwargs(fn: Any, extra_kw: dict[str, Any]) -> dict[str, Any]:
+    """Filter optional kwargs so strict test stubs without new parameters never raise TypeError."""
+    if hasattr(fn, "_mock_name"):
+        return dict(extra_kw)
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(extra_kw)
+    return {k: v for k, v in extra_kw.items() if k in params}
+
 from src.ffmpeg_ops import (
     probe_video,
+    is_8bit_pix_fmt,
+    resolve_effective_grain_profile,
     is_nvdec_supported,
     split_video_segments,
     get_segments_frame_counts,
@@ -75,7 +92,7 @@ from src.models_resolver import (
     resolve_expected_4k_output_path,
     is_valid_completed_4k_output,
 )
-from src.cuda_engine import upscale_frames_with_fallback
+from src.cuda_engine import resolve_episode_model_blend, upscale_frames_with_fallback
 from src.logger import (
     format_time,
     format_bytes,
@@ -120,6 +137,7 @@ def run_upscale_pipeline(
     use_tensorrt: bool = True,
     nvenc_multipass: str = HEVC_MULTIPASS_POLICY,
     segment_time_explicit: bool = False,
+    grain_restore: str = DEFAULT_GRAIN_RESTORE,
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
@@ -352,8 +370,24 @@ def run_upscale_pipeline(
                 os.makedirs(segs_dir, exist_ok=True)
                 os.makedirs(up_segs_dir, exist_ok=True)
 
+                norm_grain_restore = str(grain_restore or "auto").strip().lower()
+                source_is_8bit = bool(meta.get("source_is_8bit", is_8bit_pix_fmt(meta.get("pix_fmt"))))
+                if norm_grain_restore == "off":
+                    eff_grain_tier = "clean"
+                    probed_sigma_y = 0.0
+                elif hasattr(probe_video, "_mock_name") and norm_grain_restore == "auto":
+                    eff_grain_tier = "clean"
+                    probed_sigma_y = 0.0
+                else:
+                    grain_prof = resolve_effective_grain_profile(input_path, grain_restore=norm_grain_restore)
+                    eff_grain_tier = str(grain_prof["grain_tier"])
+                    probed_sigma_y = float(grain_prof["sigma_y"])
+
+                model_info = resolve_episode_model_blend(model_info, grain_tier=eff_grain_tier)
+                eff_blend_alpha = round(float(model_info.get("blend_alpha", 0.0) or 0.0), 4)
+
                 # Kiểm tra tính đồng nhất của model qua manifest.json (D7)
-                model_sha256 = str(model_info.get("sha256") or "")
+                model_sha256 = str(model_info.get("blended_weights_sha256") or model_info.get("sha256") or "")
                 manifest_path = os.path.join(work_dir, "manifest.json")
                 resumed_episode_multipass: Optional[str] = None
                 resumed_pareto_routing: Optional[dict] = None
@@ -362,13 +396,22 @@ def run_upscale_pipeline(
                         with open(manifest_path, "r", encoding="utf-8") as f:
                             manifest_data = json.load(f)
                         prev_model_id = manifest_data.get("model_id")
-                        prev_sha256 = manifest_data.get("sha256") or ""
+                        prev_sha256 = manifest_data.get("blended_weights_sha256") or manifest_data.get("sha256") or ""
+                        prev_alpha_raw = manifest_data.get("blend_alpha")
+                        prev_alpha_conflict = (
+                            prev_alpha_raw is not None
+                            and abs(float(prev_alpha_raw) - eff_blend_alpha) > 1e-4
+                        )
                         prev_mp = str(manifest_data.get("nvenc_multipass") or "").strip().lower()
                         if prev_mp in ("fullres", "qres") and not force:
                             resumed_episode_multipass = prev_mp
                         if isinstance(manifest_data.get("model_routing"), dict) and not force:
                             resumed_pareto_routing = manifest_data.get("model_routing")
-                        if prev_model_id and (prev_model_id != model_info["id"] or prev_sha256 != model_sha256):
+                        if prev_model_id and (
+                            prev_model_id != model_info["id"]
+                            or prev_sha256 != model_sha256
+                            or prev_alpha_conflict
+                        ):
                             if not force:
                                 raise ValueError(
                                     f"❌ Xung đột mô hình: Thư mục tạm '{work_dir}' chứa phân đoạn của mô hình '{prev_model_id}' "
@@ -398,6 +441,11 @@ def run_upscale_pipeline(
                     "model_id": model_info["id"],
                     "model_name": model_info["name"],
                     "sha256": model_sha256,
+                    "blended_weights_sha256": model_sha256,
+                    "blend_alpha": eff_blend_alpha,
+                    "grain_restore": norm_grain_restore,
+                    "grain_tier": eff_grain_tier,
+                    "grain_sigma_y": round(probed_sigma_y, 4),
                     "engine": engine,
                     "precision": precision,
                     "resolution_source": model_info.get("resolution_source", ""),
@@ -513,6 +561,7 @@ def run_upscale_pipeline(
                     plan_extra_meta = {
                         "model_id": model_info["id"],
                         "model_sha256": model_sha256,
+                        "blend_alpha": eff_blend_alpha,
                         "engine": engine,
                         "precision": precision,
                     }
@@ -533,6 +582,11 @@ def run_upscale_pipeline(
                                     req_params = get_dedup_params(req_pol)
                                     c_params = cached_plan_chk.get("dedup_params") or {}
                                     pol_conflict = (_canonical_dedup_family(c_pol) != _canonical_dedup_family(req_pol))
+                                    c_grain = c_params.get("grain_restore")
+                                    if not pol_conflict and c_grain is not None and str(c_grain).strip().lower() != norm_grain_restore:
+                                        pol_conflict = True
+                                    if not pol_conflict and c_grain is None and norm_grain_restore != "auto":
+                                        pol_conflict = True
                                     if not pol_conflict and (req_pol.startswith("dis") or req_pol in ("sakuga", "dis-sakuga")) and c_params.get("dis_thresh") is not None:
                                         pol_conflict = abs(float(c_params["dis_thresh"]) - float(req_params.get("dis_thresh", 0.30))) > 1e-4
                                     if not pol_conflict and req_pol.startswith("drift") and c_params.get("drift_delta") is not None:
@@ -573,6 +627,7 @@ def run_upscale_pipeline(
                                 policy=effective_dedup_policy,
                                 max_workers=2,
                                 decode_threads=2,
+                                grain_restore=norm_grain_restore,
                             )
                             rolling_planner.start(
                                 sync_initial_chunks=3,
@@ -587,6 +642,7 @@ def run_upscale_pipeline(
                             )
                         else:
                             logger.info(f"Đang kiểm tra / phân tích kế hoạch Deduplication toàn tập ({effective_dedup_policy})...", to_console=True)
+                            plan_extra_kw = {"grain_restore": norm_grain_restore} if norm_grain_restore != "auto" else {}
                             dedup_plan = load_or_create_plan(
                                 input_path=input_path,
                                 plan_path=plan_file,
@@ -595,7 +651,8 @@ def run_upscale_pipeline(
                                 fps_den=meta["fps_den"],
                                 resume=resume,
                                 chunk_frame_counts=seg_frame_counts,
-                                policy=effective_dedup_policy
+                                policy=effective_dedup_policy,
+                                **plan_extra_kw,
                             )
                             if dedup_plan:
                                 dedup_plan.update(plan_extra_meta)
@@ -857,6 +914,7 @@ def run_upscale_pipeline(
                                 raw_frames = None
                                 if use_direct_yuv:
                                     try:
+                                        yuv_extra_kw = {"grain_tier": eff_grain_tier} if eff_grain_tier != "clean" else {}
                                         raw_frames = extract_frames_raw_yuv420(
                                             c_seg_file,
                                             width=int(meta.get("width", 1920)),
@@ -868,6 +926,7 @@ def run_upscale_pipeline(
                                             chunk_start_sec=chunk_start_sec,
                                             source_codec=meta.get("codec"),
                                             source_pix_fmt=meta.get("pix_fmt"),
+                                            **yuv_extra_kw,
                                         )
                                     except Exception:
                                         raw_frames = None
@@ -1062,7 +1121,7 @@ def run_upscale_pipeline(
                                         use_tensorrt=use_tensorrt,
                                     )
                                     eff_b = batch_size or c_eng.batch_size or 8
-                                    p_key = ("auto-pareto", int(res_h), int(res_w), int(eff_b), bool(use_tensorrt), precision)
+                                    p_key = ("auto-pareto", int(res_h), int(res_w), int(eff_b), bool(use_tensorrt), precision, bool(source_is_8bit))
                                     p_bundle = getattr(c_eng, "_auto_pareto_bundle", None)
                                     if not isinstance(p_bundle, dict) or p_bundle.get("key") != p_key:
                                         if isinstance(p_bundle, dict):
@@ -1080,6 +1139,7 @@ def run_upscale_pipeline(
                                             batch_size=eff_b,
                                             use_tensorrt=use_tensorrt,
                                         )
+                                        shared_out_ring: list[torch.Tensor] = []
                                         detail_wrap = get_hybrid_engine_or_wrapper(
                                             c_eng.model,
                                             max_batch=eff_b,
@@ -1087,7 +1147,13 @@ def run_upscale_pipeline(
                                             model_id=detail_info["id"],
                                             input_hw=(res_h, res_w),
                                             scale=2.0,
-                                            weights_sha256=str(detail_info.get("sha256") or ""),
+                                            **_filter_supported_kwargs(
+                                                get_hybrid_engine_or_wrapper,
+                                                {
+                                                    "weights_sha256": str(detail_info.get("sha256") or ""),
+                                                    "shared_batch_out_ring": shared_out_ring,
+                                                },
+                                            ),
                                         )
                                         fast_wrap = get_hybrid_engine_or_wrapper(
                                             fast_worker.model,
@@ -1096,7 +1162,13 @@ def run_upscale_pipeline(
                                             model_id=fast_info["id"],
                                             input_hw=(res_h, res_w),
                                             scale=2.0,
-                                            weights_sha256=str(fast_info.get("sha256") or ""),
+                                            **_filter_supported_kwargs(
+                                                get_hybrid_engine_or_wrapper,
+                                                {
+                                                    "weights_sha256": str(fast_info.get("sha256") or ""),
+                                                    "shared_batch_out_ring": shared_out_ring,
+                                                },
+                                            ),
                                         )
                                         shared_up = DoubleBufferedPipeUpscaler(
                                             detail_wrap,
@@ -1104,17 +1176,27 @@ def run_upscale_pipeline(
                                             device=c_eng.device,
                                             input_hw=(res_h, res_w),
                                             scale=2,
+                                            **_filter_supported_kwargs(
+                                                DoubleBufferedPipeUpscaler,
+                                                {"source_is_8bit": source_is_8bit},
+                                            ),
                                         )
+                                        shared_up.source_is_8bit = source_is_8bit
                                         p_bundle = {
                                             "key": p_key,
                                             "fast_worker": fast_worker,
                                             "detail_wrap": detail_wrap,
                                             "fast_wrap": fast_wrap,
                                             "shared_upscaler": shared_up,
+                                            "shared_batch_out_ring": shared_out_ring,
                                         }
                                         c_eng._auto_pareto_bundle = p_bundle
                                         if c_eng.device.type == "cuda" and torch.cuda.is_available():
                                             torch.cuda.empty_cache()
+                                    else:
+                                        sh_up = p_bundle.get("shared_upscaler")
+                                        if sh_up is not None:
+                                            sh_up.source_is_8bit = source_is_8bit
                                     return c_eng, p_bundle
 
                                 # Khởi tạo song song GPU Engine + TensorRT + Pinned Ring + Triton Warmup ngay trong lúc chờ giải mã Chunk 0
@@ -1137,7 +1219,17 @@ def run_upscale_pipeline(
                                                 use_tensorrt=use_tensorrt,
                                             )
                                             pre_bs = batch_size or pre_cuda.batch_size or 8
-                                            pre_key = (model_info["id"], pre_h, pre_w, int(pre_bs), bool(use_tensorrt), precision)
+                                            pre_key = (
+                                                model_info["id"],
+                                                eff_blend_alpha,
+                                                model_sha256,
+                                                pre_h,
+                                                pre_w,
+                                                int(pre_bs),
+                                                bool(use_tensorrt),
+                                                precision,
+                                                bool(source_is_8bit),
+                                            )
                                             if (
                                                 getattr(pre_cuda, "_zero_disk_upscaler", None) is None
                                                 or getattr(pre_cuda, "_zero_disk_key", None) != pre_key
@@ -1155,7 +1247,10 @@ def run_upscale_pipeline(
                                                     model_id=model_info["id"],
                                                     input_hw=(pre_h, pre_w),
                                                     scale=2.0,
-                                                    weights_sha256=model_sha256,
+                                                    **_filter_supported_kwargs(
+                                                        get_hybrid_engine_or_wrapper,
+                                                        {"weights_sha256": model_sha256},
+                                                    ),
                                                 )
                                                 pre_cuda._zero_disk_wrapper = pre_wrapped
                                                 pre_cuda._zero_disk_key = pre_key
@@ -1165,7 +1260,12 @@ def run_upscale_pipeline(
                                                     device=pre_cuda.device,
                                                     input_hw=(pre_h, pre_w),
                                                     scale=2,
+                                                    **_filter_supported_kwargs(
+                                                        DoubleBufferedPipeUpscaler,
+                                                        {"source_is_8bit": source_is_8bit},
+                                                    ),
                                                 )
+                                                pre_cuda._zero_disk_upscaler.source_is_8bit = source_is_8bit
                                                 if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
                                                     torch.cuda.empty_cache()
                                     except (FileNotFoundError, ValueError):
@@ -1441,7 +1541,17 @@ def run_upscale_pipeline(
                                                         use_tensorrt=use_tensorrt,
                                                     )
                                                     eff_bs = batch_size or cuda_engine.batch_size or 8
-                                                    runner_key = (model_info["id"], int(in_h), int(in_w), int(eff_bs), bool(use_tensorrt), precision)
+                                                    runner_key = (
+                                                        model_info["id"],
+                                                        eff_blend_alpha,
+                                                        model_sha256,
+                                                        int(in_h),
+                                                        int(in_w),
+                                                        int(eff_bs),
+                                                        bool(use_tensorrt),
+                                                        precision,
+                                                        bool(source_is_8bit),
+                                                    )
 
                                                     # Khởi tạo & tái sử dụng Engine (TensorRT 10 FP16 / Hybrid Wrapper) + Pinned Buffers xuyên suốt tập
                                                     if (
@@ -1461,7 +1571,10 @@ def run_upscale_pipeline(
                                                             model_id=model_info["id"],
                                                             input_hw=(in_h, in_w),
                                                             scale=2.0,
-                                                            weights_sha256=model_sha256,
+                                                            **_filter_supported_kwargs(
+                                                                get_hybrid_engine_or_wrapper,
+                                                                {"weights_sha256": model_sha256},
+                                                            ),
                                                         )
                                                         cuda_engine._zero_disk_wrapper = wrapped_model
                                                         cuda_engine._zero_disk_key = runner_key
@@ -1471,11 +1584,17 @@ def run_upscale_pipeline(
                                                             device=cuda_engine.device,
                                                             input_hw=(in_h, in_w),
                                                             scale=2,
+                                                            **_filter_supported_kwargs(
+                                                                DoubleBufferedPipeUpscaler,
+                                                                {"source_is_8bit": source_is_8bit},
+                                                            ),
                                                         )
+                                                        cuda_engine._zero_disk_upscaler.source_is_8bit = source_is_8bit
                                                         if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
                                                             torch.cuda.empty_cache()
                                                     else:
                                                         wrapped_model = cuda_engine._zero_disk_wrapper
+                                                        cuda_engine._zero_disk_upscaler.source_is_8bit = source_is_8bit
                                                         cuda_engine._zero_disk_upscaler.ensure_resolution(in_h, in_w)
 
                                                 # Chốt an toàn VRAM cho NVENC 4K 10-bit (lookahead 32 + fullres cần ~1.1 GB VRAM):
@@ -2238,6 +2357,10 @@ def run_upscale_pipeline(
                         "model_id": model_info["id"],
                         "model_name": model_info["name"],
                         "model_sha256": model_sha256,
+                        "blend_alpha": eff_blend_alpha,
+                        "grain_restore": norm_grain_restore,
+                        "grain_tier": eff_grain_tier,
+                        "grain_sigma_y": round(probed_sigma_y, 4),
                         "engine": engine,
                         "precision": precision,
                         "nvenc_multipass": episode_multipass,

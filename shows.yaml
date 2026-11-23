@@ -2,43 +2,56 @@
 # Rule syntax (evaluated top-to-bottom; overridden by CLI --model / --dedup-policy):
 #   - pattern: Substring or glob ('*', '?') matching filename/folder (bracket-safe for '[SubsPlease]', '[BD 1080p]')
 #     model: Model ID from models/models.yaml (or 'auto-pareto'):
+#       - realcugan-pro-conservative-2x          (Studio 2x dual U-Net + SE; auto episode alpha-blend with pro-denoise3x on grained sources)
+#       - realcugan-pro-denoise3x-2x             (Studio 2x heavy film-grain restoration)
+#       - modernspanimation-v2-2x                (SPAN Native 2x modern animation compression/deblur)
 #       - animevideov3                           (Default 4x->2x Catmull-Rom AA: bold lines, strong denoise for soft/noisy sources)
-#       - animejanai-hd-v3-ultracompact          (Native 2x: mosquito-noise removal for 8-bit Web-DL / SubsPlease)
-#       - animejanai-hd-v3-sharp1-ultracompact   (Native 2x: sharp grain retention for clean Blu-ray 1080p)
-#       - animejanai-hd-v3-superultracompact     (Native 2x: light denoise for dialogue episodes)
-#       - animejanai-hd-v3-sharp1-superultracompact (Native 2x for light Blu-ray sources)
+#       - animejanai-hd-v3-ultracompact          (Native 2x: fast mosquito-noise removal for 8-bit Web-DL)
+#       - animejanai-hd-v3-sharp1-ultracompact   (Native 2x: fast sharp grain retention for Blu-ray 1080p)
 #       - animejanai-hd-v3-compact | span-2x | 2x_AnimeJaNai_V3 | auto-pareto
 #     dedup_policy: (Optional) default | dis | dis-auto | sakuga | dis-sakuga | sensitive-b | motion | drift | off
 
 shows:
-  # 1. Weekly Crunchyroll Web-DL sources ([SubsPlease], [Erai-raws]):
+  # 1. 1080p Web-DL / Simulcast sources ([SubsPlease], [Erai-raws], WEB-DL, WEBRip):
   - pattern: "[SubsPlease]*"
-    model: "animejanai-hd-v3-ultracompact"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
   - pattern: "*[SubsPlease]*"
-    model: "animejanai-hd-v3-ultracompact"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
   - pattern: "[Erai-raws]*"
-    model: "animejanai-hd-v3-ultracompact"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
   - pattern: "*[Erai-raws]*"
-    model: "animejanai-hd-v3-ultracompact"
+    model: "realcugan-pro-conservative-2x"
+    dedup_policy: "dis-auto"
+  - pattern: "*WEB-DL*"
+    model: "realcugan-pro-conservative-2x"
+    dedup_policy: "dis-auto"
+  - pattern: "*WEBRip*"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
 
-  # 2. Clean 1080p Blu-ray sources ([BD 1080p], BluRay, BDRip):
+  # 2. 1080p Blu-ray / BDRip / BDRemux sources ([BD 1080p], BluRay, BDRip, BDRemux, Remux):
   - pattern: "*[BD*"
-    model: "animejanai-hd-v3-sharp1-ultracompact"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
   - pattern: "*BluRay*"
-    model: "animejanai-hd-v3-sharp1-ultracompact"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
   - pattern: "*BDRip*"
-    model: "animejanai-hd-v3-sharp1-ultracompact"
+    model: "realcugan-pro-conservative-2x"
+    dedup_policy: "dis-auto"
+  - pattern: "*BDRemux*"
+    model: "realcugan-pro-conservative-2x"
+    dedup_policy: "dis-auto"
+  - pattern: "*Remux*"
+    model: "realcugan-pro-conservative-2x"
     dedup_policy: "dis-auto"
 
   # --- OPTIONAL SERIES OVERRIDES (uncomment to activate) ---
   #
   # Heavy action / sakuga shows:
   # - pattern: "*Fate*"
-  #   model: "animejanai-hd-v3-sharp1-ultracompact"
+  #   model: "realcugan-pro-conservative-2x"
   #   dedup_policy: "sakuga"

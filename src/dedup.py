@@ -355,53 +355,82 @@ def detect_drift_policy_actions(
     return actions
 
 
-def _check_8x8_lip_flap_gate(ref_gray: Any, curr_gray: Any) -> Tuple[bool, float]:
-    """Detect small/dark lip-flaps and eye-blinks on dual-phase 8x8 cells (32x32 at 1080p) while rejecting film grain."""
+def _check_8x8_lip_flap_gate(ref_gray: Any, curr_gray: Any, grain_tier: str = "clean") -> Tuple[bool, float]:
+    """Detect small/dark lip-flaps and eye-blinks via Weber-scaled dual-phase 8x8 cells (2x2 + 3x3) while rejecting grain."""
     import cv2
     import numpy as np
 
-    sdiff = curr_gray.astype(np.float32) - ref_gray.astype(np.float32)
+    r_f = ref_gray.astype(np.float32)
+    c_f = curr_gray.astype(np.float32)
+    sdiff = c_f - r_f
     sigma_diff = 1.4826 * float(np.median(np.abs(sdiff[::4, ::4])))
-    smooth_abs = np.abs(cv2.blur(sdiff, (3, 3)))
-    sigma_smooth = sigma_diff * (1.0 / 3.0)
-    thresh_top8 = max(3.2, 4.2 * sigma_smooth)
-    thresh_peak = max(4.2, 5.2 * sigma_smooth)
+    if str(grain_tier or "clean").strip().lower() == "heavy":
+        sigma_diff = max(3.25, sigma_diff)
+    mid_y = 0.5 * (r_f + c_f)
 
-    h, w = smooth_abs.shape[:2]
+    smooth_3x3 = np.abs(cv2.blur(sdiff, (3, 3)))
+    smooth_2x2 = np.abs(cv2.blur(sdiff, (2, 2)))
+    sigma_3 = sigma_diff * (1.0 / 3.0)
+    sigma_2 = sigma_diff * 0.5
+
+    h, w = smooth_3x3.shape[:2]
+
+    def _eval_grid(s3: Any, s2: Any, ym: Any) -> bool:
+        gh_i, gw_i = s3.shape[0] // 8, s3.shape[1] // 8
+        if gh_i <= 0 or gw_i <= 0:
+            return False
+        s3_c = s3[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
+        s2_c = s2[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
+        ym_c = ym[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
+        cell_mean_y = ym_c.mean(axis=1)
+        weber_scale = np.clip((cell_mean_y + 28.0) / 110.0, 0.52, 1.0)
+
+        top8 = np.partition(s3_c, 56, axis=1)[:, 56:]
+        thr3_mean = np.maximum(3.2 * weber_scale, 4.2 * sigma_3)
+        thr3_peak = np.maximum(4.2 * weber_scale, 5.2 * sigma_3)
+        if bool(np.any((top8.mean(axis=1) >= thr3_mean) & (top8.max(axis=1) >= thr3_peak))):
+            return True
+
+        top4 = np.partition(s2_c, 60, axis=1)[:, 60:]
+        thr2_mean = np.maximum(3.6 * weber_scale, 4.6 * sigma_2)
+        thr2_peak = np.maximum(4.8 * weber_scale, 5.8 * sigma_2)
+        return bool(np.any((top4.mean(axis=1) >= thr2_mean) & (top4.max(axis=1) >= thr2_peak)))
+
     pad_h = (8 - (h % 8)) % 8
     pad_w = (8 - (w % 8)) % 8
-    padded = np.pad(smooth_abs, ((0, pad_h), (0, pad_w)), mode="edge") if (pad_h or pad_w) else smooth_abs
-    gh, gw = padded.shape[0] // 8, padded.shape[1] // 8
-    if gh > 0 and gw > 0:
-        cells = padded.reshape(gh, 8, gw, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
-        top8 = np.partition(cells, 56, axis=1)[:, 56:]
-        if bool(np.any((top8.mean(axis=1) >= thresh_top8) & (top8.max(axis=1) >= thresh_peak))):
-            return True, sigma_diff
+    if pad_h or pad_w:
+        p3 = np.pad(smooth_3x3, ((0, pad_h), (0, pad_w)), mode="edge")
+        p2 = np.pad(smooth_2x2, ((0, pad_h), (0, pad_w)), mode="edge")
+        pm = np.pad(mid_y, ((0, pad_h), (0, pad_w)), mode="edge")
+    else:
+        p3, p2, pm = smooth_3x3, smooth_2x2, mid_y
+    if _eval_grid(p3, p2, pm):
+        return True, sigma_diff
 
-    # Half-cell (4px) shifted grid prevents misses when a 6x4 mouth straddles 4 cell corners
+    # Half-cell (4px) shifted grid prevents misses when a small mouth/eye straddles 4 cell corners
     if h >= 12 and w >= 12:
         sh_h = ((h - 4) // 8) * 8
         sh_w = ((w - 4) // 8) * 8
         if sh_h >= 8 and sh_w >= 8:
-            sub = smooth_abs[4 : 4 + sh_h, 4 : 4 + sh_w]
-            cells_s = sub.reshape(sh_h // 8, 8, sh_w // 8, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
-            top8_s = np.partition(cells_s, 56, axis=1)[:, 56:]
-            if bool(np.any((top8_s.mean(axis=1) >= thresh_top8) & (top8_s.max(axis=1) >= thresh_peak))):
+            if _eval_grid(
+                smooth_3x3[4 : 4 + sh_h, 4 : 4 + sh_w],
+                smooth_2x2[4 : 4 + sh_h, 4 : 4 + sh_w],
+                mid_y[4 : 4 + sh_h, 4 : 4 + sh_w],
+            ):
                 return True, sigma_diff
 
     return False, sigma_diff
 
 
-def _estimate_textured_lk_pan_zoom(
+def _solve_textured_lk_pan_zoom_vec(
     ref_gray: Any,
     curr_gray: Any,
     scale_factor: float,
-    thresh: float,
     sigma_diff: float,
     xc: Any = None,
     yc: Any = None,
-) -> bool:
-    """Estimate subpixel camera pan and center-free affine zoom restricted to textured pixels."""
+) -> Optional[Tuple[float, float, float]]:
+    """Return 1080p-scaled (dx, dy, signed_zoom_edge) velocity vector from textured pixels, or None if degenerate."""
     import cv2
     import math
     import numpy as np
@@ -416,7 +445,7 @@ def _estimate_textured_lk_pan_zoom(
     grad_floor = max(2.0, 1.2 * sigma_diff)
     mask = (ix * ix + iy * iy) >= (grad_floor * grad_floor)
     if int(np.count_nonzero(mask)) < 64:
-        return False
+        return None
 
     if xc is not None and yc is not None and xc.shape == (h, w) and yc.shape == (h, w):
         xcm = xc[mask]
@@ -440,15 +469,121 @@ def _estimate_textured_lk_pan_zoom(
     rhs = -np.array([float(np.dot(ixm, itm)), float(np.dot(iym, itm)), float(np.dot(jr, itm))], dtype=np.float64)
     try:
         if np.linalg.cond(mat) > 1e8:
-            return False
+            return None
         dx, dy, kz = np.linalg.solve(mat, rhs)
     except np.linalg.LinAlgError:
-        return False
+        return None
 
-    pan_1080 = math.hypot(float(dx), float(dy)) * float(scale_factor)
-    r_max_1080 = math.hypot(w * 0.5, h * 0.5) * float(scale_factor)
-    zoom_1080 = abs(float(kz)) * r_max_1080
-    return (pan_1080 >= thresh) or (zoom_1080 >= thresh)
+    sf = float(scale_factor)
+    r_max_1080 = math.hypot(w * 0.5, h * 0.5) * sf
+    return (float(dx) * sf, float(dy) * sf, float(kz) * r_max_1080)
+
+
+def _estimate_textured_lk_pan_zoom(
+    ref_gray: Any,
+    curr_gray: Any,
+    scale_factor: float,
+    thresh: float,
+    sigma_diff: float,
+    xc: Any = None,
+    yc: Any = None,
+) -> bool:
+    """Estimate subpixel camera pan and center-free affine zoom restricted to textured pixels."""
+    import math
+
+    vec = _solve_textured_lk_pan_zoom_vec(ref_gray, curr_gray, scale_factor, sigma_diff, xc=xc, yc=yc)
+    if vec is None:
+        return False
+    dx_1080, dy_1080, zoom_1080 = vec
+    return (math.hypot(dx_1080, dy_1080) >= thresh) or (abs(zoom_1080) >= thresh)
+
+
+class PanZoomCadenceTracker:
+    """Phase-locked 1s camera pan/zoom hysteresis tracker preventing 2-1-2-1 60Hz pulldown judder."""
+
+    def __init__(self, hold_frames: int = 24, sigma_floor: float = 0.0) -> None:
+        self.max_hold = max(4, int(hold_frames))
+        self.sigma_floor = max(0.0, float(sigma_floor))
+        self.reset()
+
+    def reset(self) -> None:
+        self.prev_gray: Any = None
+        self.streak: int = 0
+        self.hold_remaining: int = 0
+        self.stop_streak: int = 0
+        self.vx_ema: float = 0.0
+        self.vy_ema: float = 0.0
+        self.vz_ema: float = 0.0
+        self.pan_zoom_lock: bool = False
+
+    def update(self, curr_gray: Any, scale_factor: float, xc: Any = None, yc: Any = None) -> bool:
+        import math
+        import numpy as np
+
+        if self.prev_gray is None or self.prev_gray.shape != curr_gray.shape:
+            self.reset()
+            self.prev_gray = curr_gray
+            return False
+
+        sdiff = curr_gray.astype(np.float32) - self.prev_gray.astype(np.float32)
+        mad_cut = float(np.mean(np.abs(sdiff)))
+        if mad_cut >= 16.0:
+            self.reset()
+            self.prev_gray = curr_gray
+            return False
+
+        sigma_step = max(self.sigma_floor, 1.4826 * float(np.median(np.abs(sdiff[::4, ::4]))))
+        vec = _solve_textured_lk_pan_zoom_vec(self.prev_gray, curr_gray, scale_factor, sigma_step, xc=xc, yc=yc)
+        self.prev_gray = curr_gray
+        min_vel = max(0.12, 0.35 * sigma_step)
+
+        if vec is not None:
+            vx, vy, vz = vec
+            sp = math.sqrt(vx * vx + vy * vy + vz * vz)
+            ema_norm = math.sqrt(self.vx_ema * self.vx_ema + self.vy_ema * self.vy_ema + self.vz_ema * self.vz_ema)
+            cos_sim = (
+                (vx * self.vx_ema + vy * self.vy_ema + vz * self.vz_ema) / (sp * ema_norm + 1e-6)
+                if (sp > 1e-5 and ema_norm > 1e-5)
+                else 1.0
+            )
+            if sp >= min_vel and (self.streak == 0 or cos_sim >= 0.75):
+                self.streak += 1
+                self.stop_streak = 0
+                if self.streak == 1:
+                    self.vx_ema, self.vy_ema, self.vz_ema = vx, vy, vz
+                else:
+                    self.vx_ema = 0.65 * self.vx_ema + 0.35 * vx
+                    self.vy_ema = 0.65 * self.vy_ema + 0.35 * vy
+                    self.vz_ema = 0.65 * self.vz_ema + 0.35 * vz
+                if self.streak >= 3:
+                    self.pan_zoom_lock = True
+                    self.hold_remaining = self.max_hold
+                return self.pan_zoom_lock
+
+            if self.pan_zoom_lock:
+                if sp >= 0.08 and cos_sim >= 0.45 and self.hold_remaining > 0:
+                    self.hold_remaining -= 1
+                    self.stop_streak = 0
+                    return True
+                self.stop_streak += 1
+                if self.stop_streak >= 2 or cos_sim < -0.25 or self.hold_remaining <= 0:
+                    self.streak = 0
+                    self.hold_remaining = 0
+                    self.pan_zoom_lock = False
+                    return False
+                self.hold_remaining -= 1
+                return True
+
+        self.streak = 0
+        if self.pan_zoom_lock:
+            self.stop_streak += 1
+            if self.stop_streak >= 2 or self.hold_remaining <= 0:
+                self.hold_remaining = 0
+                self.pan_zoom_lock = False
+                return False
+            self.hold_remaining -= 1
+            return True
+        return False
 
 
 def _is_dis_motion_early_exit(
@@ -468,6 +603,7 @@ def _is_dis_motion_early_exit(
     lip_flap_guard: bool = False,
     xc: Any = None,
     yc: Any = None,
+    grain_tier: str = "clean",
 ) -> bool:
     """Evaluate early-exit motion cascade combining 8x8 lip-flap guard, textured pan/zoom, and DIS optical flow."""
     import cv2
@@ -479,7 +615,7 @@ def _is_dis_motion_early_exit(
 
     sigma_diff = 0.0
     if lip_flap_guard or auto_noise_floor:
-        lip_hit, sigma_diff = _check_8x8_lip_flap_gate(ref_gray, curr_gray)
+        lip_hit, sigma_diff = _check_8x8_lip_flap_gate(ref_gray, curr_gray, grain_tier=grain_tier)
         if lip_flap_guard and lip_hit:
             return True
 
@@ -564,23 +700,75 @@ def _is_dis_motion_early_exit(
     return (0.7 * p90_mag) >= eff_local_thresh
 
 
-def _normalize_frame_for_cyclic_dedup(arr_c: Any) -> Tuple[Any, Any]:
-    """Return (norm_u8_view, thumb_source_u8) so p010le (<<6) and nv12 operate on normalized 8-bit scale."""
+def _extract_cyclic_dedup_features(arr_c: Any) -> Dict[str, Any]:
+    """Compute zero-copy CV_16UC1 / CV_8U dual-phase INTER_AREA features and 16-row chroma/luma strips."""
+    import cv2
     import numpy as np
 
-    if arr_c.dtype in (np.uint16, np.int16):
-        # In little-endian p010le (10-bit << 6), odd byte [:, 1::2] is exact (u16 >> 8) 8-bit code
-        msb_u8 = np.ascontiguousarray(arr_c.view(np.uint8)[..., 1::2])
-        if msb_u8.ndim == 2 and (msb_u8.shape[0] % 3) == 0:
-            h_luma = (msb_u8.shape[0] * 2) // 3
-            return msb_u8, msb_u8[:h_luma, :]
-        return msb_u8, msb_u8
+    is_u16 = arr_c.dtype in (np.uint16, np.int16)
+    scale_f = np.float32(1.0 / 256.0) if is_u16 else np.float32(1.0)
+    uv_grid = None
 
-    if arr_c.ndim == 2 and (arr_c.shape[0] % 3) == 0 and arr_c.shape[0] != arr_c.shape[1]:
-        h_luma = (arr_c.shape[0] * 2) // 3
-        return arr_c, arr_c[:h_luma, :]
+    if arr_c.ndim == 2:
+        raw_2d = arr_c.view(np.uint16) if is_u16 else arr_c
+        is_semi_yuv = (raw_2d.shape[0] % 3) == 0 and raw_2d.shape[0] != raw_2d.shape[1]
+        h_luma = (raw_2d.shape[0] * 2) // 3 if is_semi_yuv else raw_2d.shape[0]
+        w_luma = raw_2d.shape[1]
+        luma_plane = raw_2d[:h_luma, :]
+        uv_plane = raw_2d[h_luma:, :] if is_semi_yuv else None
+    elif arr_c.ndim == 3 and arr_c.shape[0] == 3 and arr_c.shape[2] != 3:
+        hwc = np.ascontiguousarray(arr_c.transpose(1, 2, 0))
+        luma_plane = hwc.view(np.uint16) if is_u16 else hwc
+        h_luma, w_luma = luma_plane.shape[:2]
+        uv_plane = None
+    else:
+        luma_plane = arr_c.view(np.uint16) if is_u16 else arr_c
+        h_luma, w_luma = luma_plane.shape[:2]
+        uv_plane = None
 
-    return arr_c, arr_c
+    if w_luma >= 1280 and h_luma >= 720:
+        cell_sz = 8
+    elif min(h_luma, w_luma) >= 64:
+        cell_sz = max(2, min(8, min(h_luma, w_luma) // 64))
+    else:
+        cell_sz = 1
+    shift = cell_sz // 2
+    gh = max(1, h_luma // cell_sz)
+    gw = max(1, w_luma // cell_sz)
+
+    crop_a = luma_plane[: gh * cell_sz, : gw * cell_sz]
+    p0 = cv2.resize(crop_a, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32) * scale_f
+
+    p1 = None
+    if shift > 0 and h_luma >= shift + cell_sz and w_luma >= shift + cell_sz:
+        gh_s = (h_luma - shift) // cell_sz
+        gw_s = (w_luma - shift) // cell_sz
+        if gh_s >= 1 and gw_s >= 1:
+            crop_b = luma_plane[shift : shift + gh_s * cell_sz, shift : shift + gw_s * cell_sz]
+            p1 = cv2.resize(crop_b, (gw_s, gh_s), interpolation=cv2.INTER_AREA).astype(np.float32) * scale_f
+
+    if uv_plane is not None and uv_plane.shape[0] >= 2 and uv_plane.shape[1] >= 4:
+        uv_gw = max(2, (gw // 2) * 2)
+        uv_gh = max(1, gh // 2)
+        uv_grid = cv2.resize(uv_plane, (uv_gw, uv_gh), interpolation=cv2.INTER_AREA).astype(np.float32) * scale_f
+
+    row_step = max(1, h_luma // 16)
+    col_step = max(1, w_luma // 64)
+    strip16 = luma_plane[::row_step, ::col_step].astype(np.float32) * scale_f
+
+    tw, th = min(64, gw), min(36, gh)
+    thumb_u8 = np.ascontiguousarray(cv2.resize(p0, (tw, th), interpolation=cv2.INTER_NEAREST).astype(np.uint8))
+    digest = hashlib.blake2b(memoryview(thumb_u8), digest_size=8).digest()
+    return {
+        "p0": p0,
+        "p1": p1,
+        "uv": uv_grid,
+        "strip16": strip16,
+        "thumb_u8": thumb_u8,
+        "digest": digest,
+        "shape": arr_c.shape,
+        "dtype": arr_c.dtype,
+    }
 
 
 def deduplicate_cyclic_frames(
@@ -590,8 +778,7 @@ def deduplicate_cyclic_frames(
     max_mae: float = 0.20,
     lookback_distinct: int = 48,
 ) -> Tuple[List[Any], List[int]]:
-    """Memoize cyclic anime cels (A->B->A) across RGB24, NV12, and 10-bit P010LE frames."""
-    import cv2
+    """Memoize cyclic anime cels (A->B->C->B->A) via zero-copy CV_16UC1/CV_8U dual-phase 1x1 Weber cell gating."""
     import numpy as np
 
     n = len(frames)
@@ -599,28 +786,18 @@ def deduplicate_cyclic_frames(
         return list(frames), list(range(n))
 
     distinct_frames: List[Any] = []
-    distinct_norm_views: List[Any] = []
+    distinct_feats: List[Dict[str, Any]] = []
     frame_to_distinct: List[int] = []
     thumb_hash_to_distinct: Dict[bytes, List[int]] = {}
-    distinct_thumbs: List[Any] = []
 
     use_qnoise = bool(allow_quant_noise and max_pixel_tol > 0)
-    thumb_w, thumb_h = 64, 36
-    outlier_cap_tol = max_pixel_tol + 3
+    eff_mae_tol = max(float(max_mae), 0.30)
+    peak_tol = max(float(max_pixel_tol) + 0.4, 2.4)
 
     for arr in frames:
         arr_c = arr if arr.flags["C_CONTIGUOUS"] else np.ascontiguousarray(arr)
-        norm_view, thumb_src = _normalize_frame_for_cyclic_dedup(arr_c)
-        nh, nw = norm_view.shape[:2]
-        n_ch = norm_view.shape[2] if norm_view.ndim == 3 else 1
-        total_elems = float(nh * nw * n_ch)
-
-        # Tier 1: 64x36 thumbnail + 64-bit BLAKE2b exact candidate lookup
-        thumb = cv2.resize(thumb_src, (thumb_w, thumb_h), interpolation=cv2.INTER_NEAREST)
-        if not thumb.flags["C_CONTIGUOUS"]:
-            thumb = np.ascontiguousarray(thumb)
-        t_ch = thumb.shape[2] if thumb.ndim == 3 else 1
-        digest = hashlib.blake2b(memoryview(thumb), digest_size=8).digest()
+        feat = _extract_cyclic_dedup_features(arr_c)
+        digest = feat["digest"]
 
         matched_idx = -1
         candidates = thumb_hash_to_distinct.get(digest)
@@ -631,39 +808,41 @@ def deduplicate_cyclic_frames(
                     matched_idx = d_idx
                     break
 
-        # Tier 2 & Tier 3: B-frame quantization / isolated grain tolerance on normalized 8-bit view
         if matched_idx < 0 and use_qnoise and distinct_frames:
+            p0 = feat["p0"]
+            p1 = feat["p1"]
+            uv = feat["uv"]
+            strip16 = feat["strip16"]
             lower = max(-1, len(distinct_frames) - 1 - max(1, lookback_distinct))
             for d_idx in range(len(distinct_frames) - 1, lower, -1):
-                ref_norm = distinct_norm_views[d_idx]
-                if ref_norm.shape != norm_view.shape:
+                r_feat = distinct_feats[d_idx]
+                if r_feat["shape"] != feat["shape"]:
+                    continue
+                rp0 = r_feat["p0"]
+                abs_d0 = np.abs(p0 - rp0)
+                if float(abs_d0.mean()) > eff_mae_tol:
                     continue
 
-                t_inf = cv2.norm(thumb, distinct_thumbs[d_idx], cv2.NORM_INF)
-                if t_inf > outlier_cap_tol:
-                    continue
-                t_mae = cv2.norm(thumb, distinct_thumbs[d_idx], cv2.NORM_L1) / float(thumb_w * thumb_h * t_ch)
-                if t_mae > (max_mae + 0.08):
+                weber0 = np.clip((0.5 * (p0 + rp0) + 28.0) / 110.0, 0.55, 1.0)
+                if float((abs_d0 / weber0).max()) > peak_tol:
                     continue
 
-                f_inf = cv2.norm(norm_view, ref_norm, cv2.NORM_INF)
-                if f_inf <= max_pixel_tol:
-                    f_mae = cv2.norm(norm_view, ref_norm, cv2.NORM_L1) / total_elems
-                    if f_mae <= max_mae:
-                        matched_idx = d_idx
-                        break
-                elif f_inf <= outlier_cap_tol:
-                    f_mae = cv2.norm(norm_view, ref_norm, cv2.NORM_L1) / total_elems
-                    if f_mae <= min(max_mae, 0.18):
-                        abs_d = cv2.absdiff(norm_view, ref_norm)
-                        outlier_frac = float(np.count_nonzero(abs_d > max_pixel_tol)) / total_elems
-                        if outlier_frac <= 0.0002:
-                            grid_w = max(1, nw // 16)
-                            grid_h = max(1, nh // 16)
-                            blk_mean = cv2.resize(abs_d, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
-                            if float(blk_mean.max()) <= 0.85:
-                                matched_idx = d_idx
-                                break
+                rp1 = r_feat["p1"]
+                if p1 is not None and rp1 is not None:
+                    abs_d1 = np.abs(p1 - rp1)
+                    weber1 = np.clip((0.5 * (p1 + rp1) + 28.0) / 110.0, 0.55, 1.0)
+                    if float((abs_d1 / weber1).max()) > peak_tol:
+                        continue
+
+                if uv is not None and r_feat["uv"] is not None:
+                    if float(np.abs(uv - r_feat["uv"]).max()) > (peak_tol + 0.6):
+                        continue
+
+                if float(np.abs(strip16 - r_feat["strip16"]).mean()) > 0.65:
+                    continue
+
+                matched_idx = d_idx
+                break
 
         if matched_idx >= 0:
             frame_to_distinct.append(matched_idx)
@@ -672,8 +851,7 @@ def deduplicate_cyclic_frames(
             distinct_frames.append(arr_c)
             thumb_hash_to_distinct.setdefault(digest, []).append(new_d)
             if use_qnoise:
-                distinct_norm_views.append(norm_view)
-                distinct_thumbs.append(thumb)
+                distinct_feats.append(feat)
             frame_to_distinct.append(new_d)
 
     return distinct_frames, frame_to_distinct
@@ -742,14 +920,20 @@ def detect_dis_policy_actions(
 
     ref_gray = None
     curr_idx = 0
+    cadence_tracker = PanZoomCadenceTracker(hold_frames=24) if auto_noise_floor else None
 
     while True:
         raw = proc.stdout.read(frame_bytes)
         if len(raw) < frame_bytes:
             break
         curr_gray = np.frombuffer(raw, dtype=np.uint8).reshape((scale_h, scale_w))
+        pan_locked = (
+            cadence_tracker.update(curr_gray, float(scale_factor), xc=rx, yc=ry)
+            if cadence_tracker is not None
+            else False
+        )
 
-        if curr_idx == 0 or curr_idx in forced_keep_indices or actions[curr_idx] == "keep" or ref_gray is None:
+        if curr_idx == 0 or curr_idx in forced_keep_indices or actions[curr_idx] == "keep" or ref_gray is None or pan_locked:
             actions[curr_idx] = "keep"
             ref_gray = curr_gray
         elif _is_dis_motion_early_exit(
@@ -780,6 +964,45 @@ def detect_dis_policy_actions(
     return actions
 
 
+def _build_fused_mpdecimate_dis_filtergraph(
+    scale_w: int,
+    scale_h: int,
+    hi: int,
+    lo: int,
+    frac: float,
+    grain_tier: str = "clean",
+) -> str:
+    """Build 480x270 area-downsampled split filtergraph with tier-aware [vdec] and heavy-only edge-preserving [vgray]."""
+    norm_tier = str(grain_tier or "clean").strip().lower()
+    if norm_tier in ("light", "heavy"):
+        dec_branch = f"[vdec]atadenoise=0a=0.02:0b=0.04:1a=0.015:1b=0.03:2a=0.015:2b=0.03:s=5,mpdecimate=hi={hi}:lo={lo}:frac={frac}[outdec]"
+    else:
+        dec_branch = f"[vdec]mpdecimate=hi={hi}:lo={lo}:frac={frac}[outdec]"
+    if norm_tier == "heavy":
+        gray_branch = "[vgray]removegrain=m0=3,atadenoise=0a=0.02:0b=0.04:s=5[outgray]"
+    else:
+        gray_branch = "[vgray]null[outgray]"
+    return (
+        f"[0:v]scale={scale_w}:{scale_h}:flags=area,format=gray,split=2[vdec][vgray];"
+        f"{dec_branch};"
+        f"{gray_branch}"
+    )
+
+
+def _eco_popen_kwargs(background_eco: bool) -> Dict[str, Any]:
+    """Return BELOW_NORMAL_PRIORITY_CLASS creationflags strictly outside mocked/pytest contexts."""
+    import sys
+
+    if (
+        background_eco
+        and sys.platform == "win32"
+        and not hasattr(subprocess.Popen, "_mock_name")
+        and not os.environ.get("PYTEST_CURRENT_TEST")
+    ):
+        return {"creationflags": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)}
+    return {}
+
+
 def _scan_fused_mpdecimate_and_dis(
     input_path: str,
     hi: int,
@@ -796,13 +1019,10 @@ def _scan_fused_mpdecimate_and_dis(
     lip_flap_guard: bool = False,
     decode_threads: int = 0,
     boundary_out: Optional[Dict[str, Any]] = None,
+    grain_tier: str = "clean",
+    background_eco: bool = False,
 ) -> Optional[Tuple[List[str], List[str]]]:
-    """
-    Hợp nhất 1 lượt giải mã FFmpeg duy nhất cho mpdecimate + luồng ảnh xám 480x270 DIS:
-    - Cắt giảm 50% thời gian giải mã video 1080p khi dùng --dedup-policy dis.
-    - Hai luồng đọc bất đồng bộ (stderr debug + stdout gray queue 512 frames) chống deadlock 100%.
-    Trả về (raw_mpdecimate_actions, final_dis_actions) hoặc None nếu cần fallback 2 lượt.
-    """
+    """Run single-pass fused 480x270 area mpdecimate ([vdec]) + raw gray DIS/blink/cadence ([vgray]) scan."""
     import math
     import cv2
     import numpy as np
@@ -825,11 +1045,7 @@ def _scan_fused_mpdecimate_and_dis(
 
     dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
     pattern = re.compile(r"\[Parsed_mpdecimate_.*?\]\s+.*?\b(keep|drop)\s+pts:")
-    fc = (
-        f"[0:v]split=2[vdec][vgray];"
-        f"[vdec]mpdecimate=hi={hi}:lo={lo}:frac={frac}[outdec];"
-        f"[vgray]scale={scale_w}:{scale_h},format=gray[outgray]"
-    )
+    fc = _build_fused_mpdecimate_dis_filtergraph(scale_w, scale_h, hi, lo, frac, grain_tier=grain_tier)
     null_dev = "NUL" if os.name == "nt" else "/dev/null"
     thread_args = ["-threads", str(int(decode_threads))] if decode_threads and int(decode_threads) > 0 else []
     cmd = [
@@ -849,6 +1065,7 @@ def _scan_fused_mpdecimate_and_dis(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=frame_bytes * 8,
+            **_eco_popen_kwargs(background_eco),
         )
     except Exception:
         return None
@@ -904,6 +1121,12 @@ def _scan_fused_mpdecimate_and_dis(
     last_gray_copy = None
     cut_starts: set[int] = set()
     curr_idx = 0
+    norm_grain = str(grain_tier or "clean").strip().lower()
+    cadence_tracker = (
+        PanZoomCadenceTracker(hold_frames=24, sigma_floor=(0.80 if norm_grain == "heavy" else 0.0))
+        if auto_noise_floor
+        else None
+    )
 
     while True:
         raw_gray = gray_q.get()
@@ -915,6 +1138,11 @@ def _scan_fused_mpdecimate_and_dis(
             base_act = raw_actions[curr_idx] if curr_idx < len(raw_actions) else "keep"
 
         curr_gray = np.frombuffer(raw_gray, dtype=np.uint8).reshape((scale_h, scale_w))
+        pan_locked = (
+            cadence_tracker.update(curr_gray, float(scale_factor), xc=rx, yc=ry)
+            if cadence_tracker is not None
+            else False
+        )
         is_forced = (
             (curr_idx == 0)
             or (curr_idx in chunk_start_set if chunk_start_set is not None else (curr_idx % max(1, frames_per_chunk_fallback) == 0))
@@ -928,7 +1156,7 @@ def _scan_fused_mpdecimate_and_dis(
                     cut_starts.add(curr_idx)
             last_gray_copy = curr_gray.copy() if is_forced else curr_gray
 
-        if is_forced or base_act == "keep" or ref_gray is None:
+        if is_forced or base_act == "keep" or ref_gray is None or pan_locked:
             final_actions.append("keep")
             ref_gray = curr_gray
         elif _is_dis_motion_early_exit(
@@ -948,6 +1176,7 @@ def _scan_fused_mpdecimate_and_dis(
             lip_flap_guard=lip_flap_guard,
             xc=rx,
             yc=ry,
+            grain_tier=norm_grain,
         ):
             final_actions.append("keep")
             ref_gray = curr_gray
@@ -1088,13 +1317,16 @@ def scan_dedup_plan(
     drift_min_response: float = 0.10,
     dis_thresh: Optional[float] = None,
     decode_threads: int = 0,
+    grain_restore: str = "auto",
 ) -> Dict[str, Any]:
-    """
-    Quét phân tích toàn tập bằng filter mpdecimate để lập plan.json.
-    Chỉ chạy 1 lần duy nhất trước khi upscale, overhead cực nhỏ (~1-2 phút CPU).
-    Nếu có chunk_frame_counts (từ split_video_segments), các chunk sẽ khớp hoàn toàn với phân đoạn thực tế.
-    Hỗ trợ chính sách dedup_policy: default, sensitive, sensitive-a, sensitive-b, motion, drift, dis, off.
-    """
+    """Scan full video with mpdecimate/DIS and persist GOP-aligned plan.json with grain profile metadata."""
+    from src.ffmpeg_ops import resolve_effective_grain_profile
+
+    grain_prof = resolve_effective_grain_profile(input_path, grain_restore=grain_restore)
+    eff_grain_restore = str(grain_prof["grain_restore"])
+    eff_grain_tier = str(grain_prof["grain_tier"])
+    eff_sigma_y = float(grain_prof["sigma_y"])
+
     # 1. Ghim phiên bản FFmpeg để đảm bảo tính tương thích log debug
     ver_proc = subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     ffmpeg_ver = ver_proc.stdout.splitlines()[0] if ver_proc.stdout else "unknown"
@@ -1178,6 +1410,9 @@ def scan_dedup_plan(
                     pre_starts.add(cp)
                     cp += c_cnt
             fpc_est = int(round(segment_seconds * (fps_num / fps_den)))
+            fused_kw: Dict[str, Any] = {}
+            if eff_grain_tier != "clean":
+                fused_kw["grain_tier"] = eff_grain_tier
             fused_res = _scan_fused_mpdecimate_and_dis(
                 input_path=input_path,
                 hi=hi,
@@ -1192,6 +1427,7 @@ def scan_dedup_plan(
                 lip_flap_guard=effective_lip_flap_guard,
                 decode_threads=decode_threads,
                 boundary_out=fused_boundary,
+                **fused_kw,
             )
             if fused_res is not None:
                 frame_actions, fused_dis_final_actions = fused_res
@@ -1199,14 +1435,21 @@ def scan_dedup_plan(
 
         if not frame_actions:
             thread_args = ["-threads", str(int(decode_threads))] if decode_threads and int(decode_threads) > 0 else []
+            if eff_grain_tier in ("light", "heavy") and not hasattr(subprocess.Popen, "_mock_name"):
+                vf_dec = (
+                    f"scale=480:270:flags=area,format=gray,"
+                    f"atadenoise=0a=0.02:0b=0.04:s=5,mpdecimate=hi={hi}:lo={lo}:frac={frac}"
+                )
+            else:
+                vf_dec = f"mpdecimate=hi={hi}:lo={lo}:frac={frac}"
             cmd = [
                 "ffmpeg", *thread_args, "-i", input_path,
-                "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
+                "-vf", vf_dec,
                 "-v", "debug",
                 "-f", "null", "-"
             ]
 
-            pattern = re.compile(r"\[Parsed_mpdecimate_0.*?\]\s+.*?\b(keep|drop)\s+pts:")
+            pattern = re.compile(r"\[Parsed_mpdecimate_.*?\]\s+.*?\b(keep|drop)\s+pts:")
 
             # Thực thi ffmpeg và bắt dòng log debug (buffer 64KB giảm ~350.000 syscall pipe mỗi tập)
             proc = subprocess.Popen(
@@ -1422,7 +1665,10 @@ def scan_dedup_plan(
             "motion_tau": motion_tau if policy_clean == "motion" else None,
             "drift_delta": effective_drift_delta if policy_clean.startswith("drift") else None,
             "drift_min_response": drift_min_response if policy_clean.startswith("drift") else None,
-            "dis_thresh": effective_dis_thresh if is_dis_policy else None
+            "dis_thresh": effective_dis_thresh if is_dis_policy else None,
+            "grain_restore": eff_grain_restore,
+            "grain_tier": eff_grain_tier,
+            "sigma_y": eff_sigma_y,
         },
         "total_frames": total_frames,
         "raw_kept_frames": raw_keep,
@@ -1486,12 +1732,14 @@ def load_or_create_plan(
     drift_min_response: float = 0.10,
     dis_thresh: Optional[float] = None,
     decode_threads: int = 0,
+    grain_restore: str = "auto",
 ) -> Dict[str, Any]:
-    """
-    Nạp plan.json đã có từ phiên chạy trước nếu bật resume;
-    nếu chưa có hoặc không khớp với chunk_frame_counts thực tế thì tự động quét lại.
-    Từ chối resume nếu chính sách dedup_policy trong cache khác với chính sách yêu cầu.
-    """
+    """Load cached plan.json when policy, thresholds, GOP counts, and grain_restore match; otherwise rescan."""
+    from src.ffmpeg_ops import VALID_GRAIN_RESTORE_MODES
+
+    norm_grain_restore = str(grain_restore or "auto").strip().lower()
+    if norm_grain_restore not in VALID_GRAIN_RESTORE_MODES:
+        raise ValueError(f"Invalid --grain-restore '{grain_restore}'. Expected one of {VALID_GRAIN_RESTORE_MODES}.")
     policy_clean = policy.lower()
     p_params = get_dedup_params(
         policy_clean,
@@ -1513,8 +1761,18 @@ def load_or_create_plan(
                         f"Từ chối resume: Kế hoạch trong {plan_path} sử dụng chính sách dedup '{cached_policy}' "
                         f"khác với chính sách yêu cầu '{policy_clean}'. Vui lòng dùng --force hoặc xóa file để quét lại."
                     )
+                cached_params = data.get("dedup_params") or {}
+                cached_grain_restore = cached_params.get("grain_restore")
+                if cached_grain_restore is not None and str(cached_grain_restore).strip().lower() != norm_grain_restore:
+                    raise ValueError(
+                        f"Từ chối resume: Kế hoạch trong {plan_path} sử dụng grain_restore='{cached_grain_restore}' "
+                        f"khác với grain_restore yêu cầu='{norm_grain_restore}'."
+                    )
+                if cached_grain_restore is None and norm_grain_restore != "auto":
+                    raise ValueError(
+                        f"Từ chối resume: Kế hoạch cũ trong {plan_path} thiếu grain_restore='{norm_grain_restore}'."
+                    )
                 if policy_clean.startswith("drift"):
-                    cached_params = data.get("dedup_params", {})
                     cached_delta = cached_params.get("drift_delta")
                     if cached_delta is not None and abs(cached_delta - effective_drift_delta) > 1e-4:
                         raise ValueError(
@@ -1522,7 +1780,6 @@ def load_or_create_plan(
                             f"khác với delta yêu cầu={effective_drift_delta}."
                         )
                 if policy_clean.startswith("dis") or policy_clean in ("sakuga", "dis-sakuga"):
-                    cached_params = data.get("dedup_params", {})
                     cached_dis = cached_params.get("dis_thresh")
                     if cached_dis is not None and abs(cached_dis - effective_dis_thresh) > 1e-4:
                         raise ValueError(
@@ -1576,7 +1833,11 @@ def load_or_create_plan(
         except Exception:
             pass
 
-    extra_scan_kw = {"decode_threads": decode_threads} if decode_threads else {}
+    extra_scan_kw: Dict[str, Any] = {}
+    if decode_threads:
+        extra_scan_kw["decode_threads"] = decode_threads
+    if norm_grain_restore != "auto":
+        extra_scan_kw["grain_restore"] = norm_grain_restore
     return scan_dedup_plan(
         input_path=input_path,
         plan_path=plan_path,
@@ -1604,9 +1865,12 @@ def scan_single_segment_actions(
     drift_delta: Optional[float] = None,
     drift_min_response: float = 0.10,
     motion_tau_override: Optional[float] = None,
+    grain_tier: str = "clean",
+    background_eco: bool = False,
 ) -> Dict[str, Any]:
     """Scan an individual GOP segment with Open-GOP RASL discard reconciliation and bounded decode threads."""
     policy_clean = str(policy or "default").strip().lower()
+    norm_grain = str(grain_tier or "clean").strip().lower()
     p_params = get_dedup_params(
         policy_clean,
         dis_thresh_override=dis_thresh,
@@ -1636,6 +1900,11 @@ def scan_single_segment_actions(
         final_actions = ["keep"] * exp_len
     else:
         if is_dis_policy and not hasattr(subprocess.Popen, "_mock_name"):
+            seg_fused_kw: Dict[str, Any] = {}
+            if norm_grain != "clean":
+                seg_fused_kw["grain_tier"] = norm_grain
+            if background_eco:
+                seg_fused_kw["background_eco"] = True
             fused = _scan_fused_mpdecimate_and_dis(
                 input_path=seg_path,
                 hi=hi,
@@ -1650,21 +1919,29 @@ def scan_single_segment_actions(
                 lip_flap_guard=effective_lip_flap_guard,
                 decode_threads=decode_threads,
                 boundary_out=boundary_box,
+                **seg_fused_kw,
             )
             if fused is not None:
                 raw_actions, final_actions = fused
 
         if not raw_actions:
             thread_args = ["-threads", str(int(decode_threads))] if decode_threads and int(decode_threads) > 0 else []
+            if norm_grain in ("light", "heavy") and not hasattr(subprocess.Popen, "_mock_name"):
+                vf_seg = (
+                    f"scale=480:270:flags=area,format=gray,"
+                    f"atadenoise=0a=0.02:0b=0.04:s=5,mpdecimate=hi={hi}:lo={lo}:frac={frac}"
+                )
+            else:
+                vf_seg = f"mpdecimate=hi={hi}:lo={lo}:frac={frac}"
             cmd = [
                 "ffmpeg",
                 *thread_args,
                 "-i", seg_path,
-                "-vf", f"mpdecimate=hi={hi}:lo={lo}:frac={frac}",
+                "-vf", vf_seg,
                 "-v", "debug",
                 "-f", "null", "-",
             ]
-            pattern = re.compile(r"\[Parsed_mpdecimate_0.*?\]\s+.*?\b(keep|drop)\s+pts:")
+            pattern = re.compile(r"\[Parsed_mpdecimate_.*?\]\s+.*?\b(keep|drop)\s+pts:")
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -1673,6 +1950,7 @@ def scan_single_segment_actions(
                 encoding="utf-8",
                 errors="replace",
                 bufsize=65536,
+                **_eco_popen_kwargs(background_eco),
             )
             if proc.stderr:
                 for line in proc.stderr:
@@ -1785,8 +2063,10 @@ class RollingDedupPlanner:
         drift_delta: Optional[float] = None,
         drift_min_response: float = 0.10,
         motion_tau: Optional[float] = None,
+        grain_restore: str = "auto",
     ):
         from concurrent.futures import ThreadPoolExecutor
+        from src.ffmpeg_ops import resolve_effective_grain_profile
 
         self.input_path = input_path
         self.seg_paths = list(seg_paths)
@@ -1802,6 +2082,11 @@ class RollingDedupPlanner:
         self.drift_delta = drift_delta
         self.drift_min_response = float(drift_min_response)
         self.motion_tau = motion_tau
+        grain_prof = resolve_effective_grain_profile(input_path, grain_restore=grain_restore)
+        self.grain_restore = str(grain_prof["grain_restore"])
+        self.grain_tier = str(grain_prof["grain_tier"])
+        self.sigma_y = float(grain_prof["sigma_y"])
+        self._sync_initial_chunks: int = 1
         # Validate policy & override params eagerly on construction
         get_dedup_params(
             self.policy,
@@ -1855,6 +2140,8 @@ class RollingDedupPlanner:
             drift_delta=self.drift_delta,
             drift_min_response=self.drift_min_response,
             motion_tau_override=self.motion_tau,
+            grain_tier=self.grain_tier,
+            background_eco=(c_idx >= self._sync_initial_chunks),
         )
         with self._lock:
             self._results[c_idx] = res
@@ -1892,6 +2179,7 @@ class RollingDedupPlanner:
             self.finalize_plan()
             return
         n_sync = min(self.total_chunks, max(1, int(sync_initial_chunks)))
+        self._sync_initial_chunks = n_sync
         if self.total_chunks == 1:
             self._scan_one(0)
             self.finalize_plan()
@@ -2010,6 +2298,9 @@ class RollingDedupPlanner:
                     "drift_delta": float(p_params.get("drift_delta", 0.75)) if self.policy.startswith("drift") else None,
                     "drift_min_response": self.drift_min_response if self.policy.startswith("drift") else None,
                     "dis_thresh": float(p_params.get("dis_thresh", 0.30)) if is_dis else None,
+                    "grain_restore": self.grain_restore,
+                    "grain_tier": self.grain_tier,
+                    "sigma_y": self.sigma_y,
                 },
                 "total_frames": self.total_frames,
                 "raw_kept_frames": raw_keep,
@@ -2267,18 +2558,16 @@ def are_raw_segments_complete(
 
 
 def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
-    """
-    Điểm vào thực thi trong tiến trình con Background Queue Preflight:
-    1. Nếu plan_file nằm trong .temp_<basename>, tách sẵn raw_segs theo Keyframe GOP (Stream Copy)
-       và đo chính xác chunk_frame_counts để khi tập kế tiếp chạy không tốn giây nào chờ tách/quét lại.
-    2. Phân giải đúng dedup_policy (CLI / shows.yaml / default) để khớp 100% với pipeline chính.
-    """
+    """Execute background queue GOP split + grain-aware dedup preflight on Alder Lake E-Cores."""
     from src.ffmpeg_ops import probe_video, split_video_segments, get_segments_frame_counts
+    from src.preflight import apply_current_process_eco_qos
 
+    apply_current_process_eco_qos()
     vid = argv[0]
     plan_f = argv[1]
     seg_s = int(argv[2])
     pol_arg = argv[3] if len(argv) > 3 and argv[3] else None
+    grain_arg = argv[4] if len(argv) > 4 and argv[4] else "auto"
 
     meta = probe_video(vid)
     work_d = os.path.dirname(os.path.abspath(plan_f))
@@ -2301,6 +2590,9 @@ def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
             seg_counts = get_segments_frame_counts(existing)
 
     eff_pol = resolve_dedup_policy(vid, pol_arg)
+    extra_kw: Dict[str, Any] = {}
+    if grain_arg and grain_arg != "auto":
+        extra_kw["grain_restore"] = grain_arg
     return load_or_create_plan(
         vid,
         plan_f,
@@ -2310,6 +2602,7 @@ def run_preflight_worker_cli(argv: List[str]) -> Dict[str, Any]:
         chunk_frame_counts=seg_counts,
         policy=eff_pol,
         decode_threads=2,
+        **extra_kw,
     )
 
 
@@ -2318,18 +2611,19 @@ def build_preflight_subprocess_spec(
     plan_file: str,
     segment_seconds: int = 8,
     dedup_policy: Optional[str] = None,
+    grain_restore: str = "auto",
 ) -> Tuple[List[str], Dict[str, Any]]:
-    """
-    Xây dựng lệnh subprocess đa nền tảng (Windows BELOW_NORMAL_PRIORITY_CLASS / POSIX nice)
-    và truyền đường dẫn an toàn qua sys.argv (tránh lỗi ký tự nháy đơn/backslash trên Windows).
-    """
+    """Build cross-platform background preflight subprocess spec (BELOW_NORMAL / nice -n 10)."""
     import sys
     script = (
         "import sys; "
         "from src.dedup import run_preflight_worker_cli; "
         "run_preflight_worker_cli(sys.argv[1:])"
     )
+    norm_grain = str(grain_restore or "auto").strip().lower()
     cmd = [sys.executable, "-c", script, video_path, plan_file, str(segment_seconds), dedup_policy or ""]
+    if norm_grain != "auto":
+        cmd.append(norm_grain)
     popen_kwargs: Dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -2347,12 +2641,9 @@ def spawn_background_preflight(
     segment_seconds: int = 8,
     logger=None,
     dedup_policy: Optional[str] = None,
+    grain_restore: str = "auto",
 ) -> Optional[subprocess.Popen]:
-    """
-    Kích hoạt tiến trình quét mpdecimate lập plan.json trước cho tập kế tiếp.
-    Chạy với độ ưu tiên nền (BELOW_NORMAL_PRIORITY_CLASS trên Windows / nice -n 10 trên POSIX)
-    trong lúc GPU đang bận xử lý tập trước.
-    """
+    """Spawn background preflight subprocess to pre-compute plan.json for upcoming queue episodes."""
     import sys
     if os.environ.get("BENCHMARK_MODE") == "1":
         if logger:
@@ -2369,8 +2660,11 @@ def spawn_background_preflight(
         if os.path.exists(plan_file) and os.path.getsize(plan_file) > 100:
             return None
 
+        bg_kw: Dict[str, Any] = {"dedup_policy": dedup_policy}
+        if str(grain_restore or "auto").strip().lower() != "auto":
+            bg_kw["grain_restore"] = grain_restore
         cmd, popen_kwargs = build_preflight_subprocess_spec(
-            video_path, plan_file, segment_seconds, dedup_policy=dedup_policy
+            video_path, plan_file, segment_seconds, **bg_kw
         )
         proc = subprocess.Popen(cmd, **popen_kwargs)
         prio_desc = "BELOW_NORMAL" if sys.platform == "win32" else "nice -n 10"

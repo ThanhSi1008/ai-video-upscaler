@@ -39,17 +39,17 @@ Defined in `src/dedup.py:DEDUP_POLICY_PARAMS` (mirrored in `web/fs_browser.py`):
 ## 4. Cyclic Cel Memoization (`A->B->A`)
 
 Adjacent `mpdecimate` misses alternating anime loops (`A->B->A->C->A` lip flaps, blinking, wind cycles):
-1. **Normalized Multi-Tier Detection (`deduplicate_cyclic_frames`):** Normalizes `p010le` (`uint16 << 6`) and `nv12` to 8-bit luma/planar views, hashes coarse strided samples (`BLAKE2b`), and validates with OpenCV SIMD `cv2.absdiff` (`max_diff <= 2` + Tier 3 isolated B-frame ringing tolerance `<= 0.02%` pixels in `[3..5]`, `MAE <= 0.18`, `16x16` block mean `<= 0.85`).
+1. **Zero-Copy Dual-Phase `CV_16UC1` / `CV_8UC1` Detection (`deduplicate_cyclic_frames`):** Resizes contiguous `arr_c[:h_luma, :]` (`CV_16UC1` for `p010le` preserving fractional 10-bit `/ 256.0`, or `CV_8UC1` for `nv12`) via `cv2.INTER_AREA` `(240, 135)` on aligned `(0, 0)` and shifted `(4, 4)` phases without intermediate `msb_u8` allocation, matching candidates when `MAE <= 0.30` and Weber-weighted single-cell `1x1` peak delta on both phases `<= 2.4` LSB plus 16 strided luma+chroma row checks (`0.0%` mouth false positives while capturing `L_inf = 7..32` ringed cels).
 2. **Bounded 4K Reuse Without Re-Inference:**
    - **Zero-Disk ([`src/trt_zero_copy_upscaler.py`](../src/trt_zero_copy_upscaler.py)):** `_bound_live_cyclic_memo` applies Belady's Optimal (`OPT`) eviction capped at `max_memo_frames=64` (`<= 1.54 GB` host RAM on `24s` super-chunks).
    - **Standard ([`src/cuda_engine.py`](../src/cuda_engine.py)):** Infers distinct frames once and materializes repeats via 0-byte NTFS hardlinks (`os.link`).
 
-## 5. Perceptual Dedup V2 (`dis-auto` Early-Exit Cascade)
+## 5. Perceptual Dedup V2 (`dis-auto` Early-Exit Cascade & `60Hz` Cadence Lock)
 
-Implemented in `src/dedup.py:_is_dis_motion_early_exit`, `_check_8x8_lip_flap_gate`, and `_estimate_textured_lk_pan_zoom`:
-1. **1-Pass Split (`[0:v]split=2`):** One FFmpeg decode simultaneously logs `mpdecimate` on `stderr` and streams `480x270` grayscale frames on `stdout`.
-2. **`8x8` Dual-Phase Lip-Flap Gate (`32x32` at `1080p`):** Signed `3x3` box-blurred frame difference evaluated over aligned and `(4, 4)`-shifted `8x8` cells against a robust MAD noise floor retains small/dark mouth flaps and eye-blinks while canceling zero-mean grain.
-3. **Textured 3-DOF Lucas-Kanade & Noise-Calibrated DIS:** Pre-blurs grain (`GaussianBlur((5,5), 1.1)`), fits 3-DOF affine `(tx, ty, s)` on high-gradient foreground pixels (`>= 48` textured samples) to catch `0.25 px` pans with `72%+` flat sky and off-center zooms, and evaluates DIS vectors restricted to textured masks above an adaptive grain floor.
+Implemented in `src/dedup.py:_is_dis_motion_early_exit`, `_check_8x8_lip_flap_gate`, `PanZoomCadenceTracker`, and `_build_fused_mpdecimate_dis_filtergraph`:
+1. **Isolated `[vdec]` / `[vgray]` 1-Pass Split:** `scale=480:270:flags=area,format=gray,split=2[vdec][vgray]` applies temporal `atadenoise` on `[vdec]` (for grained `mpdecimate`) while keeping `[vgray]` raw on `clean`/`light` and attaching edge-preserving `removegrain=m0=3,atadenoise=0a=0.02:0b=0.04:s=5` strictly on `heavy` (`sigma_y >= 0.75`) so `dY = 8` LSB `4x4` dark blinks stay `100%` unattenuated (`thra = 5 < 8`) while `1-3`px film-dust clumps are suppressed.
+2. **Weber-Scaled `2x2 + 3x3` Lip-Flap & Micro-Blink Gate:** Evaluates dual-phase `8x8` cells (`32x32` at `1080p`) alongside `2x2` (`8x8` at `1080p`) eye-blink cells with dark-luma Weber scaling (`max(0.50, min(1.0, sqrt(cell_luma / 96.0)))`) to preserve dark `Y=22` blinks while rejecting Gaussian film grain.
+3. **1-Second Phase-Locked Camera Pan/Zoom Hysteresis (`PanZoomCadenceTracker`):** Tracks directional camera motion vectors `(tx, ty, s)` across frames (`>= 3` consistent steps, cosine `>= 0.85`) to enter `pan_zoom_lock` (`0.12 px` release floor, `<= 1` missed step), locking `24p` slow pans to uniform `1-1-1-1` cadence without `3/2` judder on `60Hz` displays.
 
 ## 6. Integrity Guard & Frame Reconstruction
 

@@ -353,6 +353,7 @@ _MEASURED_FILE_WEIGHT_MS: dict[str, int] = {
     "tests/e2e/test_tier3_pairwise.py": 6130,
     "tests/test_nvme_cache_and_input_triton.py": 5560,
     "tests/test_dedup_policy.py": 4840,
+    "tests/test_nextgen_cugan_grain_and_cadence.py": 4800,
     "tests/e2e/test_tier4_scenarios.py": 4620,
     "tests/test_zero_disk_and_trt_export.py": 4270,
     "tests/e2e/test_e2e_integration_t3_t4.py": 4170,
@@ -558,7 +559,7 @@ def _configure_win32_pcore_qos() -> int | None:
         state = _PowerThrottlingState(Version=1, ControlMask=0x1, StateMask=0)
         kernel32.SetProcessInformation(h_proc, 4, ctypes.byref(state), ctypes.sizeof(state))
         prev_prio = int(kernel32.GetPriorityClass(h_proc))
-        if prev_prio in (0, 0x00000020):
+        if prev_prio in (0, 0x00000020, 0x00004000, 0x00000040):
             kernel32.SetPriorityClass(h_proc, 0x00008000)
             return prev_prio or 0x00000020
     except Exception:

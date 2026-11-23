@@ -479,8 +479,8 @@ def test_o5_shows_yaml_single_model_defaults_and_auto_pareto_resolver():
 
     bd_info = resolve_model_for_video(bd_path, cli_model_arg=None)
     web_info = resolve_model_for_video(web_path, cli_model_arg=None)
-    assert bd_info["id"] == "animejanai-hd-v3-sharp1-ultracompact"
-    assert web_info["id"] == "animejanai-hd-v3-ultracompact"
+    assert bd_info["id"] == "realcugan-pro-conservative-2x"
+    assert web_info["id"] == "realcugan-pro-conservative-2x"
     assert resolve_dedup_policy(bd_path, cli_policy=None) == "dis-auto"
     assert resolve_dedup_policy(web_path, cli_policy=None) == "dis-auto"
 
@@ -505,7 +505,7 @@ def test_o5_web_studio_pareto_and_multipass_sync(tmp_path):
 
     browser = SafeLocalFSBrowser(tmp_path)
     routed_default = browser.resolve_routing_for_path(ep_file)
-    assert routed_default["model_id"] == "animejanai-hd-v3-ultracompact"
+    assert routed_default["model_id"] == "realcugan-pro-conservative-2x"
     assert routed_default["dedup_policy"] == "dis-auto"
 
     routed_pareto = browser.resolve_routing_for_path(ep_file, override_model="auto-pareto")

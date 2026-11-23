@@ -171,6 +171,7 @@ def _probe_video_ffprobe(video_path: str) -> Dict[str, Any]:
         "color_primaries": color_primaries,
         "color_transfer": color_transfer,
         "nb_frames": nb_frames,
+        "source_is_8bit": is_8bit_pix_fmt(pix_fmt),
         "audio_count": len(audio_streams),
         "subtitle_count": len(sub_streams),
         "attachment_count": len(attachment_streams),
@@ -237,11 +238,154 @@ def _probe_video_pyav(video_path: str) -> Dict[str, Any]:
             "color_primaries": color_primaries,
             "color_transfer": color_transfer,
             "nb_frames": nb_frames,
+            "source_is_8bit": is_8bit_pix_fmt(pix_fmt),
             "audio_count": len(c.streams.audio),
             "subtitle_count": len(c.streams.subtitles),
             "attachment_count": len(c.streams.attachments),
             "chapter_count": len(chapters),
         }
+
+
+VALID_GRAIN_RESTORE_MODES = ("auto", "off", "light", "heavy")
+_GRAIN_PROBE_CACHE: Dict[tuple[str, int, int], Dict[str, Any]] = {}
+
+
+def is_8bit_pix_fmt(pix_fmt: Optional[str]) -> bool:
+    """Return True when pixel format represents an 8-bit stream (e.g., yuv420p, nv12)."""
+    p = str(pix_fmt or "yuv420p").strip().lower()
+    return not any(tag in p for tag in ("10", "12", "14", "16", "p010", "p016"))
+
+
+def probe_video_grain_profile(video_path: str) -> Dict[str, Any]:
+    """Measure temporal film-grain sigma_y on simultaneously flat and static 8x8 blocks via PyAV (<0.35s)."""
+    default_res = {"sigma_y": 0.0, "grain_tier": "clean", "source_is_8bit": True}
+    if not video_path or not os.path.isfile(video_path):
+        return dict(default_res)
+    try:
+        abs_p = os.path.abspath(video_path)
+        st = os.stat(abs_p)
+        if st.st_size <= 4096:
+            return dict(default_res)
+        cache_key = (os.path.normcase(abs_p), int(st.st_mtime_ns), int(st.st_size))
+        if cache_key in _GRAIN_PROBE_CACHE:
+            return dict(_GRAIN_PROBE_CACHE[cache_key])
+    except OSError:
+        return dict(default_res)
+
+    if av is None:
+        return dict(default_res)
+
+    try:
+        import cv2
+        import numpy as np
+
+        with av.open(video_path) as c:
+            if not c.streams.video:
+                return dict(default_res)
+            v = c.streams.video[0]
+            try:
+                v.thread_type = "SLICE"
+                v.thread_count = 4
+            except Exception:
+                pass
+            pfmt = str(v.format.name) if v.format else "yuv420p"
+            src_8bit = is_8bit_pix_fmt(pfmt)
+            is_10 = not src_8bit
+            dur = float(c.duration / av.time_base) if c.duration else 0.0
+            if dur <= 0.0 and v.duration and v.time_base:
+                dur = float(v.duration * v.time_base)
+
+            fracs = (0.20, 0.50, 0.75) if dur > 6.0 else (0.0,)
+            frames_per_cluster = 8 if len(fracs) > 1 else 12
+            pair_sigmas: List[float] = []
+
+            for frac in fracs:
+                if dur > 6.0 and frac > 0.0:
+                    try:
+                        c.seek(int(dur * frac * av.time_base), backward=True, any_frame=False)
+                    except Exception:
+                        pass
+                ys: List[Any] = []
+                for fr in c.decode(v):
+                    p0 = fr.planes[0]
+                    ls = int(p0.line_size)
+                    h, w = int(fr.height), int(fr.width)
+                    cy0 = max(0, (h - 544) // 2)
+                    cy1 = min(h, cy0 + 544)
+                    cx0 = max(0, (w - 960) // 2)
+                    cx1 = min(w, cx0 + 960)
+                    if is_10:
+                        stride_u16 = max(w, ls // 2)
+                        raw = np.frombuffer(p0, dtype=np.uint16, count=h * stride_u16).reshape(h, stride_u16)[cy0:cy1, cx0:cx1]
+                        scale = (0.25 / 64.0) if "p010" in pfmt else 0.25
+                        y = raw.astype(np.float32) * scale
+                    else:
+                        stride_u8 = max(w, ls)
+                        raw = np.frombuffer(p0, dtype=np.uint8, count=h * stride_u8).reshape(h, stride_u8)[:, :w][cy0:cy1, cx0:cx1]
+                        y = raw.astype(np.float32)
+                    ys.append(y)
+                    if len(ys) >= frames_per_cluster:
+                        break
+
+                for k in range(len(ys) - 1):
+                    y0, y1 = ys[k], ys[k + 1]
+                    bh, bw = y0.shape[0] // 8, y0.shape[1] // 8
+                    if bh < 4 or bw < 4:
+                        continue
+                    y0_c = y0[: bh * 8, : bw * 8]
+                    y1_c = y1[: bh * 8, : bw * 8]
+                    b0 = cv2.resize(y0_c, (bw, bh), interpolation=cv2.INTER_AREA)
+                    gx = cv2.Sobel(b0, cv2.CV_32F, 1, 0, ksize=3) * 0.125
+                    gy = cv2.Sobel(b0, cv2.CV_32F, 0, 1, ksize=3) * 0.125
+                    grad_8x8 = np.hypot(gx, gy)
+                    diff = y1_c - y0_c
+                    mean_d_8x8 = cv2.resize(diff, (bw, bh), interpolation=cv2.INTER_AREA)
+                    flat_static = (grad_8x8 < 3.0) & (np.abs(mean_d_8x8) < 1.5)
+                    midtone_mask = flat_static & (b0 > 20.0) & (b0 < 230.0)
+                    use_mask = midtone_mask if int(np.count_nonzero(midtone_mask)) >= 16 else flat_static
+                    if int(np.count_nonzero(use_mask)) >= 8:
+                        s0 = y0_c.reshape(bh, 8, bw, 8).transpose(0, 2, 1, 3)[use_mask]
+                        s1 = y1_c.reshape(bh, 8, bw, 8).transpose(0, 2, 1, 3)[use_mask]
+                        r0 = s0 - s0.mean(axis=(1, 2), keepdims=True)
+                        r1 = s1 - s1.mean(axis=(1, 2), keepdims=True)
+                        v_diff = np.mean((r1 - r0) ** 2, axis=(1, 2)) * 0.5
+                        v_avg = np.mean((0.5 * (r0 + r1)) ** 2, axis=(1, 2))
+                        # For i.i.d. temporal grain E[v_avg] == 0.5 * E[v_diff]; panning spatial texture has v_avg >> v_diff
+                        untextured = v_avg <= (1.25 * v_diff + 0.02)
+                        blk_sig = np.sqrt(v_diff[untextured]) if int(np.count_nonzero(untextured)) >= 6 else np.sqrt(v_diff) * 0.0
+                        pair_sigmas.append(float(np.percentile(blk_sig, 35)))
+
+            sigma_y = round(float(np.median(pair_sigmas)), 4) if pair_sigmas else 0.0
+            if sigma_y < 0.25:
+                tier = "clean"
+            elif sigma_y < 0.75:
+                tier = "light"
+            else:
+                tier = "heavy"
+            out = {"sigma_y": sigma_y, "grain_tier": tier, "source_is_8bit": src_8bit}
+            if len(_GRAIN_PROBE_CACHE) >= 256:
+                _GRAIN_PROBE_CACHE.clear()
+            _GRAIN_PROBE_CACHE[cache_key] = dict(out)
+            return out
+    except Exception:
+        return dict(default_res)
+
+
+def resolve_effective_grain_profile(video_path: str, grain_restore: str = "auto") -> Dict[str, Any]:
+    """Resolve effective (grain_restore, grain_tier, sigma_y, source_is_8bit) honoring CLI overrides."""
+    mode = str(grain_restore or "auto").strip().lower()
+    if mode not in VALID_GRAIN_RESTORE_MODES:
+        raise ValueError(f"Invalid --grain-restore '{grain_restore}'. Expected one of {VALID_GRAIN_RESTORE_MODES}.")
+    if mode == "off":
+        return {"grain_restore": "off", "grain_tier": "clean", "sigma_y": 0.0, "source_is_8bit": True}
+    probed = probe_video_grain_profile(video_path)
+    eff_tier = mode if mode in ("light", "heavy") else str(probed.get("grain_tier") or "clean")
+    return {
+        "grain_restore": mode,
+        "grain_tier": eff_tier,
+        "sigma_y": float(probed.get("sigma_y", 0.0)),
+        "source_is_8bit": bool(probed.get("source_is_8bit", True)),
+    }
 
 
 def probe_video(video_path: str) -> Dict[str, Any]:
@@ -532,11 +676,23 @@ def _count_leading_discard_packets(seg_path: str) -> int:
                 if not c.streams.video:
                     return 0
                 v = c.streams.video[0]
+                kf_pts = None
                 discard_count = 0
-                for i, pkt in enumerate(c.demux(v)):
-                    if i >= 12:
+                seen = 0
+                for pkt in c.demux(v):
+                    if pkt.size == 0 and pkt.pts is None:
+                        continue
+                    if seen >= 12:
                         break
+                    seen += 1
+                    if getattr(pkt, "is_keyframe", False) and kf_pts is None and pkt.pts is not None:
+                        kf_pts = pkt.pts
                     if getattr(pkt, "is_discard", False):
+                        discard_count += 1
+                    elif not getattr(pkt, "is_keyframe", False) and (
+                        kf_pts is None or (pkt.pts is not None and pkt.pts < kf_pts)
+                    ):
+                        # H.264 Open-GOP leading B-frames precede recovery keyframe PTS without setting DISCARD flag.
                         discard_count += 1
                 return discard_count
         except Exception:
@@ -625,6 +781,8 @@ def _recover_open_gop_leading_frames(
 
     has_target = chunk_start_sec is not None
     target_sec = max(0.0, float(chunk_start_sec)) if has_target else 0.0
+    if has_target and target_sec <= 1e-4 and _count_leading_discard_packets(source_video_path) >= n_discard:
+        return [cra_anchor_frame.copy() for _ in range(n_discard)]
     seek_sec = max(0.0, target_sec - 15.0)
     seek_sec_str = f"{seek_sec:.3f}"
     eff_seek_sec = float(seek_sec_str)
@@ -760,6 +918,90 @@ def _recover_open_gop_leading_frames(
     return [cra_anchor_frame.copy() for _ in range(n_discard)]
 
 
+def _apply_symmetric_s5_p010_filter(
+    full_frames: List[Any],
+    target_indices: List[int],
+    is_10bit_src: bool,
+    grain_tier: str,
+    luma_h: int,
+) -> List[Any]:
+    """Apply symmetric s=5 (k-2..k+2) directional atadenoise filter in 10-bit p010le space across full_frames."""
+    import numpy as np
+
+    n_total = len(full_frames)
+    if n_total == 0 or not target_indices:
+        return []
+    semi_h = full_frames[0].shape[0]
+    tier = str(grain_tier or "light").strip().lower()
+    if tier == "heavy":
+        thra_y, thrb_y, thra_uv, thrb_uv = 25, 49, 16, 33
+    else:
+        thra_y, thrb_y, thra_uv, thrb_uv = 18, 37, 12, 25
+
+    thra_col = np.empty((semi_h, 1), dtype=np.int32)
+    thrb_col = np.empty((semi_h, 1), dtype=np.int32)
+    thra_col[:luma_h, 0] = thra_y
+    thra_col[luma_h:, 0] = thra_uv
+    thrb_col[:luma_h, 0] = thrb_y
+    thrb_col[luma_h:, 0] = thrb_uv
+
+    f10_cache: Dict[int, Any] = {}
+
+    def _get_f10(idx_raw: int):
+        clamped = min(max(0, int(idx_raw)), n_total - 1)
+        cached = f10_cache.get(clamped)
+        if cached is not None:
+            return cached
+        arr = full_frames[clamped]
+        if is_10bit_src or arr.dtype in (np.uint16, np.int16):
+            f10 = (arr.view(np.uint16) >> 6).astype(np.int16)
+        else:
+            f10 = arr.astype(np.int16) << 2
+        f10_cache[clamped] = f10
+        return f10
+
+    out_list: List[Any] = []
+    for k_raw in target_indices:
+        k_u = min(max(0, int(k_raw)), n_total - 1)
+        # Evict stale window entries when target_indices advance monotonically
+        if len(f10_cache) > 8:
+            for stale_k in [ck for ck in f10_cache.keys() if ck < k_u - 2 or ck > k_u + 2]:
+                del f10_cache[stale_k]
+
+        c = _get_f10(k_u)
+        c32 = c.astype(np.int32)
+        acc = c32.copy()
+        cnt = np.ones_like(acc)
+
+        m1 = _get_f10(k_u - 1).astype(np.int32)
+        d_b1 = np.abs(c32 - m1)
+        ok_b1 = (d_b1 <= thra_col) & (d_b1 <= thrb_col)
+        acc += np.where(ok_b1, m1, 0)
+        cnt += ok_b1
+
+        m2 = _get_f10(k_u - 2).astype(np.int32)
+        d_b2 = np.abs(c32 - m2)
+        ok_b2 = ok_b1 & (d_b2 <= thra_col) & ((d_b1 + d_b2) <= thrb_col)
+        acc += np.where(ok_b2, m2, 0)
+        cnt += ok_b2
+
+        p1 = _get_f10(k_u + 1).astype(np.int32)
+        d_f1 = np.abs(c32 - p1)
+        ok_f1 = (d_f1 <= thra_col) & (d_f1 <= thrb_col)
+        acc += np.where(ok_f1, p1, 0)
+        cnt += ok_f1
+
+        p2 = _get_f10(k_u + 2).astype(np.int32)
+        d_f2 = np.abs(c32 - p2)
+        ok_f2 = ok_f1 & (d_f2 <= thra_col) & ((d_f1 + d_f2) <= thrb_col)
+        acc += np.where(ok_f2, p2, 0)
+        cnt += ok_f2
+
+        out_10 = (acc + (cnt >> 1)) // cnt
+        out_list.append(np.ascontiguousarray((out_10 << 6).astype(np.uint16)))
+    return out_list
+
+
 def extract_frames_raw_yuv420(
     seg_path: str,
     width: int,
@@ -771,8 +1013,9 @@ def extract_frames_raw_yuv420(
     chunk_start_sec: Optional[float] = None,
     source_codec: Optional[str] = None,
     source_pix_fmt: Optional[str] = None,
+    grain_tier: str = "clean",
 ) -> List[Any]:
-    """Decode segment directly to semi-planar p010le (uint16, 10-bit) or nv12 (uint8, 8-bit) without swscale RGB truncation."""
+    """Decode segment directly to semi-planar p010le (uint16, 10-bit) or nv12 (uint8, 8-bit) with optional s=5 grain filter."""
     import numpy as np
 
     h_int, w_int = int(height), int(width)
@@ -781,7 +1024,15 @@ def extract_frames_raw_yuv420(
     if kept_indices is not None and len(kept_indices) == 0:
         return []
 
-    is_10bit = any(tag in str(source_pix_fmt or "").lower() for tag in ("10", "12", "p010", "p016"))
+    norm_grain = str(grain_tier or "clean").strip().lower()
+    use_grain_filter = norm_grain in ("light", "heavy")
+    is_10bit_src = not is_8bit_pix_fmt(source_pix_fmt)
+    raw_pix_fmt = "p010le" if is_10bit_src else "nv12"
+    raw_elem_dtype = np.uint16 if is_10bit_src else np.uint8
+    raw_bytes_per_elem = 2 if is_10bit_src else 1
+
+    # Promote Closed-GOP filtered output to p010le so 5-frame temporal averaging preserves 2 fractional bits
+    is_10bit = is_10bit_src or use_grain_filter
     out_pix_fmt = "p010le" if is_10bit else "nv12"
     semi_h = (h_int * 3) // 2
     elem_dtype = np.uint16 if is_10bit else np.uint8
@@ -790,11 +1041,19 @@ def extract_frames_raw_yuv420(
 
     is_real_subproc = (not hasattr(subprocess.run, "_mock_name")) and (not hasattr(subprocess.Popen, "_mock_name"))
     is_hevc = (source_codec is None) or bool(any(k in source_codec.lower() for k in ["hevc", "265"]))
-    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and is_hevc) else 0
+    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and (is_hevc or os.path.exists(seg_path))) else 0
 
-    def _run_yuv_pipe_into_array(use_hwaccel: bool, expected_count: int, select_vf: Optional[str]):
+    def _run_yuv_pipe_into_array(
+        use_hwaccel: bool,
+        expected_count: int,
+        select_vf: Optional[str],
+        pipe_pix_fmt: str = out_pix_fmt,
+        pipe_dtype: Any = elem_dtype,
+        pipe_bpe: int = bytes_per_elem,
+    ):
         hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
         vf_args = ["-vf", select_vf] if select_vf else []
+        p_frame_bytes = semi_h * w_int * pipe_bpe
         cmd = [
             "ffmpeg", "-v", "error",
             *hw_args,
@@ -802,12 +1061,12 @@ def extract_frames_raw_yuv420(
             *vf_args,
             "-vsync", "0",
             "-f", "rawvideo",
-            "-pix_fmt", out_pix_fmt,
+            "-pix_fmt", pipe_pix_fmt,
             "pipe:1",
         ]
-        out_arr = np.empty((expected_count, semi_h, w_int), dtype=elem_dtype)
+        out_arr = np.empty((expected_count, semi_h, w_int), dtype=pipe_dtype)
         mv = memoryview(out_arr).cast("B")
-        total_target = expected_count * frame_bytes
+        total_target = expected_count * p_frame_bytes
         read_step = 1048576
         offset = 0
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
@@ -825,9 +1084,9 @@ def extract_frames_raw_yuv420(
         finally:
             proc.wait()
 
-        if proc.returncode != 0 or offset < frame_bytes:
+        if proc.returncode != 0 or offset < p_frame_bytes:
             return None
-        actual_frames = offset // frame_bytes
+        actual_frames = offset // p_frame_bytes
         return [out_arr[idx] for idx in range(actual_frames)]
 
     prefer_hw = (
@@ -851,9 +1110,27 @@ def extract_frames_raw_yuv420(
     if n_discard > 0 and is_real_subproc:
         est_total = int(total_frames) if total_frames else ((max(kept_indices) + 1) if kept_indices else 256)
         dec_cap = max(1, est_total)
-        seg_frames = _run_yuv_pipe_into_array(use_hwaccel=True, expected_count=dec_cap, select_vf=None) if prefer_hw else None
+        seg_frames = (
+            _run_yuv_pipe_into_array(
+                use_hwaccel=True,
+                expected_count=dec_cap,
+                select_vf=None,
+                pipe_pix_fmt=raw_pix_fmt,
+                pipe_dtype=raw_elem_dtype,
+                pipe_bpe=raw_bytes_per_elem,
+            )
+            if prefer_hw
+            else None
+        )
         if seg_frames is None:
-            seg_frames = _run_yuv_pipe_into_array(use_hwaccel=False, expected_count=dec_cap, select_vf=None)
+            seg_frames = _run_yuv_pipe_into_array(
+                use_hwaccel=False,
+                expected_count=dec_cap,
+                select_vf=None,
+                pipe_pix_fmt=raw_pix_fmt,
+                pipe_dtype=raw_elem_dtype,
+                pipe_bpe=raw_bytes_per_elem,
+            )
         if seg_frames:
             leading = _recover_open_gop_leading_frames(
                 source_video_path=source_video_path,
@@ -863,9 +1140,18 @@ def extract_frames_raw_yuv420(
                 width=w_int,
                 height=h_int,
                 color_vf=None,
-                pix_fmt=out_pix_fmt,
+                pix_fmt=raw_pix_fmt,
             )
             full_frames = leading + seg_frames
+            if use_grain_filter:
+                target_idx = list(kept_indices) if kept_indices is not None else list(range(len(full_frames)))
+                return _apply_symmetric_s5_p010_filter(
+                    full_frames=full_frames,
+                    target_indices=target_idx,
+                    is_10bit_src=is_10bit_src,
+                    grain_tier=norm_grain,
+                    luma_h=h_int,
+                )
             if kept_indices is not None:
                 return [
                     full_frames[idx] if idx < len(full_frames) else full_frames[-1]
@@ -880,10 +1166,18 @@ def extract_frames_raw_yuv420(
         and kept_indices[0] == 0
         and kept_indices[-1] == int(total_frames) - 1
     )
-    select_vf: Optional[str] = None
+    vf_chain_parts: List[str] = []
+    if use_grain_filter and is_real_subproc:
+        atad_spec = (
+            "0a=0.024:0b=0.048:1a=0.016:1b=0.032:2a=0.016:2b=0.032:s=5"
+            if norm_grain == "heavy"
+            else "0a=0.018:0b=0.036:1a=0.012:1b=0.024:2a=0.012:2b=0.024:s=5"
+        )
+        vf_chain_parts.append(f"format=yuv420p10le,atadenoise={atad_spec}")
     if kept_indices is not None and len(kept_indices) > 0 and not all_contiguous_kept:
         select_expr = _build_balanced_select_expr(kept_indices)
-        select_vf = f"select='{select_expr}'"
+        vf_chain_parts.append(f"select='{select_expr}'")
+    select_vf: Optional[str] = ",".join(vf_chain_parts) if vf_chain_parts else None
 
     exp_n = len(kept_indices) if (kept_indices is not None and len(kept_indices) > 0) else (int(total_frames) if total_frames else None)
     if exp_n is not None and exp_n > 0 and is_real_subproc:
@@ -956,7 +1250,7 @@ def extract_frames_raw_rgb24(
     color_vf = "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc"
     is_real_subproc = (not hasattr(subprocess.run, "_mock_name")) and (not hasattr(subprocess.Popen, "_mock_name"))
     is_hevc = (source_codec is None) or bool(any(k in source_codec.lower() for k in ["hevc", "265"]))
-    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and is_hevc) else 0
+    n_discard = _count_leading_discard_packets(seg_path) if (is_real_subproc and (is_hevc or os.path.exists(seg_path))) else 0
 
     def _run_pipe_into_array(use_hwaccel: bool, expected_count: int, custom_vf: str):
         hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
