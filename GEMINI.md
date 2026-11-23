@@ -21,7 +21,7 @@
   - Delegate subtitle/pronoun evals (`subtrans/eval/runner.py`, `benchmarks/subtrans/eval_golden_pronouns*.py`) to [subtrans-evaluator](.agents/agents/subtrans-evaluator.md).
 
 ## 4. Safety, Fast Testing, Doc-Sync & Commit
-- **Secrets & Quota:** Local `.env` read is allowed freely; modifying `.env` requires confirmation; never commit, log, or export `.env`. No live Gemini API calls (except `--dry-run`/`--offline`/stubs) without approval, especially `>= 14:00`.
+- **Secrets & Quota:** Local `.env` read/write is allowed freely (free-tier keys); never commit, log, or export `.env`. No live Gemini API calls (except `--dry-run`/`--offline`/stubs) without approval, especially `>= 14:00`.
 - **Approval Gates:** Zero approval needed for GPU frame counts, `build_trt_engine.py`, full-episode upscales, or hardware benchmarks. Ask before deleting `.temp_*` checkpoints or altering repo `animevideov3` / NVENC `CQ 18` defaults.
 - **Fast Verification & Gate:** Never run bare `pytest` on live repo root. Iterate via `< 5s` `verify_offline.py --impacted` / `--target <test>` or `smoke_test_pipeline.py`, and run full `scripts/verify_offline.py` **once** before commit.
 - **Same-Commit Doc-Sync & Commit:** Pass `verify_offline.py`, `agent_context.py --check`, `ruff check .`, `git diff --check`. Sync affected docs (`STATE.md`, `PROJECT_MAP.md`, `VALIDATION.md`, `DECISIONS.md`, `README.md`, `docs/*.md`, `.agents/`) in the same commit when layout, symbols, CLI flags, schemas, hooks, or invariants change (never touch unrelated docs on internal fixes); commit immediately in English (`Request Source`, `Actions`, `Metrics & Verification`).

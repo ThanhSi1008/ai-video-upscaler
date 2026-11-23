@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 import pytest
+
+os.environ.setdefault("SUBTRANS_DISABLE_DOTENV", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gemini_env(monkeypatch: pytest.MonkeyPatch):
+    """Prevent live shell or .env GEMINI_API_KEY* variables from leaking into tests."""
+    monkeypatch.setenv("SUBTRANS_DISABLE_DOTENV", "1")
+    for env_k in list(os.environ.keys()):
+        if env_k.startswith("GEMINI_API_KEY"):
+            monkeypatch.delenv(env_k, raising=False)
+    yield
 
 
 @pytest.fixture(autouse=True)

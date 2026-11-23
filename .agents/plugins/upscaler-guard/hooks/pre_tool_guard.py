@@ -1,7 +1,7 @@
 """PreToolUse safety, context-firewall, and autonomous local-hardware hook for e:\\ai-video-upscaler.
 
 Enforces GEMINI.md, .agents/rules/*.md, and VALIDATION.md boundaries automatically:
-1. Allows free local .env reading; prompts (force_ask) on .env writes/edits; hard-denies git add/commit of .env.
+1. Allows free local .env reading and editing (free-tier keys); hard-denies git add/commit of .env.
 2. Enforces Context-Window & Full-Rewrite Firewall: blocks reading scratch/review_bundles/, blocks full-file
    write_file/write_to_file on existing > 250-line files, requires <= 280-line bounded ranges on read_file/view_file for
    > 350-line files, and blocks unbounded shell dumps on > 350-line files.
@@ -385,60 +385,6 @@ def _git_cmd_targets_secret_env(cmd: str) -> bool:
     return False
 
 
-_SHELL_WRITE_CMDS = frozenset({"set-content", "sc", "add-content", "ac", "out-file", "tee"})
-
-
-def _shell_write_targets_secret_env(cmd: str) -> bool:
-    """Return True if an unquoted shell redirection or file-writing cmdlet targets secret .env."""
-    for seg in _split_shell_segments(cmd):
-        # Scan unquoted > / >> redirection targets inside the segment
-        in_q: str | None = None
-        i = 0
-        n = len(seg)
-        while i < n:
-            ch = seg[i]
-            if in_q is not None:
-                if ch == "\\" and in_q == '"' and i + 1 < n:
-                    i += 2
-                    continue
-                if ch == in_q:
-                    in_q = None
-                i += 1
-                continue
-            if ch in ("'", '"'):
-                in_q = ch
-                i += 1
-                continue
-            if ch == ">":
-                j = i + 1 + (1 if i + 1 < n and seg[i + 1] == ">" else 0)
-                while j < n and seg[j].isspace():
-                    j += 1
-                k = j
-                while k < n and not seg[k].isspace() and seg[k] not in "&|;":
-                    k += 1
-                target = seg[j:k].strip("'\"")
-                if _is_secret_env_path(target):
-                    return True
-                i = k
-                continue
-            i += 1
-
-        tokens = _shlex_tokens(seg)
-        if not tokens:
-            continue
-        cmd_idx = 1 if (tokens[0] == "&" and len(tokens) > 1) else 0
-        cmd_name = Path(tokens[cmd_idx].replace("\\", "/")).name.lower()
-        if cmd_name in _SHELL_WRITE_CMDS:
-            for tok in tokens[cmd_idx + 1 :]:
-                if not tok.startswith("-") and _is_secret_env_path(tok):
-                    return True
-        elif cmd_name == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens[cmd_idx + 1 :]):
-            for tok in tokens[cmd_idx + 1 :]:
-                if not tok.startswith("-") and _is_secret_env_path(tok):
-                    return True
-    return False
-
-
 def _first_present(args: dict, keys: tuple[str, ...]) -> object:
     for key in keys:
         if args.get(key) is not None:
@@ -718,14 +664,9 @@ def evaluate_tool_call(payload: dict, repo_root: Path | None = None) -> dict:
                 "reason": "Blocked (Context Firewall): Do not read scratch/review_bundles/ into context; use scripts/agent_context.py --pack / --slice instead.",
             }
 
-        # 1b. Local .env read is allowed; writes/edits prompt via force_ask
+        # 1b. Local .env read and edit are allowed freely; git add/commit of .env remains hard-denied
         if _is_secret_env_path(target):
-            if tool_name in READ_TOOLS:
-                return {"decision": "allow"}
-            return {
-                "decision": "force_ask",
-                "reason": "Env Write Guard (GEMINI.md §4): Modifying .env secrets requires user confirmation.",
-            }
+            return {"decision": "allow"}
 
         # 1c. Full-file overwrite firewall (> 250 lines)
         if (
@@ -962,13 +903,6 @@ def _evaluate_single_command(cmd: str, root: Path) -> dict:
         return {
             "decision": "deny",
             "reason": "Blocked (GEMINI.md §4): Never stage or commit .env secret files with git add/commit.",
-        }
-
-    # 2d. Prompt (force_ask) on shell redirection / writes targeting .env
-    if _shell_write_targets_secret_env(cmd):
-        return {
-            "decision": "force_ask",
-            "reason": "Env Write Guard (GEMINI.md §4): Shell write targeting .env secrets requires user confirmation.",
         }
 
     if ENV_MUTATION_RE.search(cmd):

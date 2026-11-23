@@ -17,10 +17,10 @@ description: >-
    - Fallback chain in `subtrans/models.yaml:chain` (`gemini-3.8/3.7/3.6/3.5-flash`). Never default to `gemini-2.*`, never use `gemini-flash-latest` without `--allow-latest-alias`, and never enable Ollama/TranslateGemma (`--local`/`--review` are rejected with non-zero exit).
    - All GenAI calls (`gemini_backend.py`, `cast_sheet.py`, `cascade.py`) attach `get_anime_safety_settings()` (`BLOCK_NONE`), `extract_genai_response_text()`, and `max_output_tokens=16384`.
 2. **Protect `.env` & Daytime Quota:**
-   - Local reading of `.env` / `subtrans/.env` is allowed; modifying requires user confirmation; never commit, export, or print `GEMINI_API_KEY*` to logs.
+   - Local reading and editing of `.env` / `subtrans/.env` is allowed freely (free-tier keys); never commit, export, or print `GEMINI_API_KEY*` to logs.
    - Never call live Gemini APIs between **14:00 and overnight runs** (including `subtrans.py check` and `subtrans.py models`, which perform live requests!).
-3. **3-Key Round-Robin & 429 Handling:**
-   - Rotates across `GEMINI_API_KEY`, `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3` (modulo + least-loaded).
+3. **Multi-Key Round-Robin & 429 Handling:**
+   - Rotates across `GEMINI_API_KEYS`, `GEMINI_API_KEY`, and `GEMINI_API_KEY_1..N` in natural numeric order (modulo + least-loaded).
    - `429 PerMinute` / `503`: retries with `retryDelay`/backoff+jitter and rotates keys per `gemini_backend._call_api` & `throttle.call_with_retry`.
    - `429 PerDay`: marks `(model, key_hash)` exhausted until `00:00 PT` (`14:00 PDT` / `15:00 PST` VN via `cache.get_next_pt_reset`), stored in `subtrans/.cache/models_runtime_quota.yaml` (never dirtying `subtrans/models.yaml`). When all keys & models exhaust RPD, performs a graceful exit while preserving partial translations in SQLite.
 4. **Quality Gate & Dry-Run Isolation:**

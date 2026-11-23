@@ -224,10 +224,13 @@ def generate_qa_report(
     # Section: Pacific Time Quota & Usage
     raw_pt_reqs = stats.get("pacific_time_requests", {})
     pt_reqs = raw_pt_reqs if isinstance(raw_pt_reqs, dict) else {}
-    from subtrans.config import load_models_config
-    from subtrans.cache import get_next_pt_reset, get_now_pt, TranslationCache
+    from subtrans.config import get_gemini_api_keys, load_models_config
+    from subtrans.cache import TranslationCache, compute_key_id, get_next_pt_reset, get_now_pt
     models_cfg = load_models_config()
     configured_models = models_cfg.get("models", {})
+    api_keys = get_gemini_api_keys()
+    num_keys = max(1, len(api_keys))
+    key_hashes = [compute_key_id(k) for k in api_keys] if api_keys else []
     next_pt, next_vn = get_next_pt_reset()
     now_pt = get_now_pt()
     cache_inst = cache if (cache is not None and hasattr(cache, "is_model_exhausted")) else TranslationCache()
@@ -249,25 +252,29 @@ def generate_qa_report(
         r_cnt = _safe_int(pt_reqs.get(mod, 0))
         mod_info = configured_models.get(mod, {})
         rpd_val = mod_info.get("rpd", "chưa biết")
+        eff_rpd = rpd_val * num_keys if isinstance(rpd_val, int) else rpd_val
         rpd_source = mod_info.get("rpd_source", "chưa xác minh")
         try:
-            is_exhausted = cache_inst.is_model_exhausted(mod) is True
+            if key_hashes and hasattr(cache_inst, "are_all_keys_exhausted"):
+                is_exhausted = cache_inst.are_all_keys_exhausted(key_hashes, mod) is True
+            else:
+                is_exhausted = cache_inst.is_model_exhausted(mod) is True
         except Exception:
             is_exhausted = False
 
         rem_str = "—"
-        if isinstance(rpd_val, int):
-            rem_reqs = max(0, rpd_val - r_cnt)
+        if isinstance(eff_rpd, int):
+            rem_reqs = max(0, eff_rpd - r_cnt)
             rem_str = f"**{rem_reqs}**"
             if rem_reqs == 0 or is_exhausted:
                 st = f"🛑 Hết hạn mức (Khóa đến {next_vn.strftime('%H:%M %d/%m')})"
             else:
                 st = "🟢 Khả dụng"
         else:
-            rem_str = str(rpd_val)
+            rem_str = str(eff_rpd)
             st = "🟡 Chưa xác định RPD"
 
-        lines.append(f"| `{mod}` | {r_cnt} | {rpd_val} | {rem_str} | {rpd_source} | {st} |")
+        lines.append(f"| `{mod}` | {r_cnt} | {eff_rpd} | {rem_str} | {rpd_source} | {st} |")
     lines.append("")
 
     # Cảnh báo nếu model chính của lượt chạy sắp hết
@@ -281,10 +288,11 @@ def generate_qa_report(
 
     primary_reqs_used = _safe_int(pt_reqs.get(primary_m, 0))
     primary_rpd = configured_models.get(primary_m, {}).get("rpd")
-    if isinstance(primary_rpd, int) and (primary_rpd - primary_reqs_used) < 5:
+    eff_primary_rpd = primary_rpd * num_keys if isinstance(primary_rpd, int) else None
+    if isinstance(eff_primary_rpd, int) and (eff_primary_rpd - primary_reqs_used) < 5:
         lines.extend([
             "> [!WARNING]",
-            f"> **CẢNH BÁO HẠN MỨC GẦN HẾT**: Model `{primary_m}` chỉ còn **{max(0, primary_rpd - primary_reqs_used)} requests** trong ngày PT.",
+            f"> **CẢNH BÁO HẠN MỨC GẦN HẾT**: Model `{primary_m}` chỉ còn **{max(0, eff_primary_rpd - primary_reqs_used)} requests** trong ngày PT.",
             f"> Tập tiếp theo nếu thiếu hạn mức sẽ tự động kích hoạt chuyển sang `{fallback_target}`.",
             ""
         ])

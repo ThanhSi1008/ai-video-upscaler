@@ -225,3 +225,45 @@ def test_round_robin_cycles_keys_on_success(temp_cache):
         assert translator.current_key_idx == 0
 
 
+def test_eleven_keys_natural_numeric_order_and_report_rpd_scaling(tmp_path, monkeypatch):
+    """Verify GEMINI_API_KEY_1..11 load in natural numeric order and scale QA report RPD limits."""
+    import os
+    from subtrans.config import get_gemini_api_keys
+    from subtrans.report import generate_qa_report
+
+    for env_k in list(os.environ.keys()):
+        if env_k.startswith("GEMINI_API_KEY"):
+            monkeypatch.delenv(env_k, raising=False)
+
+    expected_keys = [
+        f"AQ.Ab8RN6FakeSlot{i:02d}_000000" if i not in (1, 9) else f"AIzaSyFakeSlot{i:02d}_000000"
+        for i in range(1, 12)
+    ]
+    for idx, val in enumerate(expected_keys, start=1):
+        monkeypatch.setenv(f"GEMINI_API_KEY_{idx}", val)
+
+    loaded = get_gemini_api_keys()
+    assert loaded == expected_keys
+
+    srt_out = tmp_path / "ep01.vi.srt"
+    srt_out.write_text("1\n00:00:00,000 --> 00:00:02,000\nXin chào.\n", encoding="utf-8")
+    rep_path = tmp_path / "ep01.audit.md"
+    generate_qa_report(
+        cues=[Cue(id=1, start=0, end=2000, ja="こんにちは", vi="Xin chào.", model_used="gemini-3.5-flash-lite")],
+        ja_path=tmp_path / "ep01.ja.srt",
+        en_path=None,
+        output_subtitle_path=srt_out,
+        report_path=rep_path,
+        elapsed_time_sec=1.0,
+        stats={
+            "provenance": {"primary_model": "gemini-3.5-flash-lite"},
+            "pacific_time_requests": {"gemini-3.5-flash-lite": 500, "gemini-3.8-flash": 20},
+        },
+        cache=TranslationCache(db_path=tmp_path / "rep_11k.db"),
+    )
+    rep_md = rep_path.read_text(encoding="utf-8")
+    assert "| `gemini-3.5-flash-lite` | 500 | 5500 | **5000** |" in rep_md
+    assert "| `gemini-3.8-flash` | 20 | 220 | **200** |" in rep_md
+    assert "CẢNH BÁO HẠN MỨC GẦN HẾT" not in rep_md
+
+

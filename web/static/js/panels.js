@@ -1441,7 +1441,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       const data = await apiFetch("/api/subtrans/overview");
 
       if (kpiKeys) {
-        kpiKeys.textContent = `${data.configured_keys_count} / 3 khe`;
+        const slotCap = Math.max(3, Number(data.configured_keys_count) || 0);
+        kpiKeys.textContent = `${data.configured_keys_count} / ${slotCap} khe`;
       }
       if (kpiCache) {
         const tot = Number(data.cache?.total_cached_cues || 0).toLocaleString("vi-VN");

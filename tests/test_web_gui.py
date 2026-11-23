@@ -6109,3 +6109,46 @@ def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_fl
         assert "resumeCheckpointNow" in panels_js and "resumeCheckpointNow" in app_js
         assert "/api/checkpoints/delete" in app_js
         assert "active_chunk_fraction" in app_js
+
+
+def test_eleven_keys_natural_slot_order_across_put_and_overview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify 11-key .env preserves natural numeric slot order across PUT /api/subtrans/api-keys and overview."""
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    for env_k in list(os.environ.keys()):
+        if env_k.startswith("GEMINI_API_KEY"):
+            monkeypatch.delenv(env_k, raising=False)
+
+    root = _seed_workspace(tmp_path / "eleven_keys_ws")
+    env_lines = [
+        f"GEMINI_API_KEY_{idx}=AQ.Ab8RN6SlotKey{idx:02d}_{idx:04d}"
+        for idx in range(1, 12)
+    ]
+    (root / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        ov_init = client.get("/api/subtrans/overview").json()
+        assert ov_init["configured_keys_count"] == 11
+        assert {s["slot"]: s["masked"] for s in ov_init["key_slots"]} == {
+            1: "AQ.Ab8...0001",
+            2: "AQ.Ab8...0002",
+            3: "AQ.Ab8...0003",
+        }
+
+        r_put = client.put("/api/subtrans/api-keys", json={"key_2": "AIzaSyUpdatedSlotTwo2222"})
+        assert r_put.status_code == 200
+        put_data = r_put.json()
+        assert put_data["configured_count"] == 11
+        assert {s["slot"]: s["masked"] for s in put_data["key_slots"]} == {
+            1: "AQ.Ab8...0001",
+            2: "AIzaSy...2222",
+            3: "AQ.Ab8...0003",
+        }
+
+        ov_after = client.get("/api/subtrans/overview").json()
+        assert ov_after["configured_keys_count"] == 11
+        assert {s["slot"]: s["masked"] for s in ov_after["key_slots"]} == {
+            1: "AQ.Ab8...0001",
+            2: "AIzaSy...2222",
+            3: "AQ.Ab8...0003",
+        }

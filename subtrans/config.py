@@ -168,6 +168,12 @@ def update_model_quota_in_yaml(
         logging.getLogger("subtrans.config").warning(f"Could not update runtime quota metadata for {model_name}: {e}")
 
 
+def _gemini_key_var_sort_key(name: str) -> tuple[int, Any]:
+    """Order numbered GEMINI_API_KEY_<N> slots numerically before custom suffixes."""
+    suffix = name[len("GEMINI_API_KEY_"):]
+    return (0, int(suffix)) if suffix.isdigit() else (1, suffix)
+
+
 def get_gemini_api_keys() -> list[str]:
     """
     Thu thập danh sách tất cả các GEMINI_API_KEY từ môi trường và .env:
@@ -194,13 +200,17 @@ def get_gemini_api_keys() -> list[str]:
             if k_clean and k_clean not in keys:
                 keys.append(k_clean)
 
-    # 3. Quét các biến GEMINI_API_KEY_*
-    for env_k, env_v in sorted(os.environ.items()):
-        if env_k.startswith("GEMINI_API_KEY_") and env_v:
-            for k in env_v.replace(";", ",").split(","):
-                k_clean = k.strip()
-                if k_clean and k_clean not in keys:
-                    keys.append(k_clean)
+    # 3. Quét các biến GEMINI_API_KEY_* theo thứ tự số tự nhiên (1..9, 10, 11,...)
+    numbered_items = [
+        (env_k, env_v)
+        for env_k, env_v in os.environ.items()
+        if env_k.startswith("GEMINI_API_KEY_") and env_v
+    ]
+    for _, env_v in sorted(numbered_items, key=lambda item: _gemini_key_var_sort_key(item[0])):
+        for k in env_v.replace(";", ",").split(","):
+            k_clean = k.strip()
+            if k_clean and k_clean not in keys:
+                keys.append(k_clean)
 
     return keys
 

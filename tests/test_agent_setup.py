@@ -123,7 +123,7 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         "upscaler_pre_tool_guard",
     )
 
-    # 1. Local .env reads are allowed; writes prompt (force_ask); git add/commit on .env is denied
+    # 1. Local .env reads and edits are allowed; git add/commit on .env is denied
     for read_tool in ("read_file", "view_file"):
         res_env_read = mod.evaluate_tool_call(
             {"toolCall": {"name": read_tool, "args": {"Path": "e:/ai-video-upscaler/.env"}}},
@@ -136,7 +136,7 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
             {"toolCall": {"name": write_tool, "args": {"TargetFile": ".env"}}},
             repo_root=tmp_path,
         )
-        assert res_env_write["decision"] == "force_ask"
+        assert res_env_write["decision"] == "allow"
 
     for bad_git in ("git add .env", "git commit subtrans/.env -m 'oops'", r"git add subtrans\.env", r"git commit subtrans\.env -m 'oops'"):
         res = mod.evaluate_tool_call(
@@ -156,7 +156,7 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
             {"toolCall": {"name": "run_command", "args": {"CommandLine": shell_env_cmd}}},
             repo_root=tmp_path,
         )
-        assert res_shell_env_write["decision"] == "force_ask"
+        assert res_shell_env_write["decision"] == "allow"
 
     # 2. Context-Window & Rewrite Firewall checks
     big_py = tmp_path / "src" / "big_mod.py"

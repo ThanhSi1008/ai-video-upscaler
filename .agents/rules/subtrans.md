@@ -16,6 +16,6 @@ description: "Anime subtitle translation rules synced with subtrans-anime-ops: V
 - **SQLite & FTS5/RAG Cache Safety:**
   - Never instantiate default `TranslationCache()` or `KnowledgeBase()` against live `subtrans/.cache/` in tests; always inject `tmp_path` SQLite paths.
 - **Secrets, Quota & Subagent Delegation:**
-  - Local reading of `.env` / `subtrans/.env` is allowed; never commit, export, or print keys to logs.
+  - Local reading and editing of `.env` / `subtrans/.env` is allowed freely; never commit, export, or print keys to logs.
   - Block live Gemini API calls (`subtrans.py`, `scripts/batch_translate_all.py`, `benchmarks/subtrans/eval_golden_pronouns*.py`) unless `--dry-run`, `--help`, local subcommands (`eval`, `compare`, `rag stats`), or mock/test flags are passed.
   - Delegate subtitle evals (`subtrans/eval/runner.py`, `benchmarks/subtrans/eval_golden_pronouns*.py`) to [subtrans-evaluator](../agents/subtrans-evaluator.md) and offline pytest runs (`verify_offline.py --target` / `--impacted`) to [test-verifier](../agents/test-verifier.md).

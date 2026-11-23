@@ -507,8 +507,15 @@ def _resolve_subtrans_key_slots(
 
     prefix_len = len(ordered_entries)
 
+    def _extra_var_sort_key(name: str) -> tuple[int, Any]:
+        suffix = name[len("GEMINI_API_KEY_"):]
+        return (0, int(suffix)) if suffix.isdigit() else (1, suffix)
+
     all_var_names = set(dotenv_map.keys()) | set(os.environ.keys())
-    for extra_name in sorted(k for k in all_var_names if k.startswith("GEMINI_API_KEY_")):
+    for extra_name in sorted(
+        (k for k in all_var_names if k.startswith("GEMINI_API_KEY_")),
+        key=_extra_var_sort_key,
+    ):
         e_val, e_src = _effective_var(extra_name)
         _add_entries(_split_gemini_key_tokens(e_val), e_src, extra_name)
 
