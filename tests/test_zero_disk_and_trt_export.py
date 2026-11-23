@@ -402,3 +402,32 @@ def test_gpu_persistent_worker_load_model_enforces_weights_only_true(monkeypatch
     assert load_kwargs[0].get("weights_only") is True
 
 
+def test_build_trt_engine_cli_dry_run_and_direct_script_bootstrap(tmp_path, capsys):
+    """Verify src/build_trt_engine.py CLI main() --dry-run, unknown-model exit code, and direct script sys.path bootstrap."""
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    rc_ok = trt_mod.main(["--dry-run", "--model", "animevideov3", "--cache-dir", str(tmp_path)])
+    assert rc_ok == 0
+    out_ok = capsys.readouterr().out
+    assert "[DRY-RUN] model=animevideov3" in out_ok
+    assert "animevideov3_aa2x_" in out_ok
+
+    rc_bad = trt_mod.main(["--dry-run", "--model", "nonexistent-model-xyz"])
+    assert rc_bad == 2
+    _ = capsys.readouterr()
+
+    script_path = Path(trt_mod.__file__).resolve()
+    clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run(
+        [sys.executable, str(script_path), "--help"],
+        cwd=str(tmp_path),
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"Direct script --help failed: {proc.stderr}"
+    assert "--dry-run" in proc.stdout and "--cache-dir" in proc.stdout

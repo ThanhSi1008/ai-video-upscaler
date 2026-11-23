@@ -138,7 +138,7 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res_env_write["decision"] == "force_ask"
 
-    for bad_git in ("git add .env", "git commit subtrans/.env -m 'oops'"):
+    for bad_git in ("git add .env", "git commit subtrans/.env -m 'oops'", r"git add subtrans\.env", r"git commit subtrans\.env -m 'oops'"):
         res = mod.evaluate_tool_call(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": bad_git}}},
             repo_root=tmp_path,
@@ -151,11 +151,12 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
     )
     assert res_safe_commit["decision"] == "allow"
 
-    res_shell_env_write = mod.evaluate_tool_call(
-        {"toolCall": {"name": "run_command", "args": {"CommandLine": "Set-Content .env 'KEY=1'"}}},
-        repo_root=tmp_path,
-    )
-    assert res_shell_env_write["decision"] == "force_ask"
+    for shell_env_cmd in ("Set-Content .env 'KEY=1'", r"Set-Content subtrans\.env 'KEY=1'"):
+        res_shell_env_write = mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": shell_env_cmd}}},
+            repo_root=tmp_path,
+        )
+        assert res_shell_env_write["decision"] == "force_ask"
 
     # 2. Context-Window & Rewrite Firewall checks
     big_py = tmp_path / "src" / "big_mod.py"
@@ -224,8 +225,13 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
     )
     assert res_dump_bounded["decision"] == "allow"
 
-    # 3. Guard deleting .temp_* checkpoints
-    for cp_cmd in ("Remove-Item -Recurse -Force .temp_ep01", "python upscale.py --clean-temp"):
+    # 3. Guard deleting .temp_* checkpoints (including quoted .venv interpreter and -m upscale)
+    for cp_cmd in (
+        "Remove-Item -Recurse -Force .temp_ep01",
+        "python upscale.py --clean-temp",
+        '& ".\\.venv\\Scripts\\python.exe" upscale.py ep1.mkv --clean-temp',
+        ".\\.venv\\Scripts\\python.exe -m upscale ep1.mkv --force",
+    ):
         res = mod.evaluate_tool_call(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": cp_cmd}}},
             repo_root=tmp_path,
@@ -328,9 +334,16 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         "python benchmarks/research/measure_a1_a2_windows.py",
         "python tests/test_gpu_throttling_overlap.py",
         "RUN_GPU_TESTS=1 pytest -m gpu",
+        "RUN_GPU_TESTS=1 pytest -m gpu tests/",
+        'pytest -m="gpu and unit"',
+        'pytest -m"(gpu)"',
         "$env:RUN_GPU_TESTS=1; .\\.venv\\Scripts\\python.exe -m pytest -m gpu -q",
         "RUN_GPU_TESTS=1 pytest tests/test_gpu_throttling_overlap.py",
         "pytest -m smoke",
+        "pytest -m smoke tests/",
+        'pytest -m "smoke and not gpu"',
+        ".\\.venv\\Scripts\\python.exe -m subtrans eval",
+        'Start-Process .\\.venv\\Scripts\\python.exe -ArgumentList "src/build_trt_engine.py" -Wait',
         "python upscale.py ep1.mkv --preview 10",
         "python upscale.py ep1.mkv --dry-run",
         "python scripts/batch_translate_all.py --dry-run",
@@ -341,7 +354,7 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res_hw["decision"] == "allow", f"Expected allow for: {autonomous_hw_cmd}"
 
-    # Custom @pytest.mark.gpu benchmark module in tests/ is also allowed under RUN_GPU_TESTS=1
+    # Dedicated @pytest.mark.gpu module is allowed without -m gpu, whereas mixed GPU+CPU module requires -m gpu
     custom_gpu_test = tmp_path / "tests" / "test_custom_trt_bench.py"
     custom_gpu_test.parent.mkdir(parents=True, exist_ok=True)
     custom_gpu_test.write_text("import pytest\n\n@pytest.mark.gpu\ndef test_bench():\n    pass\n", encoding="utf-8")
@@ -350,6 +363,27 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         repo_root=tmp_path,
     )
     assert res_custom_gpu["decision"] == "allow"
+
+    mixed_gpu_test = tmp_path / "tests" / "test_mixed_gpu_and_cpu.py"
+    mixed_gpu_test.write_text(
+        "import pytest\n\n@pytest.mark.gpu\ndef test_gpu_only():\n    pass\n\ndef test_unisolated_cpu():\n    pass\n",
+        encoding="utf-8",
+    )
+    assert (
+        mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": "RUN_GPU_TESTS=1 pytest tests/test_mixed_gpu_and_cpu.py"}}},
+            repo_root=tmp_path,
+        )["decision"]
+        == "ask"
+    )
+    assert (
+        mod.evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": "RUN_GPU_TESTS=1 pytest -m gpu tests/test_mixed_gpu_and_cpu.py"}}},
+            repo_root=tmp_path,
+        )["decision"]
+        == "allow"
+    )
+    assert mod._segment_uses_gpu_pytest("pytest tests/test_agent_setup.py", "pytest tests/test_agent_setup.py", REPO_ROOT) is False
 
     # Unisolated non-GPU pytest bypasses (missing -m gpu, direct pytest.exe, disjunctions, or De Morgan negation) still ask
     for unsafe_gpu_pytest in (
@@ -367,9 +401,18 @@ def test_pre_tool_guard_enforces_project_boundaries(tmp_path):
         )
         assert res_unsafe_py["decision"] == "ask", f"Expected ask for: {unsafe_gpu_pytest}"
 
-    # Explicit Cloud Gemini subtitle flags on upscale.py still require Gemini Quota Guard confirmation
+    # Explicit Cloud Gemini subtitle flags, .\ prefixes, absolute paths, -m modules, and shell wrappers require confirmation
     for live_subs_cmd in (
         ".\\.venv\\Scripts\\python.exe scripts/batch_translate_all.py",
+        ".\\.venv\\Scripts\\python.exe .\\scripts\\batch_translate_all.py",
+        ".\\.venv\\Scripts\\python.exe -m scripts.batch_translate_all",
+        ".\\.venv\\Scripts\\python.exe -m subtrans run ep.srt",
+        ".\\.venv\\Scripts\\python.exe e:/ai-video-upscaler/subtrans.py run ep.srt",
+        '&".\\.venv\\Scripts\\python.exe" subtrans.py check',
+        'Invoke-Expression "python subtrans.py run ep.srt"',
+        'cmd /c "python subtrans.py run ep.srt"',
+        'powershell -NoProfile -Command "python subtrans.py run ep.srt"',
+        'Start-Process .\\.venv\\Scripts\\python.exe -ArgumentList "subtrans.py","run","ep.srt" -Wait',
         "python upscale.py --subs-pending",
         "python upscale.py ep1.mkv --subs-after-upscale",
         "python upscale.py --queue ep1.mkv ep2.mkv --async-subs",
@@ -464,8 +507,12 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
         "python src/build_trt_engine.py --help && python src/build_trt_engine.py",
         "python scripts/benchmark_pipeline.py",
         "python scripts/silicon_roofline_probe.py",
+        ".\\.venv\\Scripts\\python.exe .\\scripts\\silicon_roofline_probe.py",
+        "python -m scripts.benchmark_pipeline",
         "python benchmarks/upscale/benchmark_models_comparison.py",
         "pytest -m gpu",
+        'pytest -m "gpu or unit"',
+        'Start-Process .\\.venv\\Scripts\\python.exe -ArgumentList "src/build_trt_engine.py" -Wait',
         "RUN_GPU_TESTS=1 pytest tests/test_agent_setup.py",
         "$env:RUN_GPU_TESTS=1; pytest tests/test_agent_setup.py",
     ):
@@ -475,13 +522,17 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
         )
         assert res["decision"] == "force_ask", f"Expected force_ask for: {lock_cmd}"
 
-    # Non-GPU commands and inline regex strings remain allowed even while .gpu_active.lock exists
+    # Non-GPU commands (including string literals mentioning @pytest.mark.gpu) remain allowed while .gpu_active.lock exists
+    fake_setup = tmp_path / "tests" / "test_agent_setup.py"
+    fake_setup.parent.mkdir(parents=True, exist_ok=True)
+    fake_setup.write_text('SAMPLE = "@pytest.mark.gpu\\ndef test_x(): pass"\n\ndef test_cpu_only():\n    assert SAMPLE\n', encoding="utf-8")
     for lock_safe_cmd in (
         "python src/build_trt_engine.py --help",
+        "python src/build_trt_engine.py --dry-run",
         "python upscale.py --list-models",
         "python upscale.py --night-report",
         "python -c \"import re; re.compile('approval|build_trt_engine|upscale.py')\"",
-        "pytest tests/test_agent_context.py",
+        "pytest tests/test_agent_context.py tests/test_agent_setup.py",
         "pytest -m smoke",
     ):
         res_lock_safe = mod.evaluate_tool_call(
@@ -504,9 +555,11 @@ def test_pre_tool_guard_blocks_chained_command_bypasses(tmp_path):
         )
         assert res["decision"] == "allow", f"Expected allow for: {auto_up}"
 
-    # 7. Cross-segment CUDA_VISIBLE_DEVICES=-1 pytest isolation remains allowed
+    # 7. Cross-segment CUDA_VISIBLE_DEVICES=-1 (unquoted and PowerShell-quoted) pytest isolation remains allowed
     for safe_py in (
         "$env:CUDA_VISIBLE_DEVICES=-1; pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py",
+        "$env:CUDA_VISIBLE_DEVICES='-1'; pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py",
+        '$env:CUDA_VISIBLE_DEVICES = "-1"; pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py',
         "CUDA_VISIBLE_DEVICES=-1 pytest -p agent_offline_guard tests/test_cli_lock_and_pipeline_regressions.py",
     ):
         res = mod.evaluate_tool_call(

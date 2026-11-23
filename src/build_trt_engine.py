@@ -1,11 +1,20 @@
 """TensorRT FP16 engine builder and runtime wrapper for SRVGGNetCompact architectures."""
 
+import argparse
 import hashlib
 import json
 import os
 import sys
 import inspect
 from typing import Optional, Any, Tuple
+
+if __name__ == "__main__":
+    _repo_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root_dir not in sys.path:
+        sys.path.insert(0, _repo_root_dir)
+    from src.env_isolation import configure_e_drive_isolation
+    configure_e_drive_isolation(_repo_root_dir)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -995,3 +1004,218 @@ def get_hybrid_engine_or_wrapper(
                 print(f"⚠️ Không thể khởi tạo TensorRT Engine ({e}), tự động chuyển sang PyTorch FP16 Wrapper.")
 
     return wrapper
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Construct CLI parser for standalone TensorRT FP16 engine compilation and verification."""
+    parser = argparse.ArgumentParser(
+        prog="src/build_trt_engine.py",
+        description="Compile and SHA-256-verify TensorRT 10 FP16 .engine artifacts for registered SR models.",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=None,
+        help="Model ID from models/models.yaml, or 'all' (default: registry default model).",
+    )
+    parser.add_argument("--width", type=int, default=1920, help="Input frame width in pixels (default: 1920).")
+    parser.add_argument("--height", type=int, default=1080, help="Input frame height in pixels (default: 1080).")
+    parser.add_argument("--max-batch", type=int, default=8, help="Requested max profile batch size (default: 8).")
+    parser.add_argument("--workspace-gb", type=int, default=2, help="TensorRT workspace cap in GiB (default: 2).")
+    parser.add_argument("--cache-dir", default=None, help="Optional directory for .engine and .sha256 outputs.")
+    parser.add_argument("--force", action="store_true", help="Force rebuild even when verified .engine exists.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve target .engine paths and sidecar verification state without GPU lock or compilation.",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entrypoint for standalone TensorRT FP16 engine builds under .gpu_active.lock."""
+    args = build_cli_parser().parse_args(argv)
+    if args.width <= 0 or args.height <= 0 or args.max_batch < 1 or args.workspace_gb < 1:
+        print("[TRT-ERROR] width, height, max-batch, and workspace-gb must be positive integers.", file=sys.stderr)
+        return 2
+
+    from src.models_resolver import get_default_model_id, load_models_registry
+
+    registry = load_models_registry()
+    raw_model = str(args.model).strip() if args.model else ""
+    if raw_model.lower() == "all":
+        model_ids = list(registry.keys())
+    elif raw_model:
+        model_ids = [raw_model]
+    else:
+        model_ids = [get_default_model_id(registry)]
+
+    unknown = [m for m in model_ids if m not in registry]
+    if unknown:
+        print(f"[TRT-ERROR] Unknown model ID(s): {', '.join(unknown)}. Valid: {', '.join(registry)}", file=sys.stderr)
+        return 2
+
+    input_hw = (int(args.height), int(args.width))
+    if args.dry_run:
+        vram_gb = 12.0
+        if torch.cuda.is_available():
+            try:
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            except Exception:
+                vram_gb = 12.0
+        for mid in model_ids:
+            info = registry[mid]
+            arch_cfg = info.get("arch") or {}
+            arch_type = str(arch_cfg.get("type") or "")
+            up_scale = int(arch_cfg.get("upscale") or 2)
+            is_cugan = arch_type == "UpCunet2x"
+            arch_tag = "aa2x" if (arch_type == "SRVGGNetCompact" and up_scale > 2) else ("ps2x" if is_cugan else None)
+            req_b = max(1, int(args.max_batch))
+            if (input_hw[0] * input_hw[1]) < (540 * 960):
+                eff_b = req_b
+            elif (is_cugan and (input_hw[0] * input_hw[1]) >= (720 * 1280)) or up_scale >= 4:
+                eff_b = min(req_b, 2)
+            elif vram_gb < 15.0 and (input_hw[0] * input_hw[1]) >= (720 * 1280):
+                eff_b = min(req_b, 2)
+            else:
+                eff_b = min(req_b, 4)
+            w_sha = str(info.get("sha256") or "").strip().lower() or None
+            eng_path = get_trt_engine_path(
+                model_id=mid,
+                max_batch=eff_b,
+                input_hw=input_hw,
+                cache_dir=args.cache_dir,
+                weights_sha256=w_sha if is_cugan else None,
+                arch_tag=arch_tag,
+            )
+            verified = bool(
+                os.path.exists(eng_path)
+                and os.path.getsize(eng_path) > 0
+                and verify_trt_engine_sha256_sidecar(eng_path, expected_weights_sha256=w_sha)
+            )
+            print(f"[DRY-RUN] model={mid} batch=1..{eff_b} verified={verified} engine={eng_path}")
+        return 0
+
+    if not torch.cuda.is_available() or not is_tensorrt_available():
+        print("[TRT-ERROR] CUDA GPU and TensorRT runtime are required for live engine compilation.", file=sys.stderr)
+        return 1
+
+    from src.config import configure_cuda_fast_math, configure_nvme_jit_caches, gpu_exclusivity_lock
+    from src.cuda_engine import GPUPersistentWorker, _cleanup_gpu_worker, is_srvgg_compact_model
+
+    configure_nvme_jit_caches()
+    configure_cuda_fast_math()
+    device = torch.device("cuda:0")
+    vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+
+    with gpu_exclusivity_lock():
+        for mid in model_ids:
+            info = registry[mid]
+            w_sha = str(info.get("sha256") or "").strip().lower() or None
+            worker = GPUPersistentWorker(
+                model_id=mid,
+                weights_path=info["weights_path"],
+                precision="fp16",
+                device="cuda",
+                batch_size=int(args.max_batch),
+                use_tensorrt=False,
+                weights_sha256=w_sha,
+            )
+            try:
+                worker._load_model()
+                py_model = worker.model
+                if py_model is None:
+                    print(f"[TRT-ERROR] Failed to load PyTorch weights for '{mid}'.", file=sys.stderr)
+                    return 1
+                trt_max_batch = resolve_trt_profile_max_batch(
+                    py_model,
+                    max_batch=int(args.max_batch),
+                    input_hw=input_hw,
+                    available_vram_gb=vram_gb,
+                )
+                is_cugan2x = is_upcunet2x_model(py_model)
+                inner_cand = py_model.inner_model if hasattr(py_model, "inner_model") else py_model
+                has_srvgg = is_srvgg_compact_model(inner_cand)
+                if has_srvgg:
+                    tmp_wrap: nn.Module = SRVGGNetCompactTRTWrapper(inner_cand, scale=2.0)
+                elif is_cugan2x:
+                    tmp_wrap = _UpCunet2xTRTExportModule(py_model, target_scale=2.0)
+                else:
+                    tmp_wrap = _GenericTRTExportModule(py_model, target_scale=2.0)
+                is_collapsed_4x = bool(
+                    getattr(tmp_wrap, "_use_collapsed_aa2x", False)
+                    or (getattr(tmp_wrap, "model_scale", 2.0) > 2.0 + 1e-4)
+                )
+                arch_tag_val = "aa2x" if is_collapsed_4x else ("ps2x" if is_cugan2x else None)
+                del tmp_wrap
+
+                engine_path = get_trt_engine_path(
+                    model_id=mid,
+                    max_batch=trt_max_batch,
+                    input_hw=input_hw,
+                    cache_dir=args.cache_dir,
+                    weights_sha256=w_sha if is_cugan2x else None,
+                    arch_tag=arch_tag_val,
+                )
+                needs_build = (
+                    bool(args.force)
+                    or not os.path.exists(engine_path)
+                    or os.path.getsize(engine_path) == 0
+                    or not verify_trt_engine_sha256_sidecar(engine_path, expected_weights_sha256=w_sha)
+                )
+                if needs_build:
+                    onnx_path = engine_path.replace(".engine", ".onnx")
+                    try:
+                        export_model_to_onnx(
+                            py_model,
+                            onnx_path,
+                            max_batch=trt_max_batch,
+                            dummy_shape=input_hw,
+                            target_scale=2.0,
+                        )
+                        built = build_tensorrt_engine(
+                            onnx_path,
+                            engine_path,
+                            max_batch=trt_max_batch,
+                            input_hw=input_hw,
+                            workspace_gb=int(args.workspace_gb),
+                            weights_sha256=w_sha,
+                        )
+                    finally:
+                        if os.path.exists(onnx_path):
+                            try:
+                                os.remove(onnx_path)
+                            except OSError:
+                                pass
+                    if not built or not verify_trt_engine_sha256_sidecar(engine_path, expected_weights_sha256=w_sha):
+                        print(f"[TRT-ERROR] Engine build or SHA-256 verification failed for '{mid}'.", file=sys.stderr)
+                        return 1
+
+                runner = TRTRuntimeEngineWrapper(
+                    engine_path,
+                    device=device,
+                    input_hw=input_hw,
+                    max_batch=trt_max_batch,
+                    scale=2,
+                )
+                probe_in = torch.zeros((1, 3, input_hw[0], input_hw[1]), dtype=torch.float16, device=device)
+                probe_out = runner(probe_in)
+                expected_shape = (1, 3, input_hw[0] * 2, input_hw[1] * 2)
+                if tuple(probe_out.shape) != expected_shape or not bool(torch.isfinite(probe_out).all()):
+                    print(
+                        f"[TRT-ERROR] Runtime verification failed for '{mid}': got shape {tuple(probe_out.shape)}.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                del runner, probe_in, probe_out
+                torch.cuda.empty_cache()
+                status_tag = "BUILT" if needs_build else "CACHED"
+                print(f"[TRT-{status_tag}] model={mid} batch=1..{trt_max_batch} engine={engine_path}")
+            finally:
+                _cleanup_gpu_worker(worker)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
