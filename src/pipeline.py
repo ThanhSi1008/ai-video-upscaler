@@ -443,11 +443,16 @@ def run_upscale_pipeline(
                     "sha256": model_sha256,
                     "blended_weights_sha256": model_sha256,
                     "blend_alpha": eff_blend_alpha,
+                    "dedup_policy": str(dedup_policy or ("off" if not dedup else "default")),
+                    "dedup_policy_requested": str(dedup_policy or ""),
                     "grain_restore": norm_grain_restore,
                     "grain_tier": eff_grain_tier,
                     "grain_sigma_y": round(probed_sigma_y, 4),
                     "engine": engine,
                     "precision": precision,
+                    "zero_disk": bool(zero_disk),
+                    "use_tensorrt": bool(use_tensorrt),
+                    "batch_size": int(batch_size) if batch_size is not None else None,
                     "resolution_source": model_info.get("resolution_source", ""),
                     **(
                         {
@@ -471,11 +476,19 @@ def run_upscale_pipeline(
                     frames_in_dir = os.path.join(cache_root, "chunk_in")
                     frames_out_dir = os.path.join(cache_root, "chunk_out")
 
-                    storage_desc = (
-                        f"RAM Disk {ramdisk_size}MB ảo (Zero SSD Wear 🛡️)"
-                        if getattr(cache_root, "is_ramdisk", False) or "RAM" in cache_root
-                        else "Thư mục tạm NVMe SSD"
-                    )
+                    is_zero_disk_cuda = bool(zero_disk and engine == "cuda")
+                    if is_zero_disk_cuda:
+                        storage_desc = "Zero-Disk Ring Buffer (0 byte khung hình trung gian trên SSD 🛡️)"
+                        frame_format_desc = "P010LE / NV12 Semi-Planar Ring (Zero-Disk 10-bit BT.709)"
+                        encode_desc = "CQ 18 VBR (maxrate 45M, p6)" if HEVC_ENCODER == "hevc_nvenc" else bitrate
+                    else:
+                        storage_desc = (
+                            f"RAM Disk {ramdisk_size}MB ảo (Zero SSD Wear 🛡️)"
+                            if getattr(cache_root, "is_ramdisk", False) or "RAM" in cache_root
+                            else "Thư mục tạm NVMe SSD"
+                        )
+                        frame_format_desc = f"{fmt.upper()} (Lossless RGB24)"
+                        encode_desc = bitrate
 
                     banner_info = {
                         "filename": os.path.basename(original_input_path),
@@ -488,8 +501,10 @@ def run_upscale_pipeline(
                         "fps": meta["fps"],
                         "model": f"{model_info['name']} ({model_info['id']}) [{engine.upper()} {precision.upper()}] - {model_info.get('resolution_source', '')}",
                         "frame_format": fmt,
+                        "frame_format_desc": frame_format_desc,
                         "storage_info": storage_desc,
                         "bitrate": bitrate,
+                        "encode_desc": encode_desc,
                         "audio_count": meta["audio_count"],
                         "sub_count": meta["subtitle_count"],
                         "attach_count": meta["attachment_count"],
@@ -691,6 +706,7 @@ def run_upscale_pipeline(
                     plan_extra_meta["nvenc_multipass"] = episode_multipass
                     if rolling_planner is not None and hasattr(rolling_planner, "set_extra_fields"):
                         rolling_planner.set_extra_fields({"nvenc_multipass": episode_multipass})
+                    manifest_data["dedup_policy"] = str(effective_dedup_policy)
                     manifest_data["nvenc_multipass"] = episode_multipass
                     manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
                     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -1191,9 +1207,19 @@ def run_upscale_pipeline(
                                                 },
                                             ),
                                         )
+                                        trt_caps = [
+                                            int(getattr(w, "max_batch", eff_b) or eff_b)
+                                            for w in (detail_wrap, fast_wrap)
+                                            if getattr(w, "is_tensorrt", False)
+                                        ]
+                                        pipe_b = (
+                                            min(int(eff_b), max(2, max(trt_caps)))
+                                            if (batch_size is None and trt_caps)
+                                            else int(eff_b)
+                                        )
                                         shared_up = DoubleBufferedPipeUpscaler(
                                             detail_wrap,
-                                            batch_size=eff_b,
+                                            batch_size=pipe_b,
                                             device=c_eng.device,
                                             input_hw=(res_h, res_w),
                                             scale=2,
@@ -1284,11 +1310,16 @@ def run_upscale_pipeline(
                                                         {"weights_sha256": model_sha256},
                                                     ),
                                                 )
+                                                pre_pipe_bs = (
+                                                    min(int(pre_bs), max(2, int(getattr(pre_wrapped, "max_batch", pre_bs) or pre_bs)))
+                                                    if (batch_size is None and getattr(pre_wrapped, "is_tensorrt", False))
+                                                    else int(pre_bs)
+                                                )
                                                 pre_cuda._zero_disk_wrapper = pre_wrapped
                                                 pre_cuda._zero_disk_key = pre_key
                                                 pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
                                                     pre_wrapped,
-                                                    batch_size=pre_bs,
+                                                    batch_size=pre_pipe_bs,
                                                     device=pre_cuda.device,
                                                     input_hw=(pre_h, pre_w),
                                                     scale=2,
@@ -1318,9 +1349,39 @@ def run_upscale_pipeline(
                                 partial_paused = False
                                 chunk_png_unit_sizes = []
 
+                                def _harvest_completed_encode_nonblocking() -> bool:
+                                    nonlocal future_encode, total_enc_time, prev_c_idx
+                                    if future_encode is None or not future_encode.done():
+                                        return False
+                                    prev_enc_elapsed = future_encode.result()
+                                    total_enc_time += prev_enc_elapsed
+                                    prev_c_idx = last_encode_item["target"][0]
+                                    prev_exp_frames = last_encode_item["extracted"]["expected_frames"]
+                                    prev_seg_elapsed = (
+                                        max(0.001, (last_seg_ai_end - last_seg_start) + prev_enc_elapsed)
+                                        if last_seg_ai_end >= last_seg_start
+                                        else max(0.001, time.time() - last_seg_start)
+                                    )
+                                    logger.log_chunk_done(
+                                        chunk_idx=prev_c_idx,
+                                        total_chunks=total_segs,
+                                        frames=prev_exp_frames,
+                                        ai_time=last_ai_result["elapsed_seconds"],
+                                        ai_fps=last_ai_result["fps"],
+                                        enc_time=prev_enc_elapsed,
+                                        total_chunk_time=prev_seg_elapsed,
+                                        output_seg=last_encode_item["target"][2],
+                                        t0_seconds=last_ai_result.get("t0_seconds"),
+                                        steady_fps=last_ai_result.get("steady_fps"),
+                                        rss_mb=last_ai_result.get("peak_rss_mb"),
+                                    )
+                                    future_encode = None
+                                    return True
+
                                 for i, target_chunk in enumerate(chunks_to_process):
                                     c_idx, c_seg_file, c_seg_out = target_chunk
                                     prev_c_idx = c_idx
+                                    _harvest_completed_encode_nonblocking()
                                     logger.set_stage(
                                         "upscaling",
                                         f"Đang suy luận 4K phân đoạn {c_idx + 1}/{total_segs}",
@@ -1333,6 +1394,7 @@ def run_upscale_pipeline(
                                         future_extract = None
                                     else:
                                         extracted = worker_extract(target_chunk)
+                                    _harvest_completed_encode_nonblocking()
 
                                     # Gối đầu thực sự (True 3-Stage Overlap):
                                     # Khởi chạy giải mã CPU/NVDEC cho chunk i+1 NGAY TRƯỚC KHI GPU suy luận chunk i!
@@ -1619,11 +1681,16 @@ def run_upscale_pipeline(
                                                                 {"weights_sha256": model_sha256},
                                                             ),
                                                         )
+                                                        pipe_bs = (
+                                                            min(int(eff_bs), max(2, int(getattr(wrapped_model, "max_batch", eff_bs) or eff_bs)))
+                                                            if (batch_size is None and getattr(wrapped_model, "is_tensorrt", False))
+                                                            else int(eff_bs)
+                                                        )
                                                         cuda_engine._zero_disk_wrapper = wrapped_model
                                                         cuda_engine._zero_disk_key = runner_key
                                                         cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
                                                             wrapped_model,
-                                                            batch_size=eff_bs,
+                                                            batch_size=pipe_bs,
                                                             device=cuda_engine.device,
                                                             input_hw=(in_h, in_w),
                                                             scale=2,
@@ -1705,11 +1772,36 @@ def run_upscale_pipeline(
                                                     enc_proc = pipe_upscaler.spawn_nvenc_pipe_writer(
                                                         tmp_seg_out, fps_str=fps_str, width=out_w, height=out_h
                                                     )
+                                                zero_disk_sync_enc = 0.001
                                                 try:
                                                     pre_dedup = (
                                                         extracted.get("distinct_frames"),
                                                         extracted.get("frame_to_distinct"),
                                                     ) if (extracted.get("distinct_frames") is not None and extracted.get("frame_to_distinct") is not None) else None
+                                                    exp_chunk_frames = int(extracted.get("expected_frames") or 0)
+
+                                                    def _on_pipe_batch_progress(
+                                                        done_d: int,
+                                                        tot_d: int,
+                                                        written_f: int,
+                                                        _c_idx=c_idx,
+                                                        _t0=t0_pipe,
+                                                        _exp_f=exp_chunk_frames,
+                                                    ) -> None:
+                                                        _harvest_completed_encode_nonblocking()
+                                                        logger.update_active_chunk_progress(
+                                                            chunk_idx=_c_idx,
+                                                            done_distinct=done_d,
+                                                            total_distinct=tot_d,
+                                                            chunk_elapsed_sec=max(0.001, time.time() - _t0),
+                                                            frames_written=written_f,
+                                                            chunk_total_frames=_exp_f,
+                                                        )
+
+                                                    pipe_extra_kw = _filter_supported_kwargs(
+                                                        pipe_upscaler.process_frames_to_pipe,
+                                                        {"batch_progress_callback": _on_pipe_batch_progress},
+                                                    )
                                                     pipe_upscaler.process_frames_to_pipe(
                                                         unique_frames_rgb,
                                                         repeat_counts,
@@ -1717,6 +1809,7 @@ def run_upscale_pipeline(
                                                         cyclic_dedup=allow_cyclic_dedup,
                                                         capture_first_rgb_small=should_check_sanity,
                                                         precomputed_dedup=pre_dedup,
+                                                        **pipe_extra_kw,
                                                     )
                                                 except Exception:
                                                     if enc_proc.stdin:
@@ -1805,7 +1898,7 @@ def run_upscale_pipeline(
                                                 if can_async_finalize:
                                                     zero_disk_pending_finalize = (enc_proc, tmp_seg_out, c_seg_out, c_idx)
                                                 else:
-                                                    worker_finalize_zero_disk(enc_proc, tmp_seg_out, c_seg_out, c_idx)
+                                                    zero_disk_sync_enc = worker_finalize_zero_disk(enc_proc, tmp_seg_out, c_seg_out, c_idx)
                                                     zero_disk_pending_finalize = None
 
                                                 num_unique_frames = pipe_upscaler.last_distinct_count or len(
@@ -2136,7 +2229,8 @@ def run_upscale_pipeline(
                                         else:
                                             prev_c_idx = c_idx
                                             chunk_elapsed = time.time() - seg_start_time
-                                            total_enc_time += 0.001
+                                            sync_enc_val = float(locals().get("zero_disk_sync_enc", 0.001) or 0.001)
+                                            total_enc_time += sync_enc_val
                                             render_progress(
                                                 c_idx + 1, total_segs,
                                                 prefix=f"✨ Đoạn {c_idx+1:02d}/{total_segs:02d}",
@@ -2149,7 +2243,7 @@ def run_upscale_pipeline(
                                                 frames=extracted["expected_frames"],
                                                 ai_time=ai_result["elapsed_seconds"],
                                                 ai_fps=ai_result["fps"],
-                                                enc_time=0.001,
+                                                enc_time=sync_enc_val,
                                                 total_chunk_time=chunk_elapsed,
                                                 output_seg=c_seg_out,
                                                 t0_seconds=0.0,

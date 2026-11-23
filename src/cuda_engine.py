@@ -670,17 +670,26 @@ class GPUPersistentWorker:
             model = model.to(memory_format=torch.channels_last)
         model.eval()
 
-        # Warm up 1 batch to initialize kernel caches
-        warm_b = min(self.batch_size, 2)
-        dummy = torch.rand(warm_b, 3, 540, 960, device=self.device)
-        if self.precision == "fp16":
-            dummy = dummy.half()
-        if self.device.type == "cuda":
-            dummy = dummy.to(memory_format=torch.channels_last)
-        with torch.inference_mode():
-            _ = model(dummy)
+        # Warm up 1 batch to initialize PyTorch/cuDNN caches when PyTorch will actually execute inference
+        skip_pytorch_warmup = False
+        if self.use_tensorrt and self.device.type == "cuda" and not in_pytest:
+            try:
+                from src.build_trt_engine import is_tensorrt_available
+                skip_pytorch_warmup = bool(is_tensorrt_available())
+            except Exception:
+                skip_pytorch_warmup = False
+
+        if not skip_pytorch_warmup:
+            warm_b = min(self.batch_size, 2)
+            dummy = torch.rand(warm_b, 3, 540, 960, device=self.device)
+            if self.precision == "fp16":
+                dummy = dummy.half()
             if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
+                dummy = dummy.to(memory_format=torch.channels_last)
+            with torch.inference_mode():
+                _ = model(dummy)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
 
         self.model = model
         self.last_load_time = time.time() - t0

@@ -832,6 +832,7 @@ class GPUColorConverterP010LE:
         chroma_siting: str = "center",
         dither: bool = False,
         soft_antiring: bool = False,
+        min_ring_batch: int = 8,
     ):
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -839,6 +840,7 @@ class GPUColorConverterP010LE:
         self.chroma_siting = str(chroma_siting or "center").strip().lower()
         self.dither = bool(dither)
         self.soft_antiring = bool(soft_antiring)
+        self.min_ring_batch = max(1, int(min_ring_batch))
         self._p010_ring: List[torch.Tensor] = []
         self._p010_ring_slot: int = 0
         self._has_triton = False
@@ -847,7 +849,7 @@ class GPUColorConverterP010LE:
             self._has_triton = True
 
     def _ensure_ring(self, B: int, H: int, W: int, device: torch.device) -> None:
-        alloc_b = max(int(B), 8)
+        alloc_b = max(int(B), self.min_ring_batch)
         out_shape = (alloc_b, int(H * 3 // 2), int(W))
         if (
             len(self._p010_ring) != 2
@@ -1545,6 +1547,7 @@ class DoubleBufferedPipeUpscaler:
             chroma_siting=self.chroma_siting,
             dither=self.dither,
             soft_antiring=self.soft_antiring,
+            min_ring_batch=self.batch_size,
         )
         self.input_hw = (0, 0)
         self.output_hw = (0, 0)
@@ -1671,7 +1674,11 @@ class DoubleBufferedPipeUpscaler:
                 dummy_p010 = torch.zeros((cur_bs, semi_h, in_w), dtype=torch.int16, device=self.device)
                 dummy_nv12 = torch.zeros((cur_bs, semi_h, in_w), dtype=torch.uint8, device=self.device)
                 _yuv420_to_nchw_fp16_bt709(
-                    dummy_p010, is_p010=True, out_nchw_fp16=dummy_in_buf, chroma_siting=self.chroma_siting
+                    dummy_p010,
+                    is_p010=True,
+                    out_nchw_fp16=dummy_in_buf,
+                    chroma_siting=self.chroma_siting,
+                    pre_deband=bool(self.source_is_8bit),
                 )
                 _yuv420_to_nchw_fp16_bt709(
                     dummy_nv12,
@@ -1691,6 +1698,7 @@ class DoubleBufferedPipeUpscaler:
                     ref_lr_rgb=dummy_in_buf if (self.soft_antiring and self.scale == 2) else None,
                 )
                 torch.cuda.synchronize(self.device)
+                torch.cuda.empty_cache()
         except Exception:
             try:
                 cur_bs = min(max(1, batch_size), self.batch_size)
@@ -1854,6 +1862,7 @@ class DoubleBufferedPipeUpscaler:
         capture_first_rgb_small: bool = False,
         enable_micro_timings: Optional[bool] = None,
         precomputed_dedup: Optional[Tuple[List[np.ndarray], List[int]]] = None,
+        batch_progress_callback: Optional[Any] = None,
     ) -> int:
         """Upscale deduplicated segment frames with cyclic memoization and stream them as P010LE into encoder_proc."""
         self.last_first_rgb_small = None
@@ -1969,10 +1978,8 @@ class DoubleBufferedPipeUpscaler:
                         evt_tri_s = evt_tri_e = None
                         evt_d2h_s = evt_d2h_e = None
 
-                    # 1. Stage NHWC input to pinned memory and enqueue async H2D copy
+                    # 1. Stage NHWC/YUV input to pinned memory and enqueue async H2D copy
                     with torch.cuda.stream(self.stream_h2d):
-                        if record_micro and evt_h2d_s is not None:
-                            evt_h2d_s.record(self.stream_h2d)
                         first_arr = distinct_frames[s_idx]
                         is_yuv = first_arr.ndim == 2
                         is_hwc = first_arr.ndim == 3 and first_arr.shape[-1] == 3
@@ -1986,6 +1993,8 @@ class DoubleBufferedPipeUpscaler:
                                 arr_i = distinct_frames[s_idx + i]
                                 src_view = arr_i.view(np.int16) if is_p010 else arr_i
                                 yuv_pin[i].copy_(torch.from_numpy(src_view))
+                            if record_micro and evt_h2d_s is not None:
+                                evt_h2d_s.record(self.stream_h2d)
                             if self.gpu_yuv_ring:
                                 gpu_yuv = self.gpu_yuv_ring[slot][:cur_B]
                                 gpu_yuv.copy_(yuv_pin[:cur_B], non_blocking=True)
@@ -2016,6 +2025,8 @@ class DoubleBufferedPipeUpscaler:
                             hwc_pin = self.host_in_pins[slot].view(self.batch_size, f_h, f_w, 3)
                             for i in range(cur_B):
                                 hwc_pin[i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
+                            if record_micro and evt_h2d_s is not None:
+                                evt_h2d_s.record(self.stream_h2d)
                             if self.gpu_nhwc_ring:
                                 gpu_nhwc = self.gpu_nhwc_ring[slot][:cur_B]
                                 gpu_nhwc.copy_(hwc_pin[:cur_B], non_blocking=True)
@@ -2032,6 +2043,8 @@ class DoubleBufferedPipeUpscaler:
                         else:
                             for i in range(cur_B):
                                 self.host_in_pins[slot][i].copy_(torch.from_numpy(distinct_frames[s_idx + i]))
+                            if record_micro and evt_h2d_s is not None:
+                                evt_h2d_s.record(self.stream_h2d)
                             gpu_in = self.host_in_pins[slot][:cur_B].to(self.device, non_blocking=True)
                             if record_micro and evt_h2d_dma_e is not None:
                                 evt_h2d_dma_e.record(self.stream_h2d)
@@ -2165,6 +2178,11 @@ class DoubleBufferedPipeUpscaler:
 
                     slot_views = {s_idx + i: out_np[i] for i in range(cur_B)}
                     _drain_ready_frames(e_idx, slot_views, slot_idx=slot)
+                    if callable(batch_progress_callback):
+                        try:
+                            batch_progress_callback(e_idx, num_distinct, total_frames_written)
+                        except Exception:
+                            pass
 
                     curr_event, curr_sanity_cpu = next_event, next_sanity_cpu
 
@@ -2281,6 +2299,11 @@ class DoubleBufferedPipeUpscaler:
 
                     slot_views = {start_idx + i: out_np[i] for i in range(cur_B)}
                     _drain_ready_frames(end_idx, slot_views, slot_idx=slot)
+                    if callable(batch_progress_callback):
+                        try:
+                            batch_progress_callback(end_idx, num_distinct, total_frames_written)
+                        except Exception:
+                            pass
 
                 if record_micro:
                     n_b = max(1, (num_distinct + self.batch_size - 1) // self.batch_size)

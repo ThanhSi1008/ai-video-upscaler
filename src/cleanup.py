@@ -189,7 +189,8 @@ def organize_output_artifacts(
     output_dir: str,
     base_name: Optional[str] = None,
     audit_subdir_name: str = "audit",
-    logger=None
+    logger=None,
+    out_stem: Optional[str] = None,
 ) -> List[str]:
     """
     Gom các file kỹ thuật/kiểm định (.audit.json, .audit.md, .cast.yaml)
@@ -220,14 +221,16 @@ def organize_output_artifacts(
                 if base_name:
                     safe_base = base_name.rstrip(". ")
                     stem_no_ext = item[:-len(ext)]
-                    exact_prefixes = (
+                    exact_prefixes = [
                         f"{base_name}.",
                         f"{base_name}_4K.",
                         f"{base_name}_4K_animejanai.",
+                        f"{base_name}_preview_",
                         f"{safe_base}.",
                         f"{safe_base}_4K.",
                         f"{safe_base}_4K_animejanai.",
-                    )
+                        f"{safe_base}_preview_",
+                    ]
                     exact_stems = {
                         base_name,
                         f"{base_name}_4K",
@@ -236,7 +239,11 @@ def organize_output_artifacts(
                         f"{safe_base}_4K",
                         f"{safe_base}_4K_animejanai",
                     }
-                    if item.startswith(exact_prefixes) or stem_no_ext in exact_stems:
+                    if out_stem:
+                        safe_out = out_stem.rstrip(". ")
+                        exact_prefixes.extend([f"{out_stem}.", f"{safe_out}."])
+                        exact_stems.update({out_stem, safe_out})
+                    if item.startswith(tuple(exact_prefixes)) or stem_no_ext in exact_stems:
                         is_target = True
                 else:
                     is_target = True

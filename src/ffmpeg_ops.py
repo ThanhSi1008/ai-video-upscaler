@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 from glob import glob
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -783,139 +783,169 @@ def _recover_open_gop_leading_frames(
     target_sec = max(0.0, float(chunk_start_sec)) if has_target else 0.0
     if has_target and target_sec <= 1e-4 and _count_leading_discard_packets(source_video_path) >= n_discard:
         return [cra_anchor_frame.copy() for _ in range(n_discard)]
-    seek_sec = max(0.0, target_sec - 15.0)
-    seek_sec_str = f"{seek_sec:.3f}"
-    eff_seek_sec = float(seek_sec_str)
-    win_dur = 18.0
-    pts_list: List[float] = []
-    probed_fps: Optional[float] = None
-    if av is not None and not hasattr(subprocess.Popen, "_mock_name"):
+
+    def _probe_window_pts(eff_seek_s: float, win_dur_s: float) -> tuple[List[float], Optional[float]]:
+        if av is None or hasattr(subprocess.Popen, "_mock_name"):
+            return [], None
         try:
             with av.open(source_video_path) as c:
                 v = next((s for s in c.streams if s.type == "video"), None)
-                if v is not None:
-                    rate = v.guessed_rate or v.average_rate
-                    if rate and float(rate) > 0:
-                        probed_fps = float(rate)
-                    if v.time_base is not None:
-                        tb = float(v.time_base)
-                        start_s = (
-                            float(v.start_time * v.time_base)
-                            if v.start_time is not None
-                            else (float(c.start_time) / 1_000_000.0 if c.start_time is not None else 0.0)
-                        )
-                        if eff_seek_sec > 2.0:
-                            c.seek(
-                                int((max(0.0, eff_seek_sec - 2.0) + start_s) / tb),
-                                stream=v,
-                                backward=True,
-                                any_frame=False,
-                            )
-                        tail_over = 0
-                        raw_pts: List[float] = []
-                        for p in c.demux(v):
-                            if p.pts is None or p.size <= 0 or getattr(p, "is_discard", False):
-                                continue
-                            t = float(p.pts * v.time_base) - start_s
-                            if t >= eff_seek_sec - 1e-4:
-                                raw_pts.append(t)
-                            if t > eff_seek_sec + win_dur + 2.0:
-                                tail_over += 1
-                                if tail_over >= 16:
-                                    break
-                            else:
-                                tail_over = 0
-                        raw_pts.sort()
-                        pts_list = raw_pts
-        except Exception:
-            pts_list = []
-
-    eff_fps = probed_fps if (probed_fps and 1.0 <= probed_fps <= 240.0) else (24000.0 / 1001.0)
-    max_win_frames = max(600, int((win_dur + 2.0) * max(eff_fps, 30.0)) + 1)
-    ring: collections.deque = collections.deque(maxlen=n_discard + 1)
-    frame_buf = bytearray(frame_bytes)
-    mv = memoryview(frame_buf)
-    mid_y = h_int // 2
-    anchor_strip = cra_anchor_frame[mid_y, ::16]
-    matched_leading: Optional[List[Any]] = None
-    best_score: Optional[tuple[int, float, int]] = None
-    best_dist: float = float("inf")
-
-    vf_args = ["-vf", color_vf] if color_vf else []
-    cmd = [
-        "ffmpeg", "-v", "error",
-        "-ss", seek_sec_str,
-        "-t", f"{win_dur:.3f}",
-        "-i", source_video_path,
-        *vf_args,
-        "-vsync", "0",
-        "-f", "rawvideo",
-        "-pix_fmt", pix_fmt,
-        "pipe:1",
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-    try:
-        if proc.stdout is not None:
-            frames_seen = 0
-            while frames_seen < max_win_frames:
-                got = 0
-                while got < frame_bytes:
-                    n_read = proc.stdout.readinto(mv[got:frame_bytes])
-                    if not n_read:
-                        break
-                    got += n_read
-                if got < frame_bytes:
-                    break
-                frames_seen += 1
-                idx0 = frames_seen - 1
-                t_curr = pts_list[idx0] if idx0 < len(pts_list) else (eff_seek_sec + (idx0 / eff_fps))
-                curr_frame = np.frombuffer(frame_buf, dtype=frame_dtype).reshape(frame_shape).copy()
-                if len(ring) >= n_discard:
-                    if (
-                        np.array_equal(curr_frame[mid_y, ::16], anchor_strip)
-                        and np.array_equal(curr_frame, cra_anchor_frame)
-                    ):
-                        if not has_target:
-                            matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
+                if v is None:
+                    return [], None
+                probed: Optional[float] = None
+                rate = v.guessed_rate or v.average_rate
+                if rate and float(rate) > 0:
+                    probed = float(rate)
+                if v.time_base is None:
+                    return [], probed
+                tb = float(v.time_base)
+                start_s = (
+                    float(v.start_time * v.time_base)
+                    if v.start_time is not None
+                    else (float(c.start_time) / 1_000_000.0 if c.start_time is not None else 0.0)
+                )
+                if eff_seek_s > 2.0:
+                    c.seek(
+                        int((max(0.0, eff_seek_s - 2.0) + start_s) / tb),
+                        stream=v,
+                        backward=True,
+                        any_frame=False,
+                    )
+                tail_over = 0
+                raw_pts: List[float] = []
+                for p in c.demux(v):
+                    if p.pts is None or p.size <= 0 or getattr(p, "is_discard", False):
+                        continue
+                    t = float(p.pts * v.time_base) - start_s
+                    if t >= eff_seek_s - 1e-4:
+                        raw_pts.append(t)
+                    if t > eff_seek_s + win_dur_s + 2.0:
+                        tail_over += 1
+                        if tail_over >= 16:
                             break
-                        dist = abs(t_curr - target_sec)
-                        in_zone = (
-                            (target_sec - 0.5 / eff_fps)
-                            <= t_curr
-                            <= (target_sec + (n_discard + 1.5) / eff_fps)
-                        )
-                        score = (0 if in_zone else 1, dist, idx0)
-                        if best_score is None or score < best_score:
-                            best_score = score
-                            best_dist = dist
-                            matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
-                ring.append(curr_frame)
-                if has_target and matched_leading is not None:
-                    if (t_curr > target_sec + 1.0 and best_dist <= 0.25) or (t_curr > target_sec + 3.0):
-                        break
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
-    finally:
-        if matched_leading is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        try:
-            proc.wait(timeout=3.0)
+                    else:
+                        tail_over = 0
+                raw_pts.sort()
+                return raw_pts, probed
         except Exception:
-            try:
-                proc.kill()
-                proc.wait(timeout=1.0)
-            except Exception:
-                pass
+            return [], None
 
-    if matched_leading is not None:
-        return matched_leading
+    def _scan_decode_window(lead_margin_s: float, win_dur_s: float) -> tuple[Optional[List[Any]], bool]:
+        seek_s = max(0.0, target_sec - lead_margin_s)
+        seek_s_str = f"{seek_s:.3f}"
+        eff_seek_s = float(seek_s_str)
+        pts_list, probed_fps = _probe_window_pts(eff_seek_s, win_dur_s)
+        eff_fps = probed_fps if (probed_fps and 1.0 <= probed_fps <= 240.0) else (24000.0 / 1001.0)
+        max_win_frames = max(600, int((win_dur_s + 2.0) * max(eff_fps, 30.0)) + 1)
+        ring: collections.deque = collections.deque(maxlen=n_discard + 1)
+        frame_buf = bytearray(frame_bytes)
+        mv = memoryview(frame_buf)
+        mid_y = h_int // 2
+        anchor_strip = cra_anchor_frame[mid_y, ::16]
+        matched_leading: Optional[List[Any]] = None
+        best_score: Optional[tuple[int, float, int]] = None
+        best_dist: float = float("inf")
+
+        vf_args = ["-vf", color_vf] if color_vf else []
+        cmd = [
+            "ffmpeg", "-v", "error",
+            "-ss", seek_s_str,
+            "-t", f"{win_dur_s:.3f}",
+            "-i", source_video_path,
+            *vf_args,
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", pix_fmt,
+            "pipe:1",
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        try:
+            if proc.stdout is not None:
+                frames_seen = 0
+                while frames_seen < max_win_frames:
+                    got = 0
+                    while got < frame_bytes:
+                        n_read = proc.stdout.readinto(mv[got:frame_bytes])
+                        if not n_read:
+                            break
+                        got += n_read
+                    if got < frame_bytes:
+                        break
+                    frames_seen += 1
+                    idx0 = frames_seen - 1
+                    t_curr = pts_list[idx0] if idx0 < len(pts_list) else (eff_seek_s + (idx0 / eff_fps))
+                    curr_frame = np.frombuffer(frame_buf, dtype=frame_dtype).reshape(frame_shape).copy()
+                    if len(ring) >= n_discard:
+                        if (
+                            np.array_equal(curr_frame[mid_y, ::16], anchor_strip)
+                            and np.array_equal(curr_frame, cra_anchor_frame)
+                        ):
+                            if not has_target:
+                                matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
+                                break
+                            dist = abs(t_curr - target_sec)
+                            in_zone = (
+                                (target_sec - 0.5 / eff_fps)
+                                <= t_curr
+                                <= (target_sec + (n_discard + 1.5) / eff_fps)
+                            )
+                            score = (0 if in_zone else 1, dist, idx0)
+                            if best_score is None or score < best_score:
+                                best_score = score
+                                best_dist = dist
+                                matched_leading = [f.copy() for f in list(ring)[-n_discard:]]
+                                if in_zone and dist <= (0.6 / eff_fps):
+                                    break
+                    ring.append(curr_frame)
+                    if has_target and matched_leading is not None:
+                        if (t_curr > target_sec + 1.0 and best_dist <= 0.25) or (t_curr > target_sec + 3.0):
+                            break
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+        finally:
+            if matched_leading is not None and callable(getattr(proc, "poll", None)) and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=3.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+        return matched_leading, bool(pts_list)
+
+    short_lead = max(2.5, (n_discard + 12) / 24.0)
+    matched, had_real_pts = _scan_decode_window(short_lead, short_lead + 3.0)
+    if matched is None and had_real_pts and target_sec > short_lead:
+        matched, _ = _scan_decode_window(15.0, 18.0)
+    if matched is not None:
+        return matched
 
     return [cra_anchor_frame.copy() for _ in range(n_discard)]
+
+
+_S5_P010_DIV_LUT: Optional[Any] = None
+
+
+def _get_s5_p010_div_lut() -> Any:
+    """Return cached 1D uint16 lookup table for ((acc + (cnt >> 1)) // cnt) << 6 over cnt in 1..5, acc in 0..5115."""
+    global _S5_P010_DIV_LUT
+    if _S5_P010_DIV_LUT is not None:
+        return _S5_P010_DIV_LUT
+    import numpy as np
+
+    lut = np.zeros((6, 8192), dtype=np.uint16)
+    acc_vals = np.arange(5120, dtype=np.int32)
+    for cnt_val in range(1, 6):
+        lut[cnt_val, :5120] = (((acc_vals + (cnt_val >> 1)) // cnt_val) << 6).astype(np.uint16)
+    _S5_P010_DIV_LUT = lut.reshape(-1)
+    return _S5_P010_DIV_LUT
 
 
 def _apply_symmetric_s5_p010_filter(
@@ -926,24 +956,18 @@ def _apply_symmetric_s5_p010_filter(
     luma_h: int,
 ) -> List[Any]:
     """Apply symmetric s=5 (k-2..k+2) directional atadenoise filter in 10-bit p010le space across full_frames."""
+    import cv2
     import numpy as np
 
     n_total = len(full_frames)
     if n_total == 0 or not target_indices:
         return []
-    semi_h = full_frames[0].shape[0]
+    semi_h, w_int = full_frames[0].shape
     tier = str(grain_tier or "light").strip().lower()
     if tier == "heavy":
         thra_y, thrb_y, thra_uv, thrb_uv = 25, 49, 16, 33
     else:
         thra_y, thrb_y, thra_uv, thrb_uv = 18, 37, 12, 25
-
-    thra_col = np.empty((semi_h, 1), dtype=np.int32)
-    thrb_col = np.empty((semi_h, 1), dtype=np.int32)
-    thra_col[:luma_h, 0] = thra_y
-    thra_col[luma_h:, 0] = thra_uv
-    thrb_col[:luma_h, 0] = thrb_y
-    thrb_col[luma_h:, 0] = thrb_uv
 
     f10_cache: Dict[int, Any] = {}
 
@@ -954,51 +978,55 @@ def _apply_symmetric_s5_p010_filter(
             return cached
         arr = full_frames[clamped]
         if is_10bit_src or arr.dtype in (np.uint16, np.int16):
-            f10 = (arr.view(np.uint16) >> 6).astype(np.int16)
+            f10 = np.right_shift(arr.view(np.uint16), 6)
         else:
-            f10 = arr.astype(np.int16) << 2
+            f10 = np.left_shift(arr.astype(np.uint16), 2)
         f10_cache[clamped] = f10
         return f10
+
+    div_lut = _get_s5_p010_div_lut()
+    acc = np.empty((semi_h, w_int), dtype=np.uint16)
+    cnt = np.empty((semi_h, w_int), dtype=np.uint8)
+    d1 = np.empty((semi_h, w_int), dtype=np.uint16)
+    d2 = np.empty((semi_h, w_int), dtype=np.uint16)
+    dsum = np.empty((semi_h, w_int), dtype=np.uint16)
+    m_ok1 = np.empty((semi_h, w_int), dtype=np.uint8)
+    m_ok2 = np.empty((semi_h, w_int), dtype=np.uint8)
+    m_tmp = np.empty((semi_h, w_int), dtype=np.uint8)
+    one_u8 = np.ones((semi_h, w_int), dtype=np.uint8)
+
+    def _accum_dir(c_f10: Any, n1_f10: Any, n2_f10: Any) -> None:
+        cv2.absdiff(c_f10, n1_f10, dst=d1)
+        cv2.compare(d1[:luma_h], thra_y, cv2.CMP_LE, dst=m_ok1[:luma_h])
+        cv2.compare(d1[luma_h:], thra_uv, cv2.CMP_LE, dst=m_ok1[luma_h:])
+        cv2.add(acc, n1_f10, dst=acc, mask=m_ok1)
+        cv2.add(cnt, one_u8, dst=cnt, mask=m_ok1)
+
+        cv2.absdiff(c_f10, n2_f10, dst=d2)
+        cv2.compare(d2[:luma_h], thra_y, cv2.CMP_LE, dst=m_ok2[:luma_h])
+        cv2.compare(d2[luma_h:], thra_uv, cv2.CMP_LE, dst=m_ok2[luma_h:])
+        cv2.bitwise_and(m_ok1, m_ok2, dst=m_ok2)
+        cv2.add(d1, d2, dst=dsum)
+        cv2.compare(dsum[:luma_h], thrb_y, cv2.CMP_LE, dst=m_tmp[:luma_h])
+        cv2.compare(dsum[luma_h:], thrb_uv, cv2.CMP_LE, dst=m_tmp[luma_h:])
+        cv2.bitwise_and(m_ok2, m_tmp, dst=m_ok2)
+        cv2.add(acc, n2_f10, dst=acc, mask=m_ok2)
+        cv2.add(cnt, one_u8, dst=cnt, mask=m_ok2)
 
     out_list: List[Any] = []
     for k_raw in target_indices:
         k_u = min(max(0, int(k_raw)), n_total - 1)
-        # Evict stale window entries when target_indices advance monotonically
         if len(f10_cache) > 8:
-            for stale_k in [ck for ck in f10_cache.keys() if ck < k_u - 2 or ck > k_u + 2]:
+            for stale_k in [ck for ck in list(f10_cache.keys()) if ck < k_u - 2 or ck > k_u + 2]:
                 del f10_cache[stale_k]
 
         c = _get_f10(k_u)
-        c32 = c.astype(np.int32)
-        acc = c32.copy()
-        cnt = np.ones_like(acc)
-
-        m1 = _get_f10(k_u - 1).astype(np.int32)
-        d_b1 = np.abs(c32 - m1)
-        ok_b1 = (d_b1 <= thra_col) & (d_b1 <= thrb_col)
-        acc += np.where(ok_b1, m1, 0)
-        cnt += ok_b1
-
-        m2 = _get_f10(k_u - 2).astype(np.int32)
-        d_b2 = np.abs(c32 - m2)
-        ok_b2 = ok_b1 & (d_b2 <= thra_col) & ((d_b1 + d_b2) <= thrb_col)
-        acc += np.where(ok_b2, m2, 0)
-        cnt += ok_b2
-
-        p1 = _get_f10(k_u + 1).astype(np.int32)
-        d_f1 = np.abs(c32 - p1)
-        ok_f1 = (d_f1 <= thra_col) & (d_f1 <= thrb_col)
-        acc += np.where(ok_f1, p1, 0)
-        cnt += ok_f1
-
-        p2 = _get_f10(k_u + 2).astype(np.int32)
-        d_f2 = np.abs(c32 - p2)
-        ok_f2 = ok_f1 & (d_f2 <= thra_col) & ((d_f1 + d_f2) <= thrb_col)
-        acc += np.where(ok_f2, p2, 0)
-        cnt += ok_f2
-
-        out_10 = (acc + (cnt >> 1)) // cnt
-        out_list.append(np.ascontiguousarray((out_10 << 6).astype(np.uint16)))
+        np.copyto(acc, c)
+        cnt.fill(1)
+        _accum_dir(c, _get_f10(k_u - 1), _get_f10(k_u - 2))
+        _accum_dir(c, _get_f10(k_u + 1), _get_f10(k_u + 2))
+        lut_idx = np.bitwise_or(np.left_shift(cnt.astype(np.int32), 13), acc.astype(np.int32))
+        out_list.append(np.ascontiguousarray(div_lut[lut_idx]))
     return out_list
 
 
@@ -1050,9 +1078,11 @@ def extract_frames_raw_yuv420(
         pipe_pix_fmt: str = out_pix_fmt,
         pipe_dtype: Any = elem_dtype,
         pipe_bpe: int = bytes_per_elem,
+        max_frames: Optional[int] = None,
     ):
         hw_args = ["-hwaccel", "cuda"] if use_hwaccel else []
         vf_args = ["-vf", select_vf] if select_vf else []
+        frames_args = ["-frames:v", str(int(max_frames))] if max_frames else []
         p_frame_bytes = semi_h * w_int * pipe_bpe
         cmd = [
             "ffmpeg", "-v", "error",
@@ -1060,6 +1090,7 @@ def extract_frames_raw_yuv420(
             "-i", seg_path,
             *vf_args,
             "-vsync", "0",
+            *frames_args,
             "-f", "rawvideo",
             "-pix_fmt", pipe_pix_fmt,
             "pipe:1",
@@ -1107,9 +1138,122 @@ def extract_frames_raw_yuv420(
         )
     )
 
+    atad_spec = (
+        "0a=0.024:0b=0.048:1a=0.016:1b=0.032:2a=0.016:2b=0.032:s=5"
+        if norm_grain == "heavy"
+        else "0a=0.018:0b=0.036:1a=0.012:1b=0.024:2a=0.012:2b=0.024:s=5"
+    )
+
     if n_discard > 0 and is_real_subproc:
         est_total = int(total_frames) if total_frames else ((max(kept_indices) + 1) if kept_indices else 256)
         dec_cap = max(1, est_total)
+        # Hybrid Open-GOP boundary split: only frames < n_discard + (2 if s=5 filter else 0) cross the splice;
+        # interior segment frames run natively through FFmpeg C AVX2 atadenoise/select without Python s=5 overhead.
+        if (kept_indices is not None or (use_grain_filter and total_frames is not None)) and (dec_cap - n_discard) > 6:
+            target_idx = list(kept_indices) if kept_indices is not None else list(range(dec_cap))
+            head_limit = n_discard + (2 if use_grain_filter else 0)
+            head_unique = sorted({k for k in target_idx if 0 <= k < head_limit})
+            tail_seg_unique = sorted({k - n_discard for k in target_idx if k >= head_limit})
+            head_map: Dict[int, Any] = {}
+            head_ok = True
+            if head_unique:
+                head_seg_need = 4 if use_grain_filter else 1
+                seg_head = (
+                    _run_yuv_pipe_into_array(
+                        use_hwaccel=True,
+                        expected_count=head_seg_need,
+                        select_vf=None,
+                        pipe_pix_fmt=raw_pix_fmt,
+                        pipe_dtype=raw_elem_dtype,
+                        pipe_bpe=raw_bytes_per_elem,
+                        max_frames=head_seg_need,
+                    )
+                    if prefer_hw
+                    else None
+                )
+                if seg_head is None or len(seg_head) < head_seg_need:
+                    seg_head = _run_yuv_pipe_into_array(
+                        use_hwaccel=False,
+                        expected_count=head_seg_need,
+                        select_vf=None,
+                        pipe_pix_fmt=raw_pix_fmt,
+                        pipe_dtype=raw_elem_dtype,
+                        pipe_bpe=raw_bytes_per_elem,
+                        max_frames=head_seg_need,
+                    )
+                if seg_head and len(seg_head) >= head_seg_need:
+                    leading_h = _recover_open_gop_leading_frames(
+                        source_video_path=source_video_path,
+                        chunk_start_sec=chunk_start_sec,
+                        cra_anchor_frame=seg_head[0],
+                        n_discard=n_discard,
+                        width=w_int,
+                        height=h_int,
+                        color_vf=None,
+                        pix_fmt=raw_pix_fmt,
+                    )
+                    head_full = leading_h + seg_head
+                    if use_grain_filter:
+                        head_filtered = _apply_symmetric_s5_p010_filter(
+                            full_frames=head_full,
+                            target_indices=head_unique,
+                            is_10bit_src=is_10bit_src,
+                            grain_tier=norm_grain,
+                            luma_h=h_int,
+                        )
+                        head_map = dict(zip(head_unique, head_filtered))
+                    else:
+                        head_map = {
+                            k: (head_full[k] if k < len(head_full) else head_full[-1])
+                            for k in head_unique
+                        }
+                else:
+                    head_ok = False
+
+            tail_map: Dict[int, Any] = {}
+            tail_fallback_frame: Optional[Any] = None
+            tail_ok = True
+            if head_ok and tail_seg_unique:
+                tail_parts: List[str] = []
+                if use_grain_filter:
+                    tail_parts.append(f"format=yuv420p10le,atadenoise={atad_spec}")
+                is_contig_tail = (
+                    tail_seg_unique[-1] - tail_seg_unique[0] + 1 == len(tail_seg_unique)
+                )
+                if is_contig_tail and total_frames is not None and tail_seg_unique[-1] == (dec_cap - n_discard - 1):
+                    if tail_seg_unique[0] > 0:
+                        tail_parts.append(f"select='gte(n\\,{tail_seg_unique[0]})'")
+                elif is_contig_tail and len(tail_seg_unique) > 4:
+                    tail_parts.append(f"select='between(n\\,{tail_seg_unique[0]}\\,{tail_seg_unique[-1]})'")
+                else:
+                    tail_sel = _build_balanced_select_expr(tail_seg_unique)
+                    tail_parts.append(f"select='{tail_sel}'")
+                tail_vf = ",".join(tail_parts) if tail_parts else None
+                exp_tail = len(tail_seg_unique)
+                tail_frames = (
+                    _run_yuv_pipe_into_array(use_hwaccel=True, expected_count=exp_tail, select_vf=tail_vf)
+                    if prefer_hw
+                    else None
+                )
+                if tail_frames is None:
+                    tail_frames = _run_yuv_pipe_into_array(use_hwaccel=False, expected_count=exp_tail, select_vf=tail_vf)
+                if tail_frames:
+                    tail_fallback_frame = tail_frames[-1]
+                    for t_pos, seg_j in enumerate(tail_seg_unique):
+                        tail_map[seg_j] = tail_frames[t_pos] if t_pos < len(tail_frames) else tail_fallback_frame
+                else:
+                    tail_ok = False
+
+            if head_ok and tail_ok:
+                last_valid = tail_fallback_frame if tail_fallback_frame is not None else (
+                    head_map[head_unique[-1]] if head_unique else None
+                )
+                if last_valid is not None:
+                    return [
+                        head_map[k] if (0 <= k < head_limit and k in head_map) else tail_map.get(k - n_discard, last_valid)
+                        for k in target_idx
+                    ]
+
         seg_frames = (
             _run_yuv_pipe_into_array(
                 use_hwaccel=True,
@@ -1168,11 +1312,6 @@ def extract_frames_raw_yuv420(
     )
     vf_chain_parts: List[str] = []
     if use_grain_filter and is_real_subproc:
-        atad_spec = (
-            "0a=0.024:0b=0.048:1a=0.016:1b=0.032:2a=0.016:2b=0.032:s=5"
-            if norm_grain == "heavy"
-            else "0a=0.018:0b=0.036:1a=0.012:1b=0.024:2a=0.012:2b=0.024:s=5"
-        )
         vf_chain_parts.append(f"format=yuv420p10le,atadenoise={atad_spec}")
     if kept_indices is not None and len(kept_indices) > 0 and not all_contiguous_kept:
         select_expr = _build_balanced_select_expr(kept_indices)

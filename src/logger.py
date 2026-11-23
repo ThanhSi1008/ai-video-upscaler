@@ -8,10 +8,43 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, Any, Iterator, Optional
 
-from src.config import LOGS_DIR as _CONFIG_LOGS_DIR, HEVC_ENCODER, DEVICE_NAME
+import src.config as _cfg
+from src.config import LOGS_DIR as _CONFIG_LOGS_DIR
 
 LOGS_DIR = _CONFIG_LOGS_DIR
 _LAST_GRACEFUL_PAUSE_TRIGGERED: bool = False
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("HEVC_ENCODER", "DEVICE_NAME"):
+        return getattr(_cfg, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _prune_old_run_logs(logs_dir: str, keep: int = 40, protect_filename: Optional[str] = None) -> None:
+    """Best-effort retention prune keeping newest run logs while protecting active/recent files."""
+    try:
+        now_ts = time.time()
+        candidates = []
+        for entry in os.scandir(logs_dir):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            fname = entry.name
+            if not fname.endswith(".log") or fname == "latest.log" or fname == protect_filename:
+                continue
+            st = entry.stat(follow_symlinks=False)
+            candidates.append((st.st_mtime, entry.path))
+        if len(candidates) <= keep:
+            return
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for mtime, fpath in candidates[keep:]:
+            if (now_ts - mtime) >= 300.0:
+                try:
+                    os.remove(fpath)
+                except OSError:
+                    pass
+    except Exception:
+        pass
 
 
 def get_logs_dir() -> str:
@@ -200,6 +233,7 @@ class RunLogger:
             "completed_chunks": 0,
             "resumed_chunks": [],
             "active_chunk": None,
+            "active_chunk_fraction": 0.0,
             "chunks": [],
             "latest_fps": 0.0,
             "steady_fps": 0.0,
@@ -225,6 +259,8 @@ class RunLogger:
             except Exception:
                 pass
 
+        self._last_intra_flush_ts: float = 0.0
+        _prune_old_run_logs(logs_dir, keep=40, protect_filename=self.log_filename)
         self._flush_live_status()
 
     def _flush_live_status(self) -> None:
@@ -254,6 +290,7 @@ class RunLogger:
     ) -> None:
         """Update active pipeline stage and preserve last active stage on pause/error."""
         prev_stage = str(self._live_state.get("stage") or "")
+        prev_active = self._live_state.get("active_chunk")
         non_step_stages = {"", "idle", "starting", "initializing", "completed", "paused", "error"}
         if stage in {"error", "paused"}:
             if prev_stage not in non_step_stages:
@@ -268,6 +305,73 @@ class RunLogger:
         if detail:
             self._live_state["stage_detail"] = detail
         self._live_state["active_chunk"] = active_chunk
+        if active_chunk != prev_active or active_chunk is None:
+            self._live_state["active_chunk_fraction"] = 0.0
+            self._last_intra_flush_ts = 0.0
+        self._flush_live_status()
+
+    def update_active_chunk_progress(
+        self,
+        chunk_idx: int,
+        done_distinct: int,
+        total_distinct: int,
+        chunk_elapsed_sec: float,
+        frames_written: int = 0,
+        chunk_total_frames: int = 0,
+        force: bool = False,
+    ) -> None:
+        """Flush throttled intra-chunk progress, live FPS, and ETA without altering completed_chunks."""
+        now_m = time.monotonic()
+        if (not force) and done_distinct < total_distinct and (now_m - self._last_intra_flush_ts) < 0.90:
+            return
+        self._last_intra_flush_ts = now_m
+
+        tot_d = max(1, int(total_distinct))
+        done_d = min(tot_d, max(0, int(done_distinct)))
+        frac = min(0.99, max(0.0, float(done_d) / float(tot_d)))
+        elap = max(0.001, float(chunk_elapsed_sec))
+
+        self._live_state["active_chunk"] = int(chunk_idx)
+        self._live_state["active_chunk_fraction"] = round(frac, 4)
+
+        total_c = int(self._live_state.get("total_chunks") or 0)
+        if total_c > 0:
+            self._live_state["stage_detail"] = (
+                f"Đang suy luận 4K phân đoạn {int(chunk_idx) + 1}/{total_c} "
+                f"({done_d}/{tot_d} unique • {frac * 100.0:.0f}%)"
+            )
+
+        if done_d >= 2 and elap >= 0.20:
+            live_ai_fps = float(done_d) / elap
+            est_out_frames = (
+                float(frames_written)
+                if frames_written > 0
+                else (frac * float(chunk_total_frames) if chunk_total_frames > 0 else float(done_d))
+            )
+            live_eff_fps = max(live_ai_fps, est_out_frames / elap)
+            self._live_state["latest_fps"] = round(live_ai_fps, 2)
+            if not self._chunk_map or float(self._live_state.get("steady_fps") or 0.0) <= 0.0:
+                self._live_state["steady_fps"] = round(live_ai_fps, 2)
+            self._live_state["effective_fps"] = round(live_eff_fps, 2)
+
+            if total_c > 0:
+                resumed_set = set(self._live_state.get("resumed_chunks") or [])
+                done_c = len(set(self._chunk_map.keys()) | resumed_set)
+                rem_chunks_f = max(0.0, float(total_c - done_c) - frac)
+                recent_times = [
+                    float(self._chunk_map[k]["total_time_s"])
+                    for k in sorted(self._chunk_map.keys())[-8:]
+                    if float(self._chunk_map[k].get("total_time_s") or 0.0) > 0.0
+                ]
+                cur_est_chunk_s = (elap / max(frac, 0.02)) + 1.0
+                if recent_times:
+                    avg_prior = sum(recent_times) / len(recent_times)
+                    blend_w = min(0.5, frac * 0.6)
+                    est_chunk_s = (1.0 - blend_w) * avg_prior + blend_w * cur_est_chunk_s
+                else:
+                    est_chunk_s = cur_est_chunk_s
+                self._live_state["eta_seconds"] = round(rem_chunks_f * est_chunk_s, 1)
+
         self._flush_live_status()
 
     @contextmanager
@@ -314,6 +418,12 @@ class RunLogger:
         self._write_file(f"[INFO] {message}")
         if to_console:
             print(f"ℹ️  {message}")
+        elif self._live_state.get("job_id") and (
+            "[ZERO-DISK SANITY" in message
+            or "[OUTPUT SANITY" in message
+            or "[CUDA MICRO-TIMINGS]" in message
+        ):
+            print(f"ℹ️  {message}", flush=True)
 
     def warn(self, message: str, to_console: bool = True):
         """Log a WARNING message."""
@@ -333,17 +443,24 @@ class RunLogger:
 
     def print_banner(self, info: Dict[str, Any]):
         """Print run startup banner to console and append to the log file."""
+        dev_name = str(globals().get("DEVICE_NAME") or getattr(_cfg, "DEVICE_NAME", "CUDA"))
+        hevc_enc = str(globals().get("HEVC_ENCODER") or getattr(_cfg, "HEVC_ENCODER", "hevc_nvenc"))
+        frame_desc = str(
+            info.get("frame_format_desc")
+            or f"{str(info.get('frame_format', 'png')).upper()} (Lossless RGB24)"
+        )
+        encode_desc = str(info.get("encode_desc") or info.get("bitrate") or "")
         banner_lines = [
             "=" * 72,
-            f"🎬  AI VIDEO UPSCALER 4K — {DEVICE_NAME.upper()} & {HEVC_ENCODER.upper()}",
+            f"🎬  AI VIDEO UPSCALER 4K — {dev_name.upper()} & {hevc_enc.upper()}",
             "=" * 72,
             f"📁 Video nguồn:    {info['filename']} ({format_bytes(info['size_bytes'])})",
             f"📐 Độ phân giải:   {info['width']}x{info['height']} ➔ {info['target_w']}x{info['target_h']} (Chuẩn 4K UHD)",
             f"⏱️  Thời lượng:     {format_time(info['duration'])} ({info['duration']:.2f}s) @ {info['fps']:.3f} fps",
-            f"🧠 AI Engine:      {info['model']} ({DEVICE_NAME} FP16)",
-            f"🖼️  Định dạng đệm:  {info['frame_format'].upper()} (Lossless RGB24)",
+            f"🧠 AI Engine:      {info['model']} ({dev_name} FP16)",
+            f"🖼️  Định dạng đệm:  {frame_desc}",
             f"💾 Bộ nhớ đệm:     {info['storage_info']}",
-            f"🎞️  Mã hóa video:   {HEVC_ENCODER} (10-bit Main 10 @ {info['bitrate']}, BT.709 Limited)",
+            f"🎞️  Mã hóa video:   {hevc_enc} (10-bit Main 10 @ {encode_desc}, BT.709 Limited)",
             f"🔊 Streams gốc:    {info['audio_count']} Audio, {info['sub_count']} Subtitles, {info['attach_count']} Fonts, {info['chap_count']} Chapters (100% Stream Copy)",
             f"🎯 File xuất:      {info['output_path']}",
             f"📝 File log:       logs/{self.log_filename} (Symlink: logs/latest.log)",
@@ -394,6 +511,8 @@ class RunLogger:
             f"Tổng: {total_chunk_time:.2f}s | File: {os.path.basename(output_seg)} {format_bytes(seg_size)})"
         )
         self._write_file(log_entry)
+        if self._live_state.get("job_id"):
+            print(log_entry, flush=True)
 
         eff_fps = (frames / total_chunk_time) if total_chunk_time > 0 else ai_fps
         s_fps = steady_fps if (steady_fps is not None and steady_fps > 0) else ai_fps
@@ -409,16 +528,19 @@ class RunLogger:
             "size_mb": round(seg_size / (1024 * 1024), 2),
         }
         self._chunk_map[int(chunk_idx)] = chunk_rec
+        if self._live_state.get("active_chunk") == int(chunk_idx) or self._live_state.get("active_chunk") is None:
+            self._live_state["active_chunk_fraction"] = 0.0
+        active_frac = float(self._live_state.get("active_chunk_fraction") or 0.0)
         resumed_set = set(self._live_state.get("resumed_chunks") or [])
         completed_total = len(set(self._chunk_map.keys()) | resumed_set)
-        remaining_chunks = max(0, int(total_chunks) - completed_total)
+        remaining_chunks_f = max(0.0, float(int(total_chunks) - completed_total) - active_frac)
         recent_times = [
             float(self._chunk_map[k]["total_time_s"])
             for k in sorted(self._chunk_map.keys())[-8:]
             if float(self._chunk_map[k].get("total_time_s") or 0.0) > 0.0
         ]
         avg_chunk_time = (sum(recent_times) / len(recent_times)) if recent_times else float(total_chunk_time)
-        eta_sec = round(remaining_chunks * avg_chunk_time, 1) if avg_chunk_time > 0 else None
+        eta_sec = round(remaining_chunks_f * avg_chunk_time, 1) if avg_chunk_time > 0 else None
 
         self._live_state["total_chunks"] = int(total_chunks)
         self._live_state["completed_chunks"] = completed_total
@@ -431,7 +553,7 @@ class RunLogger:
 
     def print_benchmark_summary(self, stats: Dict[str, Any]):
         """Print final benchmark summary table to console and append to the log file."""
-        dev_name = stats.get('device_name') or DEVICE_NAME
+        dev_name = stats.get("device_name") or globals().get("DEVICE_NAME") or getattr(_cfg, "DEVICE_NAME", "CUDA")
         summary_lines = [
             "=" * 72,
             "🎉  UPSCALE 4K HOÀN TẤT THÀNH CÔNG!",
@@ -468,5 +590,6 @@ class RunLogger:
         self._live_state["stage"] = "completed"
         self._live_state["stage_detail"] = "Hoàn tất xuất xưởng 4K thành công!"
         self._live_state["active_chunk"] = None
+        self._live_state["active_chunk_fraction"] = 0.0
         self._live_state["eta_seconds"] = 0.0
         self._flush_live_status()

@@ -372,6 +372,10 @@ def _check_8x8_lip_flap_gate(ref_gray: Any, curr_gray: Any, grain_tier: str = "c
     smooth_2x2 = np.abs(cv2.blur(sdiff, (2, 2)))
     sigma_3 = sigma_diff * (1.0 / 3.0)
     sigma_2 = sigma_diff * 0.5
+    min_peak3 = max(4.2 * 0.52, 5.2 * sigma_3)
+    min_peak2 = max(4.8 * 0.52, 5.8 * sigma_2)
+    if float(smooth_3x3.max()) < min_peak3 and float(smooth_2x2.max()) < min_peak2:
+        return False, sigma_diff
 
     h, w = smooth_3x3.shape[:2]
 
@@ -381,27 +385,43 @@ def _check_8x8_lip_flap_gate(ref_gray: Any, curr_gray: Any, grain_tier: str = "c
             return False
         s3_c = s3[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
         s2_c = s2[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
+        c3_max = s3_c.max(axis=1)
+        c2_max = s2_c.max(axis=1)
+        cand3 = np.flatnonzero(c3_max >= min_peak3)
+        cand2 = np.flatnonzero(c2_max >= min_peak2)
+        if cand3.size == 0 and cand2.size == 0:
+            return False
+
         ym_c = ym[: gh_i * 8, : gw_i * 8].reshape(gh_i, 8, gw_i, 8).transpose(0, 2, 1, 3).reshape(-1, 64)
-        cell_mean_y = ym_c.mean(axis=1)
-        weber_scale = np.clip((cell_mean_y + 28.0) / 110.0, 0.52, 1.0)
+        if cand3.size > 0:
+            w3 = np.clip((ym_c[cand3].mean(axis=1) + 28.0) / 110.0, 0.52, 1.0)
+            thr3_peak = np.maximum(4.2 * w3, 5.2 * sigma_3)
+            keep3 = c3_max[cand3] >= thr3_peak
+            if np.any(keep3):
+                sub3 = cand3[keep3]
+                thr3_mean = np.maximum(3.2 * w3[keep3], 4.2 * sigma_3)
+                top8 = np.partition(s3_c[sub3], 56, axis=1)[:, 56:]
+                if bool(np.any(top8.mean(axis=1) >= thr3_mean)):
+                    return True
 
-        top8 = np.partition(s3_c, 56, axis=1)[:, 56:]
-        thr3_mean = np.maximum(3.2 * weber_scale, 4.2 * sigma_3)
-        thr3_peak = np.maximum(4.2 * weber_scale, 5.2 * sigma_3)
-        if bool(np.any((top8.mean(axis=1) >= thr3_mean) & (top8.max(axis=1) >= thr3_peak))):
-            return True
-
-        top4 = np.partition(s2_c, 60, axis=1)[:, 60:]
-        thr2_mean = np.maximum(3.6 * weber_scale, 4.6 * sigma_2)
-        thr2_peak = np.maximum(4.8 * weber_scale, 5.8 * sigma_2)
-        return bool(np.any((top4.mean(axis=1) >= thr2_mean) & (top4.max(axis=1) >= thr2_peak)))
+        if cand2.size > 0:
+            w2 = np.clip((ym_c[cand2].mean(axis=1) + 28.0) / 110.0, 0.52, 1.0)
+            thr2_peak = np.maximum(4.8 * w2, 5.8 * sigma_2)
+            keep2 = c2_max[cand2] >= thr2_peak
+            if np.any(keep2):
+                sub2 = cand2[keep2]
+                thr2_mean = np.maximum(3.6 * w2[keep2], 4.6 * sigma_2)
+                top4 = np.partition(s2_c[sub2], 60, axis=1)[:, 60:]
+                if bool(np.any(top4.mean(axis=1) >= thr2_mean)):
+                    return True
+        return False
 
     pad_h = (8 - (h % 8)) % 8
     pad_w = (8 - (w % 8)) % 8
     if pad_h or pad_w:
-        p3 = np.pad(smooth_3x3, ((0, pad_h), (0, pad_w)), mode="edge")
-        p2 = np.pad(smooth_2x2, ((0, pad_h), (0, pad_w)), mode="edge")
-        pm = np.pad(mid_y, ((0, pad_h), (0, pad_w)), mode="edge")
+        p3 = cv2.copyMakeBorder(smooth_3x3, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+        p2 = cv2.copyMakeBorder(smooth_2x2, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+        pm = cv2.copyMakeBorder(mid_y, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
     else:
         p3, p2, pm = smooth_3x3, smooth_2x2, mid_y
     if _eval_grid(p3, p2, pm):
@@ -429,6 +449,8 @@ def _solve_textured_lk_pan_zoom_vec(
     sigma_diff: float,
     xc: Any = None,
     yc: Any = None,
+    ref_blur: Any = None,
+    curr_blur: Any = None,
 ) -> Optional[Tuple[float, float, float]]:
     """Return 1080p-scaled (dx, dy, signed_zoom_edge) velocity vector from textured pixels, or None if degenerate."""
     import cv2
@@ -436,27 +458,27 @@ def _solve_textured_lk_pan_zoom_vec(
     import numpy as np
 
     h, w = ref_gray.shape[:2]
-    r_f = cv2.GaussianBlur(ref_gray.astype(np.float32), (5, 5), 1.0)
-    c_f = cv2.GaussianBlur(curr_gray.astype(np.float32), (5, 5), 1.0)
+    r_f = ref_blur if ref_blur is not None else cv2.GaussianBlur(ref_gray.astype(np.float32), (5, 5), 1.0)
+    c_f = curr_blur if curr_blur is not None else cv2.GaussianBlur(curr_gray.astype(np.float32), (5, 5), 1.0)
     it = c_f - r_f
     mid = 0.5 * (r_f + c_f)
     ix = cv2.Sobel(mid, cv2.CV_32F, 1, 0, ksize=3) * (1.0 / 8.0)
     iy = cv2.Sobel(mid, cv2.CV_32F, 0, 1, ksize=3) * (1.0 / 8.0)
     grad_floor = max(2.0, 1.2 * sigma_diff)
-    mask = (ix * ix + iy * iy) >= (grad_floor * grad_floor)
-    if int(np.count_nonzero(mask)) < 64:
+    nz_idx = np.flatnonzero((ix * ix + iy * iy) >= (grad_floor * grad_floor))
+    if nz_idx.size < 64:
         return None
 
     if xc is not None and yc is not None and xc.shape == (h, w) and yc.shape == (h, w):
-        xcm = xc[mask]
-        ycm = yc[mask]
+        xcm = xc.ravel()[nz_idx]
+        ycm = yc.ravel()[nz_idx]
     else:
         yg, xg = np.mgrid[0:h, 0:w].astype(np.float32)
-        xcm = (xg - (w * 0.5))[mask]
-        ycm = (yg - (h * 0.5))[mask]
-    ixm = ix[mask]
-    iym = iy[mask]
-    itm = it[mask]
+        xcm = (xg - (w * 0.5)).ravel()[nz_idx]
+        ycm = (yg - (h * 0.5)).ravel()[nz_idx]
+    ixm = ix.ravel()[nz_idx]
+    iym = iy.ravel()[nz_idx]
+    itm = it.ravel()[nz_idx]
     jr = ixm * xcm + iym * ycm
 
     a00 = float(np.dot(ixm, ixm))
@@ -487,11 +509,32 @@ def _estimate_textured_lk_pan_zoom(
     sigma_diff: float,
     xc: Any = None,
     yc: Any = None,
+    ref_blur: Any = None,
+    curr_blur: Any = None,
+    cached_lk: Optional[Tuple[Any, Any, float, Optional[Tuple[float, float, float]]]] = None,
 ) -> bool:
     """Estimate subpixel camera pan and center-free affine zoom restricted to textured pixels."""
     import math
 
-    vec = _solve_textured_lk_pan_zoom_vec(ref_gray, curr_gray, scale_factor, sigma_diff, xc=xc, yc=yc)
+    grad_floor = max(2.0, 1.2 * sigma_diff)
+    if (
+        cached_lk is not None
+        and cached_lk[0] is ref_gray
+        and cached_lk[1] is curr_gray
+        and abs(cached_lk[2] - grad_floor) <= 1e-6
+    ):
+        vec = cached_lk[3]
+    else:
+        vec = _solve_textured_lk_pan_zoom_vec(
+            ref_gray,
+            curr_gray,
+            scale_factor,
+            sigma_diff,
+            xc=xc,
+            yc=yc,
+            ref_blur=ref_blur,
+            curr_blur=curr_blur,
+        )
     if vec is None:
         return False
     dx_1080, dy_1080, zoom_1080 = vec
@@ -508,6 +551,9 @@ class PanZoomCadenceTracker:
 
     def reset(self) -> None:
         self.prev_gray: Any = None
+        self.prev_blur: Any = None
+        self.last_curr_blur: Any = None
+        self.last_lk_cache: Optional[Tuple[Any, Any, float, Optional[Tuple[float, float, float]]]] = None
         self.streak: int = 0
         self.hold_remaining: int = 0
         self.stop_streak: int = 0
@@ -517,24 +563,42 @@ class PanZoomCadenceTracker:
         self.pan_zoom_lock: bool = False
 
     def update(self, curr_gray: Any, scale_factor: float, xc: Any = None, yc: Any = None) -> bool:
+        import cv2
         import math
         import numpy as np
 
         if self.prev_gray is None or self.prev_gray.shape != curr_gray.shape:
             self.reset()
             self.prev_gray = curr_gray
+            self.prev_blur = cv2.GaussianBlur(curr_gray.astype(np.float32), (5, 5), 1.0)
+            self.last_curr_blur = self.prev_blur
             return False
 
-        sdiff = curr_gray.astype(np.float32) - self.prev_gray.astype(np.float32)
-        mad_cut = float(np.mean(np.abs(sdiff)))
+        abs_u8 = cv2.absdiff(curr_gray, self.prev_gray)
+        mad_cut = float(cv2.mean(abs_u8)[0])
         if mad_cut >= 16.0:
             self.reset()
             self.prev_gray = curr_gray
+            self.prev_blur = cv2.GaussianBlur(curr_gray.astype(np.float32), (5, 5), 1.0)
+            self.last_curr_blur = self.prev_blur
             return False
 
-        sigma_step = max(self.sigma_floor, 1.4826 * float(np.median(np.abs(sdiff[::4, ::4]))))
-        vec = _solve_textured_lk_pan_zoom_vec(self.prev_gray, curr_gray, scale_factor, sigma_step, xc=xc, yc=yc)
+        sigma_step = max(self.sigma_floor, 1.4826 * float(np.median(abs_u8[::4, ::4])))
+        curr_blur = cv2.GaussianBlur(curr_gray.astype(np.float32), (5, 5), 1.0)
+        vec = _solve_textured_lk_pan_zoom_vec(
+            self.prev_gray,
+            curr_gray,
+            scale_factor,
+            sigma_step,
+            xc=xc,
+            yc=yc,
+            ref_blur=self.prev_blur,
+            curr_blur=curr_blur,
+        )
+        self.last_lk_cache = (self.prev_gray, curr_gray, max(2.0, 1.2 * sigma_step), vec)
         self.prev_gray = curr_gray
+        self.prev_blur = curr_blur
+        self.last_curr_blur = curr_blur
         min_vel = max(0.12, 0.35 * sigma_step)
 
         if vec is not None:
@@ -604,6 +668,7 @@ def _is_dis_motion_early_exit(
     xc: Any = None,
     yc: Any = None,
     grain_tier: str = "clean",
+    _dis_cache: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Evaluate early-exit motion cascade combining 8x8 lip-flap guard, textured pan/zoom, and DIS optical flow."""
     import cv2
@@ -620,23 +685,48 @@ def _is_dis_motion_early_exit(
             return True
 
     if auto_noise_floor:
+        ref_lk_blur = None
+        curr_lk_blur = None
+        cached_lk = None
+        if _dis_cache is not None:
+            r_pair = _dis_cache.get("ref_lk_blur")
+            if r_pair is not None and r_pair[0] is ref_gray:
+                ref_lk_blur = r_pair[1]
+            c_pair = _dis_cache.get("curr_lk_blur")
+            if c_pair is not None and c_pair[0] is curr_gray:
+                curr_lk_blur = c_pair[1]
+            cached_lk = _dis_cache.get("last_lk")
         if _estimate_textured_lk_pan_zoom(
-            ref_gray, curr_gray, float(scale_factor), float(thresh), sigma_diff, xc=xc, yc=yc
+            ref_gray,
+            curr_gray,
+            float(scale_factor),
+            float(thresh),
+            sigma_diff,
+            xc=xc,
+            yc=yc,
+            ref_blur=ref_lk_blur,
+            curr_blur=curr_lk_blur,
+            cached_lk=cached_lk,
         ):
             return True
-        if sigma_diff > 0.8:
-            ref_in = cv2.GaussianBlur(ref_gray, (5, 5), 1.1)
-            curr_in = cv2.GaussianBlur(curr_gray, (5, 5), 1.1)
-        else:
-            ref_in = ref_gray
-            curr_in = curr_gray
+        use_dis_blur = sigma_diff > 0.8
+        ref_in = None
+        grad = None
+        if _dis_cache is not None:
+            r_dis = _dis_cache.get("ref_dis")
+            if r_dis is not None and r_dis[0] is ref_gray and r_dis[1] == use_dis_blur:
+                ref_in, grad = r_dis[2], r_dis[3]
+        if ref_in is None or grad is None:
+            ref_in = cv2.GaussianBlur(ref_gray, (5, 5), 1.1) if use_dis_blur else ref_gray
+            gx = cv2.Sobel(ref_in, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(ref_in, cv2.CV_32F, 0, 1, ksize=3)
+            grad = cv2.magnitude(gx, gy)
+            if _dis_cache is not None:
+                _dis_cache["ref_dis"] = (ref_gray, use_dis_blur, ref_in, grad)
+        curr_in = cv2.GaussianBlur(curr_gray, (5, 5), 1.1) if use_dis_blur else curr_gray
         flow = dis.calc(ref_in, curr_in, None)
         u = flow[..., 0] * scale_factor
         v = flow[..., 1] * scale_factor
-
-        gx = cv2.Sobel(ref_in, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(ref_in, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.magnitude(gx, gy)
         tex_mask = grad >= max(18.0, 8.0 * sigma_diff)
         eff_local_thresh = (
             float(local_thresh)
@@ -818,6 +908,8 @@ def deduplicate_cyclic_frames(
                 r_feat = distinct_feats[d_idx]
                 if r_feat["shape"] != feat["shape"]:
                     continue
+                if float(np.abs(strip16 - r_feat["strip16"]).mean()) > 0.65:
+                    continue
                 rp0 = r_feat["p0"]
                 abs_d0 = np.abs(p0 - rp0)
                 if float(abs_d0.mean()) > eff_mae_tol:
@@ -837,9 +929,6 @@ def deduplicate_cyclic_frames(
                 if uv is not None and r_feat["uv"] is not None:
                     if float(np.abs(uv - r_feat["uv"]).max()) > (peak_tol + 0.6):
                         continue
-
-                if float(np.abs(strip16 - r_feat["strip16"]).mean()) > 0.65:
-                    continue
 
                 matched_idx = d_idx
                 break
@@ -1127,6 +1216,7 @@ def _scan_fused_mpdecimate_and_dis(
         if auto_noise_floor
         else None
     )
+    dis_cache: Dict[str, Any] = {}
 
     while True:
         raw_gray = gray_q.get()
@@ -1143,6 +1233,10 @@ def _scan_fused_mpdecimate_and_dis(
             if cadence_tracker is not None
             else False
         )
+        if cadence_tracker is not None:
+            if cadence_tracker.last_curr_blur is not None:
+                dis_cache["curr_lk_blur"] = (curr_gray, cadence_tracker.last_curr_blur)
+            dis_cache["last_lk"] = cadence_tracker.last_lk_cache
         is_forced = (
             (curr_idx == 0)
             or (curr_idx in chunk_start_set if chunk_start_set is not None else (curr_idx % max(1, frames_per_chunk_fallback) == 0))
@@ -1159,6 +1253,8 @@ def _scan_fused_mpdecimate_and_dis(
         if is_forced or base_act == "keep" or ref_gray is None or pan_locked:
             final_actions.append("keep")
             ref_gray = curr_gray
+            if cadence_tracker is not None and cadence_tracker.last_curr_blur is not None:
+                dis_cache["ref_lk_blur"] = (curr_gray, cadence_tracker.last_curr_blur)
         elif _is_dis_motion_early_exit(
             dis,
             ref_gray,
@@ -1177,9 +1273,12 @@ def _scan_fused_mpdecimate_and_dis(
             xc=rx,
             yc=ry,
             grain_tier=norm_grain,
+            _dis_cache=dis_cache,
         ):
             final_actions.append("keep")
             ref_gray = curr_gray
+            if cadence_tracker is not None and cadence_tracker.last_curr_blur is not None:
+                dis_cache["ref_lk_blur"] = (curr_gray, cadence_tracker.last_curr_blur)
         else:
             final_actions.append("drop")
 

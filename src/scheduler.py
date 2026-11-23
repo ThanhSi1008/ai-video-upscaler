@@ -11,10 +11,17 @@ import subprocess
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
+import src.config as _cfg
 from src.ffmpeg_ops import probe_video
 from src.dedup import scan_dedup_plan, load_or_create_plan, resolve_dedup_policy
-from src.config import DEVICE_NAME
+from src.logger import is_graceful_pause_requested
 from src.models_resolver import find_existing_4k_output_path
+
+
+def __getattr__(name: str) -> Any:
+    if name == "DEVICE_NAME":
+        return getattr(_cfg, "DEVICE_NAME")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _filter_supported_kwargs(fn: Any, extra_kw: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,6 +173,7 @@ class BackgroundQueuePreflightManager:
         self._video_events: Dict[str, threading.Event] = {}
         self._claimed_by_main: set[str] = set()
         self._done_videos: set[str] = set()
+        self._created_work_dirs: Dict[str, str] = {}
         self._current_video: Optional[str] = None
         self._current_proc: Optional[subprocess.Popen] = None
         self.results: Dict[str, Dict[str, Any]] = {}
@@ -241,10 +249,29 @@ class BackgroundQueuePreflightManager:
         )
         self.thread.start()
 
+    def _cleanup_zero_chunk_work_dir(self, vkey: str, work_dir: str) -> None:
+        with self._lock:
+            if vkey in self._claimed_by_main:
+                return
+        if not work_dir or not os.path.isdir(work_dir):
+            return
+        up_dir = os.path.join(work_dir, "upscaled_segs")
+        if os.path.isdir(up_dir):
+            try:
+                has_up = any(
+                    fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4")
+                    for fn in os.listdir(up_dir)
+                )
+                if has_up:
+                    return
+            except OSError:
+                return
+        shutil.rmtree(work_dir, ignore_errors=True)
+
     def _worker(self, items: List[str]):
         try:
             for vid in items:
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or is_graceful_pause_requested():
                     break
 
                 vkey = self._norm_key(vid)
@@ -281,7 +308,11 @@ class BackgroundQueuePreflightManager:
 
                     base_name = os.path.splitext(os.path.basename(vid))[0]
                     work_dir = os.path.join(self.output_dir, f".temp_{base_name}")
+                    existed_before = os.path.exists(work_dir)
                     os.makedirs(work_dir, exist_ok=True)
+                    if not existed_before:
+                        with self._lock:
+                            self._created_work_dirs[vkey] = work_dir
                     plan_file = os.path.join(work_dir, "plan.json")
 
                     from src.dedup import build_preflight_subprocess_spec
@@ -296,8 +327,10 @@ class BackgroundQueuePreflightManager:
                     with self._lock:
                         self._current_proc = proc
 
+                    aborted_mid_scan = False
                     while proc.poll() is None:
-                        if self._stop_event.is_set():
+                        if self._stop_event.is_set() or is_graceful_pause_requested():
+                            aborted_mid_scan = True
                             try:
                                 proc.terminate()
                                 proc.wait(timeout=2.0)
@@ -310,7 +343,9 @@ class BackgroundQueuePreflightManager:
                             break
                         time.sleep(0.2)
 
-                    if (not self._stop_event.is_set()) and proc.returncode == 0 and os.path.exists(plan_file):
+                    if aborted_mid_scan and not existed_before and not os.path.exists(plan_file):
+                        self._cleanup_zero_chunk_work_dir(vkey, work_dir)
+                    elif (not self._stop_event.is_set()) and (not is_graceful_pause_requested()) and proc.returncode == 0 and os.path.exists(plan_file):
                         with open(plan_file, "r", encoding="utf-8") as f:
                             plan_data = json.load(f)
                         self.results[vid] = plan_data
@@ -344,7 +379,7 @@ class BackgroundQueuePreflightManager:
                 for evt_rem in self._video_events.values():
                     evt_rem.set()
 
-    def stop(self):
+    def stop(self, cleanup_unclaimed: bool = False):
         self._stop_event.set()
         with self._lock:
             proc = self._current_proc
@@ -360,6 +395,83 @@ class BackgroundQueuePreflightManager:
                     pass
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=5.0)
+        if cleanup_unclaimed:
+            with self._lock:
+                unclaimed_items = [
+                    (vk, wd) for vk, wd in self._created_work_dirs.items()
+                    if vk not in self._claimed_by_main
+                ]
+            for vk, wd in unclaimed_items:
+                self._cleanup_zero_chunk_work_dir(vk, wd)
+
+
+def _inspect_resumable_checkpoint(
+    video_path: str,
+    output_dir: Optional[str],
+    plan: Optional[Dict[str, Any]],
+    total_frames: int,
+    n_unique: int,
+    segment_seconds: int,
+) -> Tuple[int, int, float, int]:
+    """Return (done_chunks, total_chunks, remaining_fraction, remaining_n_unique) for an active checkpoint."""
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    out_dir = output_dir or "out"
+    if str(out_dir).lower().endswith((".mkv", ".mp4")):
+        out_dir = os.path.dirname(out_dir) or "out"
+    vid_dir = os.path.dirname(os.path.abspath(video_path))
+    cand_dirs = [
+        os.path.join(out_dir, f".temp_{base_name}"),
+        os.path.join("out", f".temp_{base_name}"),
+        os.path.join(vid_dir, f".temp_{base_name}"),
+    ]
+    for w_dir in cand_dirs:
+        up_dir = os.path.join(w_dir, "upscaled_segs")
+        if not os.path.isdir(up_dir):
+            continue
+        done_idxs: set[int] = set()
+        try:
+            for fn in os.listdir(up_dir):
+                if fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4"):
+                    fp = os.path.join(up_dir, fn)
+                    if os.path.getsize(fp) > 10000:
+                        stem_num = fn[3:-4]
+                        if stem_num.isdigit():
+                            done_idxs.add(int(stem_num))
+        except OSError:
+            continue
+        if not done_idxs:
+            continue
+        chunks_list = plan.get("chunks") if isinstance(plan, dict) else None
+        if isinstance(chunks_list, list) and len(chunks_list) > 0:
+            tot_c = len(chunks_list)
+            rem_u = 0
+            valid_done = 0
+            for idx_c, ch in enumerate(chunks_list):
+                c_id = int(ch.get("chunk_idx", idx_c)) if isinstance(ch, dict) else idx_c
+                if c_id in done_idxs:
+                    valid_done += 1
+                else:
+                    rem_u += int(ch.get("kept_count", ch.get("total_frames", 0))) if isinstance(ch, dict) else 0
+            if valid_done > 0:
+                rem_frac = max(0.0, float(tot_c - valid_done) / float(max(1, tot_c)))
+                return valid_done, tot_c, rem_frac, max(0, rem_u)
+        raw_dir = os.path.join(w_dir, "raw_segs")
+        tot_c_est = 0
+        if os.path.isdir(raw_dir):
+            try:
+                tot_c_est = sum(
+                    1 for fn in os.listdir(raw_dir)
+                    if fn.startswith("seg_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4")
+                )
+            except OSError:
+                tot_c_est = 0
+        if tot_c_est <= 0:
+            tot_c_est = max(len(done_idxs) + 1, int(round(max(1, total_frames) / max(1.0, segment_seconds * 23.976))))
+        valid_done = min(len(done_idxs), tot_c_est)
+        rem_frac = max(0.0, float(tot_c_est - valid_done) / float(max(1, tot_c_est)))
+        rem_u = max(0, int(round(float(n_unique) * rem_frac)))
+        return valid_done, tot_c_est, rem_frac, rem_u
+    return 0, 0, 1.0, n_unique
 
 
 def compute_overnight_schedule(
@@ -378,6 +490,7 @@ def compute_overnight_schedule(
     subs_quality: str = "normal",
     dedup_policy: Optional[str] = None,
     grain_restore: str = "auto",
+    force: bool = False,
 ) -> Dict[str, Any]:
     """
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
@@ -454,8 +567,19 @@ def compute_overnight_schedule(
             n_unique_source = "ước lượng thận trọng (n=4)"
 
         # Kiểm tra nếu file 4K thành phẩm đã tồn tại (hỗ trợ cả _4K_animejanai.mkv, _4K.mkv và file -o tường minh)
-        existing_4k = find_existing_4k_output_path(vid, output_arg=output_dir)
+        existing_4k = None if force else find_existing_4k_output_path(vid, output_arg=output_dir)
         already_completed = existing_4k is not None
+        resumed_done_c = 0
+        resumed_tot_c = 0
+        ep_total_overhead = total_overhead
+        if not force and not already_completed:
+            resumed_done_c, resumed_tot_c, rem_frac, rem_u = _inspect_resumable_checkpoint(
+                vid, output_dir, plan, total_frames, n_unique, segment_seconds
+            )
+            if resumed_done_c > 0:
+                n_unique = rem_u
+                ep_total_overhead = float(video_overhead_seconds) * max(0.15, rem_frac) + float(subtitles_overhead_seconds)
+                n_unique_source = f"{n_unique_source} (còn {resumed_tot_c - resumed_done_c}/{resumed_tot_c} chunk)"
 
         # 2. Tính ETA trung vị (thời gian kỳ vọng) và ETA P5 (+7% biên an toàn cho quyết định)
         if already_completed:
@@ -474,10 +598,10 @@ def compute_overnight_schedule(
         else:
             is_already_completed = False
             ai_seconds_median = n_unique / fps_med
-            eta_median_seconds = ai_seconds_median + total_overhead
+            eta_median_seconds = ai_seconds_median + ep_total_overhead
 
             ai_seconds_p5 = n_unique / fps_conservative
-            eta_p5_seconds = ai_seconds_p5 + total_overhead
+            eta_p5_seconds = ai_seconds_p5 + ep_total_overhead
             decision_eta_seconds = eta_p5_seconds * (1.0 + eta_margin_pct)
 
             ep_start_time = sim_time_median
@@ -538,6 +662,8 @@ def compute_overnight_schedule(
             "decision_finish_time": ep_decision_finish_time.strftime("%H:%M:%S"),
             "can_run": can_run,
             "is_partial": is_partial,
+            "resumed_done_chunks": resumed_done_c,
+            "resumed_total_chunks": resumed_tot_c,
             "is_already_completed": is_already_completed,
             "decision": decision
         })
@@ -663,7 +789,8 @@ def format_schedule_decision_table(sched: Dict[str, Any]) -> str:
     lines.append(f"• Thời điểm bắt đầu    : {sched['start_time']}")
     lines.append(f"• Mốc hạn chót          : {sched['deadline_str'] or 'Không đặt'} ({sched['deadline_time'] or 'N/A'})")
     lines.append(f"• Quỹ thời gian có sẵn : {sched['available_time_formatted']}")
-    lines.append(f"• Tốc độ AI suy luận    : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (Unique Inference FPS trên {DEVICE_NAME})")
+    dev_name = str(globals().get("DEVICE_NAME") or getattr(_cfg, "DEVICE_NAME", "CUDA"))
+    lines.append(f"• Tốc độ AI suy luận    : Trung vị {sched['fps_median']:.2f} fps | P5 {sched['fps_p5']:.2f} fps (Unique Inference FPS trên {dev_name})")
     lines.append(f"• Overhead mỗi tập      : {sched['total_overhead_seconds']:.0f}s (~{sched['total_overhead_seconds']/60:.1f} phút: {sched['video_overhead_seconds']:.0f}s video + {sched['subtitles_overhead_seconds']:.0f}s phụ đề)")
     lines.append(f"• Biên an toàn ETA      : +{sched['eta_margin_pct']*100:.1f}% trên ETA P5 để ra quyết định hạn chót")
     lines.append(f"• Cho phép dở dang      : --allow-partial = {'BẬT' if sched.get('allow_partial') else 'TẮT'}")

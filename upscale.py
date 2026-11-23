@@ -152,6 +152,7 @@ def check_deadline_and_eta(
     dedup_policy: Optional[str] = None,
     base_deadline_dt: Optional[datetime] = None,
     grain_restore: str = "auto",
+    force: bool = False,
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
@@ -196,6 +197,8 @@ def check_deadline_and_eta(
     n_unique = None
     is_measured = False
     norm_grain = str(grain_restore or "auto").strip().lower()
+    matched_plan: Optional[Dict[str, Any]] = None
+    total_f_est = 34000
     for p in candidate_plans:
         if os.path.exists(p):
             try:
@@ -214,6 +217,8 @@ def check_deadline_and_eta(
                     cand_kept = pdata.get("total_kept_frames")
                     if cand_kept:
                         n_unique = cand_kept
+                        total_f_est = int(pdata.get("total_frames") or 34000)
+                        matched_plan = pdata
                         is_measured = True
                         break
             except Exception:
@@ -225,16 +230,30 @@ def check_deadline_and_eta(
         try:
             meta = probe_video(video_path)
             total_f = meta.get("nb_frames") or int(meta.get("duration", 1440) * 23.976)
+            total_f_est = int(total_f)
             n_unique = int(total_f * keep_factor)
         except Exception:
             n_unique = int(34000 * keep_factor)
 
-    total_overhead = video_overhead + subtitles_overhead
+    source_tag = "đo (plan.json)" if is_measured else "ước lượng thận trọng (n=4)"
+    eff_vid_overhead = float(video_overhead)
+    if not force:
+        try:
+            from src.scheduler import _inspect_resumable_checkpoint
+            done_c, tot_c, rem_frac, rem_u = _inspect_resumable_checkpoint(
+                video_path, output_dir, matched_plan, total_f_est, int(n_unique), DEFAULT_ZERO_DISK_SEGMENT_TIME
+            )
+            if done_c > 0:
+                n_unique = rem_u
+                eff_vid_overhead = float(video_overhead) * max(0.15, rem_frac)
+                source_tag = f"{source_tag} (còn {tot_c - done_c}/{tot_c} chunk)"
+        except Exception:
+            pass
+
+    total_overhead = eff_vid_overhead + subtitles_overhead
     eta_p5 = (n_unique / max(0.5, fps_p5)) + total_overhead
     decision_eta = eta_p5 * (1.0 + eta_margin_pct)
     eta_med = (n_unique / max(0.5, fps_median)) + total_overhead
-
-    source_tag = "đo (plan.json)" if is_measured else "ước lượng thận trọng (n=4)"
 
     if decision_eta > seconds_left:
         if allow_partial and seconds_left > 0:
@@ -1118,7 +1137,11 @@ def main():
         print("\n⚡ [BENCHMARK MODE] Đã kích hoạt chế độ benchmark thuần túy: Bộ lập lịch và preflight nền từ chối chạy để bảo toàn môi trường đo đạc!")
 
     eff_sched_grain = str(getattr(args, "grain_restore", DEFAULT_GRAIN_RESTORE) or "auto").strip().lower()
-    sched_grain_kw = {"grain_restore": eff_sched_grain} if eff_sched_grain != "auto" else {}
+    sched_grain_kw: Dict[str, Any] = {}
+    if eff_sched_grain != "auto":
+        sched_grain_kw["grain_restore"] = eff_sched_grain
+    if getattr(args, "force", False):
+        sched_grain_kw["force"] = True
 
     # 1. Chế độ Dry Run (--dry-run): Preflight toàn bộ hàng đợi và in bảng quyết định, không chạy GPU
     if args.dry_run:
@@ -1200,7 +1223,7 @@ def main():
                 benchmark_mode=args.benchmark_mode,
                 on_plan_ready=_on_bg_plan_ready,
                 dedup_policy=eff_cli_dedup_policy,
-                **sched_grain_kw,
+                **({"grain_restore": eff_sched_grain} if eff_sched_grain != "auto" else {}),
             )
             bg_preflight.start()
 
@@ -1426,7 +1449,14 @@ def main():
                     unfinished_videos[vid] = f"Thử lại thất bại (chunk {last_c_idx + 1}): {retry_err}"
     finally:
         if bg_preflight is not None:
-            bg_preflight.stop()
+            should_clean_bg = bool(
+                not getattr(args, "keep_temp", False)
+                and (queue_halted or was_graceful_paused() or len(completed_videos) < len(videos))
+            )
+            try:
+                bg_preflight.stop(cleanup_unclaimed=should_clean_bg)
+            except TypeError:
+                bg_preflight.stop()
 
     # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY CHO CÁC TẬP ĐÃ HOÀN TẤT)
     # CHẠY TRONG TIẾN TRÌNH CON ĐỘC LẬP (SUBPROCESS), KHÔNG CHẶN HAY HỎNG VIDEO 4K
@@ -1507,7 +1537,7 @@ def main():
                 base_vid_name,
                 keep_whisper=has_partial,
             )
-            organize_output_artifacts(sub_out_dir, base_name=base_vid_name)
+            organize_output_artifacts(sub_out_dir, base_name=base_vid_name, out_stem=out_stem)
 
     # KIỂM ĐỊNH TẤT CẢ CÁC TẬP: NẾU CÒN TẬP CHƯA XONG THÌ THOÁT MÃ ≠ 0 VÀ IN BẢNG
     unfinished_list = [v for v in videos if v not in [cv[0] for cv in completed_videos]]
