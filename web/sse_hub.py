@@ -282,6 +282,13 @@ def scan_temp_checkpoints(
 
             episode_name = entry.name[len(".temp_"):]
             model_id = ""
+            dedup_policy = ""
+            dedup_policy_requested = ""
+            grain_restore = "auto"
+            nvenc_multipass_policy = "auto"
+            zero_disk = True
+            use_tensorrt = True
+            batch_size_val: Optional[int] = None
             source_file = ""
             output_dir_str = ""
             if manifest_path.is_file():
@@ -289,6 +296,19 @@ def scan_temp_checkpoints(
                     mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
                     if isinstance(mdata, dict):
                         model_id = str(mdata.get("model_id") or "")
+                        dedup_policy = str(mdata.get("dedup_policy") or "")
+                        dedup_policy_requested = str(mdata.get("dedup_policy_requested") or "")
+                        if mdata.get("grain_restore"):
+                            grain_restore = str(mdata.get("grain_restore") or "auto")
+                        if mdata.get("nvenc_multipass_policy"):
+                            nvenc_multipass_policy = str(mdata.get("nvenc_multipass_policy") or "auto")
+                        if "zero_disk" in mdata:
+                            zero_disk = bool(mdata.get("zero_disk"))
+                        if "use_tensorrt" in mdata:
+                            use_tensorrt = bool(mdata.get("use_tensorrt"))
+                        raw_bs = mdata.get("batch_size")
+                        if isinstance(raw_bs, int) and not isinstance(raw_bs, bool) and 1 <= raw_bs <= 32:
+                            batch_size_val = raw_bs
                         output_dir_str = str(mdata.get("output_dir") or "").strip()
                         for key in ("original_source_file", "source_file", "input_path"):
                             cand = str(mdata.get(key) or "").strip()
@@ -299,12 +319,25 @@ def scan_temp_checkpoints(
                     pass
 
             total_chunks = raw_count
+            manifest_total_chunks = 0
+            if manifest_path.is_file():
+                try:
+                    mdata_tc = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(mdata_tc, dict):
+                        manifest_total_chunks = int(mdata_tc.get("total_chunks") or 0)
+                except Exception:
+                    manifest_total_chunks = 0
             if plan_path.is_file():
                 try:
                     pdata = json.loads(plan_path.read_text(encoding="utf-8"))
                     if isinstance(pdata, dict):
                         if total_chunks == 0:
-                            total_chunks = len(pdata.get("chunks") or [])
+                            total_chunks = len(pdata.get("chunks") or []) or int(pdata.get("n_segments") or 0)
+                        if not dedup_policy and pdata.get("dedup_policy"):
+                            dedup_policy = str(pdata.get("dedup_policy") or "")
+                        p_params = pdata.get("dedup_params") or {}
+                        if grain_restore == "auto" and isinstance(p_params, dict) and p_params.get("grain_restore"):
+                            grain_restore = str(p_params.get("grain_restore") or "auto")
                         if not source_file:
                             cand_plan_path = str(pdata.get("source_path") or "").strip()
                             if cand_plan_path and not os.path.basename(cand_plan_path).startswith(".preview_clip_"):
@@ -319,6 +352,8 @@ def scan_temp_checkpoints(
                                     source_file = cand_plan_file
                 except Exception:
                     pass
+            if total_chunks == 0 and manifest_total_chunks > 0:
+                total_chunks = manifest_total_chunks
 
             if not source_file and live_data_disk:
                 cand_live_in = str(live_data_disk.get("input_path") or "").strip()
@@ -356,6 +391,13 @@ def scan_temp_checkpoints(
                 "completed_chunks": up_count,
                 "total_chunks": total_chunks,
                 "model_id": model_id,
+                "dedup_policy": dedup_policy,
+                "dedup_policy_requested": dedup_policy_requested,
+                "grain_restore": grain_restore,
+                "nvenc_multipass_policy": nvenc_multipass_policy,
+                "zero_disk": zero_disk,
+                "use_tensorrt": use_tensorrt,
+                "batch_size": batch_size_val,
                 "size_mb": round(size_bytes / (1024 * 1024), 2),
             })
     return results
@@ -576,17 +618,23 @@ class TelemetryHub:
             if active_type in {"subtrans", "subs_pending"}:
                 # Tiến trình dịch phụ đề độc lập không ghi live_status.json: không để trạng thái tập cũ tràn sang
                 effective_stage = "subtrans"
-                sub_qual = str((active_job.get("options") or {}).get("subs_quality") or "normal")
+                sub_opts = active_job.get("options") or {}
+                sub_qual = str(sub_opts.get("subs_quality") or "normal")
+                is_sub_dry = bool(sub_opts.get("dry_run"))
+                dry_prefix = "[Dry-Run] " if is_sub_dry else ""
                 live_data = {
                     "video_name": target_label,
                     "pid": active_pid,
+                    "job_id": active_job.get("job_id"),
+                    "job_type": active_type,
+                    "dry_run": is_sub_dry,
                     "started_at": active_job.get("started_at"),
                     "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                     "stage": "subtrans",
                     "stage_detail": (
-                        f"Đang dịch hàng đợi phụ đề tồn đọng ({target_label})..."
+                        f"{dry_prefix}Đang dịch hàng đợi phụ đề tồn đọng ({target_label})..."
                         if active_type == "subs_pending"
-                        else f"Đang trích xuất & dịch phụ đề Anime ({target_label})..."
+                        else f"{dry_prefix}Đang trích xuất & dịch phụ đề Anime ({target_label})..."
                     ),
                     "model_id": f"subtrans ({sub_qual})",
                     "zero_disk": False,
@@ -608,15 +656,19 @@ class TelemetryHub:
             ):
                 # Tập mới vừa được Web GUI khởi chạy nhưng chưa kịp tạo RunLogger mới -> tránh báo nhầm 'completed' của tập cũ
                 effective_stage = "initializing"
+                up_opts = active_job.get("options") or {}
                 live_data = {
                     "video_name": target_label,
                     "pid": active_pid,
+                    "job_id": active_job.get("job_id"),
+                    "job_type": active_type,
+                    "dry_run": bool(up_opts.get("dry_run")),
                     "started_at": active_job.get("started_at"),
                     "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                     "stage": "initializing",
                     "stage_detail": "Đang khởi tạo tiến trình Upscale & kiểm tra môi trường...",
-                    "model_id": str((active_job.get("options") or {}).get("model") or ""),
-                    "zero_disk": bool((active_job.get("options") or {}).get("zero_disk", True)),
+                    "model_id": str(up_opts.get("model") or ""),
+                    "zero_disk": bool(up_opts.get("zero_disk", True)),
                     "total_frames": 0,
                     "unique_frames": 0,
                     "total_chunks": 0,
@@ -660,19 +712,25 @@ class TelemetryHub:
 
                 if last_type in {"subtrans", "subs_pending"} and not live_from_newer_upscale:
                     if last_status == "completed":
+                        is_sub_dry = bool((last_job.get("options") or {}).get("dry_run"))
                         effective_stage = "completed"
                         live_data = {
                             "video_name": target_label_last,
                             "pid": last_job.get("pid"),
                             "job_id": last_job.get("job_id"),
                             "job_type": last_type,
+                            "dry_run": is_sub_dry,
                             "started_at": last_job.get("started_at"),
                             "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                             "stage": "completed",
                             "stage_detail": (
-                                f"Hoàn tất dịch hàng đợi phụ đề ({target_label_last})."
-                                if last_type == "subs_pending"
-                                else f"Hoàn tất dịch & nhúng phụ đề ({target_label_last})."
+                                f"Hoàn tất mô phỏng dịch phụ đề (--dry-run) ({target_label_last})."
+                                if is_sub_dry
+                                else (
+                                    f"Hoàn tất dịch hàng đợi phụ đề ({target_label_last})."
+                                    if last_type == "subs_pending"
+                                    else f"Hoàn tất dịch & nhúng phụ đề ({target_label_last})."
+                                )
                             ),
                             "model_id": f"subtrans ({(last_job.get('options') or {}).get('subs_quality', 'normal')})",
                             "zero_disk": False,
@@ -843,6 +901,9 @@ class TelemetryHub:
                             if effective_stage not in {"starting", "initializing"}:
                                 live_data["last_stage"] = effective_stage
                             live_data["stage"] = "paused"
+                            live_data["active_chunk_fraction"] = 0.0
+                            live_data["eta_seconds"] = None
+                            live_data["stage_detail"] = f"Tác vụ {last_type} đã bị dừng ({target_label_last})."
                             effective_stage = "paused"
                     else:
                         aborted_stage = "paused" if checkpoints else "idle"

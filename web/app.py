@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -46,7 +47,7 @@ from web.fs_browser import (
     match_show_rule,
 )
 from web.job_manager import MODEL_REFERENCE_FPS, JobManager
-from web.sse_hub import TelemetryHub, scan_temp_checkpoints
+from web.sse_hub import TelemetryHub, check_active_gpu_lock, scan_temp_checkpoints
 
 ALLOWED_OPEN_MEDIA_EXTS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -292,6 +293,15 @@ class OpenMediaRequest(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_p(cls, v: str) -> str:
+        return _validate_no_nul_str(v, "path") or ""
+
+
+class DeleteCheckpointRequest(BaseModel):
+    path: str
+
+    @field_validator("path")
+    @classmethod
+    def _validate_cp_path(cls, v: str) -> str:
         return _validate_no_nul_str(v, "path") or ""
 
 
@@ -1321,6 +1331,9 @@ def create_app(
             _cleanup_web_compare_dir()
             await telemetry_hub.shutdown()
 
+    if not is_mock:
+        _cleanup_web_compare_dir()
+
     app = FastAPI(
         title="AI Video Upscaler & Subtrans Studio",
         version="1.0.0",
@@ -1623,6 +1636,61 @@ def create_app(
             return mock_controls["abort"]()
         return job_manager.abort_job()
 
+    @app.post("/api/checkpoints/delete")
+    def api_delete_checkpoint(req: DeleteCheckpointRequest) -> Dict[str, Any]:
+        cleaned = (req.path or "").strip()
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="Thiếu đường dẫn thư mục checkpoint (.temp_*).")
+        if is_mock and popen_factory is None:
+            return {"ok": True, "deleted": cleaned, "freed_mb": 0.0, "mock": True}
+
+        jstate = job_manager.get_state()
+        if jstate.get("status") in {"running", "pausing"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Không thể xóa checkpoint khi đang có tiến trình chạy. Hãy tạm dừng hoặc dừng tác vụ trước.",
+            )
+        lock_state = check_active_gpu_lock(root)
+        if lock_state.get("locked"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"GPU đang bận xử lý tiến trình khác (PID={lock_state.get('pid')}); từ chối xóa checkpoint.",
+            )
+
+        cand = Path(os.path.expanduser(cleaned))
+        if not cand.is_absolute():
+            cand = (root / cand).resolve()
+        else:
+            cand = cand.resolve()
+
+        if cand.is_symlink() or not cand.name.startswith(".temp_") or len(cand.name) <= len(".temp_"):
+            raise HTTPException(status_code=400, detail="Chỉ cho phép xóa thư mục checkpoint .temp_* hợp lệ.")
+        if not cand.is_dir():
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy thư mục checkpoint: {cand}")
+
+        known_outs = _collect_known_output_dirs(root, job_manager)
+        known_cps = scan_temp_checkpoints(root, extra_dirs=known_outs)
+        norm_cand = os.path.normcase(str(cand))
+        matched_cp = next(
+            (cp for cp in known_cps if os.path.normcase(os.path.abspath(str(cp.get("path") or ""))) == norm_cand),
+            None,
+        )
+        has_cp_markers = any(
+            (cand / marker).exists() for marker in ("raw_segs", "upscaled_segs", "manifest.json", "plan.json")
+        )
+        if matched_cp is None or not has_cp_markers:
+            raise HTTPException(
+                status_code=403,
+                detail="Từ chối xóa: thư mục không thuộc danh sách checkpoint .temp_* hợp lệ của dự án.",
+            )
+
+        freed_mb = float(matched_cp.get("size_mb") or 0.0)
+        try:
+            shutil.rmtree(cand)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Không thể xóa checkpoint: {exc}") from exc
+        return {"ok": True, "deleted": str(cand), "freed_mb": freed_mb}
+
     @app.post("/api/open-media")
     def api_open_media(req: OpenMediaRequest) -> Dict[str, Any]:
         cleaned = (req.path or "").strip()
@@ -1836,8 +1904,15 @@ def create_app(
 
     @app.post("/api/preview/compare-frames")
     def api_compare_frames(req: CompareFramesRequest) -> Dict[str, Any]:
-        src_p = Path(os.path.expanduser(req.source_path.strip()))
-        up_p = Path(os.path.expanduser(req.upscaled_path.strip()))
+        raw_src = (req.source_path or "").strip()
+        raw_up = (req.upscaled_path or "").strip()
+        if not raw_src or not raw_up:
+            raise HTTPException(
+                status_code=400,
+                detail="Vui lòng cung cấp đầy đủ đường dẫn video gốc (1080p) và video thành phẩm (4K).",
+            )
+        src_p = Path(os.path.expanduser(raw_src))
+        up_p = Path(os.path.expanduser(raw_up))
         if not src_p.is_absolute():
             src_p = (root / src_p).resolve()
         else:
@@ -1913,10 +1988,10 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        # Retain at most the 24 most recent temporary comparison frames
+        # Retain at most the 12 most recent temporary comparison frames (6 pairs)
         try:
             pngs = sorted(compare_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for old_f in pngs[24:]:
+            for old_f in pngs[12:]:
                 try:
                     old_f.unlink()
                 except OSError:

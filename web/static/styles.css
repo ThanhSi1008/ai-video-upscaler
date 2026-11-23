@@ -405,6 +405,11 @@ textarea.code-textarea {
     padding-inline: 0.45rem;
     font-size: 0.74rem;
   }
+
+  #gpu-badge {
+    grid-column: 1 / -1;
+    inline-size: 100%;
+  }
 }
 
 /* ==========================================================================
@@ -894,6 +899,10 @@ textarea[aria-invalid="true"] {
   min-inline-size: 0;
 }
 
+.monitor-bottom-split {
+  align-items: start;
+}
+
 /* Chunk Heatmap */
 .heatmap-legend {
   display: flex;
@@ -955,6 +964,7 @@ textarea[aria-invalid="true"] {
 .checkpoint-chip {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.45rem 0.7rem;
@@ -962,6 +972,13 @@ textarea[aria-invalid="true"] {
   background-color: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   font-size: 0.82rem;
+}
+
+.checkpoint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 /* Live Log Console */
@@ -1095,6 +1112,11 @@ textarea.code-textarea {
   gap: 0.45rem;
   font-size: 0.85rem;
   cursor: pointer;
+}
+
+.inline-check.is-disabled-dep,
+.field-group.is-disabled-dep {
+  opacity: 0.55;
 }
 
 .form-cta-row {
@@ -1390,6 +1412,22 @@ textarea.code-textarea {
   margin-block-end: 0.85rem;
 }
 
+@media (min-width: 1200px) {
+  .compare-controls-grid {
+    grid-template-columns:
+      minmax(200px, 1.35fr)
+      minmax(240px, 1.8fr)
+      minmax(240px, 1.8fr)
+      minmax(115px, 0.7fr)
+      minmax(125px, 0.75fr)
+      auto;
+  }
+}
+
+.compare-quick-btns {
+  gap: 0.25rem;
+}
+
 .compare-extract-cta {
   min-inline-size: 0;
   grid-template-rows: minmax(2.65rem, auto) auto auto;
@@ -1647,6 +1685,23 @@ dialog::backdrop {
   flex-wrap: wrap;
   align-items: safe center;
   gap: 0.45rem;
+}
+
+.fs-quick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.fs-jump-group {
+  flex: 2 1 280px;
+  min-inline-size: 0;
+}
+
+.fs-filter-group {
+  flex: 1 1 190px;
+  min-inline-size: 0;
 }
 
 .fs-path-pill {

@@ -5859,3 +5859,253 @@ def test_abort_job_discards_aborting_token_on_unexpected_error(
     # Subsequent pause/clear or status polling remains clean after exception recovery.
     assert jm.get_state()["status"] == "aborted"
     assert jm.clear_graceful_pause()["ok"] is True
+
+
+def test_qa_remediation_intra_chunk_progress_and_log_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify B1 1Hz intra-chunk progress updates without mutating completed_chunks and Hygiene #3 log pruning."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", str(log_dir))
+
+    import time as _time_mod
+
+    old_ts = _time_mod.time() - 600.0
+    for i in range(46):
+        old_log = log_dir / f"upscale_20260101_0000{i:02d}_ep.log"
+        old_log.write_text("old\n", encoding="utf-8")
+        os.utime(old_log, (old_ts + i, old_ts + i))
+
+    rl = logger_mod.RunLogger("Mushoku_S01E21.mkv")
+    rl.update_live_context(
+        model_id="realcugan-pro-conservative-2x",
+        total_frames=1138,
+        unique_frames=700,
+        total_chunks=2,
+        zero_disk=True,
+    )
+    assert len(list(log_dir.glob("upscale_*.log"))) <= 41
+
+    rl.set_stage("upscaling", "Đang nâng cấp chunk 1/2", active_chunk=0)
+    rl._last_intra_flush_ts = 0.0
+    rl.update_active_chunk_progress(
+        chunk_idx=0,
+        done_distinct=175,
+        total_distinct=350,
+        chunk_elapsed_sec=20.0,
+        chunk_total_frames=576,
+        force=True,
+    )
+    snap = logger_mod.read_live_status()
+    assert snap["completed_chunks"] == 0
+    assert snap["chunks"] == []
+    assert snap["active_chunk"] == 0
+    assert snap["active_chunk_fraction"] == pytest.approx(0.5, abs=0.02)
+    assert snap["latest_fps"] > 0.0
+    assert snap["effective_fps"] > snap["latest_fps"]
+    assert snap["eta_seconds"] is not None and snap["eta_seconds"] > 0
+
+    dummy_seg = tmp_path / "up_0000.mp4"
+    dummy_seg.write_bytes(b"x" * 16384)
+    rl.log_chunk_done(
+        chunk_idx=0,
+        total_chunks=2,
+        frames=576,
+        ai_time=40.0,
+        ai_fps=8.75,
+        enc_time=0.5,
+        total_chunk_time=40.5,
+        output_seg=str(dummy_seg),
+    )
+    snap_done = logger_mod.read_live_status()
+    assert snap_done["completed_chunks"] == 1
+    assert snap_done["active_chunk_fraction"] == 0.0
+    assert len(snap_done["chunks"]) == 1
+
+
+def test_qa_remediation_checkpoint_metadata_schedule_deduction_and_safe_delete(tmp_path: Path):
+    """Verify B2/B8a full checkpoint metadata & ETA deduction plus G1 safe /api/checkpoints/delete guards."""
+    root = _seed_workspace(tmp_path / "qa_cp_ws")
+    ep_path = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    cp_dir = root / "out" / ".temp_[BD 1080p] Fate_Ep22"
+    up_segs = cp_dir / "upscaled_segs"
+    up_segs.mkdir(parents=True, exist_ok=True)
+    (cp_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_file": str(ep_path),
+                "model_id": "realcugan-pro-conservative-2x",
+                "scale": 2,
+                "out_w": 3840,
+                "out_h": 2160,
+                "dedup_policy": "dis-auto",
+                "dedup_policy_requested": "auto",
+                "grain_restore": "off",
+                "nvenc_multipass_policy": "qres",
+                "zero_disk": True,
+                "use_tensorrt": True,
+                "batch_size": 4,
+                "total_frames": 2400,
+                "unique_frames": 1200,
+                "total_chunks": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cp_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "dedup_policy": "dis-auto",
+                "total_frames": 2400,
+                "total_kept_frames": 1200,
+                "chunks": [
+                    {"chunk_idx": 0, "total_frames": 600, "kept_count": 300},
+                    {"chunk_idx": 1, "total_frames": 600, "kept_count": 300},
+                    {"chunk_idx": 2, "total_frames": 600, "kept_count": 300},
+                    {"chunk_idx": 3, "total_frames": 600, "kept_count": 300},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (up_segs / "up_0000.mp4").write_bytes(b"0" * 16384)
+    (up_segs / "up_0001.mp4").write_bytes(b"1" * 16384)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+    with TestClient(app) as client:
+        st = client.get("/api/status").json()
+        cps = st["pipeline"]["checkpoints"]
+        target_cp = next(c for c in cps if c["name"] == cp_dir.name)
+        assert target_cp["completed_chunks"] == 2
+        assert target_cp["total_chunks"] == 4
+        assert target_cp["model_id"] == "realcugan-pro-conservative-2x"
+        assert target_cp["dedup_policy"] == "dis-auto"
+        assert target_cp["dedup_policy_requested"] == "auto"
+        assert target_cp["grain_restore"] == "off"
+        assert target_cp["nvenc_multipass_policy"] == "qres"
+        assert target_cp["batch_size"] == 4
+        assert target_cp["zero_disk"] is True
+        assert target_cp["use_tensorrt"] is True
+
+        sched_resume = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [str(ep_path)], "model": "realcugan-pro-conservative-2x", "force": False},
+        )
+        assert sched_resume.status_code == 200
+        ep_res = sched_resume.json()["episodes"][0]
+        assert "Tiếp tục checkpoint 2/4" in ep_res["routing_source"]
+
+        sched_force = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [str(ep_path)], "model": "realcugan-pro-conservative-2x", "force": True},
+        )
+        assert sched_force.status_code == 200
+        ep_force = sched_force.json()["episodes"][0]
+        assert ep_res["eta_seconds"] < ep_force["eta_seconds"]
+
+        # Reject deleting arbitrary non-checkpoint folder
+        bad_del = client.post("/api/checkpoints/delete", json={"path": str(root / "out")})
+        assert bad_del.status_code == 400
+
+        # Reject deleting unknown .temp_ folder lacking checkpoint markers
+        stray_dir = root / "out" / ".temp_not_a_checkpoint"
+        stray_dir.mkdir(parents=True, exist_ok=True)
+        (stray_dir / "notes.txt").write_text("hi", encoding="utf-8")
+        untrusted_del = client.post("/api/checkpoints/delete", json={"path": str(stray_dir)})
+        assert untrusted_del.status_code in (400, 403)
+        assert stray_dir.is_dir()
+
+        # Reject deleting when GPU lock is active
+        lock_file = root / ".gpu_active.lock"
+        lock_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        try:
+            locked_del = client.post("/api/checkpoints/delete", json={"path": str(cp_dir)})
+            assert locked_del.status_code == 409
+            assert cp_dir.is_dir()
+        finally:
+            lock_file.unlink(missing_ok=True)
+
+        # Cleanly delete known idle checkpoint
+        ok_del = client.post("/api/checkpoints/delete", json={"path": str(cp_dir)})
+        assert ok_del.status_code == 200
+        assert ok_del.json()["ok"] is True
+        assert not cp_dir.exists()
+
+
+def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_flags(tmp_path: Path):
+    """Verify B4 (.srt / _4K rejection on upscale), B5 (subtrans dry_run), B6 (dominant folder_routing), B8d, U5, and UI tokens."""
+    root = _seed_workspace(tmp_path / "qa_misc_ws")
+    season_dir = root / "anime_season"
+    srt_file = season_dir / "Fate_Ep22.ja.srt"
+    srt_file.write_text("1\n00:00:01,000 --> 00:00:02,000\nテスト\n", encoding="utf-8")
+    already_4k = root / "out" / "[BD 1080p] Fate_Ep22_4K.mkv"
+    already_4k.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 512)
+    src_ep = season_dir / "[BD 1080p] Fate_Ep22.mkv"
+
+    spawned_cmds: List[List[str]] = []
+
+    def capture_factory(cmd: List[str], **_kw: Any) -> FakePopenProcess:
+        spawned_cmds.append(list(cmd))
+        return FakePopenProcess(cmd, pid=81234, running=True, return_code=0)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
+    with TestClient(app) as client:
+        # B4: Reject .srt and *_4K.mkv in upscale / preview / schedule
+        for bad_input in (str(srt_file), str(already_4k)):
+            assert client.post("/api/queue/preview-schedule", json={"inputs": [bad_input]}).status_code == 400
+            assert client.post("/api/jobs/start", json={"inputs": [bad_input], "dry_run": True}).status_code == 400
+            assert client.post("/api/jobs/preview", json={"video_path": bad_input}).status_code == 400
+
+        # B4 + B5: Allow both .srt and *_4K.mkv in subtrans, and reflect dry_run in live status
+        sub_ok = client.post("/api/jobs/subtrans", json={"input_path": str(srt_file), "dry_run": True})
+        assert sub_ok.status_code == 200
+        st_sub = client.get("/api/status").json()
+        assert st_sub["pipeline"]["live"]["dry_run"] is True
+        assert "Dry-Run" in st_sub["pipeline"]["live"]["stage_detail"]
+        assert client.post("/api/jobs/abort").status_code == 200
+
+        # U5: --no-subs omits redundant subtitle flags
+        spawned_cmds.clear()
+        start_nosubs = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(src_ep)], "subs_after_upscale": False, "dry_run": True},
+        )
+        assert start_nosubs.status_code == 200
+        cmd_used = spawned_cmds[-1]
+        assert "--no-subs" in cmd_used
+        assert "--subs-quality" not in cmd_used
+        assert "--auto-align-en" not in cmd_used
+        assert client.post("/api/jobs/abort").status_code == 200
+
+        # B6: Folder routing reflects actual episodes inside folder
+        browse_res = client.get("/api/fs/browse", params={"path": str(season_dir)}).json()
+        assert browse_res["folder_routing"] is not None
+        assert browse_res["folder_routing"]["model_id"] != ""
+
+        # B8d: Blank compare-frames paths return HTTP 400 (not 403)
+        cmp_blank = client.post(
+            "/api/preview/compare-frames",
+            json={"source_path": "", "upscaled_path": "   ", "timestamp_sec": 1.0},
+        )
+        assert cmp_blank.status_code == 400
+
+        # Frontend token checks for new UX/QA features
+        html = client.get("/").text
+        panels_js = client.get("/static/js/panels.js").text
+        compare_js = client.get("/static/js/compare_stage.js").text
+        fs_js = client.get("/static/js/fs_picker.js").text
+        app_js = client.get("/static/js/app.js").text
+
+        assert "btn-browse-opt-outdir" in html and "btn-browse-sub-outdir" in html
+        assert "opt-preview-seconds" in html
+        assert "fs-jump-input" in html and "fs-filter-input" in html
+        assert "btn-wipe-src" in html and "compare-pan-mode" in html
+        assert "QUEUE_CONFIG_STORAGE_KEY" in panels_js
+        assert "validity.badInput" in panels_js and "validity.badInput" in compare_js
+        assert "foldersOnly" in fs_js and "foldersOnly" in panels_js
+        assert "resumeCheckpointNow" in panels_js and "resumeCheckpointNow" in app_js
+        assert "/api/checkpoints/delete" in app_js
+        assert "active_chunk_fraction" in app_js

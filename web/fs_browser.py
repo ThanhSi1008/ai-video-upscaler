@@ -398,16 +398,46 @@ class SafeLocalFSBrowser:
                         "size_mb": size_mb,
                     })
 
+        source_files = [
+            f for f in files if f.get("type") == "video" and isinstance(f.get("routing"), dict)
+        ]
+        if source_files:
+            pair_counts: Dict[tuple[str, str], int] = {}
+            pair_sample: Dict[tuple[str, str], Dict[str, Any]] = {}
+            distinct_models: set[str] = set()
+            for sf in source_files:
+                rt = sf["routing"]
+                key = (str(rt.get("model_id") or ""), str(rt.get("dedup_policy") or "default"))
+                pair_counts[key] = pair_counts.get(key, 0) + 1
+                pair_sample.setdefault(key, rt)
+                if key[0]:
+                    distinct_models.add(key[0])
+            dominant_key = max(pair_counts.items(), key=lambda kv: kv[1])[0]
+            folder_routing = dict(pair_sample[dominant_key])
+            if len(pair_counts) > 1:
+                folder_routing["mixed_routing"] = True
+                folder_routing["distinct_models_count"] = len(distinct_models)
+                folder_routing["resolution_source"] = (
+                    f"Hỗn hợp {len(pair_counts)} cấu hình theo từng tệp (phổ biến: {dominant_key[0]})"
+                )
+        else:
+            folder_routing = self.resolve_routing_for_path(cand / "sample.mkv", routing_tables=routing_tables)
+
         return {
             "current_path": str(cand),
             "parent_path": parent_path,
             "workspace_root": str(self.workspace_root),
             "source_video_count": source_video_count,
-            "folder_routing": self.resolve_routing_for_path(cand / "sample.mkv", routing_tables=routing_tables),
+            "folder_routing": folder_routing,
             "entries": dirs + files,
         }
 
-    def expand_inputs(self, raw_inputs: Sequence[str]) -> List[str]:
+    def expand_inputs(
+        self,
+        raw_inputs: Sequence[str],
+        allow_subtitles: bool = True,
+        allow_upscaled_4k: bool = True,
+    ) -> List[str]:
         """Expand file/directory inputs in natural order, skipping hidden and *_4K outputs."""
         expanded: List[str] = []
         seen: set[str] = set()
@@ -458,8 +488,17 @@ class SafeLocalFSBrowser:
                     _add(fp)
             elif cand.is_file():
                 ext = cand.suffix.lower()
-                if ext not in (VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS):
+                allowed_exts = (VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS) if allow_subtitles else VIDEO_EXTENSIONS
+                if ext not in allowed_exts:
+                    if ext in SUBTITLE_EXTENSIONS and not allow_subtitles:
+                        raise ValueError(
+                            f"Tệp phụ đề '{cand.name}' không phải là video nguồn để nâng cấp 4K (hãy dùng Tab Subtrans)."
+                        )
                     raise ValueError(f"Định dạng file không được hỗ trợ: {cand.name}")
+                if (not allow_upscaled_4k) and (ext in VIDEO_EXTENSIONS) and is_upscaled_output_stem(cand.stem):
+                    raise ValueError(
+                        f"Tệp '{cand.name}' đã là bản thành phẩm 4K (_4K) — từ chối nạp làm nguồn đầu vào để tránh tràn VRAM 8K."
+                    )
                 _add(str(cand))
             else:
                 raise FileNotFoundError(f"Không tìm thấy đường dẫn: {cand}")

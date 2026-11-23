@@ -23,6 +23,9 @@ export function initFsPickerModal() {
   const btnWorkspace = document.getElementById("fs-btn-workspace");
   const btnUp = document.getElementById("fs-btn-up");
   const btnPickFolder = document.getElementById("fs-btn-pick-folder");
+  const jumpInput = document.getElementById("fs-jump-input");
+  const btnJump = document.getElementById("fs-btn-jump");
+  const filterInput = document.getElementById("fs-filter-input");
 
   btnDrives?.addEventListener("click", () => {
     activeSession?.browse("drives");
@@ -38,6 +41,25 @@ export function initFsPickerModal() {
     } else {
       activeSession?.browse("drives");
     }
+  });
+
+  const triggerJump = () => {
+    if (!activeSession || !(jumpInput instanceof HTMLInputElement)) return;
+    const target = jumpInput.value.trim();
+    activeSession.browse(target || "drives");
+  };
+
+  btnJump?.addEventListener("click", triggerJump);
+  jumpInput?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      if (ev.isComposing || ev.keyCode === 229) return;
+      ev.preventDefault();
+      triggerJump();
+    }
+  });
+
+  filterInput?.addEventListener("input", () => {
+    activeSession?.renderEntries();
   });
 
   btnPickFolder?.addEventListener("click", () => {
@@ -79,11 +101,15 @@ export function openFsPicker(options = {}) {
   const selectionCount = document.getElementById("fs-selection-count");
   const btnUp = document.getElementById("fs-btn-up");
   const btnConfirm = document.getElementById("fs-btn-confirm");
+  const btnPickFolder = document.getElementById("fs-btn-pick-folder");
+  const jumpInput = document.getElementById("fs-jump-input");
+  const filterInput = document.getElementById("fs-filter-input");
 
   const cfg = {
     title: options.title || "Chọn Video hoặc Thư mục trên Máy trạm",
     multi: Boolean(options.multi),
     allowFolders: Boolean(options.allowFolders),
+    foldersOnly: Boolean(options.foldersOnly),
     includeSubtitles: Boolean(options.includeSubtitles),
     allow4k: Boolean(options.allow4k),
     initialPath: options.initialPath ?? (lastVisitedPath || ""),
@@ -92,6 +118,9 @@ export function openFsPicker(options = {}) {
   if (titleEl) {
     titleEl.textContent = cfg.title;
   }
+  if (filterInput instanceof HTMLInputElement) {
+    filterInput.value = "";
+  }
 
   return new Promise((resolve) => {
     const session = {
@@ -99,6 +128,7 @@ export function openFsPicker(options = {}) {
       currentPath: "",
       parentPath: null,
       workspaceRoot: "",
+      lastEntries: [],
       browseSeq: 0,
       resolved: false,
       resolve,
@@ -108,12 +138,49 @@ export function openFsPicker(options = {}) {
           selectionCount.textContent =
             count > 0
               ? `Đã chọn ${count} mục.`
-              : cfg.multi
-                ? "Nhấp vào thư mục để mở, hoặc đánh dấu các tệp cần thêm."
-                : "Nhấp vào một tệp để chọn nhanh.";
+              : cfg.foldersOnly
+                ? "Mở thư mục đích rồi nhấn “✓ Chọn thư mục này” (hoặc “+ Chọn thư mục” trên dòng con)."
+                : cfg.multi
+                  ? "Nhấp vào thư mục để mở, hoặc đánh dấu các tệp cần thêm."
+                  : "Nhấp vào một tệp để chọn nhanh.";
         }
         if (btnConfirm instanceof HTMLButtonElement) {
           btnConfirm.disabled = count === 0;
+        }
+      },
+      renderEntries() {
+        if (!entriesList) return;
+        clearChildren(entriesList);
+        const filterKw =
+          filterInput instanceof HTMLInputElement ? filterInput.value.trim().toLowerCase() : "";
+        let renderedCount = 0;
+        for (const item of this.lastEntries) {
+          if (cfg.foldersOnly && item.type !== "drive" && item.type !== "dir") {
+            continue;
+          }
+          if (item.type === "video_4k" && !cfg.allow4k && !cfg.multi) {
+            continue;
+          }
+          if (filterKw && !String(item.name || "").toLowerCase().includes(filterKw)) {
+            continue;
+          }
+          const row = this._renderEntryRow(item);
+          if (row) {
+            entriesList.append(row);
+            renderedCount++;
+          }
+        }
+        if (renderedCount === 0) {
+          entriesList.append(
+            el("p", {
+              className: "empty-hint",
+              textContent: filterKw
+                ? `Không có mục nào khớp từ khóa "${filterKw}".`
+                : cfg.foldersOnly
+                  ? "Không có thư mục con (bạn vẫn có thể chọn chính thư mục đang mở ở thanh trên)."
+                  : "Thư mục này chưa có thư mục con hoặc tệp media phù hợp.",
+            })
+          );
         }
       },
       async browse(targetPath) {
@@ -144,44 +211,33 @@ export function openFsPicker(options = {}) {
           if (pathPill) {
             pathPill.textContent = this.currentPath || "Danh sách Ổ đĩa Máy trạm";
           }
+          if (jumpInput instanceof HTMLInputElement) {
+            jumpInput.value = this.currentPath || "";
+          }
           if (btnUp instanceof HTMLButtonElement) {
             btnUp.disabled = !this.currentPath;
           }
 
           // Folder whole-select banner
           if (folderBanner && folderSummary) {
-            if (cfg.allowFolders && this.currentPath && Number(data.source_video_count || 0) > 0) {
+            if (cfg.foldersOnly && this.currentPath) {
+              folderSummary.textContent = `Thư mục đích hiện tại: ${this.currentPath}`;
+              if (btnPickFolder) btnPickFolder.textContent = "✓ Chọn thư mục này";
+              folderBanner.hidden = false;
+            } else if (cfg.allowFolders && this.currentPath && Number(data.source_video_count || 0) > 0) {
               const routeModel = data.folder_routing?.model_id || "animevideov3";
               const routePol = data.folder_routing?.dedup_policy || "default";
-              folderSummary.textContent = `Thư mục này có ${data.source_video_count} tập nguồn • Định tuyến: ${routeModel} (${routePol})`;
+              const mixNote = data.folder_routing?.mixed_routing ? " [hỗn hợp theo file]" : "";
+              folderSummary.textContent = `Thư mục này có ${data.source_video_count} tập nguồn • Định tuyến: ${routeModel} (${routePol})${mixNote}`;
+              if (btnPickFolder) btnPickFolder.textContent = "✓ Chọn cả thư mục này";
               folderBanner.hidden = false;
             } else {
               folderBanner.hidden = true;
             }
           }
 
-          clearChildren(entriesList);
-          const entries = Array.isArray(data.entries) ? data.entries : [];
-          let renderedCount = 0;
-          for (const item of entries) {
-            if (item.type === "video_4k" && !cfg.allow4k && !cfg.multi) {
-              // Still show in queue browser as informational, hide only when picking 1080p source
-              continue;
-            }
-            const row = this._renderEntryRow(item);
-            if (row) {
-              entriesList.append(row);
-              renderedCount++;
-            }
-          }
-          if (renderedCount === 0) {
-            entriesList.append(
-              el("p", {
-                className: "empty-hint",
-                textContent: "Thư mục này chưa có thư mục con hoặc tệp media phù hợp.",
-              })
-            );
-          }
+          this.lastEntries = Array.isArray(data.entries) ? data.entries : [];
+          this.renderEntries();
           this.updateFooter();
         } catch (err) {
           if (!isCurrent()) return;

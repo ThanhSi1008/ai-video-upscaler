@@ -186,12 +186,17 @@ function bootstrapStudio() {
       }
       if (
         mode === "subtrans" &&
-        !(
-          low.includes("sub") ||
-          low.includes("gemini") ||
-          low.includes("whisper") ||
-          low.includes("dtw")
-        )
+        (low.includes("subtitles,") ||
+          !(
+            low.includes("subtrans") ||
+            low.includes("[sub") ||
+            low.includes("stage b") ||
+            low.includes("phụ đề") ||
+            low.includes("vietsub") ||
+            low.includes("gemini") ||
+            low.includes("whisper") ||
+            low.includes("dtw")
+          ))
       ) {
         return false;
       }
@@ -277,7 +282,13 @@ function bootstrapStudio() {
     }
   });
 
+  let abortInFlight = false;
   btnAbortJob?.addEventListener("click", async () => {
+    if (abortInFlight) return;
+    abortInFlight = true;
+    if (btnAbortJob instanceof HTMLButtonElement) {
+      btnAbortJob.disabled = true;
+    }
     try {
       const res = await apiFetch("/api/jobs/abort", { method: "POST" });
       if (res.aborted_pid) {
@@ -291,9 +302,11 @@ function bootstrapStudio() {
       } else {
         showToast(res.message || "Không có tiến trình Web Job nào đang chạy.", "info");
       }
-      fetchSnapshotFallback();
     } catch (err) {
       showToast(err.message, "error");
+    } finally {
+      abortInFlight = false;
+      fetchSnapshotFallback();
     }
   });
 
@@ -318,11 +331,17 @@ function bootstrapStudio() {
       "subtrans",
     ]);
     if (activeTransitionStages.has(lastEffectiveStage) && stage === "completed") {
-      const toastMsg =
-        lastEffectiveStage === "subtrans"
-          ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
-          : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
-      showToast(toastMsg, "success", 6500);
+      const lastJobRef = job.last_job || job.last_finished_job || null;
+      const wasDryRun = Boolean(live.dry_run || lastJobRef?.dry_run);
+      if (wasDryRun) {
+        showToast("🧪 Hoàn tất kiểm thử Dry-Run (không xuất media hay trừ hạn mức API).", "info", 5200);
+      } else {
+        const toastMsg =
+          lastEffectiveStage === "subtrans"
+            ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
+            : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
+        showToast(toastMsg, "success", 6500);
+      }
       compareCtrl?.refreshCandidates();
       subtransCtrl?.refreshAll({ force: true });
       modelsCtrl?.refresh();
@@ -342,7 +361,7 @@ function bootstrapStudio() {
     if (sourceBadge && sourceBadgeText) {
       if (activeSource === "web") {
         sourceBadge.dataset.tone = "running";
-        sourceBadgeText.textContent = `Đang chạy Web Job (${activeWebJob?.job_type || "upscale"} • PID ${activeWebJob?.pid || live.pid || "—"})`;
+        sourceBadgeText.textContent = `Đang chạy Web Job (${activeWebJob?.job_type || "upscale"} • PID ${live.pid || activeWebJob?.pid || "—"})`;
       } else if (activeSource === "cli") {
         sourceBadge.dataset.tone = "running";
         sourceBadgeText.textContent = `Đang đồng bộ CLI ngoài (PID ${pipeline.gpu_lock?.pid || live.pid || "—"})`;
@@ -364,10 +383,12 @@ function bootstrapStudio() {
 
     // Hardware summary line
     if (hwLiveSummary && telemetry) {
+      const vramUsedGib = (Number(telemetry.vram_used_mib || 0) / 1024).toFixed(2);
+      const vramTotalGib = (Number(telemetry.vram_total_mib || 0) / 1024).toFixed(1);
       hwLiveSummary.textContent =
         `CPU: ${telemetry.cpu_pct.toFixed(1)}% | P-State: ${telemetry.pstate} | ` +
         `Xung GPU: ${Math.round(telemetry.core_clock_mhz)} MHz | ` +
-        `VRAM: ${Math.round(telemetry.vram_used_mib)} / ${Math.round(telemetry.vram_total_mib)} MiB`;
+        `VRAM: ${vramUsedGib} / ${vramTotalGib} GiB (${Math.round(telemetry.vram_used_mib)} MiB)`;
     }
 
     // Hero Episode Banner & Action Buttons
@@ -388,6 +409,7 @@ function bootstrapStudio() {
       busyReason = `Đang có tiến trình CLI ngoài hoạt động (PID ${pidLabel})${targetSuffix}`;
     }
     queueCtrl?.setSystemBusy?.(isRunning, busyReason);
+    modelsCtrl?.setSystemBusy?.(isRunning, busyReason);
     subtransCtrl?.setSystemBusy?.(isRunning, busyReason);
 
     if (episodeTitle) {
@@ -419,7 +441,7 @@ function bootstrapStudio() {
       btnClearPause.hidden = !pausePending;
     }
     if (btnAbortJob instanceof HTMLButtonElement) {
-      btnAbortJob.disabled = activeSource !== "web";
+      btnAbortJob.disabled = activeSource !== "web" || abortInFlight;
     }
 
     // 6-Stage Stepper
@@ -458,14 +480,19 @@ function bootstrapStudio() {
       }
     }
 
-    // Progress calculation
+    // Progress calculation (smooth 1Hz intra-chunk progress without mutating integer completed_chunks)
     const totChunks = Number(live.total_chunks || 0);
     const doneChunks = Number(live.completed_chunks || 0);
+    const activeFrac =
+      isRunning && stage === "upscaling"
+        ? Math.max(0, Math.min(0.99, Number(live.active_chunk_fraction || 0)))
+        : 0;
+    const effectiveDoneChunks = Math.min(totChunks, doneChunks + activeFrac);
     let pct = 0;
     if (stage === "completed") {
       pct = 100;
     } else if (totChunks > 0) {
-      pct = Math.min(99.5, (doneChunks / totChunks) * 100);
+      pct = Math.min(99.5, (effectiveDoneChunks / totChunks) * 100);
     }
     if (progressEl instanceof HTMLProgressElement) {
       progressEl.value = Number(pct.toFixed(1));
@@ -482,7 +509,12 @@ function bootstrapStudio() {
     // 6 KPI Boxes
     if (kpiModel) {
       const mId = live.model_id || "—";
-      const modeTag = live.model_id ? (live.zero_disk ? "Zero-Disk" : "PNG Disk") : "";
+      const isSubLive =
+        live.job_type === "subtrans" ||
+        live.job_type === "subs_pending" ||
+        String(mId).startsWith("subtrans");
+      const modeTag =
+        live.model_id && !isSubLive ? (live.zero_disk ? "Zero-Disk" : "PNG Disk") : "";
       kpiModel.textContent = modeTag ? `${mId} (${modeTag})` : mId;
     }
     if (kpiFrames) {
@@ -490,7 +522,9 @@ function bootstrapStudio() {
       const uniqF = Number(live.unique_frames || 0);
       if (totF > 0 && totChunks > 0) {
         const estDoneF =
-          stage === "completed" ? totF : Math.min(totF, Math.round((doneChunks / totChunks) * totF));
+          stage === "completed"
+            ? totF
+            : Math.min(totF, Math.round((effectiveDoneChunks / totChunks) * totF));
         const dedupPct = Number(live.dedup_ratio_percent || 0);
         const dedupNote = dedupPct > 0 ? ` (tiết kiệm ${dedupPct.toFixed(1)}% dedup)` : "";
         kpiFrames.textContent = `${estDoneF.toLocaleString("vi-VN")} / ${totF.toLocaleString("vi-VN")}${dedupNote}`;
@@ -650,44 +684,102 @@ function bootstrapStudio() {
         });
       };
 
-      const cpSig = cps
-        .map(
-          (cp) =>
-            `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${isCpActive(cp) ? "1" : "0"}`
-        )
-        .join(";;");
+      const cpSig =
+        `${isRunning ? "busy" : "idle"}::` +
+        cps
+          .map(
+            (cp) =>
+              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${isCpActive(cp) ? "1" : "0"}`
+          )
+          .join(";;");
       if (cpSig !== lastCheckpointSignature) {
         lastCheckpointSignature = cpSig;
         clearChildren(checkpointList);
         for (const cp of cps) {
           const isCpRunning = isCpActive(cp);
+          const cpModelNote = cp.model_id ? ` • ${cp.model_id}` : "";
+          const resumeBtn = el("button", {
+            type: "button",
+            className: "btn btn-primary",
+            disabled: isRunning,
+            title: isRunning ? busyReason || "Đang có tiến trình chạy." : "Tiếp tục render ngay từ chunk đã lưu",
+            textContent: isCpRunning ? "▶ Đang xử lý…" : "▶ Tiếp tục ngay",
+            onClick: () => {
+              queueCtrl?.resumeCheckpointNow(cp);
+            },
+          });
+
+          const configBtn = el("button", {
+            type: "button",
+            className: "btn btn-secondary",
+            textContent: "Cấu hình →",
+            onClick: () => {
+              if (!cp.source_file) {
+                showToast(
+                  `Checkpoint '${cp.episode_name || cp.name}' thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại tệp video gốc.`,
+                  "warn"
+                );
+                tabsCtrl.selectTabById("tab-queue", { focusTab: false });
+                return;
+              }
+              queueCtrl?.focusWithPath({
+                ...cp,
+                sourceFile: cp.source_file,
+                outputDir: cp.output_dir || "",
+                isCustomOutputDir: Boolean(cp.is_custom_output_dir),
+                episodeName: cp.episode_name || "",
+              });
+            },
+          });
+
+          let confirmTimer = 0;
+          const deleteBtn = el("button", {
+            type: "button",
+            className: "btn btn-ghost",
+            disabled: isRunning,
+            "aria-label": `Xóa checkpoint ${cp.name}`,
+            title: isRunning ? "Không thể xóa checkpoint khi GPU đang chạy" : "Nhấn 2 lần để xóa thư mục .temp_*",
+            textContent: "🗑 Xóa",
+            onClick: async () => {
+              if (deleteBtn.dataset.confirming !== "true") {
+                deleteBtn.dataset.confirming = "true";
+                deleteBtn.className = "btn btn-danger";
+                deleteBtn.textContent = "Xác nhận xóa?";
+                if (confirmTimer) window.clearTimeout(confirmTimer);
+                confirmTimer = window.setTimeout(() => {
+                  delete deleteBtn.dataset.confirming;
+                  deleteBtn.className = "btn btn-ghost";
+                  deleteBtn.textContent = "🗑 Xóa";
+                }, 4000);
+                return;
+              }
+              if (confirmTimer) window.clearTimeout(confirmTimer);
+              deleteBtn.disabled = true;
+              try {
+                await apiFetch("/api/checkpoints/delete", {
+                  method: "POST",
+                  body: { path: cp.path },
+                });
+                showToast(`Đã dọn sạch checkpoint ${cp.name} (${cp.size_mb} MB).`, "success", 3200);
+                lastCheckpointSignature = null;
+                fetchSnapshotFallback();
+                queueCtrl?.refreshSchedule();
+              } catch (err) {
+                delete deleteBtn.dataset.confirming;
+                deleteBtn.className = "btn btn-ghost";
+                deleteBtn.textContent = "🗑 Xóa";
+                deleteBtn.disabled = false;
+                showToast(err.message, "error");
+              }
+            },
+          });
+
           checkpointList.append(
             el("div", { className: "checkpoint-chip" }, [
               el("span", {
-                textContent: `💾 Checkpoint ${cp.name}: Đã lưu ${cp.completed_chunks}/${cp.total_chunks || "?"} chunk (${cp.size_mb} MB)`,
+                textContent: `💾 Checkpoint ${cp.name}: Đã lưu ${cp.completed_chunks}/${cp.total_chunks || "?"} chunk (${cp.size_mb} MB${cpModelNote})`,
               }),
-              el("button", {
-                type: "button",
-                className: "btn btn-ghost",
-                disabled: isCpRunning,
-                textContent: isCpRunning ? "▶ Đang xử lý…" : "Mở Tab Hàng đợi để Tiếp tục →",
-                onClick: () => {
-                  if (!cp.source_file) {
-                    showToast(
-                      `Checkpoint '${cp.episode_name || cp.name}' thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại tệp video gốc.`,
-                      "warn"
-                    );
-                    tabsCtrl.selectTabById("tab-queue", { focusTab: false });
-                    return;
-                  }
-                  queueCtrl?.focusWithPath({
-                    sourceFile: cp.source_file,
-                    outputDir: cp.output_dir || "",
-                    isCustomOutputDir: Boolean(cp.is_custom_output_dir),
-                    episodeName: cp.episode_name || "",
-                  });
-                },
-              }),
+              el("div", { className: "checkpoint-actions" }, [resumeBtn, configBtn, deleteBtn]),
             ])
           );
         }

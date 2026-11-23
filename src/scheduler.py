@@ -466,6 +466,16 @@ def _inspect_resumable_checkpoint(
             except OSError:
                 tot_c_est = 0
         if tot_c_est <= 0:
+            mf_path = os.path.join(w_dir, "manifest.json")
+            if os.path.isfile(mf_path):
+                try:
+                    with open(mf_path, "r", encoding="utf-8") as mf:
+                        mdata = json.load(mf)
+                    if isinstance(mdata, dict):
+                        tot_c_est = int(mdata.get("total_chunks") or 0)
+                except Exception:
+                    tot_c_est = 0
+        if tot_c_est <= 0:
             tot_c_est = max(len(done_idxs) + 1, int(round(max(1, total_frames) / max(1.0, segment_seconds * 23.976))))
         valid_done = min(len(done_idxs), tot_c_est)
         rem_frac = max(0.0, float(tot_c_est - valid_done) / float(max(1, tot_c_est)))

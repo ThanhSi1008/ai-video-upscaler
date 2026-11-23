@@ -310,6 +310,84 @@ def _find_cached_plan(
     return None
 
 
+def _inspect_web_checkpoint_progress(
+    workspace_root: Path,
+    video_path: str,
+    out_base: Path,
+    plan: Optional[Dict[str, Any]],
+    total_frames: int,
+    n_unique: int,
+) -> tuple[int, int, float, int]:
+    """Return (done_chunks, total_chunks, remaining_fraction, remaining_n_unique) for an active .temp_* checkpoint."""
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    vid_dir = Path(video_path).resolve().parent
+    cand_dirs = [
+        out_base / f".temp_{base_name}",
+        workspace_root / "out" / f".temp_{base_name}",
+        vid_dir / f".temp_{base_name}",
+    ]
+    for w_dir in cand_dirs:
+        up_dir = w_dir / "upscaled_segs"
+        if not up_dir.is_dir():
+            continue
+        done_idxs: set[int] = set()
+        try:
+            for entry in os.scandir(up_dir):
+                fn = entry.name
+                if fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4"):
+                    if entry.stat().st_size > 0:
+                        stem_num = fn[3:-4]
+                        if stem_num.isdigit():
+                            done_idxs.add(int(stem_num))
+        except OSError:
+            continue
+        if not done_idxs:
+            continue
+        chunks_list = plan.get("chunks") if isinstance(plan, dict) else None
+        if isinstance(chunks_list, list) and len(chunks_list) > 0:
+            tot_c = len(chunks_list)
+            rem_u = 0
+            valid_done = 0
+            for idx_c, ch in enumerate(chunks_list):
+                c_id = int(ch.get("chunk_idx", idx_c)) if isinstance(ch, dict) else idx_c
+                if c_id in done_idxs:
+                    valid_done += 1
+                elif isinstance(ch, dict):
+                    rem_u += int(ch.get("kept_count", ch.get("total_frames", 0)))
+            if valid_done > 0:
+                rem_frac = max(0.0, float(tot_c - valid_done) / float(max(1, tot_c)))
+                return valid_done, tot_c, rem_frac, max(0, rem_u)
+        raw_dir = w_dir / "raw_segs"
+        tot_c_est = 0
+        if raw_dir.is_dir():
+            try:
+                tot_c_est = sum(
+                    1
+                    for entry in os.scandir(raw_dir)
+                    if entry.name.startswith("seg_")
+                    and entry.name.endswith(".mp4")
+                    and not entry.name.endswith(".tmp.mp4")
+                )
+            except OSError:
+                tot_c_est = 0
+        if tot_c_est <= 0:
+            mf_path = w_dir / "manifest.json"
+            if mf_path.is_file():
+                try:
+                    mdata = json.loads(mf_path.read_text(encoding="utf-8"))
+                    if isinstance(mdata, dict):
+                        tot_c_est = int(mdata.get("total_chunks") or 0)
+                except Exception:
+                    tot_c_est = 0
+        if tot_c_est <= 0:
+            tot_c_est = max(len(done_idxs) + 1, int(round(max(1, total_frames) / (24.0 * 23.976))))
+        valid_done = min(len(done_idxs), tot_c_est)
+        rem_frac = max(0.0, float(tot_c_est - valid_done) / float(max(1, tot_c_est)))
+        rem_u = max(0, int(round(float(n_unique) * rem_frac)))
+        return valid_done, tot_c_est, rem_frac, rem_u
+    return 0, 0, 1.0, n_unique
+
+
 class JobManager:
     """Quản lý thực thi tác vụ nền và lập lịch hàng đợi cho Web GUI."""
 
@@ -405,7 +483,11 @@ class JobManager:
         force: bool = False,
     ) -> Dict[str, Any]:
         """Dự báo chi tiết danh sách tập, model phân giải từ shows.yaml và thời gian hoàn thành theo --deadline."""
-        videos = self.fs_browser.expand_inputs(inputs)
+        videos = self.fs_browser.expand_inputs(
+            inputs,
+            allow_subtitles=False,
+            allow_upscaled_4k=False,
+        )
         deadline_str = _validate_deadline(deadline_str)
         grain_norm = _validate_grain_restore(grain_restore)
         now = datetime.now()
@@ -491,6 +573,18 @@ class JobManager:
                 dedup_pct = round((1.0 - keep_factor) * 100.0, 1)
                 source_note = "ước tính thận trọng"
 
+            resumed_done_c = 0
+            resumed_tot_c = 0
+            ep_total_overhead = total_overhead
+            if not already_done and not force:
+                resumed_done_c, resumed_tot_c, rem_frac, rem_u = _inspect_web_checkpoint_progress(
+                    self.workspace_root, vid, out_base, plan, total_f, n_unique
+                )
+                if resumed_done_c > 0:
+                    n_unique = rem_u
+                    ep_total_overhead = (vid_overhead * max(0.15, rem_frac)) + sub_overhead
+                    source_note = f"{source_note} (còn {resumed_tot_c - resumed_done_c}/{resumed_tot_c} chunk)"
+
             if already_done:
                 eta_med_s = 0.0
                 dec_eta_s = 0.0
@@ -500,8 +594,8 @@ class JobManager:
                 ep_start = sim_med
                 ep_finish = sim_med
             else:
-                eta_med_s = (n_unique / max(0.5, base_med_fps)) + total_overhead
-                eta_p5_s = (n_unique / max(0.5, base_p5_fps)) + total_overhead
+                eta_med_s = (n_unique / max(0.5, base_med_fps)) + ep_total_overhead
+                eta_p5_s = (n_unique / max(0.5, base_p5_fps)) + ep_total_overhead
                 dec_eta_s = eta_p5_s * 1.07
                 ep_start = sim_med
                 ep_finish = sim_med + timedelta(seconds=eta_med_s)
@@ -540,18 +634,25 @@ class JobManager:
                 "model_id": m_id,
                 "model_name": routing["model_name"],
                 "dedup_policy": routing["dedup_policy"],
-                "routing_source": routing["resolution_source"],
+                "routing_source": (
+                    f"{routing['resolution_source']} [Tiếp tục checkpoint {resumed_done_c}/{resumed_tot_c} chunk]"
+                    if resumed_done_c > 0
+                    else routing["resolution_source"]
+                ),
                 "total_frames": total_f,
                 "n_unique": n_unique,
                 "dedup_ratio_percent": round(dedup_pct, 1),
                 "n_unique_source": source_note,
                 "ref_fps": round(base_med_fps, 1),
+                "eta_seconds": round(eta_med_s, 1),
                 "eta_minutes": round(eta_med_s / 60.0, 1),
                 "start_time": ep_start.strftime("%H:%M"),
                 "finish_time": ep_finish.strftime("%H:%M"),
                 "can_run": can_run,
                 "is_partial": is_partial,
                 "already_done": already_done,
+                "resumed_done_chunks": resumed_done_c,
+                "resumed_total_chunks": resumed_tot_c,
                 "decision": decision,
             })
 
@@ -741,7 +842,11 @@ class JobManager:
         nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
         grain_norm = _validate_grain_restore(payload.get("grain_restore"))
 
-        videos = self.fs_browser.expand_inputs(raw_inputs)
+        videos = self.fs_browser.expand_inputs(
+            raw_inputs,
+            allow_subtitles=False,
+            allow_upscaled_4k=False,
+        )
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=not dry_run)
 
@@ -774,15 +879,16 @@ class JobManager:
             cmd.append("--no-tensorrt")
         if payload.get("subs_after_upscale") is False:
             cmd.append("--no-subs")
-        cmd.extend(["--subs-quality", subs_quality])
-        if payload.get("async_subs"):
-            cmd.append("--async-subs")
-        if payload.get("prefer_whisper"):
-            cmd.append("--prefer-whisper")
-        if payload.get("auto_align_en") is False:
-            cmd.append("--no-auto-align-en")
-        if payload.get("sub_offset_ms"):
-            cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
+        else:
+            cmd.extend(["--subs-quality", subs_quality])
+            if payload.get("async_subs"):
+                cmd.append("--async-subs")
+            if payload.get("prefer_whisper"):
+                cmd.append("--prefer-whisper")
+            if payload.get("auto_align_en") is False:
+                cmd.append("--no-auto-align-en")
+            if payload.get("sub_offset_ms"):
+                cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
         if payload.get("keep_temp"):
             cmd.append("--keep-temp")
         if payload.get("force"):
@@ -800,7 +906,11 @@ class JobManager:
             raise ValueError("Vui lòng chọn một file video để trích xuất Preview.")
         out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"))
         batch_size = _validate_batch_size(payload.get("batch_size"))
-        videos = self.fs_browser.expand_inputs([video_raw])
+        videos = self.fs_browser.expand_inputs(
+            [video_raw],
+            allow_subtitles=False,
+            allow_upscaled_4k=False,
+        )
         target_video = videos[0]
         raw_sec = payload.get("seconds", 10)
         sec_f = float(10 if raw_sec is None else raw_sec)
@@ -1109,6 +1219,8 @@ class JobManager:
         abort_token: Optional[str] = None
         owned_tree_pids: set[int] = set()
         external_lock_pid: Optional[int] = None
+        concurrent_abort_pid: Optional[int] = None
+        reclaimed_lineage_pid: Optional[int] = None
         try:
             with self._lock:
                 proc = self._proc
@@ -1177,6 +1289,20 @@ class JobManager:
                             proc.kill()
                         except Exception:
                             pass
+                elif self._aborting_tokens:
+                    concurrent_abort_pid = _coerce_pid(
+                        getattr(proc, "pid", None)
+                        or (self._active_job or {}).get("pid")
+                        or (self._history[0].get("pid") if self._history else None)
+                    )
+
+            if concurrent_abort_pid is not None and killed_proc is None:
+                return {
+                    "ok": True,
+                    "aborted_pid": concurrent_abort_pid,
+                    "status": "aborted",
+                    "message": f"Đang hoàn tất dừng tiến trình Web Job (PID={concurrent_abort_pid}).",
+                }
 
             if killed_proc is not None:
                 try:
@@ -1207,18 +1333,30 @@ class JobManager:
                 lock_state = check_active_gpu_lock(self.workspace_root)
                 lock_pid = _coerce_pid(lock_state.get("pid"))
                 is_owned_lock = False
-                if killed_pid is not None and lock_pid is not None:
-                    if lock_pid in owned_tree_pids:
-                        is_owned_lock = True
-                    else:
-                        try:
-                            import psutil
-                            proc_ppid = _coerce_pid(psutil.Process(lock_pid).ppid())
-                            if proc_ppid is not None and proc_ppid in owned_tree_pids:
-                                owned_tree_pids.add(lock_pid)
-                                is_owned_lock = True
-                        except Exception:
-                            pass
+                if lock_pid is not None:
+                    if killed_pid is not None:
+                        if lock_pid in owned_tree_pids:
+                            is_owned_lock = True
+                        else:
+                            try:
+                                import psutil
+                                proc_ppid = _coerce_pid(psutil.Process(lock_pid).ppid())
+                                if proc_ppid is not None and proc_ppid in owned_tree_pids:
+                                    owned_tree_pids.add(lock_pid)
+                                    is_owned_lock = True
+                            except Exception:
+                                pass
+                    if not is_owned_lock:
+                        with self._lock:
+                            cand_aborted_jobs = [
+                                j for j in ([self._active_job] if self._active_job else []) + list(self._history)
+                                if isinstance(j, dict) and j.get("status") == "aborted"
+                            ]
+                            for ab_job in cand_aborted_jobs:
+                                if self._is_aborted_job_lineage_locked(lock_pid, ab_job):
+                                    is_owned_lock = True
+                                    reclaimed_lineage_pid = lock_pid
+                                    break
                 if not lock_state.get("locked") or is_owned_lock:
                     try:
                         lock_file.unlink(missing_ok=True)
@@ -1273,6 +1411,13 @@ class JobManager:
                 "aborted_pid": killed_pid,
                 "status": "aborted",
                 "message": f"Đã dừng tiến trình Web Job (PID={killed_pid}).",
+            }
+        if reclaimed_lineage_pid is not None:
+            return {
+                "ok": True,
+                "aborted_pid": reclaimed_lineage_pid,
+                "status": "aborted",
+                "message": f"Đã thu hồi khóa GPU của tiến trình Web Job vừa dừng (PID={reclaimed_lineage_pid}).",
             }
         if external_lock_pid is not None:
             return {

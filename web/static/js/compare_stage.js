@@ -33,6 +33,11 @@ export function initCompareStage({ selectTabById } = {}) {
 
   const wipeRange = document.getElementById("compare-wipe-range");
   const wipeLabel = document.getElementById("compare-wipe-label");
+  const btnWipeSrc = document.getElementById("btn-wipe-src");
+  const btnWipeSplit = document.getElementById("btn-wipe-split");
+  const btnWipeUp = document.getElementById("btn-wipe-up");
+  const panModeToggle = document.getElementById("compare-pan-mode");
+  const btnZoomReset = document.getElementById("btn-compare-zoom-reset");
   const loupeToggle = document.getElementById("compare-loupe-toggle");
   const zoomSelect = document.getElementById("compare-zoom-select");
   const stage = document.getElementById("compare-stage");
@@ -47,11 +52,31 @@ export function initCompareStage({ selectTabById } = {}) {
   let srcImg = null;
   let upImg = null;
   let wipePct = 50;
+  let viewZoom = 1.0;
+  let viewPanX = 0.0;
+  let viewPanY = 0.0;
   let pointerPos = null;
   let draggingSplit = false;
+  let draggingPan = false;
+  let panDragStart = { x: 0, y: 0, panX: 0, panY: 0 };
   let renderRafId = 0;
   let extractSeq = 0;
-  let imageBounds = { x: 0, y: 0, w: 0, h: 0 };
+  let imageBounds = { x: 0, y: 0, w: 0, h: 0, visLeft: 0, visW: 0, baseW: 0, baseH: 0, cssW: 0, cssH: 0 };
+
+  const syncZoomReadout = () => {
+    if (btnZoomReset instanceof HTMLButtonElement) {
+      btnZoomReset.textContent =
+        viewZoom > 1.005 ? `Khung: ${viewZoom.toFixed(1)}× ↺` : "Khung: 1.0×";
+    }
+  };
+
+  const resetViewZoom = () => {
+    viewZoom = 1.0;
+    viewPanX = 0.0;
+    viewPanY = 0.0;
+    syncZoomReadout();
+    scheduleRender();
+  };
 
   const setFieldError = (inputEl, errorEl, msg) => {
     if (msg) {
@@ -95,27 +120,45 @@ export function initCompareStage({ selectTabById } = {}) {
     ctx.fillStyle = "#070b14";
     ctx.fillRect(0, 0, cssW, cssH);
 
-    // Compute aspect-fit rectangle inside stage
+    // Compute aspect-fit rectangle inside stage + interactive zoom/pan transform
     const imgAspect = upImg.naturalWidth / Math.max(1, upImg.naturalHeight);
     const stageAspect = cssW / Math.max(1, cssH);
-    let drawW = cssW;
-    let drawH = cssH;
-    let drawX = 0;
-    let drawY = 0;
+    let baseW = cssW;
+    let baseH = cssH;
 
     if (imgAspect > stageAspect) {
-      drawH = cssW / imgAspect;
-      drawY = (cssH - drawH) / 2;
+      baseH = cssW / imgAspect;
     } else {
-      drawW = cssH * imgAspect;
-      drawX = (cssW - drawW) / 2;
+      baseW = cssH * imgAspect;
     }
-    imageBounds = { x: drawX, y: drawY, w: drawW, h: drawH };
+    const drawW = baseW * viewZoom;
+    const drawH = baseH * viewZoom;
+    let drawX = (cssW - drawW) / 2 + viewPanX;
+    let drawY = (cssH - drawH) / 2 + viewPanY;
+    if (drawW <= cssW) {
+      drawX = (cssW - drawW) / 2;
+      viewPanX = 0;
+    } else {
+      drawX = Math.min(0, Math.max(cssW - drawW, drawX));
+      viewPanX = drawX - (cssW - drawW) / 2;
+    }
+    if (drawH <= cssH) {
+      drawY = (cssH - drawH) / 2;
+      viewPanY = 0;
+    } else {
+      drawY = Math.min(0, Math.max(cssH - drawH, drawY));
+      viewPanY = drawY - (cssH - drawH) / 2;
+    }
+    const visLeft = Math.max(0, drawX);
+    const visRight = Math.min(cssW, drawX + drawW);
+    const visTop = Math.max(0, drawY);
+    const visW = Math.max(1, visRight - visLeft);
+    imageBounds = { x: drawX, y: drawY, w: drawW, h: drawH, visLeft, visW, baseW, baseH, cssW, cssH };
 
-    const splitX = drawX + (wipePct / 100) * drawW;
+    const splitX = visLeft + (wipePct / 100) * visW;
 
     // 1. Draw full 4K AI frame (right side visible)
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = viewZoom < 3.0;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(upImg, drawX, drawY, drawW, drawH);
 
@@ -131,11 +174,11 @@ export function initCompareStage({ selectTabById } = {}) {
     ctx.strokeStyle = "#38bdf8";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(splitX, drawY);
-    ctx.lineTo(splitX, drawY + drawH);
+    ctx.moveTo(splitX, Math.max(0, drawY));
+    ctx.lineTo(splitX, Math.min(cssH, drawY + drawH));
     ctx.stroke();
 
-    const handleY = drawY + drawH / 2;
+    const handleY = Math.max(24, Math.min(cssH - 24, (Math.max(0, drawY) + Math.min(cssH, drawY + drawH)) / 2));
     ctx.fillStyle = "rgba(9, 14, 26, 0.88)";
     ctx.beginPath();
     ctx.arc(splitX, handleY, 16, 0, Math.PI * 2);
@@ -155,7 +198,7 @@ export function initCompareStage({ selectTabById } = {}) {
       const boxW = ctx.measureText(label).width + padX * 2;
       const boxH = 26;
       const boxX = alignRight ? x - boxW : x;
-      const boxY = drawY + 12;
+      const boxY = visTop + 12;
       ctx.fillStyle = "rgba(7, 11, 20, 0.78)";
       ctx.strokeStyle = "rgba(148, 163, 184, 0.55)";
       ctx.lineWidth = 1;
@@ -173,19 +216,21 @@ export function initCompareStage({ selectTabById } = {}) {
       ctx.fillText(label, boxX + padX, boxY + boxH / 2);
     };
 
-    drawCornerTag(`1080p GỐC (${srcImg.naturalWidth}×${srcImg.naturalHeight})`, drawX + 12, false);
-    drawCornerTag(`4K AI (${upImg.naturalWidth}×${upImg.naturalHeight})`, drawX + drawW - 12, true);
+    const zoomTag = viewZoom > 1.005 ? ` • ${viewZoom.toFixed(1)}×` : "";
+    drawCornerTag(`1080p GỐC (${srcImg.naturalWidth}×${srcImg.naturalHeight})${zoomTag}`, visLeft + 12, false);
+    drawCornerTag(`4K AI (${upImg.naturalWidth}×${upImg.naturalHeight})${zoomTag}`, visRight - 12, true);
 
     // 5. Split-View Pixel Magnifier Loupe on hover
     const loupeActive =
       pointerPos &&
       !draggingSplit &&
+      !draggingPan &&
       loupeToggle instanceof HTMLInputElement &&
       loupeToggle.checked &&
-      pointerPos.x >= drawX &&
-      pointerPos.x <= drawX + drawW &&
-      pointerPos.y >= drawY &&
-      pointerPos.y <= drawY + drawH;
+      pointerPos.x >= visLeft &&
+      pointerPos.x <= visRight &&
+      pointerPos.y >= Math.max(0, drawY) &&
+      pointerPos.y <= Math.min(cssH, drawY + drawH);
 
     if (loupeActive) {
       const zoom = Math.max(2, Number(zoomSelect?.value || 3));
@@ -349,8 +394,9 @@ export function initCompareStage({ selectTabById } = {}) {
     }
 
     const rawTs = tsInput?.value.trim() ?? "";
-    const tsSec = rawTs === "" ? 2.0 : Number(rawTs);
-    if (!Number.isFinite(tsSec) || tsSec < 0) {
+    const tsBadInput = tsInput instanceof HTMLInputElement && tsInput.validity.badInput;
+    const tsSec = !tsBadInput && rawTs === "" ? 2.0 : Number(rawTs);
+    if (tsBadInput || !Number.isFinite(tsSec) || tsSec < 0) {
       setFieldError(tsInput, tsErrorEl, "Mốc thời gian phải là số giây hợp lệ (>= 0).");
       tsInput?.focus();
       showToast("Mốc thời gian phải là số giây hợp lệ (>= 0).", "warn");
@@ -359,8 +405,9 @@ export function initCompareStage({ selectTabById } = {}) {
     setFieldError(tsInput, tsErrorEl, null);
 
     const rawOffset = offsetInput?.value.trim() || "";
-    const offsetVal = rawOffset === "" ? null : Number(rawOffset);
-    if (offsetVal !== null && !Number.isFinite(offsetVal)) {
+    const offsetBadInput = offsetInput instanceof HTMLInputElement && offsetInput.validity.badInput;
+    const offsetVal = !offsetBadInput && rawOffset === "" ? null : Number(rawOffset);
+    if (offsetBadInput || (offsetVal !== null && !Number.isFinite(offsetVal))) {
       setFieldError(offsetInput, offsetErrorEl, "Độ lệch gốc phải là số giây hữu hạn hợp lệ.");
       offsetInput?.focus();
       showToast("Độ lệch gốc (offset) phải là số giây hữu hạn hợp lệ.", "warn");
@@ -423,6 +470,13 @@ export function initCompareStage({ selectTabById } = {}) {
     }
   };
 
+  const syncCandidateSelectToInputs = () => {
+    if (!(candidateSelect instanceof HTMLSelectElement)) return;
+    const upVal = upInput?.value.trim() || "";
+    const matched = upVal && candidatesCache.find((c) => c.upscaled_path === upVal);
+    candidateSelect.value = matched ? upVal : "";
+  };
+
   candidateSelect?.addEventListener("change", () => {
     const chosenUp = candidateSelect.value;
     const item = candidatesCache.find((c) => c.upscaled_path === chosenUp);
@@ -430,6 +484,7 @@ export function initCompareStage({ selectTabById } = {}) {
     if (upInput) upInput.value = item.upscaled_path;
     if (srcInput) srcInput.value = item.source_path || "";
     if (offsetInput) offsetInput.value = "";
+    resetViewZoom();
     if (srcInput?.value && upInput?.value) {
       extractAndCompare();
     } else {
@@ -446,7 +501,10 @@ export function initCompareStage({ selectTabById } = {}) {
   });
 
   btnRefresh?.addEventListener("click", () => {
-    loadCandidates().then(() => showToast("Đã cập nhật danh sách video trong out/.", "info", 2800));
+    loadCandidates().then(() => {
+      syncCandidateSelectToInputs();
+      showToast("Đã cập nhật danh sách video trong out/.", "info", 2800);
+    });
   });
 
   btnBrowseSrc?.addEventListener("click", async () => {
@@ -471,8 +529,10 @@ export function initCompareStage({ selectTabById } = {}) {
     });
     if (picked.length > 0 && upInput) {
       upInput.value = picked[0];
+      syncCandidateSelectToInputs();
     }
   });
+  upInput?.addEventListener("input", syncCandidateSelectToInputs);
 
   btnOpenMpv?.addEventListener("click", async () => {
     const target = upInput?.value.trim() || candidateSelect?.value || "";
@@ -496,19 +556,27 @@ export function initCompareStage({ selectTabById } = {}) {
 
   btnExtract?.addEventListener("click", extractAndCompare);
   wipeRange?.addEventListener("input", () => setWipe(wipeRange.value));
+  btnWipeSrc?.addEventListener("click", () => setWipe(100));
+  btnWipeSplit?.addEventListener("click", () => setWipe(50));
+  btnWipeUp?.addEventListener("click", () => setWipe(0));
+  btnZoomReset?.addEventListener("click", resetViewZoom);
   loupeToggle?.addEventListener("change", renderCanvas);
   zoomSelect?.addEventListener("change", renderCanvas);
 
-  // Pointer interactions on compare stage (drag = move curtain, hover = move loupe)
+  // Pointer & wheel interactions on compare stage (split drag, pan drag, cursor-centered zoom, loupe)
   if (stage && canvas instanceof HTMLCanvasElement) {
     const updateFromEvent = (ev) => {
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
       pointerPos = { x, y };
-      if (draggingSplit && rect.width > 0) {
-        const effW = imageBounds.w > 0 ? imageBounds.w : rect.width;
-        const effX = imageBounds.w > 0 ? x - imageBounds.x : x;
+      if (draggingPan) {
+        viewPanX = panDragStart.panX + (x - panDragStart.x);
+        viewPanY = panDragStart.panY + (y - panDragStart.y);
+        scheduleRender();
+      } else if (draggingSplit && rect.width > 0) {
+        const effW = imageBounds.visW > 0 ? imageBounds.visW : rect.width;
+        const effX = imageBounds.visW > 0 ? x - imageBounds.visLeft : x;
         setWipe((effX / Math.max(1, effW)) * 100, { coalesce: true });
       } else {
         scheduleRender();
@@ -517,8 +585,26 @@ export function initCompareStage({ selectTabById } = {}) {
 
     stage.addEventListener("pointerdown", (ev) => {
       if (!srcImg || !upImg) return;
-      if (ev.pointerType === "mouse" && ev.button !== 0) return;
-      draggingSplit = true;
+      const isMiddleBtn = ev.pointerType === "mouse" && ev.button === 1;
+      const isPrimaryBtn = ev.pointerType !== "mouse" || ev.button === 0;
+      if (!isPrimaryBtn && !isMiddleBtn) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const wantPan =
+        viewZoom > 1.005 &&
+        (isMiddleBtn || ev.shiftKey || (panModeToggle instanceof HTMLInputElement && panModeToggle.checked));
+
+      if (wantPan) {
+        ev.preventDefault();
+        draggingPan = true;
+        draggingSplit = false;
+        panDragStart = { x, y, panX: viewPanX, panY: viewPanY };
+      } else {
+        draggingSplit = true;
+        draggingPan = false;
+      }
       try {
         stage.setPointerCapture?.(ev.pointerId);
       } catch {
@@ -532,6 +618,7 @@ export function initCompareStage({ selectTabById } = {}) {
     });
     const endDrag = (ev) => {
       draggingSplit = false;
+      draggingPan = false;
       try {
         if (stage.hasPointerCapture?.(ev.pointerId)) {
           stage.releasePointerCapture(ev.pointerId);
@@ -545,26 +632,71 @@ export function initCompareStage({ selectTabById } = {}) {
     stage.addEventListener("pointercancel", endDrag);
     stage.addEventListener("pointerleave", () => {
       draggingSplit = false;
+      draggingPan = false;
       pointerPos = null;
       scheduleRender();
     });
+    stage.addEventListener("dblclick", () => {
+      if (!srcImg || !upImg) return;
+      resetViewZoom();
+    });
+    stage.addEventListener(
+      "wheel",
+      (ev) => {
+        if (!srcImg || !upImg) return;
+        ev.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const y = ev.clientY - rect.top;
+        pointerPos = { x, y };
+        const factor = ev.deltaY < 0 ? 1.18 : 1 / 1.18;
+        const nextZoom = Math.max(1.0, Math.min(8.0, viewZoom * factor));
+        if (Math.abs(nextZoom - viewZoom) < 0.001) return;
+        if (nextZoom <= 1.005) {
+          resetViewZoom();
+          return;
+        }
+        const curW = Math.max(1, imageBounds.w || rect.width);
+        const curH = Math.max(1, imageBounds.h || rect.height);
+        const u = Math.max(0, Math.min(1, (x - imageBounds.x) / curW));
+        const v = Math.max(0, Math.min(1, (y - imageBounds.y) / curH));
+        const baseW = imageBounds.baseW || rect.width;
+        const baseH = imageBounds.baseH || rect.height;
+        const cssW = imageBounds.cssW || rect.width;
+        const cssH = imageBounds.cssH || rect.height;
+        const newW = baseW * nextZoom;
+        const newH = baseH * nextZoom;
+        const newX = x - u * newW;
+        const newY = y - v * newH;
+        viewZoom = nextZoom;
+        viewPanX = newX - (cssW - newW) / 2;
+        viewPanY = newY - (cssH - newH) / 2;
+        syncZoomReadout();
+        scheduleRender();
+      },
+      { passive: false }
+    );
 
     if (typeof ResizeObserver === "function") {
       new ResizeObserver(() => scheduleRender()).observe(stage);
     }
   }
 
+  syncZoomReadout();
   loadCandidates();
 
   return {
     refreshCandidates: loadCandidates,
     redraw: renderCanvas,
+    resetZoom: resetViewZoom,
     async openPair(sourcePath, upscaledPath) {
       if (srcInput) srcInput.value = sourcePath || "";
       if (upInput) upInput.value = upscaledPath || "";
       if (offsetInput) offsetInput.value = "";
+      resetViewZoom();
       selectTabById?.("tab-compare");
       await loadCandidates();
+      syncCandidateSelectToInputs();
       if (sourcePath && upscaledPath) {
         await extractAndCompare();
       }

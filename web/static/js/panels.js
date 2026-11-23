@@ -17,6 +17,7 @@ import {
 } from "./ui.js";
 
 const QUEUE_STORAGE_KEY = "upscaler-studio-queue-inputs";
+const QUEUE_CONFIG_STORAGE_KEY = "upscaler-studio-queue-config";
 
 function setSelectValueSafely(selectEl, targetValue, fallbackValue = "") {
   if (!(selectEl instanceof HTMLSelectElement)) return;
@@ -32,6 +33,12 @@ function setSelectValueSafely(selectEl, targetValue, fallbackValue = "") {
   } else if (options.length > 0) {
     selectEl.selectedIndex = 0;
   }
+}
+
+function setDesiredSelectValue(selectEl, targetValue, fallbackValue = "") {
+  if (!(selectEl instanceof HTMLSelectElement)) return;
+  selectEl.dataset.desiredValue = targetValue == null ? "" : String(targetValue);
+  setSelectValueSafely(selectEl, targetValue, fallbackValue);
 }
 
 /* =====================================================================
@@ -62,7 +69,9 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const optDeadline = document.getElementById("opt-deadline");
   const optDeadlineError = document.getElementById("opt-deadline-error");
   const optOutDir = document.getElementById("opt-output-dir");
+  const btnBrowseOutDir = document.getElementById("btn-browse-opt-outdir");
   const optSubsQuality = document.getElementById("opt-subs-quality");
+  const optPreviewSeconds = document.getElementById("opt-preview-seconds");
   const optZeroDisk = document.getElementById("opt-zero-disk");
   const optTensorrt = document.getElementById("opt-tensorrt");
   const optAllowPartial = document.getElementById("opt-allow-partial");
@@ -117,6 +126,30 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     }
   };
 
+  const getPreviewSeconds = () => {
+    const n = Number(optPreviewSeconds?.value || 10);
+    return Number.isFinite(n) && n >= 3 && n <= 60 ? Math.round(n) : 10;
+  };
+
+  const syncPreviewButtonLabel = () => {
+    if (!(btnPreview10s instanceof HTMLButtonElement)) return;
+    const sec = getPreviewSeconds();
+    clearChildren(btnPreview10s);
+    btnPreview10s.append(
+      el("span", { "aria-hidden": "true", textContent: "🎬" }),
+      ` Chạy Xem trước ${sec}s (30% phim)`
+    );
+  };
+
+  const syncStageBControls = () => {
+    const subsOn = Boolean(optSubsAfter?.checked);
+    for (const depEl of [optSubsQuality, optAsyncSubs, optPreferWhisper]) {
+      if (!depEl) continue;
+      depEl.disabled = !subsOn;
+      depEl.closest(".field-group, .check-item")?.classList.toggle("is-disabled-dep", !subsOn);
+    }
+  };
+
   const syncQueueLaunchButtons = () => {
     const busyOrLaunching = systemBusy || localLaunchInFlight;
     if (btnPreview10s instanceof HTMLButtonElement) {
@@ -126,13 +159,15 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     if (btnStartUpscale instanceof HTMLButtonElement) {
       btnStartUpscale.disabled = busyOrLaunching;
     }
+    syncPreviewButtonLabel();
     syncStartUpscaleLabel();
   };
 
   const validateBatchSizeInput = ({ focusOnError = false, toastOnError = false } = {}) => {
     const rawBatch = optBatch?.value.trim() ?? "";
-    const isInt = rawBatch === "" || /^[+-]?\d+$/.test(rawBatch);
-    const batchVal = rawBatch === "" ? 8 : isInt ? Number(rawBatch) : Number.NaN;
+    const batchBadInput = optBatch instanceof HTMLInputElement && optBatch.validity.badInput;
+    const isInt = !batchBadInput && (rawBatch === "" || /^[+-]?\d+$/.test(rawBatch));
+    const batchVal = !batchBadInput && rawBatch === "" ? 8 : isInt ? Number(rawBatch) : Number.NaN;
     if (!Number.isFinite(batchVal) || !Number.isInteger(batchVal) || batchVal < 1 || batchVal > 32) {
       const msg = "Batch Size phải là số nguyên từ 1 đến 32.";
       if (optBatch instanceof HTMLInputElement) {
@@ -185,6 +220,114 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       // Ignore storage quota errors
     }
   };
+
+  const persistQueueConfig = () => {
+    try {
+      const cfg = {
+        model: optModel?.dataset?.desiredValue ?? optModel?.value ?? "",
+        dedup_policy: optDedup?.dataset?.desiredValue ?? optDedup?.value ?? "",
+        nvenc_multipass: optNvencMultipass?.dataset?.desiredValue ?? optNvencMultipass?.value ?? "auto",
+        grain_restore: optGrainRestore?.value ?? "auto",
+        batch_size: optBatch?.value.trim() || "8",
+        deadline: optDeadline?.value.trim() || "",
+        output_dir: optOutDir?.value.trim() || "",
+        subs_quality: optSubsQuality?.value || "normal",
+        preview_seconds: String(getPreviewSeconds()),
+        zero_disk: Boolean(optZeroDisk?.checked ?? true),
+        use_tensorrt: Boolean(optTensorrt?.checked ?? true),
+        allow_partial: Boolean(optAllowPartial?.checked),
+        subs_after_upscale: Boolean(optSubsAfter?.checked),
+        async_subs: Boolean(optAsyncSubs?.checked),
+        prefer_whisper: Boolean(optPreferWhisper?.checked),
+      };
+      localStorage.setItem(QUEUE_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
+    } catch {
+      // Ignore storage quota errors
+    }
+  };
+
+  const restoreQueueConfig = () => {
+    try {
+      const raw = localStorage.getItem(QUEUE_CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      const cfg = JSON.parse(raw);
+      if (!cfg || typeof cfg !== "object") return;
+      if (typeof cfg.model === "string") setDesiredSelectValue(optModel, cfg.model, "");
+      if (typeof cfg.dedup_policy === "string") setDesiredSelectValue(optDedup, cfg.dedup_policy, "");
+      if (typeof cfg.nvenc_multipass === "string") {
+        setDesiredSelectValue(optNvencMultipass, cfg.nvenc_multipass, "auto");
+      }
+      if (typeof cfg.grain_restore === "string") {
+        setSelectValueSafely(optGrainRestore, cfg.grain_restore, "auto");
+      }
+      if (typeof cfg.batch_size === "string" && optBatch instanceof HTMLInputElement) {
+        const bNum = Number(cfg.batch_size);
+        if (Number.isInteger(bNum) && bNum >= 1 && bNum <= 32) {
+          optBatch.value = String(bNum);
+        }
+      }
+      if (typeof cfg.deadline === "string" && optDeadline instanceof HTMLInputElement) {
+        optDeadline.value = cfg.deadline;
+      }
+      if (typeof cfg.output_dir === "string" && optOutDir instanceof HTMLInputElement) {
+        optOutDir.value = cfg.output_dir;
+      }
+      if (typeof cfg.subs_quality === "string") {
+        setSelectValueSafely(optSubsQuality, cfg.subs_quality, "normal");
+      }
+      if (typeof cfg.preview_seconds === "string") {
+        setSelectValueSafely(optPreviewSeconds, cfg.preview_seconds, "10");
+      }
+      if (typeof cfg.zero_disk === "boolean" && optZeroDisk instanceof HTMLInputElement) {
+        optZeroDisk.checked = cfg.zero_disk;
+      }
+      if (typeof cfg.use_tensorrt === "boolean" && optTensorrt instanceof HTMLInputElement) {
+        optTensorrt.checked = cfg.use_tensorrt;
+      }
+      if (typeof cfg.allow_partial === "boolean" && optAllowPartial instanceof HTMLInputElement) {
+        optAllowPartial.checked = cfg.allow_partial;
+      }
+      if (typeof cfg.subs_after_upscale === "boolean" && optSubsAfter instanceof HTMLInputElement) {
+        optSubsAfter.checked = cfg.subs_after_upscale;
+      }
+      if (typeof cfg.async_subs === "boolean" && optAsyncSubs instanceof HTMLInputElement) {
+        optAsyncSubs.checked = cfg.async_subs;
+      }
+      if (typeof cfg.prefer_whisper === "boolean" && optPreferWhisper instanceof HTMLInputElement) {
+        optPreferWhisper.checked = cfg.prefer_whisper;
+      }
+    } catch {
+      // Ignore malformed stored state
+    }
+  };
+
+  restoreQueueConfig();
+  if (optForce instanceof HTMLInputElement) optForce.checked = false;
+  if (optDryRun instanceof HTMLInputElement) optDryRun.checked = false;
+
+  window.addEventListener("studio:models-loaded", () => {
+    let changed = false;
+    for (const [selEl, fb] of [
+      [optModel, ""],
+      [optDedup, ""],
+      [optNvencMultipass, "auto"],
+    ]) {
+      if (!(selEl instanceof HTMLSelectElement)) continue;
+      const desired = selEl.dataset.desiredValue;
+      if (desired !== undefined) {
+        const before = selEl.value;
+        setSelectValueSafely(selEl, desired, fb);
+        if (selEl.value !== before) changed = true;
+      }
+    }
+    if (changed && hasComputedInitial && queueInputs.length > 0) {
+      if (panelQueue && panelQueue.hasAttribute("hidden")) {
+        scheduleDirty = true;
+      } else {
+        schedulePreviewDebounced();
+      }
+    }
+  });
 
   const addInputs = (paths) => {
     let added = 0;
@@ -477,6 +620,21 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   btnCalc?.addEventListener("click", computeScheduleNow);
 
+  btnBrowseOutDir?.addEventListener("click", async () => {
+    const picked = await openFsPicker({
+      title: "Chọn Thư mục Xuất (-o)",
+      multi: false,
+      allowFolders: true,
+      foldersOnly: true,
+      initialPath: optOutDir?.value.trim() || "out",
+    });
+    if (picked.length > 0 && optOutDir) {
+      optOutDir.value = picked[0];
+      persistQueueConfig();
+      schedulePreviewDebounced();
+    }
+  });
+
   optDeadline?.addEventListener("input", () => {
     const val = optDeadline.value.trim();
     if (!val || optDeadline.checkValidity()) {
@@ -494,7 +652,12 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     validateBatchSizeInput();
   });
   optSubsAfter?.addEventListener("change", () => {
+    syncStageBControls();
     syncStartUpscaleLabel();
+  });
+  optPreviewSeconds?.addEventListener("change", () => {
+    syncPreviewButtonLabel();
+    persistQueueConfig();
   });
 
   for (const ctrl of [
@@ -510,7 +673,26 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     optSubsAfter,
     optForce,
   ]) {
-    ctrl?.addEventListener("change", schedulePreviewDebounced);
+    ctrl?.addEventListener("change", () => {
+      if (ctrl === optModel && optModel instanceof HTMLSelectElement) {
+        optModel.dataset.desiredValue = optModel.value;
+      } else if (ctrl === optDedup && optDedup instanceof HTMLSelectElement) {
+        optDedup.dataset.desiredValue = optDedup.value;
+      }
+      if (ctrl !== optForce) {
+        persistQueueConfig();
+      }
+      schedulePreviewDebounced();
+    });
+  }
+
+  for (const extraCtrl of [optNvencMultipass, optSubsQuality, optAsyncSubs, optPreferWhisper]) {
+    extraCtrl?.addEventListener("change", () => {
+      if (extraCtrl === optNvencMultipass && optNvencMultipass instanceof HTMLSelectElement) {
+        optNvencMultipass.dataset.desiredValue = optNvencMultipass.value;
+      }
+      persistQueueConfig();
+    });
   }
 
   btnPreview10s?.addEventListener("click", async () => {
@@ -518,8 +700,9 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
       return;
     }
+    const previewSec = getPreviewSeconds();
     if (queueInputs.length === 0) {
-      showToast("Hãy chọn ít nhất 1 file video hoặc thư mục để chạy Xem trước 10s.", "warn");
+      showToast(`Hãy chọn ít nhất 1 file video hoặc thư mục để chạy Xem trước ${previewSec}s.`, "warn");
       return;
     }
     const batchVal = validateBatchSizeInput({ focusOnError: true, toastOnError: true });
@@ -532,7 +715,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         method: "POST",
         body: {
           video_path: queueInputs[0],
-          seconds: 10,
+          seconds: previewSec,
           output_dir: optOutDir?.value.trim() || null,
           model: optModel?.value || null,
           dedup_policy: optDedup?.value || null,
@@ -545,7 +728,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           auto_open_player: false,
         },
       });
-      showToast(`Đã khởi chạy Xem trước 10s (PID=${res.job.pid}).`, "success");
+      showToast(`Đã khởi chạy Xem trước ${previewSec}s (PID=${res.job.pid}).`, "success");
       selectTabById?.("tab-monitor");
       onJobLaunched?.(res.job);
     } catch (err) {
@@ -615,7 +798,105 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     }
   });
 
+  const applyCheckpointOptions = (opts, { replaceQueue = false } = {}) => {
+    const isObj = typeof opts === "object" && opts !== null;
+    const sourceFile = isObj
+      ? String(opts.sourceFile ?? opts.source_file ?? "").trim()
+      : String(opts || "").trim();
+    const outputDir = isObj ? String(opts.outputDir ?? opts.output_dir ?? "").trim() : "";
+    const isCustomOut = isObj
+      ? typeof (opts.isCustomOutputDir ?? opts.is_custom_output_dir) === "boolean"
+        ? Boolean(opts.isCustomOutputDir ?? opts.is_custom_output_dir)
+        : Boolean(outputDir && !/[\\/]out$/i.test(outputDir))
+      : false;
+
+    let cfgChanged = false;
+    if (isObj) {
+      if (optOutDir instanceof HTMLInputElement) {
+        const nextOutDir = isCustomOut ? outputDir : "";
+        if (optOutDir.value.trim() !== nextOutDir) {
+          optOutDir.value = nextOutDir;
+          cfgChanged = true;
+        }
+      }
+      const cpModel = String(opts.modelId ?? opts.model_id ?? "").trim();
+      if (cpModel) {
+        setDesiredSelectValue(optModel, cpModel, "");
+        cfgChanged = true;
+      }
+      const cpDedup = String(
+        opts.dedupPolicy ?? opts.dedup_policy_requested ?? opts.dedup_policy ?? ""
+      ).trim();
+      if (cpDedup) {
+        setDesiredSelectValue(optDedup, cpDedup, "");
+        cfgChanged = true;
+      }
+      const cpGrain = String(opts.grainRestore ?? opts.grain_restore ?? "").trim();
+      if (cpGrain) {
+        setSelectValueSafely(optGrainRestore, cpGrain, "auto");
+        cfgChanged = true;
+      }
+      const cpMp = String(opts.nvencMultipass ?? opts.nvenc_multipass_policy ?? "").trim();
+      if (cpMp) {
+        setDesiredSelectValue(optNvencMultipass, cpMp, "auto");
+        cfgChanged = true;
+      }
+      const cpZeroDisk = opts.zeroDisk ?? opts.zero_disk;
+      if (typeof cpZeroDisk === "boolean" && optZeroDisk instanceof HTMLInputElement) {
+        optZeroDisk.checked = cpZeroDisk;
+        cfgChanged = true;
+      }
+      const cpTrt = opts.useTensorrt ?? opts.use_tensorrt;
+      if (typeof cpTrt === "boolean" && optTensorrt instanceof HTMLInputElement) {
+        optTensorrt.checked = cpTrt;
+        cfgChanged = true;
+      }
+      const cpBatch = Number(opts.batchSize ?? opts.batch_size);
+      if (
+        Number.isInteger(cpBatch) &&
+        cpBatch >= 1 &&
+        cpBatch <= 32 &&
+        optBatch instanceof HTMLInputElement
+      ) {
+        optBatch.value = String(cpBatch);
+        optBatch.setCustomValidity("");
+        setFieldError(optBatch, optBatchError, null);
+        cfgChanged = true;
+      }
+      if (optForce instanceof HTMLInputElement && optForce.checked) {
+        optForce.checked = false;
+        cfgChanged = true;
+      }
+      if (optDryRun instanceof HTMLInputElement && optDryRun.checked) {
+        optDryRun.checked = false;
+      }
+      if (cfgChanged) {
+        persistQueueConfig();
+      }
+    }
+
+    if (sourceFile) {
+      if (replaceQueue) {
+        queueInputs = [sourceFile];
+        queueErrorPaths.clear();
+        persistInputs();
+        renderInputsList();
+        scheduleDirty = true;
+      } else {
+        const added = addInputs([sourceFile]);
+        if (added === 0 && cfgChanged) {
+          scheduleDirty = true;
+          if (panelQueue && !panelQueue.hasAttribute("hidden")) {
+            schedulePreviewDebounced();
+          }
+        }
+      }
+    }
+    return { sourceFile, isObj };
+  };
+
   renderInputsList();
+  syncStageBControls();
   syncQueueLaunchButtons();
   if (queueInputs.length > 0 && summaryPill) {
     summaryPill.textContent = `Đã khôi phục ${queueInputs.length} mục đã chọn — mở tab Hàng đợi để tính lịch trình.`;
@@ -643,36 +924,71 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       syncQueueLaunchButtons();
     },
     focusWithPath(opts) {
-      const isObj = typeof opts === "object" && opts !== null;
-      const sourceFile = isObj ? String(opts.sourceFile || "").trim() : String(opts || "").trim();
-      const outputDir = isObj ? String(opts.outputDir || "").trim() : "";
-      const isCustomOut = isObj
-        ? typeof opts.isCustomOutputDir === "boolean"
-          ? opts.isCustomOutputDir
-          : Boolean(outputDir && !/[\\/]out$/i.test(outputDir))
-        : false;
-
-      let outDirChanged = false;
-      if (isObj && optOutDir instanceof HTMLInputElement) {
-        const nextOutDir = isCustomOut ? outputDir : "";
-        if (optOutDir.value.trim() !== nextOutDir) {
-          optOutDir.value = nextOutDir;
-          outDirChanged = true;
-        }
-      }
-
-      if (sourceFile) {
-        const added = addInputs([sourceFile]);
-        if (added === 0 && outDirChanged) {
-          scheduleDirty = true;
-        }
-      } else if (isObj) {
+      const { sourceFile, isObj } = applyCheckpointOptions(opts, { replaceQueue: false });
+      if (!sourceFile && isObj) {
         showToast(
           "Checkpoint cũ thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại file nguồn.",
           "warn"
         );
       }
       selectTabById?.("tab-queue");
+    },
+    async resumeCheckpointNow(cp) {
+      if (systemBusy || localLaunchInFlight) {
+        showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+        return;
+      }
+      const { sourceFile } = applyCheckpointOptions(cp, { replaceQueue: true });
+      if (!sourceFile) {
+        showToast(
+          "Checkpoint cũ thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại file nguồn ở Tab 2.",
+          "warn"
+        );
+        selectTabById?.("tab-queue");
+        return;
+      }
+      const batchVal = validateBatchSizeInput({ focusOnError: false, toastOnError: true }) ?? 8;
+      localLaunchInFlight = true;
+      syncQueueLaunchButtons();
+      try {
+        const payload = {
+          inputs: [sourceFile],
+          output_dir: optOutDir?.value.trim() || null,
+          model: (optModel?.dataset?.desiredValue ?? optModel?.value) || null,
+          dedup_policy: (optDedup?.dataset?.desiredValue ?? optDedup?.value) || null,
+          nvenc_multipass: (optNvencMultipass?.dataset?.desiredValue ?? optNvencMultipass?.value) || "auto",
+          grain_restore: optGrainRestore?.value || "auto",
+          batch_size: batchVal,
+          deadline: null,
+          allow_partial: false,
+          zero_disk: Boolean(optZeroDisk?.checked ?? true),
+          use_tensorrt: Boolean(optTensorrt?.checked ?? true),
+          subs_after_upscale: Boolean(optSubsAfter?.checked),
+          subs_quality: optSubsQuality?.value || "normal",
+          async_subs: Boolean(optAsyncSubs?.checked),
+          prefer_whisper: Boolean(optPreferWhisper?.checked),
+          auto_align_en: true,
+          sub_offset_ms: 0,
+          keep_temp: false,
+          force: false,
+          dry_run: false,
+        };
+        const res = await apiFetch("/api/jobs/start", {
+          method: "POST",
+          body: payload,
+        });
+        showToast(
+          `Đã tiếp tục nâng cấp từ checkpoint chunk ${Number(cp?.completed_chunks || 0)}/${Number(cp?.total_chunks || 0)} (PID=${res.job.pid}).`,
+          "success"
+        );
+        selectTabById?.("tab-monitor");
+        onJobLaunched?.(res.job);
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        localLaunchInFlight = false;
+        syncQueueLaunchButtons();
+      }
     },
   };
 }
@@ -701,6 +1017,16 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
   const optNvencMultipassSelect = document.getElementById("opt-nvenc-multipass");
 
   let editorDirty = false;
+  let modelsSystemBusy = false;
+  let modelsSystemBusyReason = "";
+
+  const syncShowsSaveButton = () => {
+    if (!(btnSaveShows instanceof HTMLButtonElement)) return;
+    btnSaveShows.disabled = modelsSystemBusy;
+    btnSaveShows.title = modelsSystemBusy
+      ? modelsSystemBusyReason || "Đang có tiến trình chạy — tạm khóa lưu shows.yaml để tránh lệch cấu hình giữa ca."
+      : "";
+  };
 
   const setShowsYamlError = (errMsg) => {
     if (errMsg) {
@@ -769,7 +1095,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
 
       // Populate Queue dropdowns
       if (optModelSelect instanceof HTMLSelectElement) {
-        const cur = optModelSelect.value;
+        const cur = optModelSelect.value || optModelSelect.dataset.desiredValue || "";
         const addedIds = new Set();
         clearChildren(optModelSelect);
         optModelSelect.append(
@@ -802,7 +1128,8 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
       }
 
       if (optNvencMultipassSelect instanceof HTMLSelectElement) {
-        const curMp = optNvencMultipassSelect.value || "auto";
+        const curMp =
+          optNvencMultipassSelect.dataset.desiredValue || optNvencMultipassSelect.value || "auto";
         const mpLabels = {
           auto: "auto — Tự động theo độ phân giải (Khuyên dùng)",
           fullres: "fullres — 2-Pass toàn khung (Chất lượng tối đa)",
@@ -821,7 +1148,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
       }
 
       if (optDedupSelect instanceof HTMLSelectElement) {
-        const curPol = optDedupSelect.value;
+        const curPol = optDedupSelect.value || optDedupSelect.dataset.desiredValue || "";
         clearChildren(optDedupSelect);
         optDedupSelect.append(
           el("option", {
@@ -840,6 +1167,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
         }
         setSelectValueSafely(optDedupSelect, curPol, "");
       }
+      window.dispatchEvent(new CustomEvent("studio:models-loaded"));
 
       // Render Models Table
       if (tbody) {
@@ -930,6 +1258,13 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
 
   btnSaveShows?.addEventListener("click", async () => {
     if (!editor) return;
+    if (modelsSystemBusy) {
+      showToast(
+        modelsSystemBusyReason || "Đang có tiến trình chạy — vui lòng chờ hoàn tất trước khi lưu shows.yaml.",
+        "warn"
+      );
+      return;
+    }
     try {
       const res = await apiFetch("/api/config/shows", {
         method: "PUT",
@@ -947,10 +1282,19 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
     }
   });
 
+  syncShowsSaveButton();
   loadModelsAndShows(true);
 
   return {
     refresh: () => loadModelsAndShows(false),
+    setSystemBusy(isBusy, reason = "") {
+      const nextBusy = Boolean(isBusy);
+      const nextReason = String(reason || "");
+      if (modelsSystemBusy === nextBusy && modelsSystemBusyReason === nextReason) return;
+      modelsSystemBusy = nextBusy;
+      modelsSystemBusyReason = nextReason;
+      syncShowsSaveButton();
+    },
   };
 }
 
@@ -967,6 +1311,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const subOffset = document.getElementById("sub-offset-input");
   const subOffsetError = document.getElementById("sub-offset-error");
   const subOutDir = document.getElementById("sub-output-dir");
+  const btnBrowseSubOutDir = document.getElementById("btn-browse-sub-outdir");
   const subAutoAlign = document.getElementById("sub-auto-align");
   const subPreferWhisper = document.getElementById("sub-prefer-whisper");
   const subUpgrade = document.getElementById("sub-upgrade");
@@ -1408,6 +1753,19 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   });
 
+  btnBrowseSubOutDir?.addEventListener("click", async () => {
+    const picked = await openFsPicker({
+      title: "Chọn Thư mục Xuất Phụ đề (-o)",
+      multi: false,
+      allowFolders: true,
+      foldersOnly: true,
+      initialPath: subOutDir?.value.trim() || "out",
+    });
+    if (picked.length > 0 && subOutDir) {
+      subOutDir.value = picked[0];
+    }
+  });
+
   subForm?.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     if (systemBusy) {
@@ -1423,8 +1781,9 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
     setSubFieldError(subInputPath, subInputError, null);
     const rawOffset = subOffset?.value.trim() ?? "";
-    const offsetMs = rawOffset === "" ? 0 : Number(rawOffset);
-    if (!Number.isFinite(offsetMs) || !Number.isInteger(offsetMs)) {
+    const subOffsetBad = subOffset instanceof HTMLInputElement && subOffset.validity.badInput;
+    const offsetMs = !subOffsetBad && rawOffset === "" ? 0 : Number(rawOffset);
+    if (subOffsetBad || !Number.isFinite(offsetMs) || !Number.isInteger(offsetMs)) {
       setSubFieldError(subOffset, subOffsetError, "Sub Offset (ms) phải là số nguyên hợp lệ.");
       subOffset?.focus();
       showToast("Sub Offset (ms) phải là số nguyên hợp lệ.", "warn");
