@@ -795,6 +795,16 @@ class GPUPersistentWorker:
                 eff_alpha = round(float(getattr(self, "blend_alpha", 0.0) or 0.0), 4)
                 key = (int(in_h), int(in_w), int(b_size), eff_alpha, eff_sha)
                 if key not in runners:
+                    if runners:
+                        for old_runner in list(runners.values()):
+                            if hasattr(old_runner, "release"):
+                                try:
+                                    old_runner.release()
+                                except Exception:
+                                    pass
+                        runners.clear()
+                        if self.device.type == "cuda" and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     from src.build_trt_engine import get_hybrid_engine_or_wrapper
                     runners[key] = get_hybrid_engine_or_wrapper(
                         self.model,
@@ -843,8 +853,9 @@ class GPUPersistentWorker:
 
                 h0, w0 = batch_arrs[0].shape[:2]
                 same_shape = all(a.shape[:2] == (h0, w0) for a in batch_arrs)
+                has_live_cuda = self.device.type == "cuda" and torch.cuda.is_available()
 
-                if self.device.type == "cuda" and same_shape:
+                if has_live_cuda and same_shape:
                     if pinned_in is None or pinned_in.shape[0] < cur_b or pinned_in.shape[1:3] != (h0, w0):
                         pinned_in = torch.empty((max(b_size, cur_b), h0, w0, 3), dtype=torch.uint8, pin_memory=True)
                     for i, arr in enumerate(batch_arrs):
@@ -859,7 +870,9 @@ class GPUPersistentWorker:
                     )
                 else:
                     batch_np = np.stack(batch_arrs, axis=0)
-                    raw_t = torch.from_numpy(batch_np).to(self.device)
+                    raw_t = torch.from_numpy(batch_np)
+                    if has_live_cuda:
+                        raw_t = raw_t.to(self.device)
                     tensor = (
                         raw_t[..., [2, 1, 0]]
                         .permute(0, 3, 1, 2)
@@ -867,7 +880,7 @@ class GPUPersistentWorker:
                         .to(dtype=target_dtype)
                         .mul_(1.0 / 255.0)
                     )
-                    if self.device.type == "cuda":
+                    if has_live_cuda:
                         tensor = tensor.to(memory_format=torch.channels_last)
 
                 # Drop host array references once batch tensors are staged on device
@@ -889,7 +902,7 @@ class GPUPersistentWorker:
                         .contiguous()
                     )
                     slot = (b_start // b_size) % 2
-                    if self.device.type == "cuda":
+                    if has_live_cuda:
                         # Wait until previous PNG writers on this ring slot finish before overwriting
                         if slot_futures[slot]:
                             for prev_fut in slot_futures[slot]:
@@ -925,7 +938,7 @@ class GPUPersistentWorker:
                     raise GPUError(f"Phát hiện giá trị bất thường (NaN/Inf) tại khung hình lô: '{sample_name}'")
 
                 # Record peak VRAM allocation
-                if self.device.type == "cuda":
+                if has_live_cuda:
                     c_alloc = torch.cuda.memory_allocated(self.device) / (1024 * 1024)
                     if c_alloc > curr_alloc_peak:
                         curr_alloc_peak = c_alloc
@@ -991,6 +1004,11 @@ def _cleanup_gpu_worker(worker: Optional[GPUPersistentWorker]) -> None:
     runners = getattr(worker, "_trt_runners", None)
     if isinstance(runners, dict):
         for runner in runners.values():
+            if hasattr(runner, "release"):
+                try:
+                    runner.release()
+                except Exception:
+                    pass
             for attr in ("_out_ring", "_batch_out_ring", "context", "engine", "runtime", "fallback_module"):
                 if hasattr(runner, attr):
                     try:

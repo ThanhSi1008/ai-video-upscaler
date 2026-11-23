@@ -5,6 +5,7 @@ import sys
 import json
 import time
 import shutil
+import inspect
 import threading
 import subprocess
 from datetime import datetime, timedelta
@@ -14,6 +15,16 @@ from src.ffmpeg_ops import probe_video
 from src.dedup import scan_dedup_plan, load_or_create_plan, resolve_dedup_policy
 from src.config import DEVICE_NAME
 from src.models_resolver import find_existing_4k_output_path
+
+
+def _filter_supported_kwargs(fn: Any, extra_kw: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return extra_kw
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return extra_kw
+    return {k: v for k, v in extra_kw.items() if k in sig.parameters}
 
 
 def find_cached_plan(
@@ -76,12 +87,19 @@ def preflight_video_plan(
     segment_seconds: int = 8,
     progress_callback=None,
     dedup_policy: Optional[str] = None,
+    grain_restore: str = "auto",
 ) -> Dict[str, Any]:
     """
     Quét hoặc nạp plan.json cho một video cụ thể.
     """
     eff_policy = resolve_dedup_policy(video_path, dedup_policy)
-    cached = find_cached_plan(video_path, output_dir, expected_policy=eff_policy)
+    eff_grain = str(grain_restore or "auto").strip().lower()
+    cached = find_cached_plan(
+        video_path,
+        output_dir,
+        expected_policy=eff_policy,
+        **_filter_supported_kwargs(find_cached_plan, {"expected_grain_restore": eff_grain}),
+    )
     if cached:
         return cached
 
@@ -107,6 +125,7 @@ def preflight_video_plan(
         fps_num=fps_num,
         fps_den=fps_den,
         policy=eff_policy,
+        **({"grain_restore": eff_grain} if eff_grain != "auto" else {}),
     )
     return plan_data
 
@@ -127,6 +146,7 @@ class BackgroundQueuePreflightManager:
         benchmark_mode: bool = False,
         on_plan_ready=None,
         dedup_policy: Optional[str] = None,
+        grain_restore: str = "auto",
     ):
         self.queue = queue
         out_clean = output_dir or "out"
@@ -139,6 +159,7 @@ class BackgroundQueuePreflightManager:
         self.benchmark_mode = benchmark_mode or (os.environ.get("BENCHMARK_MODE") == "1")
         self.on_plan_ready = on_plan_ready
         self.dedup_policy = dedup_policy
+        self.grain_restore = str(grain_restore or "auto").strip().lower()
         self.thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -241,7 +262,12 @@ class BackgroundQueuePreflightManager:
                     if not os.path.isfile(vid):
                         continue
                     eff_pol = resolve_dedup_policy(vid, self.dedup_policy)
-                    cached = find_cached_plan(vid, self.output_dir, expected_policy=eff_pol)
+                    cached = find_cached_plan(
+                        vid,
+                        self.output_dir,
+                        expected_policy=eff_pol,
+                        **_filter_supported_kwargs(find_cached_plan, {"expected_grain_restore": self.grain_restore}),
+                    )
                     if cached:
                         self.results[vid] = cached
                         continue
@@ -260,7 +286,11 @@ class BackgroundQueuePreflightManager:
 
                     from src.dedup import build_preflight_subprocess_spec
                     cmd, popen_kwargs = build_preflight_subprocess_spec(
-                        vid, plan_file, self.segment_seconds, dedup_policy=self.dedup_policy
+                        vid,
+                        plan_file,
+                        self.segment_seconds,
+                        dedup_policy=self.dedup_policy,
+                        **({"grain_restore": self.grain_restore} if self.grain_restore != "auto" else {}),
                     )
                     proc = subprocess.Popen(cmd, **popen_kwargs)
                     with self._lock:
@@ -347,6 +377,7 @@ def compute_overnight_schedule(
     start_time: Optional[datetime] = None,
     subs_quality: str = "normal",
     dedup_policy: Optional[str] = None,
+    grain_restore: str = "auto",
 ) -> Dict[str, Any]:
     """
     Tính toán lịch trình chi tiết và đưa ra quyết định cho từng tập trong hàng đợi.
@@ -385,10 +416,22 @@ def compute_overnight_schedule(
         # 1. Tìm hoặc quét plan.json
         plan = None
         eff_pol = resolve_dedup_policy(vid, dedup_policy)
+        eff_grain = str(grain_restore or "auto").strip().lower()
         if preflight_now:
-            plan = preflight_video_plan(vid, output_dir, segment_seconds, dedup_policy=eff_pol)
+            plan = preflight_video_plan(
+                vid,
+                output_dir,
+                segment_seconds,
+                dedup_policy=eff_pol,
+                **_filter_supported_kwargs(preflight_video_plan, {"grain_restore": eff_grain}),
+            )
         else:
-            plan = find_cached_plan(vid, output_dir, expected_policy=eff_pol)
+            plan = find_cached_plan(
+                vid,
+                output_dir,
+                expected_policy=eff_pol,
+                **_filter_supported_kwargs(find_cached_plan, {"expected_grain_restore": eff_grain}),
+            )
 
         is_exact = plan is not None
         if plan:

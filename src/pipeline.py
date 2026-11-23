@@ -1109,7 +1109,11 @@ def run_upscale_pipeline(
                                 def _ensure_auto_pareto_bundle(res_h: int, res_w: int):
                                     import torch
                                     from src.build_trt_engine import get_hybrid_engine_or_wrapper
-                                    from src.cuda_engine import GPUPersistentWorker, get_cuda_inference_engine
+                                    from src.cuda_engine import (
+                                        GPUPersistentWorker,
+                                        _cleanup_gpu_worker,
+                                        get_cuda_inference_engine,
+                                    )
                                     from src.trt_zero_copy_upscaler import DoubleBufferedPipeUpscaler
 
                                     detail_info = model_info["detail_model_info"]
@@ -1131,6 +1135,23 @@ def run_upscale_pipeline(
                                                     old_up.release()
                                                 except Exception:
                                                     pass
+                                            for wrap_k in ("detail_wrap", "fast_wrap"):
+                                                old_w = p_bundle.get(wrap_k)
+                                                if old_w is not None and hasattr(old_w, "release"):
+                                                    try:
+                                                        old_w.release()
+                                                    except Exception:
+                                                        pass
+                                            old_fast = p_bundle.get("fast_worker")
+                                            if old_fast is not None and old_fast is not c_eng:
+                                                _cleanup_gpu_worker(old_fast)
+                                            old_ring = p_bundle.get("shared_batch_out_ring")
+                                            if isinstance(old_ring, list):
+                                                old_ring.clear()
+                                            p_bundle.clear()
+                                            c_eng._auto_pareto_bundle = None
+                                            if c_eng.device.type == "cuda" and torch.cuda.is_available():
+                                                torch.cuda.empty_cache()
                                         fast_worker = GPUPersistentWorker(
                                             model_id=fast_info["id"],
                                             weights_path=fast_info["weights_path"],
@@ -1240,6 +1261,17 @@ def run_upscale_pipeline(
                                                         old_pre_upscaler.release()
                                                     except Exception:
                                                         pass
+                                                old_pre_wrapper = getattr(pre_cuda, "_zero_disk_wrapper", None)
+                                                if old_pre_wrapper is not None and hasattr(old_pre_wrapper, "release"):
+                                                    try:
+                                                        old_pre_wrapper.release()
+                                                    except Exception:
+                                                        pass
+                                                pre_cuda._zero_disk_upscaler = None
+                                                pre_cuda._zero_disk_wrapper = None
+                                                del old_pre_upscaler, old_pre_wrapper
+                                                if pre_cuda.device.type == "cuda" and torch.cuda.is_available():
+                                                    torch.cuda.empty_cache()
                                                 pre_wrapped = get_hybrid_engine_or_wrapper(
                                                     pre_cuda.model,
                                                     max_batch=pre_bs,
@@ -1564,6 +1596,17 @@ def run_upscale_pipeline(
                                                                 old_zd_upscaler.release()
                                                             except Exception:
                                                                 pass
+                                                        old_zd_wrapper = getattr(cuda_engine, "_zero_disk_wrapper", None)
+                                                        if old_zd_wrapper is not None and hasattr(old_zd_wrapper, "release"):
+                                                            try:
+                                                                old_zd_wrapper.release()
+                                                            except Exception:
+                                                                pass
+                                                        cuda_engine._zero_disk_upscaler = None
+                                                        cuda_engine._zero_disk_wrapper = None
+                                                        del old_zd_upscaler, old_zd_wrapper
+                                                        if cuda_engine.device.type == "cuda" and torch.cuda.is_available():
+                                                            torch.cuda.empty_cache()
                                                         wrapped_model = get_hybrid_engine_or_wrapper(
                                                             cuda_engine.model,
                                                             max_batch=eff_bs,

@@ -71,6 +71,8 @@ def resolve_trt_profile_max_batch(
         return req_b
 
     if is_upcunet2x_model(pytorch_model) and (in_h * in_w) >= (720 * 1280):
+        if (in_h * in_w) > (800 * 1920):
+            return 1
         return min(req_b, 2)
 
     upscale = 2
@@ -754,6 +756,8 @@ class TRTRuntimeEngineWrapper:
         self._use_v3 = hasattr(self.context, "execute_async_v3") and hasattr(self.context, "set_tensor_address")
         self._out_ring: list[torch.Tensor] = []
         self._ring_idx: int = 0
+        self._in_cast_buf: Optional[torch.Tensor] = None
+        self._out_cast_buf: Optional[torch.Tensor] = None
         self._shared_batch_out_ring = shared_batch_out_ring
         self._batch_out_ring: list[torch.Tensor] = shared_batch_out_ring if shared_batch_out_ring is not None else []
         self._batch_ring_idx: int = 0
@@ -795,22 +799,30 @@ class TRTRuntimeEngineWrapper:
         self._ring_idx ^= 1
         return slot_buf[:B]
 
-    def _acquire_batch_output_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
+    def _acquire_batch_output_buffer(
+        self,
+        B: int,
+        C: int,
+        out_h: int,
+        out_w: int,
+        target_dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
         """Vòng đệm đôi 2-slot cho batch tổng hợp (vd: B=8 khi profile max_batch=2) để cắt lát zero-copy."""
         alloc_b = max(int(B), self.max_batch)
         target_tail = (int(C), int(out_h), int(out_w))
+        eff_dtype = target_dtype if target_dtype is not None else self.out_torch_dtype
         if (
             len(self._batch_out_ring) != 2
             or self._batch_out_ring[0].shape[0] < alloc_b
             or self._batch_out_ring[0].shape[1:] != target_tail
-            or self._batch_out_ring[0].dtype != self.out_torch_dtype
+            or self._batch_out_ring[0].dtype != eff_dtype
             or self._batch_out_ring[0].device != self.device
         ):
             if self._out_ring:
                 self._out_ring = []
                 self._last_out_ptr = None
             new_ring = [
-                torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
+                torch.empty((alloc_b, *target_tail), dtype=eff_dtype, device=self.device)
                 for _ in range(2)
             ]
             if self._batch_out_ring is not None:
@@ -818,16 +830,51 @@ class TRTRuntimeEngineWrapper:
             else:
                 self._batch_out_ring = new_ring
             self._batch_ring_idx = 0
-            self._last_out_ptr = None
+            if eff_dtype == self.out_torch_dtype:
+                self._last_out_ptr = None
         slot_buf = self._batch_out_ring[self._batch_ring_idx]
         self._batch_ring_idx ^= 1
         return slot_buf[:B]
+
+    def _acquire_out_cast_buffer(self, B: int, C: int, out_h: int, out_w: int) -> torch.Tensor:
+        alloc_b = max(int(B), self.max_batch)
+        target_tail = (int(C), int(out_h), int(out_w))
+        buf = getattr(self, "_out_cast_buf", None)
+        if (
+            buf is None
+            or buf.shape[0] < alloc_b
+            or buf.shape[1:] != target_tail
+            or buf.dtype != self.out_torch_dtype
+            or buf.device != self.device
+        ):
+            buf = torch.empty((alloc_b, *target_tail), dtype=self.out_torch_dtype, device=self.device)
+            self._out_cast_buf = buf
+            self._last_out_ptr = None
+        return buf[:B]
 
     def _exec_single_batch(self, contig_in: torch.Tensor, out_view: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, C, H, W = contig_in.shape
         out_h, out_w = H * self.scale, W * self.scale
         if contig_in.dtype != self.in_torch_dtype:
-            contig_in = contig_in.to(dtype=self.in_torch_dtype).contiguous()
+            alloc_in_b = max(int(B), self.max_batch)
+            in_cast = getattr(self, "_in_cast_buf", None)
+            if (
+                in_cast is None
+                or in_cast.shape[0] < alloc_in_b
+                or in_cast.shape[1:] != (int(C), int(H), int(W))
+                or in_cast.dtype != self.in_torch_dtype
+                or in_cast.device != self.device
+            ):
+                in_cast = torch.empty(
+                    (alloc_in_b, int(C), int(H), int(W)),
+                    dtype=self.in_torch_dtype,
+                    device=self.device,
+                )
+                self._in_cast_buf = in_cast
+                self._last_in_ptr = None
+            in_slice = in_cast[:B]
+            in_slice.copy_(contig_in)
+            contig_in = in_slice
         output_tensor = out_view if out_view is not None else self._acquire_output_buffer(B, C, out_h, out_w)
         stream_ptr = (
             torch.cuda.current_stream(self.device).cuda_stream
@@ -871,17 +918,39 @@ class TRTRuntimeEngineWrapper:
 
         # Chuyển về NCHW contiguous trước khi truyền địa chỉ con trỏ thô cho TensorRT
         contig_in = input_tensor.contiguous()
-        if B <= self.max_batch:
-            out = self._exec_single_batch(contig_in)
-            return out if orig_dtype == self.out_torch_dtype else out.to(orig_dtype)
-
-        # Tự động cắt lát zero-copy trực tiếp vào lát cắt của vòng đệm _batch_out_ring (0 lần copy thừa 199 MB)
         out_h, out_w = H * self.scale, W * self.scale
-        full_out = self._acquire_batch_output_buffer(B, C, out_h, out_w)
+        if orig_dtype == self.out_torch_dtype:
+            if B <= self.max_batch:
+                return self._exec_single_batch(contig_in)
+            full_out = self._acquire_batch_output_buffer(B, C, out_h, out_w, target_dtype=orig_dtype)
+            for s in range(0, B, self.max_batch):
+                e = min(s + self.max_batch, B)
+                self._exec_single_batch(contig_in[s:e], out_view=full_out[s:e])
+            return full_out
+
+        # Engine I/O dtype differs from caller dtype (e.g. FP32 ONNX I/O vs FP16 caller):
+        # keep the 2-slot B-frame output ring in orig_dtype (saving ~1.0-1.4 GiB VRAM) and cast per max_batch slice.
+        full_out = self._acquire_batch_output_buffer(B, C, out_h, out_w, target_dtype=orig_dtype)
         for s in range(0, B, self.max_batch):
             e = min(s + self.max_batch, B)
-            self._exec_single_batch(contig_in[s:e], out_view=full_out[s:e])
-        return full_out if orig_dtype == self.out_torch_dtype else full_out.to(orig_dtype)
+            cast_view = self._acquire_out_cast_buffer(e - s, C, out_h, out_w)
+            slice_out = self._exec_single_batch(contig_in[s:e], out_view=cast_view)
+            full_out[s:e].copy_(slice_out)
+        return full_out
+
+    def release(self) -> None:
+        """Deterministically free TensorRT IExecutionContext/ICudaEngine device memory and output rings."""
+        self._out_ring = []
+        self._in_cast_buf = None
+        self._out_cast_buf = None
+        if self._shared_batch_out_ring is None:
+            self._batch_out_ring = []
+        self._last_input_shape = None
+        self._last_in_ptr = None
+        self._last_out_ptr = None
+        for attr in ("context", "engine", "runtime", "fallback_module"):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
 
 
 def get_hybrid_engine_or_wrapper(
@@ -1073,6 +1142,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             req_b = max(1, int(args.max_batch))
             if (input_hw[0] * input_hw[1]) < (540 * 960):
                 eff_b = req_b
+            elif is_cugan and (input_hw[0] * input_hw[1]) > (800 * 1920):
+                eff_b = 1
             elif (is_cugan and (input_hw[0] * input_hw[1]) >= (720 * 1280)) or up_scale >= 4:
                 eff_b = min(req_b, 2)
             elif vram_gb < 15.0 and (input_hw[0] * input_hw[1]) >= (720 * 1280):

@@ -84,10 +84,23 @@ def test_upcunet2x_trt_export_module_exact_parity_across_even_mod4_and_odd_crops
     assert max_diff <= 1e-5, f"Mismatch max_diff={max_diff} for pro={pro_flag}, hw={hw}"
 
 
-def test_upcunet2x_onnx_export_has_zero_pad_nodes_and_batch_profile_cap(tmp_path: Path):
-    """Verify exported UpCunet2x ONNX graph contains 0 Pad nodes and caps >=720p TRT max_batch <= 2."""
+def test_upcunet2x_onnx_export_has_zero_pad_nodes_and_batch_profile_cap(tmp_path: Path, capsys):
+    """Verify UpCunet2x ONNX graph has 0 Pad/ConvTranspose ops, keeps b1-2 at <=800x1920, and caps >800x1920 to b1-1."""
+
     ref_model = _build_upcunet2x(pro=True)
+    assert resolve_trt_profile_max_batch(ref_model, max_batch=8, input_hw=(720, 1280), available_vram_gb=24.0) == 2
     assert resolve_trt_profile_max_batch(ref_model, max_batch=8, input_hw=(800, 1920), available_vram_gb=24.0) == 2
+    assert resolve_trt_profile_max_batch(ref_model, max_batch=1, input_hw=(800, 1920), available_vram_gb=24.0) == 1
+    assert resolve_trt_profile_max_batch(ref_model, max_batch=8, input_hw=(801, 1920), available_vram_gb=24.0) == 1
+    assert resolve_trt_profile_max_batch(ref_model, max_batch=8, input_hw=(1080, 1920), available_vram_gb=24.0) == 1
+
+    assert trt_mod.main(["--dry-run", "--model", "realcugan-pro-conservative-2x", "--width", "1920", "--height", "800"]) == 0
+    out_800 = capsys.readouterr().out
+    assert "batch=1..2" in out_800 and "_800x1920_b1-2.engine" in out_800
+
+    assert trt_mod.main(["--dry-run", "--model", "realcugan-pro-conservative-2x", "--width", "1920", "--height", "1080"]) == 0
+    out_1080 = capsys.readouterr().out
+    assert "batch=1..1" in out_1080 and "_1080x1920_b1-1.engine" in out_1080
 
     onnx_path = tmp_path / "upcunet2x_800p.onnx"
     export_model_to_onnx(ref_model, str(onnx_path), max_batch=2, dummy_shape=(80, 120))
@@ -640,3 +653,279 @@ def test_h264_open_gop_leading_b_frame_pts_detection(tmp_path: Path, monkeypatch
     assert ff_mod._count_leading_discard_packets(str(seg)) == 2
 
 
+def test_background_queue_preflight_forwards_grain_restore(tmp_path: Path, monkeypatch):
+    """Verify BackgroundQueuePreflightManager forwards explicit --grain-restore to subprocess preflight and plan lookup."""
+    import json
+    import src.dedup as dedup_mod
+    import src.scheduler as sched_mod
+
+    ep1 = tmp_path / "ep01.mkv"
+    ep2 = tmp_path / "ep02.mkv"
+    ep1.write_bytes(b"ep1")
+    ep2.write_bytes(b"ep2")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    captured_specs: list[tuple[list[str], str]] = []
+    orig_build = dedup_mod.build_preflight_subprocess_spec
+
+    def _spy_build(video_path, plan_file, segment_seconds=8, dedup_policy=None, grain_restore="auto"):
+        cmd, kw = orig_build(video_path, plan_file, segment_seconds, dedup_policy=dedup_policy, grain_restore=grain_restore)
+        captured_specs.append((cmd, grain_restore))
+        Path(plan_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(plan_file).write_text(
+            json.dumps(
+                {
+                    "source_path": str(video_path),
+                    "dedup_policy": dedup_policy or "dis-auto",
+                    "dedup_params": {"grain_restore": grain_restore, "grain_tier": "clean", "sigma_y": 0.0},
+                    "total_frames": 24,
+                    "total_kept_frames": 12,
+                    "dedup_ratio_percent": 50.0,
+                    "chunks": [{"chunk_index": 0, "kept_indices": [0], "total_frames": 24}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return cmd, kw
+
+    class _FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(dedup_mod, "build_preflight_subprocess_spec", _spy_build)
+    monkeypatch.setattr(sched_mod.subprocess, "Popen", lambda *a, **kw: _FakeProc())
+
+    mgr = sched_mod.BackgroundQueuePreflightManager(
+        queue=[str(ep1), str(ep2)],
+        output_dir=str(out_dir),
+        segment_seconds=24,
+        skip_first=True,
+        dedup_policy="dis-auto",
+        grain_restore="off",
+    )
+    mgr._worker([str(ep2)])
+    assert len(captured_specs) == 1
+    assert captured_specs[0][1] == "off"
+    assert any("grain_restore='off'" in part or '"off"' in part or "off" in part for part in captured_specs[0][0])
+    assert sched_mod.find_cached_plan(str(ep2), str(out_dir), expected_policy="dis-auto", expected_grain_restore="off") is not None
+    assert sched_mod.find_cached_plan(str(ep2), str(out_dir), expected_policy="dis-auto", expected_grain_restore="heavy") is None
+    assert sched_mod.find_cached_plan(str(ep2), str(out_dir), expected_policy="dis-auto", expected_grain_restore="auto") is None
+
+    # Default --grain-restore auto must also reject stale grain_restore="off" plan.json across scheduler, web, and CLI ETA:
+    monkeypatch.setattr(sched_mod, "probe_video", lambda _p: {"nb_frames": 480, "duration": 20.0, "fps": 24.0})
+    sched_auto = sched_mod.compute_overnight_schedule(
+        [str(ep2)],
+        output_dir=str(out_dir),
+        preflight_now=False,
+        dedup_policy="dis-auto",
+    )
+    assert sched_auto["episodes"][0]["is_exact_plan"] is False
+
+    import upscale as up_mod
+
+    monkeypatch.setattr(up_mod, "probe_video", lambda _p: {"nb_frames": 480, "duration": 20.0, "fps": 24.0})
+    jm = JobManager(tmp_path)
+    monkeypatch.setattr("web.job_manager._probe_frames_lightweight", lambda _p: 480)
+    web_sched = jm.compute_schedule_preview([str(ep2)], dedup_override="dis-auto", grain_restore=None, output_dir="out")
+    assert web_sched["episodes"][0]["n_unique_source"] != "plan.json (đã quét)"
+
+    # Re-running background preflight under default grain_restore="auto" must rescan ep2 instead of reusing "off" plan:
+    mgr_auto = sched_mod.BackgroundQueuePreflightManager(
+        queue=[str(ep1), str(ep2)],
+        output_dir=str(out_dir),
+        segment_seconds=24,
+        skip_first=True,
+        dedup_policy="dis-auto",
+        grain_restore="auto",
+    )
+    mgr_auto._worker([str(ep2)])
+    assert len(captured_specs) == 2
+    assert captured_specs[1][1] == "auto"
+
+    # check_deadline_and_eta must reject mismatched grain_restore in plan.json while accepting matching grain_restore:
+    plan_ep2 = out_dir / ".temp_ep02" / "plan.json"
+    plan_ep2.write_text(
+        json.dumps(
+            {
+                "source_path": str(ep2),
+                "dedup_policy": "dis-auto",
+                "dedup_params": {"grain_restore": "off", "grain_tier": "clean", "sigma_y": 0.0},
+                "total_frames": 30000,
+                "total_kept_frames": 30000,
+                "chunks": [{"chunk_index": 0, "kept_indices": [0], "total_frames": 30000}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    from datetime import datetime as _dt_cls
+
+    class _FrozenDt(_dt_cls):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt_cls(2026, 11, 23, 23, 39, 0)
+
+    monkeypatch.setattr(up_mod, "datetime", _FrozenDt)
+    can_auto, _, _ = up_mod.check_deadline_and_eta(
+        str(ep2), "23:59", output_dir=str(out_dir), dedup_policy="dis-auto", grain_restore="auto"
+    )
+    can_off, _, _ = up_mod.check_deadline_and_eta(
+        str(ep2), "23:59", output_dir=str(out_dir), dedup_policy="dis-auto", grain_restore="off"
+    )
+    assert can_auto is True
+    assert can_off is False
+
+
+def test_trt_wrapper_fp32_io_uses_fp16_batch_ring_and_fixed_slice_cast_buffers(tmp_path: Path, monkeypatch):
+    """Verify FP32-I/O TRT engines store B-frame output rings in FP16 and reuse constant slice cast pointers."""
+    import ctypes
+    import sys
+    import types
+
+    fake_trt = types.ModuleType("tensorrt")
+
+    class _FakeDataType:
+        FLOAT = "FLOAT"
+        HALF = "HALF"
+
+    class _FakeLogger:
+        ERROR = 1
+
+        def __init__(self, severity):
+            self.severity = severity
+
+    class _FakeContext:
+        def __init__(self):
+            self.shape_calls = 0
+            self.addr_calls = {"input_rgb": 0, "output_rgb": 0}
+            self.ptrs = {}
+            self.last_shape = None
+            self.executed_v3 = 0
+
+        def set_input_shape(self, name, shape):
+            self.shape_calls += 1
+            self.last_shape = tuple(shape)
+
+        def set_tensor_address(self, name, ptr):
+            self.addr_calls[name] = self.addr_calls.get(name, 0) + 1
+            self.ptrs[name] = int(ptr)
+
+        def execute_async_v3(self, _stream_handle):
+            self.executed_v3 += 1
+            b, c, h, w = self.last_shape
+            in_n = b * c * h * w
+            out_n = b * c * (h * 2) * (w * 2)
+            in_arr = np.ctypeslib.as_array((ctypes.c_float * in_n).from_address(self.ptrs["input_rgb"])).reshape(b, c, h, w)
+            out_arr = np.ctypeslib.as_array((ctypes.c_float * out_n).from_address(self.ptrs["output_rgb"])).reshape(
+                b, c, h * 2, w * 2
+            )
+            out_arr[...] = np.repeat(np.repeat(in_arr * 0.5 + 0.125, 2, axis=2), 2, axis=3)
+            return True
+
+    class _FakeEngine:
+        def get_tensor_dtype(self, _name):
+            return _FakeDataType.FLOAT
+
+        def create_execution_context(self):
+            return _FakeContext()
+
+    class _FakeRuntime:
+        def __init__(self, _logger):
+            pass
+
+        def deserialize_cuda_engine(self, _blob):
+            return _FakeEngine()
+
+    fake_trt.DataType = _FakeDataType
+    fake_trt.Logger = _FakeLogger
+    fake_trt.Runtime = _FakeRuntime
+
+    eng_file = tmp_path / "fp32_io.engine"
+    eng_file.write_bytes(b"FAKE_FP32_ENGINE")
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+
+    wrapper = TRTRuntimeEngineWrapper(
+        str(eng_file),
+        device=torch.device("cpu"),
+        input_hw=(8, 12),
+        max_batch=1,
+        scale=2,
+    )
+    assert wrapper.in_torch_dtype == torch.float32
+    assert wrapper.out_torch_dtype == torch.float32
+
+    x = torch.linspace(0.0, 1.0, 8 * 3 * 8 * 12, dtype=torch.float16).reshape(8, 3, 8, 12)
+    y1 = wrapper(x)
+    y2 = wrapper(x)
+    y3 = wrapper(x)
+
+    expected = torch.nn.functional.interpolate(x.float() * 0.5 + 0.125, scale_factor=2.0, mode="nearest").to(torch.float16)
+    assert y1.dtype == torch.float16
+    assert torch.equal(y1, expected)
+    assert len(wrapper._batch_out_ring) == 2
+    assert wrapper._batch_out_ring[0].dtype == torch.float16
+    assert wrapper._out_cast_buf is not None and wrapper._out_cast_buf.shape == (1, 3, 16, 24)
+    assert wrapper._in_cast_buf is not None and wrapper._in_cast_buf.shape == (1, 3, 8, 12)
+    assert wrapper.context.executed_v3 == 24
+    assert wrapper.context.shape_calls == 1
+    assert wrapper.context.addr_calls["input_rgb"] == 1
+    assert wrapper.context.addr_calls["output_rgb"] == 1
+    assert y1.data_ptr() != y2.data_ptr()
+    assert y3.data_ptr() == y1.data_ptr()
+
+    wrapper.release()
+    assert wrapper._in_cast_buf is None
+    assert wrapper._out_cast_buf is None
+    assert wrapper._batch_out_ring == []
+
+
+def test_no_zero_disk_resolve_runner_evicts_prior_resolution_trt_context(tmp_path: Path, monkeypatch):
+    """Verify GPUPersistentWorker.upscale_directory releases prior resolution TRT runner before building a new one."""
+    import cv2
+    import src.build_trt_engine as trt_b
+    import src.cuda_engine as ce_mod
+
+    released_keys: list[tuple[int, int]] = []
+
+    class _SpyTRTRunner:
+        def __init__(self, hw: tuple[int, int]):
+            self.hw = hw
+
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+
+        def release(self) -> None:
+            released_keys.append(self.hw)
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        trt_b,
+        "get_hybrid_engine_or_wrapper",
+        lambda _m, input_hw=(80, 120), **_kw: _SpyTRTRunner((int(input_hw[0]), int(input_hw[1]))),
+    )
+
+    worker = ce_mod.GPUPersistentWorker.__new__(ce_mod.GPUPersistentWorker)
+    worker.model_id = "realcugan-pro-conservative-2x"
+    worker.precision = "fp16"
+    worker.batch_size = 2
+    worker.use_tensorrt = True
+    worker.blend_alpha = 0.45
+    worker.weights_sha256 = "abcd1234"
+    worker.device = type("_FakeCudaDev", (), {"type": "cuda"})()
+    worker._trt_runners = {}
+    worker.model = torch.nn.Identity()
+
+    for idx, (h, w) in enumerate(((16, 24), (20, 28), (22, 30))):
+        in_d = tmp_path / f"in_{idx}"
+        out_d = tmp_path / f"out_{idx}"
+        in_d.mkdir()
+        cv2.imwrite(str(in_d / "0001.png"), np.full((h, w, 3), 64, dtype=np.uint8))
+        res = worker.upscale_directory(str(in_d), str(out_d), fmt="png", batch_size=2, dedup=False)
+        assert res["num_frames"] == 1
+        assert len(worker._trt_runners) == 1
+
+    assert released_keys == [(16, 24), (20, 28)]
+    ce_mod._cleanup_gpu_worker(worker)
+    assert released_keys == [(16, 24), (20, 28), (22, 30)]

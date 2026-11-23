@@ -82,8 +82,8 @@ _MODEL_TRT_ZERO_DISK_FPS: Dict[str, Tuple[float, float]] = {
     "span-2x": (10.5, 8.5),
     "2x_animejanai_v3": (10.5, 8.5),
     "modernspanimation-v2-2x": (10.5, 8.5),
-    "realcugan-pro-conservative-2x": (8.5, 7.0),
-    "realcugan-pro-denoise3x-2x": (8.5, 7.0),
+    "realcugan-pro-conservative-2x": (4.5, 3.6),
+    "realcugan-pro-denoise3x-2x": (4.5, 3.6),
     "auto-pareto": (16.5, 13.5),
 }
 
@@ -151,6 +151,7 @@ def check_deadline_and_eta(
     reserved_seconds: float = 0.0,
     dedup_policy: Optional[str] = None,
     base_deadline_dt: Optional[datetime] = None,
+    grain_restore: str = "auto",
 ) -> Tuple[bool, bool, Optional[datetime]]:
     """
     Kiểm tra thời gian hoàn thành dự toán của tập video so với mốc deadline.
@@ -194,6 +195,7 @@ def check_deadline_and_eta(
             candidate_plans.append(p)
     n_unique = None
     is_measured = False
+    norm_grain = str(grain_restore or "auto").strip().lower()
     for p in candidate_plans:
         if os.path.exists(p):
             try:
@@ -203,6 +205,12 @@ def check_deadline_and_eta(
                     if eff_policy and plan_pol is not None:
                         if str(plan_pol).strip().lower() != str(eff_policy).strip().lower():
                             continue
+                    c_params = pdata.get("dedup_params") or {}
+                    c_grain = c_params.get("grain_restore")
+                    if c_grain is not None and str(c_grain).strip().lower() != norm_grain:
+                        continue
+                    if c_grain is None and norm_grain != "auto":
+                        continue
                     cand_kept = pdata.get("total_kept_frames")
                     if cand_kept:
                         n_unique = cand_kept
@@ -1109,6 +1117,9 @@ def main():
         os.environ["BENCHMARK_MODE"] = "1"
         print("\n⚡ [BENCHMARK MODE] Đã kích hoạt chế độ benchmark thuần túy: Bộ lập lịch và preflight nền từ chối chạy để bảo toàn môi trường đo đạc!")
 
+    eff_sched_grain = str(getattr(args, "grain_restore", DEFAULT_GRAIN_RESTORE) or "auto").strip().lower()
+    sched_grain_kw = {"grain_restore": eff_sched_grain} if eff_sched_grain != "auto" else {}
+
     # 1. Chế độ Dry Run (--dry-run): Preflight toàn bộ hàng đợi và in bảng quyết định, không chạy GPU
     if args.dry_run:
         from src.scheduler import compute_overnight_schedule, format_schedule_decision_table
@@ -1126,6 +1137,7 @@ def main():
             preflight_now=False,
             subs_quality=args.subs_quality,
             dedup_policy=eff_cli_dedup_policy,
+            **sched_grain_kw,
         )
         print(format_schedule_decision_table(sched))
         sys.exit(0)
@@ -1152,6 +1164,7 @@ def main():
             preflight_now=False,
             subs_quality=args.subs_quality,
             dedup_policy=eff_cli_dedup_policy,
+            **sched_grain_kw,
         )
         print(format_schedule_decision_table(sched))
 
@@ -1172,6 +1185,7 @@ def main():
                         preflight_now=False,
                         subs_quality=args.subs_quality,
                         dedup_policy=eff_cli_dedup_policy,
+                        **sched_grain_kw,
                     )
                     print(f"\n🔄 [BẢNG LẬP LỊCH CẬP NHẬT] Đã nạp số đo n_unique thật cho '{os.path.basename(scanned_vid)}':")
                     print(format_schedule_decision_table(updated_sched))
@@ -1186,6 +1200,7 @@ def main():
                 benchmark_mode=args.benchmark_mode,
                 on_plan_ready=_on_bg_plan_ready,
                 dedup_policy=eff_cli_dedup_policy,
+                **sched_grain_kw,
             )
             bg_preflight.start()
 
@@ -1256,6 +1271,7 @@ def main():
                     reserved_seconds=subs_reserved_sec,
                     dedup_policy=eff_cli_dedup_policy,
                     base_deadline_dt=session_deadline_dt,
+                    **sched_grain_kw,
                 )
                 if not can_finish:
                     print(f"⏹️ Dừng hàng đợi tại tập {idx+1}/{len(videos)} do chạm ngưỡng hạn chót {args.deadline}.")

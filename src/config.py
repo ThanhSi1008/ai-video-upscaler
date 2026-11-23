@@ -364,8 +364,8 @@ _MODEL_TRT_INFER_FPS_ESTIMATE: dict[str, float] = {
     "span-2x": 10.5,
     "2x_animejanai_v3": 10.5,
     "modernspanimation-v2-2x": 10.5,
-    "realcugan-pro-conservative-2x": 8.5,
-    "realcugan-pro-denoise3x-2x": 8.5,
+    "realcugan-pro-conservative-2x": 4.9,
+    "realcugan-pro-denoise3x-2x": 4.9,
     "auto-pareto": 18.0,
 }
 

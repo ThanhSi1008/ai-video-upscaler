@@ -37,8 +37,8 @@ MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
     "span-2x": (10.5, 8.5),
     "2x_AnimeJaNai_V3": (10.5, 8.5),
     "modernspanimation-v2-2x": (10.5, 8.5),
-    "realcugan-pro-conservative-2x": (8.5, 7.0),
-    "realcugan-pro-denoise3x-2x": (8.5, 7.0),
+    "realcugan-pro-conservative-2x": (4.5, 3.6),
+    "realcugan-pro-denoise3x-2x": (4.5, 3.6),
 }
 
 
@@ -465,7 +465,7 @@ class JobManager:
                 vid,
                 str(out_base),
                 expected_policy=routing["dedup_policy"],
-                expected_grain_restore=grain_norm,
+                expected_grain_restore=grain_norm or "auto",
             )
             if already_done:
                 if plan:
