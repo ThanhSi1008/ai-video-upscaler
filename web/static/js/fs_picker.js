@@ -81,9 +81,12 @@ export function initFsPickerModal() {
     }
   });
 
-  filterInput?.addEventListener("input", () => {
+  const onFilterChange = () => {
     activeSession?.renderEntries();
-  });
+  };
+  filterInput?.addEventListener("input", onFilterChange);
+  filterInput?.addEventListener("search", onFilterChange);
+  filterInput?.addEventListener("change", onFilterChange);
 
   btnPickFolder?.addEventListener("click", () => {
     if (!activeSession || !activeSession.currentPath) return;
@@ -194,16 +197,30 @@ export function openFsPicker(options = {}) {
           }
         }
         if (renderedCount === 0) {
-          entriesList.append(
-            el("p", {
-              className: "empty-hint",
+          const emptyBox = el("div", { className: "empty-hint" }, [
+            el("span", {
               textContent: filterKw
-                ? `Không có mục nào khớp từ khóa "${filterKw}".`
+                ? `Không có mục nào khớp từ khóa "${filterKw}". `
                 : cfg.foldersOnly
                   ? "Không có thư mục con (bạn vẫn có thể chọn chính thư mục đang mở ở thanh trên)."
                   : "Thư mục này chưa có thư mục con hoặc tệp media phù hợp.",
-            })
-          );
+            }),
+          ]);
+          if (filterKw && filterInput instanceof HTMLInputElement) {
+            emptyBox.append(
+              el("button", {
+                type: "button",
+                className: "btn btn-ghost btn-xs",
+                textContent: "✕ Xóa bộ lọc",
+                onClick: () => {
+                  filterInput.value = "";
+                  this.renderEntries();
+                  filterInput.focus();
+                },
+              })
+            );
+          }
+          entriesList.append(emptyBox);
         }
       },
       async browse(targetPath, { allowFallback = false } = {}) {
@@ -225,9 +242,13 @@ export function openFsPicker(options = {}) {
           const data = await apiFetch(`/api/fs/browse?${qs.toString()}`);
           if (!isCurrent()) return;
 
+          const prevPath = this.currentPath;
           this.currentPath = data.current_path || "";
           this.parentPath = data.parent_path || null;
           this.workspaceRoot = data.workspace_root || this.workspaceRoot;
+          if (filterInput instanceof HTMLInputElement && this.currentPath !== prevPath) {
+            filterInput.value = "";
+          }
           if (this.currentPath) {
             lastVisitedPath = this.currentPath;
           }

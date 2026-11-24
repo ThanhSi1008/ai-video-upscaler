@@ -56,6 +56,7 @@ function bootstrapStudio() {
 
   // Live Monitor DOM refs
   const episodeTitle = document.getElementById("live-episode-title");
+  const queueProgressStrip = document.getElementById("queue-progress-strip");
   const btnGoQueue = document.getElementById("btn-go-queue");
   const btnPauseGraceful = document.getElementById("btn-pause-graceful");
   const btnClearPause = document.getElementById("btn-clear-pause");
@@ -459,6 +460,35 @@ function bootstrapStudio() {
       String(mIdRaw).startsWith("subtrans");
     const isDryRunLive = Boolean(live.dry_run || activeWebJob?.options?.dry_run);
 
+    if (queueProgressStrip) {
+      const qs = pipeline.queue_summary;
+      if (qs && Number(qs.total_items || 0) > 1) {
+        clearChildren(queueProgressStrip);
+        queueProgressStrip.append(
+          el("span", {
+            className: "badge badge-ok",
+            textContent: `🗂️ Tập ${qs.current_index} / ${qs.total_items}`,
+          }),
+          el("span", {
+            textContent: `Đã hoàn tất: ${qs.completed_items} tập`,
+          })
+        );
+        if (Array.isArray(qs.remaining_names) && qs.remaining_names.length > 0) {
+          const extraCnt = Math.max(0, Number(qs.remaining_count || 0) - qs.remaining_names.length);
+          const extraSuffix = extraCnt > 0 ? ` (+${extraCnt} tập nữa)` : "";
+          queueProgressStrip.append(
+            el("span", {
+              className: "muted-meta",
+              textContent: `• Sắp chạy: ${qs.remaining_names.join(", ")}${extraSuffix}`,
+            })
+          );
+        }
+        queueProgressStrip.hidden = false;
+      } else {
+        queueProgressStrip.hidden = true;
+      }
+    }
+
     // 6-Stage Stepper
     if (stepperEl) {
       const normalizeStep = (st) => {
@@ -557,7 +587,21 @@ function bootstrapStudio() {
       const mId = live.model_id || "—";
       const modeTag =
         live.model_id && !isSubLive ? (live.zero_disk ? "Zero-Disk" : "PNG Disk") : "";
-      kpiModel.textContent = modeTag ? `${mId} (${modeTag})` : mId;
+      const rawBackend = String(live.runtime_backend || "").toLowerCase();
+      const backendTag =
+        !live.model_id || isSubLive
+          ? ""
+          : rawBackend === "tensorrt"
+            ? "TRT10 FP16"
+            : rawBackend === "pytorch-cuda"
+              ? "PyTorch CUDA"
+              : rawBackend === "cpu"
+                ? "CPU"
+                : rawBackend === "ncnn-vulkan"
+                  ? "NCNN Vulkan"
+                  : "";
+      const combinedMode = [backendTag, modeTag].filter(Boolean).join(" • ");
+      kpiModel.textContent = combinedMode ? `${mId} (${combinedMode})` : mId;
     }
     if (kpiFrames) {
       const totF = Number(live.total_frames || 0);
@@ -704,20 +748,17 @@ function bootstrapStudio() {
         activeWebJob?.job_type !== "preview" &&
         !live.is_preview;
       const activeTargets = isActiveUpscale
-        ? [
-            live.input_path,
-            live.video_name,
-            ...(Array.isArray(activeWebJob?.queue_items) ? activeWebJob.queue_items : []),
-          ]
-            .map(normPath)
-            .filter(Boolean)
+        ? [live.input_path, live.video_name].map(normPath).filter(Boolean)
         : [];
-      const isCpActive = (cp) => {
-        if (!isActiveUpscale || activeTargets.length === 0) return false;
+      const queuedTargets = isActiveUpscale && Array.isArray(activeWebJob?.queue_items)
+        ? activeWebJob.queue_items.map(normPath).filter(Boolean)
+        : [];
+      const matchesTargetList = (cp, targets) => {
+        if (!isActiveUpscale || targets.length === 0) return false;
         const cpSrc = normPath(cp.source_file);
         const cpEpStem = normPath(cp.episode_name);
         const cpSrcStem = stripVideoExt(baseNameOf(cpSrc));
-        return activeTargets.some((t) => {
+        return targets.some((t) => {
           if (cpSrc && t.includes("/")) {
             return cpSrc === t;
           }
@@ -725,13 +766,15 @@ function bootstrapStudio() {
           return (cpEpStem && tStem === cpEpStem) || (cpSrcStem && tStem === cpSrcStem);
         });
       };
+      const isCpActive = (cp) => matchesTargetList(cp, activeTargets);
+      const isCpQueued = (cp) => !isCpActive(cp) && matchesTargetList(cp, queuedTargets);
 
       const cpSig =
         `${isRunning ? "busy" : "idle"}::` +
         cps
           .map(
             (cp) =>
-              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${isCpActive(cp) ? "1" : "0"}`
+              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${isCpActive(cp) ? "1" : isCpQueued(cp) ? "Q" : "0"}`
           )
           .join(";;");
       if (cpSig !== lastCheckpointSignature) {
@@ -739,13 +782,18 @@ function bootstrapStudio() {
         clearChildren(checkpointList);
         for (const cp of cps) {
           const isCpRunning = isCpActive(cp);
+          const cpWaitingTurn = isCpQueued(cp);
           const cpModelNote = cp.model_id ? ` • ${cp.model_id}` : "";
           const resumeBtn = el("button", {
             type: "button",
             className: "btn btn-primary",
             disabled: isRunning,
             title: isRunning ? busyReason || "Đang có tiến trình chạy." : "Tiếp tục render ngay từ chunk đã lưu",
-            textContent: isCpRunning ? "▶ Đang xử lý…" : "▶ Tiếp tục ngay",
+            textContent: isCpRunning
+              ? "▶ Đang xử lý…"
+              : cpWaitingTurn
+                ? "⏳ Chờ tới lượt"
+                : "▶ Tiếp tục ngay",
             onClick: () => {
               queueCtrl?.resumeCheckpointNow(cp);
             },

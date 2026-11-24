@@ -658,16 +658,40 @@ class TelemetryHub:
                     extra_cp_dirs.append(d_job)
         checkpoints = scan_temp_checkpoints(self.workspace_root, extra_dirs=extra_cp_dirs)
 
+        aborted_pids_set = {
+            int(p) for p in (job_state.get("aborted_pids") or []) if _coerce_pid(p) is not None
+        }
+        last_job_cand = _resolve_last_job(job_state, active_job)
+        lock_pid_int = _coerce_pid(gpu_lock.get("pid"))
+        is_aborted_web_teardown = bool(
+            not web_job_running
+            and (
+                bool(job_state.get("aborting"))
+                or (
+                    last_job_cand is not None
+                    and str(last_job_cand.get("status") or "") == "aborted"
+                )
+            )
+            and (not gpu_lock.get("locked") or (lock_pid_int is not None and lock_pid_int in aborted_pids_set))
+            and (
+                not pid_alive
+                or (live_pid is not None and live_pid in aborted_pids_set)
+                or (last_job_cand is not None and self._live_matches_web_job(live_data, last_job_cand, live_file_mtime))
+            )
+        )
+
         # Xác định nguồn khởi chạy (Web GUI vs Terminal CLI ngoài)
         active_source = "idle"
         if web_job_running:
             active_source = "web"
-        elif gpu_lock.get("locked") or (
-            pid_alive and live_data.get("stage") not in {"completed", "paused", "error", None}
+        elif not is_aborted_web_teardown and (
+            gpu_lock.get("locked")
+            or (pid_alive and live_data.get("stage") not in {"completed", "paused", "error", None})
         ):
             active_source = "cli"
 
         effective_stage = str(live_data.get("stage") or "idle")
+        queue_summary: Optional[Dict[str, Any]] = None
 
         if web_job_running and active_job is not None:
             active_type = str(active_job.get("job_type") or "upscale")
@@ -717,8 +741,39 @@ class TelemetryHub:
                 # Tập mới vừa được Web GUI khởi chạy nhưng chưa kịp tạo RunLogger mới -> tránh báo nhầm 'completed' của tập cũ
                 effective_stage = "initializing"
                 up_opts = active_job.get("options") or {}
+                init_done_chunks = 0
+                init_tot_chunks = 0
+                init_resumed_chunks: List[int] = []
+                init_detail = "Đang khởi tạo tiến trình Upscale & kiểm tra môi trường..."
+                if not up_opts.get("force") and q_items and checkpoints:
+                    q0_raw = str(q_items[0]).strip()
+                    q0_norm = os.path.normcase(os.path.abspath(q0_raw)) if q0_raw else ""
+                    q0_stem = Path(q0_raw).stem.lower() if q0_raw else ""
+                    matched_init_cp = next(
+                        (
+                            cp
+                            for cp in checkpoints
+                            if (
+                                q0_norm
+                                and cp.get("source_file")
+                                and os.path.normcase(os.path.abspath(str(cp["source_file"]))) == q0_norm
+                            )
+                            or (q0_stem and str(cp.get("episode_name") or "").lower() == q0_stem)
+                        ),
+                        None,
+                    )
+                    if matched_init_cp is not None:
+                        cand_done = int(matched_init_cp.get("completed_chunks") or 0)
+                        if cand_done > 0:
+                            init_done_chunks = cand_done
+                            init_tot_chunks = max(cand_done, int(matched_init_cp.get("total_chunks") or 0))
+                            init_resumed_chunks = list(range(cand_done))
+                            init_detail = (
+                                f"Đang khôi phục tiến trình từ checkpoint ({init_done_chunks}/{init_tot_chunks} chunk đã lưu)..."
+                            )
                 live_data = {
                     "video_name": target_label,
+                    "input_path": str(q_items[0]) if q_items else "",
                     "pid": active_pid,
                     "job_id": active_job.get("job_id"),
                     "job_type": active_type,
@@ -726,27 +781,52 @@ class TelemetryHub:
                     "started_at": active_job.get("started_at"),
                     "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                     "stage": "initializing",
-                    "stage_detail": "Đang khởi tạo tiến trình Upscale & kiểm tra môi trường...",
+                    "stage_detail": init_detail,
                     "model_id": str(up_opts.get("model") or ""),
                     "zero_disk": bool(up_opts.get("zero_disk", True)),
                     "total_frames": 0,
                     "unique_frames": 0,
-                    "total_chunks": 0,
-                    "completed_chunks": 0,
+                    "total_chunks": init_tot_chunks,
+                    "completed_chunks": init_done_chunks,
                     "chunks": [],
-                    "resumed_chunks": [],
+                    "resumed_chunks": init_resumed_chunks,
                     "active_chunk": None,
                     "steady_fps": 0.0,
                     "latest_fps": 0.0,
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
+
+            if active_type == "upscale" and len(q_items) > 1:
+                live_in_str = str(live_data.get("input_path") or "").strip()
+                live_in_norm_q = os.path.normcase(os.path.abspath(live_in_str)) if live_in_str else ""
+                live_vname_q = str(live_data.get("video_name") or "").strip()
+                live_vstem_q = Path(live_vname_q).stem.lower() if live_vname_q else ""
+                cur_q_idx = 0
+                for idx_q, q_raw in enumerate(q_items):
+                    q_str = str(q_raw)
+                    q_norm = os.path.normcase(os.path.abspath(q_str))
+                    q_stem = Path(q_str).stem.lower()
+                    if (live_in_norm_q and q_norm == live_in_norm_q) or (
+                        not live_in_norm_q and live_vstem_q and q_stem == live_vstem_q
+                    ):
+                        cur_q_idx = idx_q
+                        break
+                next_names = [os.path.basename(str(x)) for x in q_items[cur_q_idx + 1 : cur_q_idx + 4]]
+                queue_summary = {
+                    "total_items": len(q_items),
+                    "current_index": cur_q_idx + 1,
+                    "completed_items": cur_q_idx,
+                    "current_name": os.path.basename(str(q_items[cur_q_idx])),
+                    "remaining_count": max(0, len(q_items) - (cur_q_idx + 1)),
+                    "remaining_names": next_names,
+                }
         else:
-            last_job = _resolve_last_job(job_state, active_job)
+            last_job = last_job_cand
+            dying_owned_teardown = bool(is_aborted_web_teardown and (pid_alive or gpu_lock.get("locked") or job_state.get("aborting")))
             if (
                 last_job is not None
-                and not pid_alive
-                and not gpu_lock.get("locked")
+                and ((not pid_alive and not gpu_lock.get("locked")) or is_aborted_web_teardown)
             ):
                 last_type = str(last_job.get("job_type") or "")
                 last_status = str(last_job.get("status") or "")
@@ -970,7 +1050,11 @@ class TelemetryHub:
                             live_data["stage"] = "paused"
                             live_data["active_chunk_fraction"] = 0.0
                             live_data["eta_seconds"] = None
-                            live_data["stage_detail"] = f"Tác vụ {last_type} đã bị dừng ({target_label_last})."
+                            live_data["stage_detail"] = (
+                                "Đang giải phóng VRAM sau khi dừng tác vụ..."
+                                if dying_owned_teardown
+                                else f"Tác vụ {last_type} đã bị dừng ({target_label_last})."
+                            )
                             effective_stage = "paused"
                     else:
                         aborted_stage = "paused" if checkpoints else "idle"
@@ -984,7 +1068,11 @@ class TelemetryHub:
                             "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                             "stage": aborted_stage,
                             "last_stage": "probing",
-                            "stage_detail": f"Tác vụ {last_type} đã bị dừng ({target_label_last}).",
+                            "stage_detail": (
+                                "Đang giải phóng VRAM sau khi dừng tác vụ..."
+                                if dying_owned_teardown
+                                else f"Tác vụ {last_type} đã bị dừng ({target_label_last})."
+                            ),
                             "model_id": str((last_job.get("options") or {}).get("model") or ""),
                             "zero_disk": bool((last_job.get("options") or {}).get("zero_disk", True)),
                             "total_frames": 0,
@@ -1066,6 +1154,7 @@ class TelemetryHub:
             "pid_alive": pid_alive,
             "live": live_data,
             "checkpoints": checkpoints,
+            "queue_summary": queue_summary,
             "job": job_state,
         }
 
@@ -1164,7 +1253,14 @@ class TelemetryHub:
                         hist_lp_mtime = hist_path.stat().st_mtime
                     except OSError:
                         hist_lp_mtime = 0.0
-                    hist_fin_ts = _parse_iso_timestamp(last_hist.get("finished_at"))
+                    raw_hist_ep = last_hist.get("finished_epoch")
+                    has_hist_ep = (
+                        isinstance(raw_hist_ep, (int, float))
+                        and not isinstance(raw_hist_ep, bool)
+                        and float(raw_hist_ep) > 0.0
+                    )
+                    hist_fin_ts = float(raw_hist_ep) if has_hist_ep else _parse_iso_timestamp(last_hist.get("finished_at"))
+                    hist_slack = 0.05 if has_hist_ep else 1.0
                     hist_ref_ts = max(hist_lp_mtime, hist_fin_ts)
                     hist_key = self._safe_resolve_str(hist_path)
                     newest_other_mtime = 0.0
@@ -1176,8 +1272,8 @@ class TelemetryHub:
                                 newest_other_mtime = 0.0
                             break
                     if (
-                        (live_mtime <= 0.0 or hist_ref_ts >= live_mtime - 1.0)
-                        and newest_other_mtime <= hist_ref_ts + 1.0
+                        (live_mtime <= 0.0 or hist_ref_ts >= live_mtime - hist_slack)
+                        and newest_other_mtime <= hist_ref_ts + hist_slack
                     ):
                         return hist_path
 

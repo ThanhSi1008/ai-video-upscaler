@@ -485,10 +485,14 @@ class JobManager:
                     self._finalize_locked(rc)
             active = dict(self._active_job) if self._active_job else None
             hist = [dict(x) for x in self._history]
+            is_aborting = bool(self._aborting_tokens)
+            aborted_pids = sorted({int(p) for pid_set in self._aborted_owned_pids_by_job.values() for p in pid_set})
         return {
             "status": active["status"] if active else "idle",
             "active_job": active,
             "history": hist,
+            "aborting": is_aborting,
+            "aborted_pids": aborted_pids,
         }
 
     def _finalize_locked(self, return_code: int) -> None:
@@ -1330,6 +1334,8 @@ class JobManager:
         killed_job_id: Optional[str] = None
         abort_token: Optional[str] = None
         owned_tree_pids: set[int] = set()
+        aborted_queue_items: List[str] = []
+        aborted_output_dir: Optional[str] = None
         external_lock_pid: Optional[int] = None
         concurrent_abort_pid: Optional[int] = None
         reclaimed_lineage_pid: Optional[int] = None
@@ -1340,6 +1346,13 @@ class JobManager:
                     killed_pid = getattr(proc, "pid", None)
                     killed_proc = proc
                     killed_job_id = str(self._active_job.get("job_id") or "") if self._active_job else None
+                    if self._active_job and str(self._active_job.get("job_type") or "") == "upscale":
+                        aborted_queue_items = [
+                            str(x) for x in (self._active_job.get("queue_items") or []) if str(x or "").strip()
+                        ]
+                        raw_opts = self._active_job.get("options")
+                        if isinstance(raw_opts, dict) and raw_opts.get("output_dir"):
+                            aborted_output_dir = str(raw_opts.get("output_dir"))
                     abort_token = self._job_abort_token(self._active_job, killed_proc)
                     if abort_token is not None:
                         self._aborting_tokens.add(abort_token)
@@ -1476,6 +1489,36 @@ class JobManager:
                         pass
                 else:
                     external_lock_pid = lock_state.get("pid")
+
+            # Clean unclaimed 0-chunk preflight .temp_* directories left behind after aborting a multi-item queue.
+            if killed_proc is not None and len(aborted_queue_items) > 1 and external_lock_pid is None:
+                import shutil
+                try:
+                    out_base_clean, _ = _resolve_output_target(self.workspace_root, aborted_output_dir)
+                except Exception:
+                    out_base_clean = (self.workspace_root / "out").resolve()
+                for q_vid in aborted_queue_items:
+                    q_stem = os.path.splitext(os.path.basename(q_vid))[0]
+                    if not q_stem:
+                        continue
+                    temp_cand = out_base_clean / f".temp_{q_stem}"
+                    if not temp_cand.exists() or temp_cand.is_symlink() or os.path.islink(str(temp_cand)):
+                        continue
+                    try:
+                        st_cand = temp_cand.lstat()
+                        if bool(getattr(st_cand, "st_file_attributes", 0) & 0x0400) or not temp_cand.is_dir():
+                            continue
+                        up_dir_cand = temp_cand / "upscaled_segs"
+                        has_done_up = False
+                        if up_dir_cand.is_dir():
+                            has_done_up = any(
+                                fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4")
+                                for fn in os.listdir(up_dir_cand)
+                            )
+                        if not has_done_up:
+                            shutil.rmtree(temp_cand, ignore_errors=True)
+                    except OSError:
+                        pass
         finally:
             if killed_proc is not None or abort_token is not None:
                 with self._lock:

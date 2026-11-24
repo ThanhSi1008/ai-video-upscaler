@@ -6783,3 +6783,169 @@ def test_m1_p0_srgb_compare_parity_video_tail_clamp_outdir_hygiene_subtrans_batc
         resume_body = panels_js[resume_idx:]
         assert "applyCheckpointOptions" not in resume_body
         assert "model: cpModelReq || null" in resume_body
+
+
+def test_m2_p1_dynamic_keys_queue_summary_resume_init_abort_teardown_and_zero_chunk_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify M2 P1 features: 11+ dynamic .env key slots, queue_summary, non-zero resume init, zero CLI flash on abort, and 0-chunk queue cleanup."""
+    import time
+    import psutil
+    from web.sse_hub import TelemetryHub
+
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    for env_k in list(os.environ.keys()):
+        if env_k.startswith("GEMINI_API_KEY"):
+            monkeypatch.delenv(env_k, raising=False)
+
+    root = _seed_workspace(tmp_path / "m2_p1_ws")
+    env_lines = [f"GEMINI_API_KEY_{idx}=AQ.Ab8RN6DynSlot{idx:02d}_{idx:04d}" for idx in range(1, 12)]
+    (root / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+
+    next_running = {"val": True}
+    app = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: FakePopenProcess(cmd, pid=88400, running=next_running["val"]),
+    )
+    ep1 = root / "anime_season" / "[SubsPlease] Frieren - 02 (1080p).mkv"
+    ep2 = root / "anime_season" / "[SubsPlease] Frieren - 10 (1080p).mkv"
+    ep3 = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+
+    with TestClient(app) as client:
+        # 1. Dynamic 1..11+ key slots via all_key_slots and PUT slots map
+        ov = client.get("/api/subtrans/overview").json()
+        assert len(ov["key_slots"]) == 3
+        assert len(ov["all_key_slots"]) == 11
+        assert ov["all_key_slots"][10]["slot"] == 11
+        assert ov["all_key_slots"][10]["masked"] == "AQ.Ab8...0011"
+
+        r_upd = client.put(
+            "/api/subtrans/api-keys",
+            json={"slots": {"5": "", "12": "AIzaSyAddedSlotTwelve1212"}},
+        )
+        assert r_upd.status_code == 200
+        upd_json = r_upd.json()
+        assert upd_json["configured_count"] == 11  # 11 - 1 cleared + 1 added = 11
+        by_slot = {s["slot"]: s for s in upd_json["all_key_slots"]}
+        assert by_slot[5]["configured"] is False
+        assert by_slot[12]["configured"] is True
+        assert by_slot[12]["masked"] == "AIzaSy...1212"
+
+        for bad_slots in ({"0": "AIzaBad"}, {"33": "AIzaBad"}, {"8": "AIza\nCR"}):
+            assert client.put("/api/subtrans/api-keys", json={"slots": bad_slots}).status_code == 422
+
+        # 2. Resume initializing preserves checkpoint chunks (no 40% -> 0% -> 40% drop) & queue_summary
+        cp_ep1 = root / "out" / f".temp_{ep1.stem}"
+        (cp_ep1 / "upscaled_segs").mkdir(parents=True)
+        (cp_ep1 / "upscaled_segs" / "up_0000.mp4").write_bytes(b"\x00" * 256)
+        (cp_ep1 / "upscaled_segs" / "up_0001.mp4").write_bytes(b"\x00" * 256)
+        (cp_ep1 / "manifest.json").write_text(
+            json.dumps({"source_file": str(ep1), "total_chunks": 5, "model_id": "animejanai-hd-v3-ultracompact"}),
+            encoding="utf-8",
+        )
+        cp_ep2_zero = root / "out" / f".temp_{ep2.stem}"
+        (cp_ep2_zero / "raw_segs").mkdir(parents=True)
+        (cp_ep2_zero / "raw_segs" / "seg_0000.mp4").write_bytes(b"\x00" * 256)
+
+        r_q = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(ep1), str(ep2), str(ep3)], "subs_after_upscale": False},
+        )
+        assert r_q.status_code == 200
+        q_job = r_q.json()["job"]
+
+        # While initializing (before RunLogger writes live_status.json for q_job), completed_chunks stays 2/5
+        st_init = client.get("/api/status").json()["pipeline"]
+        assert st_init["effective_stage"] == "initializing"
+        assert st_init["live"]["completed_chunks"] == 2
+        assert st_init["live"]["total_chunks"] == 5
+        assert st_init["live"]["resumed_chunks"] == [0, 1]
+        assert st_init["queue_summary"] == {
+            "total_items": 3,
+            "current_index": 1,
+            "completed_items": 0,
+            "current_name": ep1.name,
+            "remaining_count": 2,
+            "remaining_names": [ep2.name, ep3.name],
+        }
+
+        # When RunLogger advances to ep2, queue_summary updates to 2/3
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": ep2.stem,
+                    "input_path": str(ep2),
+                    "pid": 88400,
+                    "job_id": q_job["job_id"],
+                    "stage": "upscaling",
+                    "completed_chunks": 0,
+                    "total_chunks": 6,
+                }
+            ),
+            encoding="utf-8",
+        )
+        st_ep2 = client.get("/api/status").json()["pipeline"]
+        assert st_ep2["queue_summary"]["current_index"] == 2
+        assert st_ep2["queue_summary"]["completed_items"] == 1
+        assert st_ep2["queue_summary"]["remaining_names"] == [ep3.name]
+
+        # 3. Aborting multi-episode queue cleans 0-chunk .temp_ep2 while preserving 2-chunk .temp_ep1
+        r_abort = client.post("/api/jobs/abort")
+        assert r_abort.status_code == 200
+        assert cp_ep1.is_dir()
+        assert not cp_ep2_zero.exists()
+
+        # 4. Dying child PID from aborted Web Job never flashes active_source == "cli"
+        dying_pid = 88999
+        monkeypatch.setattr(psutil, "pid_exists", lambda p: p == dying_pid)
+        (root / ".gpu_active.lock").write_text(f"{dying_pid}\n", encoding="utf-8")
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": ep1.stem,
+                    "input_path": str(ep1),
+                    "pid": dying_pid,
+                    "job_id": q_job["job_id"],
+                    "stage": "upscaling",
+                    "completed_chunks": 2,
+                    "total_chunks": 5,
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            hub_dying = TelemetryHub(
+                root,
+                gpu_query_fn=_idle_gpu_metrics,
+                job_state_provider=lambda: {
+                    "status": "idle",
+                    "active_job": None,
+                    "history": [{**q_job, "status": "aborted", "finished_epoch": time.time()}],
+                    "aborting": False,
+                    "aborted_pids": [88400, dying_pid],
+                },
+            )
+            pipe_dying = hub_dying.read_pipeline_state()
+            assert pipe_dying["active_source"] == "idle"
+            assert pipe_dying["effective_stage"] == "paused"
+            assert "giải phóng VRAM" in pipe_dying["live"]["stage_detail"]
+        finally:
+            (root / ".gpu_active.lock").unlink(missing_ok=True)
+
+        # 5. Frontend M2 UI contracts
+        html = client.get("/").text
+        app_js = client.get("/static/js/app.js").text
+        compare_js = client.get("/static/js/compare_stage.js").text
+        fs_js = client.get("/static/js/fs_picker.js").text
+        panels_js = client.get("/static/js/panels.js").text
+
+        assert 'id="queue-progress-strip"' in html
+        assert 'id="btn-compare-prev-frame"' in html and 'id="btn-compare-next-frame"' in html
+        assert 'id="compare-mismatch-warning"' in html
+        assert 'id="btn-add-api-key-slot"' in html
+        assert "⏳ Chờ tới lượt" in app_js
+        assert "TRT10 FP16" in app_js and "PyTorch CUDA" in app_js
+        assert "stepCompareFrame" in compare_js
+        assert "this.currentPath !== prevPath" in fs_js
+        assert "Xác nhận xóa?" in panels_js

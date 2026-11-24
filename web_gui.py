@@ -101,18 +101,18 @@ def main(argv: list[str] | None = None) -> int:
     allow_lan_control = bool(args.lan_control)
     local_url = f"http://127.0.0.1:{args.port}"
 
-    print("=" * 72)
-    print("🎬 AI VIDEO UPSCALER & SUBTRANS — REAL-TIME WEB STUDIO")
-    print("=" * 72)
-    print(f"  • Địa chỉ máy trạm : {local_url}")
+    print("=" * 72, flush=True)
+    print("🎬 AI VIDEO UPSCALER & SUBTRANS — REAL-TIME WEB STUDIO", flush=True)
+    print("=" * 72, flush=True)
+    print(f"  • Địa chỉ máy trạm : {local_url}", flush=True)
     if args.lan or bind_host == "0.0.0.0":
         lan_mode_note = "Điều khiển đầy đủ (--lan-control)" if allow_lan_control else "Chỉ-đọc an toàn (mặc định; thêm --lan-control để điều khiển)"
-        print(f"  • Địa chỉ mạng LAN : http://{_detect_lan_ip()}:{args.port} [{lan_mode_note}]")
-    print(f"  • Thư mục dự án    : {ROOT_DIR}")
+        print(f"  • Địa chỉ mạng LAN : http://{_detect_lan_ip()}:{args.port} [{lan_mode_note}]", flush=True)
+    print(f"  • Thư mục dự án    : {ROOT_DIR}", flush=True)
     if args.mock:
-        print("  • Mode             : MOCK (--mock deterministic telemetry/jobs; no GPU/CUDA)")
-    print("  • Nhấn Ctrl+C để đóng máy chủ Web (các tiến trình CLI độc lập không bị ảnh hưởng).")
-    print("=" * 72)
+        print("  • Mode             : MOCK (--mock deterministic telemetry/jobs; no GPU/CUDA)", flush=True)
+    print("  • Nhấn Ctrl+C để đóng máy chủ Web (các tiến trình CLI độc lập không bị ảnh hưởng).", flush=True)
+    print("=" * 72, flush=True)
 
     if not args.no_browser and not args.mock:
         def _open_later() -> None:

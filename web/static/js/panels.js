@@ -553,7 +553,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           ]),
           el("td", { textContent: ep.dedup_policy }),
           el("td", {
-            textContent: `${ep.n_unique.toLocaleString("vi-VN")} / ${ep.total_frames.toLocaleString("vi-VN")} (tiết kiệm ${ep.dedup_ratio_percent}% dedup)`,
+            textContent:
+              Number(ep.resumed_done_chunks || 0) > 0
+                ? `Còn ${ep.n_unique.toLocaleString("vi-VN")} / ${ep.total_frames.toLocaleString("vi-VN")} frame (tiếp tục ${ep.resumed_done_chunks}/${ep.resumed_total_chunks} chunk • tiết kiệm ${ep.dedup_ratio_percent}% dedup)`
+                : `${ep.n_unique.toLocaleString("vi-VN")} / ${ep.total_frames.toLocaleString("vi-VN")} (tiết kiệm ${ep.dedup_ratio_percent}% dedup)`,
           }),
           el("td", { textContent: `${ep.ref_fps} fps` }),
           el("td", { textContent: ep.already_done ? "0 phút" : `${ep.eta_minutes} phút` }),
@@ -1476,12 +1479,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const todayUsageBox = document.getElementById("sub-today-usage");
   const keySlotsStatus = document.getElementById("key-slots-status");
   const apiKeysForm = document.getElementById("api-keys-form");
-  const keyInput1 = document.getElementById("input-api-key-1");
-  const keyInput2 = document.getElementById("input-api-key-2");
-  const keyInput3 = document.getElementById("input-api-key-3");
-  const keyClear1 = document.getElementById("clear-api-key-1");
-  const keyClear2 = document.getElementById("clear-api-key-2");
-  const keyClear3 = document.getElementById("clear-api-key-3");
+  const apiKeysInputsGrid = document.getElementById("api-keys-inputs-grid");
+  const btnAddApiKeySlot = document.getElementById("btn-add-api-key-slot");
 
   const btnRefreshAudits = document.getElementById("btn-refresh-audits");
   const auditsTbody = document.getElementById("audits-tbody");
@@ -1532,13 +1531,61 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     });
   }
 
+  let manualKeySlotCount = 3;
+
+  const syncKeyInputsGrid = (slots) => {
+    if (!apiKeysInputsGrid) return;
+    const serverMax = Array.isArray(slots) && slots.length > 0
+      ? Math.max(...slots.map((s) => Number(s.slot) || 0))
+      : 3;
+    const targetCount = Math.min(32, Math.max(3, serverMax, manualKeySlotCount));
+    manualKeySlotCount = targetCount;
+
+    const draftValues = new Map();
+    for (const inp of apiKeysInputsGrid.querySelectorAll("input[data-slot]")) {
+      if (inp instanceof HTMLInputElement && inp.value) {
+        draftValues.set(Number(inp.dataset.slot), inp.value);
+      }
+    }
+
+    const currentInputs = apiKeysInputsGrid.querySelectorAll("input[data-slot]");
+    if (currentInputs.length === targetCount) {
+      return;
+    }
+
+    clearChildren(apiKeysInputsGrid);
+    for (let idx = 1; idx <= targetCount; idx++) {
+      const inputId = `input-api-key-${idx}`;
+      const inpEl = el("input", {
+        type: "password",
+        id: inputId,
+        dataset: { slot: String(idx) },
+        autocomplete: "off",
+        placeholder: "Giữ nguyên nếu để trống…",
+      });
+      if (draftValues.has(idx)) {
+        inpEl.value = draftValues.get(idx);
+      }
+      apiKeysInputsGrid.append(
+        el("div", { className: "field-group" }, [
+          el("label", { for: inputId, textContent: `Khe ${idx} (GEMINI_API_KEY_${idx})` }),
+          inpEl,
+        ])
+      );
+    }
+    if (btnAddApiKeySlot instanceof HTMLButtonElement) {
+      btnAddApiKeySlot.disabled = targetCount >= 32;
+    }
+  };
+
   const clearKeySlot = async (slotNum) => {
     try {
       const res = await apiFetch("/api/subtrans/api-keys", {
         method: "PUT",
-        body: { [`key_${slotNum}`]: "" },
+        body: { slots: { [slotNum]: "" } },
       });
-      renderKeySlots(res.key_slots);
+      const updatedSlots = res.all_key_slots || res.key_slots;
+      renderKeySlots(updatedSlots);
       await loadSubtransOverview();
       showToast(`Đã xóa khóa ở Khe ${slotNum} khỏi .env cục bộ.`, "info");
     } catch (err) {
@@ -1547,6 +1594,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   };
 
   const renderKeySlots = (slots) => {
+    syncKeyInputsGrid(slots);
     if (!keySlotsStatus) return;
     clearChildren(keySlotsStatus);
     for (const s of slots || []) {
@@ -1563,18 +1611,38 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         : `◌ Khe ${s.slot}: Chưa đặt`;
       chip.append(el("span", { className: cls, textContent: label }));
       if (s.configured && s.source !== "env") {
-        chip.append(
-          el(
-            "button",
-            {
-              type: "button",
-              className: "btn-ghost btn-xs",
-              "aria-label": `Xóa khóa Gemini API Khe ${s.slot}`,
-              onClick: () => clearKeySlot(s.slot),
+        let confirmTimer = 0;
+        const clearBtnId = s.slot === 1 ? "clear-api-key-1" : `clear-api-key-${s.slot}`;
+        const delBtn = el(
+          "button",
+          {
+            type: "button",
+            id: clearBtnId,
+            className: "btn btn-ghost btn-xs",
+            "aria-label": `Xóa khóa Gemini API Khe ${s.slot}`,
+            title: "Nhấn 2 lần để xóa khóa này khỏi .env",
+            onClick: async () => {
+              if (delBtn.dataset.confirming !== "true") {
+                delBtn.dataset.confirming = "true";
+                delBtn.className = "btn btn-danger btn-xs";
+                delBtn.textContent = "Xác nhận xóa?";
+                if (confirmTimer) window.clearTimeout(confirmTimer);
+                confirmTimer = window.setTimeout(() => {
+                  delete delBtn.dataset.confirming;
+                  delBtn.className = "btn btn-ghost btn-xs";
+                  clearChildren(delBtn);
+                  delBtn.append(el("span", { "aria-hidden": "true", textContent: "✕ " }), "Xóa");
+                }, 4000);
+                return;
+              }
+              if (confirmTimer) window.clearTimeout(confirmTimer);
+              delBtn.disabled = true;
+              await clearKeySlot(s.slot);
             },
-            [el("span", { "aria-hidden": "true", textContent: "✕ " }), "Xóa"]
-          )
+          },
+          [el("span", { "aria-hidden": "true", textContent: "✕ " }), "Xóa"]
         );
+        chip.append(delBtn);
       } else if (s.configured && s.source === "env") {
         chip.append(
           el("span", {
@@ -1591,8 +1659,9 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     try {
       const data = await apiFetch("/api/subtrans/overview");
 
+      const effectiveSlots = data.all_key_slots || data.key_slots || [];
       if (kpiKeys) {
-        const slotCap = Math.max(3, Number(data.configured_keys_count) || 0);
+        const slotCap = Math.max(3, effectiveSlots.length, Number(data.configured_keys_count) || 0);
         kpiKeys.textContent = `${data.configured_keys_count} / ${slotCap} khe`;
       }
       if (kpiCache) {
@@ -1623,7 +1692,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         setSelectValueSafely(subGlossary, curG, "");
       }
 
-      renderKeySlots(data.key_slots);
+      renderKeySlots(effectiveSlots);
 
       if (todayUsageBox) {
         clearChildren(todayUsageBox);
@@ -1893,9 +1962,9 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
 
   btnBrowseSub?.addEventListener("click", async () => {
     const picked = await openFsPicker({
-      title: "Chọn Video (.mkv/.mp4) hoặc Phụ đề rời (.srt/.ass)",
+      title: "Chọn Video (.mkv/.mp4), Phụ đề (.srt/.ass) hoặc Thư mục",
       multi: false,
-      allowFolders: false,
+      allowFolders: true,
       includeSubtitles: true,
       allow4k: true,
     });
@@ -1997,29 +2066,34 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   });
 
-  for (const [inp, chk] of [
-    [keyInput1, keyClear1],
-    [keyInput2, keyClear2],
-    [keyInput3, keyClear3],
-  ]) {
-    inp?.addEventListener("input", () => {
-      if (chk && inp.value.trim()) chk.checked = false;
-    });
-    chk?.addEventListener("change", () => {
-      if (chk.checked && inp) inp.value = "";
-    });
-  }
+  btnAddApiKeySlot?.addEventListener("click", () => {
+    if (manualKeySlotCount >= 32) {
+      showToast("Đã đạt tối đa 32 khe khóa Gemini API.", "info", 2400);
+      return;
+    }
+    manualKeySlotCount += 1;
+    syncKeyInputsGrid([]);
+    const newInp = document.getElementById(`input-api-key-${manualKeySlotCount}`);
+    newInp?.focus();
+  });
 
   apiKeysForm?.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const v1 = keyInput1?.value.trim() || "";
-    const v2 = keyInput2?.value.trim() || "";
-    const v3 = keyInput3?.value.trim() || "";
-    const c1 = Boolean(keyClear1?.checked);
-    const c2 = Boolean(keyClear2?.checked);
-    const c3 = Boolean(keyClear3?.checked);
-    if (!v1 && !v2 && !v3 && !c1 && !c2 && !c3) {
-      showToast("Hãy nhập khóa API mới hoặc tích chọn xóa khe cần cập nhật.", "warn");
+    const slotsPayload = {};
+    let editCount = 0;
+    if (apiKeysInputsGrid) {
+      for (const inp of apiKeysInputsGrid.querySelectorAll("input[data-slot]")) {
+        if (!(inp instanceof HTMLInputElement)) continue;
+        const slotIdx = Number(inp.dataset.slot);
+        const val = inp.value.trim();
+        if (Number.isInteger(slotIdx) && slotIdx >= 1 && slotIdx <= 32 && val) {
+          slotsPayload[slotIdx] = val;
+          editCount += 1;
+        }
+      }
+    }
+    if (editCount === 0) {
+      showToast("Hãy nhập ít nhất một khóa API mới vào ô tương ứng trước khi lưu.", "warn");
       return;
     }
     const submitBtn = ev.submitter instanceof HTMLButtonElement ? ev.submitter : null;
@@ -2027,19 +2101,14 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     try {
       const res = await apiFetch("/api/subtrans/api-keys", {
         method: "PUT",
-        body: {
-          key_1: c1 && !v1 ? "" : v1 ? v1 : null,
-          key_2: c2 && !v2 ? "" : v2 ? v2 : null,
-          key_3: c3 && !v3 ? "" : v3 ? v3 : null,
-        },
+        body: { slots: slotsPayload },
       });
-      if (keyInput1) keyInput1.value = "";
-      if (keyInput2) keyInput2.value = "";
-      if (keyInput3) keyInput3.value = "";
-      if (keyClear1) keyClear1.checked = false;
-      if (keyClear2) keyClear2.checked = false;
-      if (keyClear3) keyClear3.checked = false;
-      renderKeySlots(res.key_slots);
+      if (apiKeysInputsGrid) {
+        for (const inp of apiKeysInputsGrid.querySelectorAll("input[data-slot]")) {
+          if (inp instanceof HTMLInputElement) inp.value = "";
+        }
+      }
+      renderKeySlots(res.all_key_slots || res.key_slots);
       await loadSubtransOverview();
       showToast("Đã cập nhật khóa Gemini API an toàn vào .env cục bộ.", "success");
     } catch (err) {

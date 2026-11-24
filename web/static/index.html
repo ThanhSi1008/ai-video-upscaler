@@ -101,6 +101,8 @@
                 </div>
               </div>
 
+              <div id="queue-progress-strip" class="queue-progress-strip" role="status" aria-live="polite" hidden></div>
+
               <ol class="pipeline-stepper" id="pipeline-stepper" aria-label="Các bước tiến trình xử lý video">
                 <li class="step-item" data-step="probing">
                   <span class="step-marker" aria-hidden="true">1</span>
@@ -435,7 +437,7 @@
                 </div>
                 <div class="button-cluster">
                   <button type="button" id="btn-refresh-candidates" class="btn btn-ghost">↻ Làm mới danh sách out/</button>
-                  <button type="button" id="btn-open-4k-mpv" class="btn btn-secondary">
+                  <button type="button" id="btn-open-4k-mpv" class="btn btn-secondary" disabled>
                     <span aria-hidden="true">🎬</span> Mở bản 4K trên Máy phát
                   </button>
                 </div>
@@ -467,7 +469,7 @@
 
                 <div class="field-group">
                   <label for="compare-ts-input">Mốc thời gian bản 4K (giây)</label>
-                  <input type="number" id="compare-ts-input" min="0" step="0.25" value="2.0" aria-describedby="compare-ts-error">
+                  <input type="number" id="compare-ts-input" min="0" step="any" value="2.0" aria-describedby="compare-ts-error">
                   <p id="compare-ts-error" class="field-error" role="alert" hidden></p>
                 </div>
 
@@ -490,6 +492,8 @@
                   <input type="range" id="compare-wipe-range" min="0" max="100" value="50">
                   <span id="compare-wipe-label">50%</span>
                   <div class="button-cluster compare-quick-btns">
+                    <button type="button" id="btn-compare-prev-frame" class="btn btn-ghost btn-xs" title="Lùi 1 khung hình (phím tắt ,)">⏮ -1 Frame</button>
+                    <button type="button" id="btn-compare-next-frame" class="btn btn-ghost btn-xs" title="Tiến 1 khung hình (phím tắt .)">+1 Frame ⏭</button>
                     <button type="button" id="btn-wipe-src" class="btn btn-ghost btn-xs" title="Xem toàn khung 1080p gốc">Gốc 100%</button>
                     <button type="button" id="btn-wipe-split" class="btn btn-ghost btn-xs" title="Chia đôi 50 / 50">50/50</button>
                     <button type="button" id="btn-wipe-up" class="btn btn-ghost btn-xs" title="Xem toàn khung 4K AI">4K 100%</button>
@@ -521,6 +525,7 @@
                   Chọn một file thành phẩm trong <code>out/</code> (hoặc chạy Xem trước 10s ở Tab Hàng đợi) rồi nhấn “Trích xuất Khung hình Đối chiếu”.
                 </p>
               </div>
+              <p id="compare-mismatch-warning" class="compare-mismatch-warning" role="status" hidden></p>
               <p id="compare-meta-caption" class="muted-meta">Chưa nạp khung hình.</p>
             </section>
           </div>
@@ -681,7 +686,7 @@
 
               <section class="card-panel" aria-labelledby="subtrans-quota-heading">
                 <div class="section-header-inline">
-                  <h2 id="subtrans-quota-heading" class="section-heading">Trạng thái Gemini 3-Key, Hạn mức PT &amp; SQLite Cache</h2>
+                  <h2 id="subtrans-quota-heading" class="section-heading">Trạng thái Đa Khóa Gemini, Hạn mức PT &amp; SQLite Cache</h2>
                   <button type="button" id="btn-refresh-subtrans" class="btn btn-ghost">↻ Làm mới</button>
                 </div>
 
@@ -705,27 +710,27 @@
                 </div>
 
                 <details class="api-keys-disclosure">
-                  <summary>Quản lý 3 Khe Khóa Gemini API cục bộ (.env)</summary>
+                  <summary>Quản lý Đa Khe Khóa Gemini API cục bộ (.env)</summary>
                   <div class="disclosure-body">
-                    <p class="muted-meta">Khóa được lưu cục bộ vào tệp <code>.env</code> trên máy của bạn và luôn được che kín trên giao diện. Để trống một ô nếu không muốn thay đổi khe đó.</p>
+                    <p class="muted-meta">Khóa được lưu cục bộ vào tệp <code>.env</code> trên máy của bạn và luôn được che kín trên giao diện. Để trống ô nếu giữ nguyên khe đó; dùng nút xóa 2 bước trên từng thẻ để gỡ khóa.</p>
                     <div id="key-slots-status" class="key-slots-list"></div>
                     <form id="api-keys-form" class="form-grid">
-                      <div class="field-group">
-                        <label for="input-api-key-1">Khe 1 (GEMINI_API_KEY_1)</label>
-                        <input type="password" id="input-api-key-1" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
-                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-1"> Xóa khe 1 khỏi .env</label>
-                      </div>
-                      <div class="field-group">
-                        <label for="input-api-key-2">Khe 2 (GEMINI_API_KEY_2)</label>
-                        <input type="password" id="input-api-key-2" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
-                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-2"> Xóa khe 2 khỏi .env</label>
-                      </div>
-                      <div class="field-group">
-                        <label for="input-api-key-3">Khe 3 (GEMINI_API_KEY_3)</label>
-                        <input type="password" id="input-api-key-3" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
-                        <label class="checkbox-inline"><input type="checkbox" id="clear-api-key-3"> Xóa khe 3 khỏi .env</label>
+                      <div id="api-keys-inputs-grid" class="form-grid span-full">
+                        <div class="field-group">
+                          <label for="input-api-key-1">Khe 1 (GEMINI_API_KEY_1)</label>
+                          <input type="password" id="input-api-key-1" data-slot="1" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
+                        </div>
+                        <div class="field-group">
+                          <label for="input-api-key-2">Khe 2 (GEMINI_API_KEY_2)</label>
+                          <input type="password" id="input-api-key-2" data-slot="2" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
+                        </div>
+                        <div class="field-group">
+                          <label for="input-api-key-3">Khe 3 (GEMINI_API_KEY_3)</label>
+                          <input type="password" id="input-api-key-3" data-slot="3" autocomplete="off" placeholder="Giữ nguyên nếu để trống…">
+                        </div>
                       </div>
                       <div class="form-cta-row">
+                        <button type="button" id="btn-add-api-key-slot" class="btn btn-ghost">+ Thêm khe khóa</button>
                         <button type="submit" class="btn btn-secondary">Lưu Khóa API vào .env</button>
                       </div>
                     </form>

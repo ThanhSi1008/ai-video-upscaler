@@ -383,6 +383,7 @@ class UpdateApiKeysRequest(BaseModel):
     key_1: Optional[str] = None
     key_2: Optional[str] = None
     key_3: Optional[str] = None
+    slots: Optional[Dict[int, Optional[str]]] = None
 
     @field_validator("key_1", "key_2", "key_3")
     @classmethod
@@ -390,6 +391,32 @@ class UpdateApiKeysRequest(BaseModel):
         if v is not None and any(ch in v for ch in ("\r", "\n", "\x00")):
             raise ValueError("API key không được chứa ký tự xuống dòng (CR/LF) hoặc NUL.")
         return v
+
+    @field_validator("slots", mode="before")
+    @classmethod
+    def _validate_slots_map(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise ValueError("slots phải là từ điển ánh xạ số khe (1..32) sang chuỗi API key.")
+        normalized: Dict[int, Optional[str]] = {}
+        for raw_k, raw_val in v.items():
+            if isinstance(raw_k, bool):
+                raise ValueError("Số khe khóa không được là kiểu boolean.")
+            try:
+                slot_idx = int(str(raw_k).strip())
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Số khe khóa '{raw_k}' không hợp lệ (phải là số nguyên 1..32).") from exc
+            if slot_idx < 1 or slot_idx > 32:
+                raise ValueError("Số khe khóa phải nằm trong khoảng 1..32.")
+            if raw_val is not None:
+                val_str = str(raw_val)
+                if any(ch in val_str for ch in ("\r", "\n", "\x00")):
+                    raise ValueError("API key không được chứa ký tự xuống dòng (CR/LF) hoặc NUL.")
+                normalized[slot_idx] = val_str
+            else:
+                normalized[slot_idx] = None
+        return normalized
 
 
 # HELPER UTILITIES
@@ -496,11 +523,11 @@ def _split_gemini_key_tokens(raw: Optional[str]) -> List[str]:
     return [tok.strip() for tok in re.split(r"[;,]", raw) if tok.strip()]
 
 
-def _resolve_subtrans_key_slots(
+def _resolve_subtrans_key_slots_all(
     dotenv_path: Path,
     key_id_fn: Optional[Callable[[str], str]] = None,
-) -> tuple[List[Dict[str, Any]], int]:
-    """Resolve 3 API key slot statuses matching subtrans/config.py precedence (env > subtrans/.env > .env)."""
+) -> tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
+    """Resolve 3-slot summary and dynamic 1..N API key slot statuses matching subtrans/config.py precedence."""
     sub_dotenv_path = dotenv_path.parent / "subtrans" / ".env"
     dotenv_map = _read_dotenv_map(dotenv_path)
     if sub_dotenv_path.is_file():
@@ -546,16 +573,30 @@ def _resolve_subtrans_key_slots(
         e_val, e_src = _effective_var(extra_name)
         _add_entries(_split_gemini_key_tokens(e_val), e_src, extra_name)
 
-    slots_summary: List[Dict[str, Any]] = []
-    for idx in (1, 2, 3):
+    max_numbered_slot = 3
+    for var_n in all_var_names:
+        m_num = re.match(r"^GEMINI_API_KEY_([1-9]\d*)$", var_n)
+        if m_num:
+            n_val, _ = _effective_var(var_n)
+            if _split_gemini_key_tokens(n_val):
+                max_numbered_slot = max(max_numbered_slot, min(32, int(m_num.group(1))))
+    total_slot_count = max(3, min(32, len(ordered_entries)), max_numbered_slot)
+
+    slot1_raw, _ = _effective_var("GEMINI_API_KEY_1")
+    slot1_tokens = _split_gemini_key_tokens(slot1_raw)
+    use_positional_slots = not multi_tokens and (not prim_tokens or prim_tokens == slot1_tokens)
+
+    all_slots_summary: List[Dict[str, Any]] = []
+    for idx in range(1, total_slot_count + 1):
         slot_key_name = f"GEMINI_API_KEY_{idx}"
         chosen_val = ""
         chosen_src = ""
         chosen_var = slot_key_name
 
-        # Align slots 1..3 with ordered_entries when GEMINI_API_KEYS/GEMINI_API_KEY supply prefix tokens;
-        # when absent (P == 0), keep positional GEMINI_API_KEY_1..3 mapping so clearing slot 1 stays unconfigured.
-        if prefix_len > 0:
+        # Align slots with ordered_entries when GEMINI_API_KEYS or a distinct unnumbered GEMINI_API_KEY
+        # supplies prefix tokens; when GEMINI_API_KEY merely mirrors GEMINI_API_KEY_1 (or is absent),
+        # preserve positional GEMINI_API_KEY_1..N mapping so clearing any middle slot stays unconfigured.
+        if not use_positional_slots and prefix_len > 0:
             if idx - 1 < len(ordered_entries):
                 chosen_val, chosen_src, chosen_var = ordered_entries[idx - 1]
         else:
@@ -564,7 +605,7 @@ def _resolve_subtrans_key_slots(
             if slot_tokens:
                 chosen_val, chosen_src, chosen_var = slot_tokens[0], slot_src, slot_key_name
 
-        slots_summary.append(
+        all_slots_summary.append(
             {
                 "slot": idx,
                 "env_name": chosen_var,
@@ -575,7 +616,15 @@ def _resolve_subtrans_key_slots(
             }
         )
 
-    return slots_summary, len(ordered_entries)
+    return all_slots_summary[:3], len(ordered_entries), all_slots_summary
+
+
+def _resolve_subtrans_key_slots(
+    dotenv_path: Path,
+    key_id_fn: Optional[Callable[[str], str]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    slots_3, active_cnt, _ = _resolve_subtrans_key_slots_all(dotenv_path, key_id_fn=key_id_fn)
+    return slots_3, active_cnt
 
 
 _SLOT_ENV_KEY_RE = re.compile(r"^GEMINI_API_KEY_([1-9]\d*)$")
@@ -586,11 +635,22 @@ def _apply_subtrans_key_edits(
     key_1: Optional[str],
     key_2: Optional[str],
     key_3: Optional[str],
+    slots: Optional[Dict[int, Optional[str]]] = None,
 ) -> Dict[str, Optional[str]]:
     """Transform merged .env key entries into normalized GEMINI_API_KEY_1..N slots plus synced GEMINI_API_KEY."""
-    if key_1 is None and key_2 is None and key_3 is None:
+    requested_edits: Dict[int, str] = {}
+    for base_idx, base_val in ((1, key_1), (2, key_2), (3, key_3)):
+        if base_val is not None:
+            requested_edits[base_idx] = base_val
+    if slots:
+        for dyn_idx, dyn_val in slots.items():
+            if dyn_val is not None and 1 <= int(dyn_idx) <= 32:
+                requested_edits[int(dyn_idx)] = dyn_val
+    if not requested_edits:
         return {}
 
+    eff_key_1 = requested_edits.get(1)
+    eff_key_2 = requested_edits.get(2)
     old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
     old_prim_orig = _split_gemini_key_tokens(existing.get("GEMINI_API_KEY"))
     old_prim = list(old_prim_orig)
@@ -598,7 +658,7 @@ def _apply_subtrans_key_edits(
 
     # Preserve tests/test_web_gui.py:1295: legacy single GEMINI_API_KEY coexisting with
     # GEMINI_API_KEYS and GEMINI_API_KEY_1 is superseded when Slot 1 is explicitly edited.
-    if legacy_triple_coexist and key_1 is not None:
+    if legacy_triple_coexist and eff_key_1 is not None:
         old_prim = []
 
     prefix_tokens: List[str] = []
@@ -626,8 +686,8 @@ def _apply_subtrans_key_edits(
             prefix_len > 0
             and n == 1
             and (
-                (key_1 is not None and legacy_triple_coexist)
-                or (key_2 is not None and not old_multi and len(old_prim_orig) == 1 and bool(numbered_vars.get(2)))
+                (eff_key_1 is not None and legacy_triple_coexist)
+                or (eff_key_2 is not None and not old_multi and len(old_prim_orig) == 1 and bool(numbered_vars.get(2)))
             )
         ):
             continue
@@ -640,10 +700,9 @@ def _apply_subtrans_key_edits(
                 target += 1
             slot_table[target] = tok
 
-    # Phase 2: Apply requested Slot 1..3 edits or explicit clears.
-    for slot_idx, raw_val in ((1, key_1), (2, key_2), (3, key_3)):
-        if raw_val is None:
-            continue
+    # Phase 2: Apply requested Slot 1..32 edits or explicit clears.
+    for slot_idx in sorted(requested_edits.keys()):
+        raw_val = requested_edits[slot_idx]
         cleaned = _validate_dotenv_value(raw_val, key_name=f"GEMINI_API_KEY_{slot_idx}")
         if cleaned:
             slot_table[slot_idx] = cleaned
@@ -655,7 +714,7 @@ def _apply_subtrans_key_edits(
         "GEMINI_API_KEYS": "",
         "GEMINI_API_KEY": slot_table.get(1, ""),
     }
-    all_indices = {1, 2, 3} | set(slot_table.keys()) | set(numbered_vars.keys())
+    all_indices = {1, 2, 3} | set(slot_table.keys()) | set(numbered_vars.keys()) | set(requested_edits.keys())
     for idx in sorted(all_indices):
         updates[f"GEMINI_API_KEY_{idx}"] = slot_table.get(idx, "")
     return updates
@@ -1299,6 +1358,7 @@ def _enable_mock_studio_state(
                 "stage": stage_val,
                 "stage_detail": f"Mock TensorRT 10.16 FP16 Zero-Disk 4K ({completed_chunks + 1}/{total_chunks} chunks)",
                 "model_id": "animevideov3",
+                "runtime_backend": "tensorrt",
                 "zero_disk": True,
                 "total_frames": total_frames,
                 "unique_frames": 18240,
@@ -2489,11 +2549,15 @@ def create_app(
 
         # Masked API key slot statuses mirroring subtrans/config.py precedence
         with _DOTENV_LOCK:
-            key_slots, active_key_count = _resolve_subtrans_key_slots(root / ".env", key_id_fn=compute_key_id)
+            key_slots, active_key_count, all_key_slots = _resolve_subtrans_key_slots_all(
+                root / ".env", key_id_fn=compute_key_id
+            )
         req_client = getattr(request, "client", None)
         req_client_host = (getattr(req_client, "host", "") or "").lower()
         req_host_name, _, _ = _parse_host_header(request.headers.get("host"))
         if not _is_loopback_request(req_client_host, req_host_name):
+            for s_entry in all_key_slots:
+                s_entry["masked"] = ""
             for s_entry in key_slots:
                 s_entry["masked"] = ""
 
@@ -2631,6 +2695,7 @@ def create_app(
             "next_reset_vn": next_vn.strftime("%Y-%m-%d %H:%M:%S"),
             "reset_in_seconds": reset_seconds,
             "key_slots": key_slots,
+            "all_key_slots": all_key_slots,
             "configured_keys_count": active_key_count,
             "models": sub_models,
             "chain": chain,
@@ -2657,7 +2722,9 @@ def create_app(
                     existing[sk] = sv
 
             try:
-                updates = _apply_subtrans_key_edits(existing, req.key_1, req.key_2, req.key_3)
+                updates = _apply_subtrans_key_edits(
+                    existing, req.key_1, req.key_2, req.key_3, slots=req.slots
+                )
                 if updates:
                     _write_dotenv_keys(dotenv_path, updates)
                     if sub_dotenv_path.is_file():
@@ -2674,17 +2741,22 @@ def create_app(
                 raise HTTPException(status_code=422, detail=str(exc))
 
             # Leave Web Studio os.environ untouched so subprocesses load .env cleanly and UI slot controls stay accurate
-            slots_summary, active_key_count = _resolve_subtrans_key_slots(dotenv_path, key_id_fn=compute_key_id)
+            slots_summary, active_key_count, all_slots_summary = _resolve_subtrans_key_slots_all(
+                dotenv_path, key_id_fn=compute_key_id
+            )
 
         req_client = getattr(request, "client", None)
         req_client_host = (getattr(req_client, "host", "") or "").lower()
         req_host_name, _, _ = _parse_host_header(request.headers.get("host"))
         if not _is_loopback_request(req_client_host, req_host_name):
+            for s_entry in all_slots_summary:
+                s_entry["masked"] = ""
             for s_entry in slots_summary:
                 s_entry["masked"] = ""
         return {
             "ok": True,
             "key_slots": slots_summary,
+            "all_key_slots": all_slots_summary,
             "configured_count": active_key_count,
         }
 

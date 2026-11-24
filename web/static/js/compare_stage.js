@@ -33,6 +33,8 @@ export function initCompareStage({ selectTabById } = {}) {
 
   const wipeRange = document.getElementById("compare-wipe-range");
   const wipeLabel = document.getElementById("compare-wipe-label");
+  const btnPrevFrame = document.getElementById("btn-compare-prev-frame");
+  const btnNextFrame = document.getElementById("btn-compare-next-frame");
   const btnWipeSrc = document.getElementById("btn-wipe-src");
   const btnWipeSplit = document.getElementById("btn-wipe-split");
   const btnWipeUp = document.getElementById("btn-wipe-up");
@@ -43,7 +45,9 @@ export function initCompareStage({ selectTabById } = {}) {
   const stage = document.getElementById("compare-stage");
   const canvas = document.getElementById("compare-canvas");
   const placeholder = document.getElementById("compare-placeholder");
+  const mismatchWarning = document.getElementById("compare-mismatch-warning");
   const metaCaption = document.getElementById("compare-meta-caption");
+  const panelCompare = document.getElementById("panel-compare");
 
   const tsErrorEl = document.getElementById("compare-ts-error");
   const offsetErrorEl = document.getElementById("compare-offset-error");
@@ -61,7 +65,29 @@ export function initCompareStage({ selectTabById } = {}) {
   let panDragStart = { x: 0, y: 0, panX: 0, panY: 0 };
   let renderRafId = 0;
   let extractSeq = 0;
+  let currentCompareFps = 23.976;
   let imageBounds = { x: 0, y: 0, w: 0, h: 0, visLeft: 0, visW: 0, baseW: 0, baseH: 0, cssW: 0, cssH: 0 };
+
+  const syncOpenMpvButton = () => {
+    if (!(btnOpenMpv instanceof HTMLButtonElement)) return;
+    const hasUp = Boolean(upInput?.value.trim());
+    btnOpenMpv.disabled = !hasUp;
+    btnOpenMpv.title = hasUp ? "" : "Chọn hoặc nhập đường dẫn video 4K trước khi mở trình phát.";
+  };
+
+  const normalizeEpisodeStem = (rawPath) => {
+    const base = String(rawPath || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .split("/")
+      .pop() || "";
+    return base
+      .replace(/\.(mkv|mp4|webm|avi|mov|ts|m2ts)$/i, "")
+      .replace(/_preview_\d+s_4k(?:_animejanai)?$/i, "")
+      .replace(/_4k(?:_animejanai)?$/i, "")
+      .trim()
+      .toLowerCase();
+  };
 
   const syncZoomReadout = () => {
     if (btnZoomReset instanceof HTMLButtonElement) {
@@ -446,14 +472,46 @@ export function initCompareStage({ selectTabById } = {}) {
 
       srcImg = loadedSrc;
       upImg = loadedUp;
+      const probedFps = Number(res.upscaled_meta?.fps || res.source_meta?.fps || 23.976);
+      if (Number.isFinite(probedFps) && probedFps > 0.5) {
+        currentCompareFps = probedFps;
+      }
       if (placeholder) {
         placeholder.hidden = true;
+      }
+      if (mismatchWarning) {
+        const sW = Number(res.source_meta?.width || loadedSrc.naturalWidth || 0);
+        const sH = Number(res.source_meta?.height || loadedSrc.naturalHeight || 0);
+        const uW = Number(res.upscaled_meta?.width || loadedUp.naturalWidth || 0);
+        const uH = Number(res.upscaled_meta?.height || loadedUp.naturalHeight || 0);
+        const warnings = [];
+        if (sW > 0 && sH > 0 && uW > 0 && uH > 0) {
+          const sDar = sW / sH;
+          const uDar = uW / uH;
+          if (Math.abs(sDar - uDar) / Math.max(0.1, sDar) > 0.03) {
+            warnings.push(
+              `tỷ lệ khung hình lệch nhau (${sW}×${sH} [${sDar.toFixed(2)}:1] vs ${uW}×${uH} [${uDar.toFixed(2)}:1])`
+            );
+          }
+        }
+        const srcStem = normalizeEpisodeStem(srcPath);
+        const upStem = normalizeEpisodeStem(upPath);
+        if (srcStem && upStem && srcStem !== upStem && !srcStem.includes(upStem) && !upStem.includes(srcStem)) {
+          warnings.push(`tên tệp gốc và bản 4K không khớp nhau ("${srcStem}" ≠ "${upStem}")`);
+        }
+        if (warnings.length > 0) {
+          mismatchWarning.textContent = `⚠ Cảnh báo cặp đối chiếu: Phát hiện ${warnings.join(" và ")} — hãy kiểm tra lại tránh ghép nhầm hai bộ phim khác nhau.`;
+          mismatchWarning.hidden = false;
+        } else {
+          mismatchWarning.textContent = "";
+          mismatchWarning.hidden = true;
+        }
       }
       if (metaCaption) {
         metaCaption.textContent =
           `Đã khớp: Gốc ${res.source_meta.width}×${res.source_meta.height} @ ${res.source_timestamp_sec}s ` +
           `⇄ Thành phẩm ${res.upscaled_meta.width}×${res.upscaled_meta.height} @ ${res.upscaled_timestamp_sec}s ` +
-          `(Bù lệch gốc: ${res.source_offset_sec}s • Chuẩn màu BT.709 PC Full-Range)`;
+          `(Bù lệch gốc: ${res.source_offset_sec}s • ${currentCompareFps.toFixed(3)} fps • Chuẩn màu BT.709 sRGB 8-bit)`;
       }
       renderCanvas();
     } catch (err) {
@@ -471,6 +529,7 @@ export function initCompareStage({ selectTabById } = {}) {
   };
 
   const syncCandidateSelectToInputs = () => {
+    syncOpenMpvButton();
     if (!(candidateSelect instanceof HTMLSelectElement)) return;
     const upVal = upInput?.value.trim() || "";
     const matched = upVal && candidatesCache.find((c) => c.upscaled_path === upVal);
@@ -480,10 +539,14 @@ export function initCompareStage({ selectTabById } = {}) {
   candidateSelect?.addEventListener("change", () => {
     const chosenUp = candidateSelect.value;
     const item = candidatesCache.find((c) => c.upscaled_path === chosenUp);
-    if (!item) return;
+    if (!item) {
+      syncOpenMpvButton();
+      return;
+    }
     if (upInput) upInput.value = item.upscaled_path;
     if (srcInput) srcInput.value = item.source_path || "";
     if (offsetInput) offsetInput.value = "";
+    syncOpenMpvButton();
     resetViewZoom();
     if (srcInput?.value && upInput?.value) {
       extractAndCompare();
@@ -535,7 +598,7 @@ export function initCompareStage({ selectTabById } = {}) {
   upInput?.addEventListener("input", syncCandidateSelectToInputs);
 
   btnOpenMpv?.addEventListener("click", async () => {
-    const target = upInput?.value.trim() || candidateSelect?.value || "";
+    const target = upInput?.value.trim() || "";
     if (!target) {
       showToast("Chưa có đường dẫn file 4K để mở trình phát.", "warn");
       return;
@@ -548,6 +611,48 @@ export function initCompareStage({ selectTabById } = {}) {
       showToast(`Đã mở trình phát (${res.launcher}) cho bản 4K.`, "success", 3200);
     } catch (err) {
       showToast(err.message, "error");
+    }
+  });
+
+  const stepCompareFrame = (deltaFrames) => {
+    if (!srcInput?.value.trim() || !upInput?.value.trim()) {
+      showToast("Hãy chọn cặp video gốc và 4K trước khi nhích từng khung hình.", "warn");
+      return;
+    }
+    const rawCur = tsInput?.value.trim() ?? "";
+    const curSec = rawCur === "" ? 2.0 : Number(rawCur);
+    const safeCur = Number.isFinite(curSec) && curSec >= 0 ? curSec : 0.0;
+    const dt = 1.0 / Math.max(1.0, currentCompareFps || 23.976);
+    const nextSec = Math.max(0.0, Math.round((safeCur + deltaFrames * dt) * 1000) / 1000);
+    if (tsInput instanceof HTMLInputElement) {
+      tsInput.value = nextSec.toFixed(3);
+    }
+    setFieldError(tsInput, tsErrorEl, null);
+    extractAndCompare();
+  };
+
+  btnPrevFrame?.addEventListener("click", () => stepCompareFrame(-1));
+  btnNextFrame?.addEventListener("click", () => stepCompareFrame(1));
+
+  document.addEventListener("keydown", (ev) => {
+    if (!panelCompare || panelCompare.hasAttribute("hidden")) return;
+    if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.isComposing) return;
+    if (document.querySelector("dialog[open]")) return;
+    const activeEl = document.activeElement;
+    if (
+      activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement ||
+      activeEl instanceof HTMLSelectElement ||
+      activeEl?.isContentEditable
+    ) {
+      return;
+    }
+    if (ev.key === ",") {
+      ev.preventDefault();
+      stepCompareFrame(-1);
+    } else if (ev.key === ".") {
+      ev.preventDefault();
+      stepCompareFrame(1);
     }
   });
 
@@ -682,6 +787,7 @@ export function initCompareStage({ selectTabById } = {}) {
     }
   }
 
+  syncOpenMpvButton();
   syncZoomReadout();
   loadCandidates();
 
