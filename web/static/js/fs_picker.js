@@ -11,10 +11,25 @@ let initialized = false;
 let activeSession = null;
 let lastVisitedPath = "";
 
-const stripOuterQuotes = (raw) => {
-  const s = String(raw || "").trim();
-  if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === '"' || s[0] === "'")) {
-    return s.slice(1, -1).trim();
+const _QUOTE_PAIRS = {
+  '"': '"',
+  "'": "'",
+  "\u201c": "\u201d",
+  "\u201d": "\u201c",
+  "\u2018": "\u2019",
+  "\u2019": "\u2018",
+};
+
+export const stripOuterQuotes = (raw) => {
+  let s = String(raw || "").trim();
+  while (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === last && (first === '"' || first === "'")) || _QUOTE_PAIRS[first] === last) {
+      s = s.slice(1, -1).trim();
+    } else {
+      break;
+    }
   }
   return s;
 };

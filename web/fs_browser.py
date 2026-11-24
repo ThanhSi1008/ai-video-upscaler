@@ -87,9 +87,31 @@ def natural_sort_key(name: str) -> List[Any]:
     return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", str(name))]
 
 
+_QUOTE_PAIRS = {
+    '"': '"',
+    "'": "'",
+    "\u201c": "\u201d",
+    "\u201d": "\u201c",
+    "\u2018": "\u2019",
+    "\u2019": "\u2018",
+}
+
+
+def strip_wrapping_quotes(raw: Optional[str]) -> str:
+    """Strip matching ASCII or smart outer quote pairs around a pasted filesystem path."""
+    s = str(raw or "").strip()
+    while len(s) >= 2:
+        first, last = s[0], s[-1]
+        if (first in ('"', "'") and last == first) or _QUOTE_PAIRS.get(first) == last:
+            s = s[1:-1].strip()
+        else:
+            break
+    return s
+
+
 def is_secret_filename(name: str) -> bool:
     """Block access to secret .env files over HTTP/LAN while permitting templates."""
-    low = name.strip().lower()
+    low = strip_wrapping_quotes(name).lower()
     if low in {".env.example", ".env.sample", ".env.template"}:
         return False
     return low == ".env" or low.startswith(".env.")
@@ -97,12 +119,11 @@ def is_secret_filename(name: str) -> bool:
 
 def is_unc_path(raw: Optional[str]) -> bool:
     """Return True if raw string targets a Windows/POSIX UNC network share (\\\\... or //...)."""
-    if not raw:
+    s = strip_wrapping_quotes(raw)
+    if not s:
         return False
-    s = str(raw).strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
-        s = s[1:-1].strip()
-    return s.startswith("\\\\") or s.startswith("//") or s.lower().startswith("\\\\?\\unc\\")
+    norm = s.replace("/", "\\")
+    return norm.startswith("\\\\") or norm.lower().startswith("\\??\\unc\\")
 
 
 def is_upscaled_output_stem(stem: str) -> bool:
@@ -290,9 +311,7 @@ class SafeLocalFSBrowser:
                 "source_video_count": 0,
             }
 
-        cleaned = raw_path.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
+        cleaned = strip_wrapping_quotes(raw_path)
         if not cleaned or cleaned.lower() == "drives":
             return {
                 "current_path": "",
@@ -307,6 +326,8 @@ class SafeLocalFSBrowser:
             raise ValueError("Từ chối truy cập đường dẫn mạng UNC (\\\\... hoặc //...).")
 
         cand = Path(os.path.expanduser(cleaned))
+        if cand.drive and not cand.is_absolute():
+            raise ValueError("Đường dẫn tương đối theo ổ đĩa (vd: E:folder) không hợp lệ.")
         if not cand.is_absolute():
             cand = (self.workspace_root / cand).resolve()
         else:
@@ -464,9 +485,7 @@ class SafeLocalFSBrowser:
         for raw in raw_inputs:
             if not raw or not str(raw).strip():
                 continue
-            item = str(raw).strip()
-            if len(item) >= 2 and item[0] == item[-1] and item[0] in ('"', "'"):
-                item = item[1:-1].strip()
+            item = strip_wrapping_quotes(str(raw))
             if not item:
                 continue
             if "\x00" in item:
@@ -474,6 +493,8 @@ class SafeLocalFSBrowser:
             if is_unc_path(item):
                 raise ValueError("Từ chối truy cập đường dẫn mạng UNC (\\\\... hoặc //...).")
             cand = Path(os.path.expanduser(item))
+            if cand.drive and not cand.is_absolute():
+                raise ValueError("Đường dẫn tương đối theo ổ đĩa (vd: E:folder) không hợp lệ.")
             if not cand.is_absolute():
                 cand = (self.workspace_root / cand).resolve()
             else:

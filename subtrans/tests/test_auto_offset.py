@@ -82,3 +82,49 @@ def test_auto_align_en_cli_flags():
     args_disabled = parser.parse_args(["video.mkv", "--no-auto-align-en"])
     assert args_disabled.auto_align_en is False
 
+
+def test_detect_auto_offset_whitespace_separators_short_ms_and_legacy_encodings(tmp_path: Path):
+    """Verify fast SRT parser and pysubs2 fallback handle whitespace separators, 1-2 digit ms, UTF-16, and CP932."""
+    from subtrans.parser import parse_and_align_subtitles
+
+    ja_cues = [
+        f"{idx + 1}\n00:{(idx * 2) // 60:02d}:{(idx * 2) % 60:02d},50 --> 00:{(idx * 2 + 1) // 60:02d}:{(idx * 2 + 1) % 60:02d},5\nこんにちは{idx}？"
+        for idx in range(50)
+    ]
+    en_cues = [
+        f"{idx + 1}\n00:{(idx * 2 + 3) // 60:02d}:{(idx * 2 + 3) % 60:02d},500 --> 00:{(idx * 2 + 4) // 60:02d}:{(idx * 2 + 4) % 60:02d},500\nHello {idx}?"
+        for idx in range(50)
+    ]
+    en_path = tmp_path / "ref.en.srt"
+    en_path.write_text("\n\n".join(en_cues), encoding="utf-8")
+
+    # 1. Whitespace-only blank lines ('\n \n' / '\n\t\n') + 1- and 2-digit fractional milliseconds (,50 and ,5 == 500ms)
+    ja_ws = tmp_path / "ja_ws_sep.srt"
+    ja_ws.write_text("\n \n".join(ja_cues), encoding="utf-8")
+    off_ws, ok_ws, reason_ws, stats_ws = detect_auto_offset(str(ja_ws), str(en_path))
+    assert ok_ws, reason_ws
+    assert off_ws == 3000
+    assert stats_ws["pairs_count"] == 50
+
+    # 2. Unseparated cues without blank lines fall back cleanly to pysubs2
+    ja_nosep = tmp_path / "ja_nosep.srt"
+    ja_nosep.write_text("\n".join(ja_cues), encoding="utf-8")
+    off_ns, ok_ns, reason_ns, _ = detect_auto_offset(str(ja_nosep), str(en_path))
+    assert ok_ns, reason_ns
+    assert off_ns == 3000
+
+    # 3. UTF-16 BOM and CP932 (Shift-JIS) subtitle encodings succeed in both detect_auto_offset and parse_and_align_subtitles
+    ja_u16 = tmp_path / "ja_utf16.srt"
+    ja_u16.write_bytes("\n\n".join(ja_cues).encode("utf-16"))
+    off_u16, ok_u16, reason_u16, _ = detect_auto_offset(str(ja_u16), str(en_path))
+    assert ok_u16, reason_u16
+    assert off_u16 == 3000
+    cues_u16, _, _ = parse_and_align_subtitles(str(ja_u16), str(en_path), ja_offset_ms=3000)
+    assert len(cues_u16) == 50
+
+    ja_sjis = tmp_path / "ja_cp932.srt"
+    ja_sjis.write_bytes("\n\n".join(ja_cues).encode("cp932"))
+    off_sjis, ok_sjis, reason_sjis, _ = detect_auto_offset(str(ja_sjis), str(en_path))
+    assert ok_sjis, reason_sjis
+    assert off_sjis == 3000
+

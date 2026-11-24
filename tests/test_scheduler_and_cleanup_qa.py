@@ -157,6 +157,11 @@ def test_concat_lists_resolve_relative_paths_and_preview_start_parser(tmp_path: 
         "-1:20",
         "14: 20",
         "25:00:00",
+        "1_00",
+        "1e2",
+        "+10",
+        ".5",
+        "١٢",
         "nan",
         "inf",
     ):

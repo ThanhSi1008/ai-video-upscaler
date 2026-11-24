@@ -6381,3 +6381,177 @@ def test_deep_external_symlink_ancestor_guard_strict_preview_start_and_stale_liv
             cmd_p = spawned_cmds[-1]
             assert "--preview-start" in cmd_p
             assert float(cmd_p[cmd_p.index("--preview-start") + 1]) == pytest.approx(expected_sec)
+
+
+def test_mixed_slash_unc_quoted_output_dirs_subtrans_secret_guard_and_post_delete_idle(tmp_path: Path):
+    """Verify mixed-slash UNC blocks, quoted -o paths, subtrans .env guards, strict float preview_start, and post-delete idle reset."""
+    import shutil
+    import time
+    from web.fs_browser import is_unc_path
+    from web.sse_hub import scan_temp_checkpoints
+
+    root = _seed_workspace(tmp_path / "hardened_web_ws")
+    ep_file = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    srt_file = root / "anime_season" / "Frieren_02.ja.srt"
+    custom_out = tmp_path / "Custom Output Space"
+    custom_out.mkdir(parents=True, exist_ok=True)
+
+    spawned_cmds: List[List[str]] = []
+
+    next_running = {"value": False}
+
+    def capture_factory(cmd: List[str], **_kw: Any) -> FakePopenProcess:
+        spawned_cmds.append(list(cmd))
+        is_run = next_running["value"]
+        return FakePopenProcess(cmd, pid=93456, running=is_run, return_code=None if is_run else 0)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
+    with TestClient(app) as client:
+        # 1. Mixed-slash, curly-quoted, double-quoted, and NT-namespace UNC strings must all be rejected
+        for unc_variant in (
+            "\\/192.0.2.1/share/.temp_attack",
+            "/\\192.0.2.1\\share\\.temp_attack",
+            '""\\\\192.0.2.1\\share\\.temp_attack""',
+            "“\\\\192.0.2.1\\share\\.temp_attack”",
+            "\\??\\UNC\\192.0.2.1\\share\\.temp_attack",
+        ):
+            assert is_unc_path(unc_variant) is True
+            assert client.post("/api/checkpoints/delete", json={"path": unc_variant}).status_code in (400, 422)
+            assert client.get("/api/fs/browse", params={"path": unc_variant}).status_code == 400
+
+        # Windows drive-relative path ('E:sub\..\.temp_attack') must be rejected with HTTP 400
+        if sys.platform == "win32":
+            assert client.post("/api/checkpoints/delete", json={"path": "E:sub\\..\\.temp_attack"}).status_code == 400
+            assert client.get("/api/fs/browse", params={"path": "E:sub\\.."}).status_code == 400
+
+        # 2. Explorer 'Copy as path' quotes on output_dir (-o) and test-match work cleanly without literal quote artifacts
+        ext_q_cp = custom_out / f".temp_{ep_file.stem}"
+        (ext_q_cp / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+        (ext_q_cp / "upscaled_segs" / "up_0000.mp4").write_bytes(b"q" * 8192)
+        (ext_q_cp / "manifest.json").write_text(
+            json.dumps({"source_file": str(ep_file), "model_id": "animevideov3", "total_chunks": 4}),
+            encoding="utf-8",
+        )
+        quoted_out = f'"{custom_out}"'
+        r_sched = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [str(ep_file)], "output_dir": quoted_out},
+        )
+        assert r_sched.status_code == 200
+        assert r_sched.json()["episodes"][0]["resumed_done_chunks"] == 1
+        if sys.platform == "win32":
+            import ctypes
+
+            buf = ctypes.create_unicode_buffer(1024)
+            n_ch = ctypes.windll.kernel32.GetShortPathNameW(str(custom_out), buf, 1024)
+            short_parent = Path(buf.value) if n_ch > 0 and buf.value else custom_out
+            cps_dedup = scan_temp_checkpoints(root, extra_dirs=[short_parent, custom_out])
+            assert sum(1 for c in cps_dedup if c["name"] == ext_q_cp.name) == 1
+        spawned_cmds.clear()
+        r_start_q = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(ep_file)], "output_dir": f"“{custom_out}”", "dry_run": True},
+        )
+        assert r_start_q.status_code == 200
+        cmd_q = spawned_cmds[-1]
+        assert cmd_q[cmd_q.index("-o") + 1] == str(custom_out)
+        assert any(c["name"] == ext_q_cp.name for c in client.get("/api/status").json()["pipeline"]["checkpoints"])
+        shutil.rmtree(ext_q_cp)
+
+        r_match_q = client.post("/api/config/test-match", json={"sample_path": f'"{ep_file}"'})
+        assert r_match_q.status_code == 200
+        assert r_match_q.json()["sample"] == str(ep_file)
+
+        # 3. Subtrans endpoint blocks .env secret paths on output_dir and glossary with HTTP 403 and rejects bool sub_offset_ms
+        assert (
+            client.post(
+                "/api/jobs/subtrans",
+                json={"input_path": str(srt_file), "output_dir": ".env", "dry_run": True},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/jobs/subtrans",
+                json={"input_path": str(srt_file), "glossary": '".env.production"', "dry_run": True},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/jobs/subtrans",
+                json={"input_path": str(srt_file), "sub_offset_ms": True, "dry_run": True},
+            ).status_code
+            == 422
+        )
+
+        # 4. Plain-seconds preview_start_sec rejects underscore/scientific/signed/Unicode float quirks matching panels.js
+        for bad_plain in ("1_00", "1e2", "+10", ".5", "١٢"):
+            r_bad_p = client.post(
+                "/api/jobs/preview",
+                json={"video_path": str(ep_file), "seconds": 10, "preview_start_sec": bad_plain},
+            )
+            assert r_bad_p.status_code == 422, f"Expected 422 for {bad_plain!r}, got {r_bad_p.status_code}"
+
+        # 5. Reconcile paused checkpoint completed_chunks and transition cleanly to idle after deleting last checkpoint
+        time.sleep(0.01)
+        cp_dir = root / "out" / f".temp_{ep_file.stem}"
+        (cp_dir / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+        (cp_dir / "upscaled_segs" / "up_0000.mp4").write_bytes(b"0" * 8192)
+        (cp_dir / "upscaled_segs" / "up_0001.mp4").write_bytes(b"1" * 8192)
+        (cp_dir / "manifest.json").write_text(
+            json.dumps({"source_file": str(ep_file), "model_id": "animevideov3", "total_chunks": 6}),
+            encoding="utf-8",
+        )
+        # First verify sub-second CLI live_status immediately overrides a just-finished dry_run via finished_epoch
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": ep_file.stem,
+                    "input_path": str(ep_file),
+                    "pid": 99999991,
+                    "stage": "paused",
+                    "stage_detail": "Đã dừng êm tại phân đoạn 1/6.",
+                    "completed_chunks": 1,
+                    "total_chunks": 6,
+                }
+            ),
+            encoding="utf-8",
+        )
+        st_cli_paused = client.get("/api/status").json()["pipeline"]
+        assert st_cli_paused["effective_stage"] == "paused"
+        assert st_cli_paused["live"]["completed_chunks"] == 2
+
+        # Next launch & abort a Web upscale job, verify completed_chunks reconciles to 2, then delete checkpoint -> idle
+        next_running["value"] = True
+        r_live_job = client.post("/api/jobs/start", json={"inputs": [str(ep_file)], "subs_after_upscale": False})
+        assert r_live_job.status_code == 200
+        live_jid = r_live_job.json()["job"]["job_id"]
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": ep_file.stem,
+                    "input_path": str(ep_file),
+                    "pid": 93456,
+                    "job_id": live_jid,
+                    "stage": "upscaling",
+                    "stage_detail": "Đang suy luận phân đoạn 2/6...",
+                    "completed_chunks": 1,
+                    "total_chunks": 6,
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert client.post("/api/jobs/abort").status_code == 200
+        next_running["value"] = False
+
+        st_paused = client.get("/api/status").json()["pipeline"]
+        assert st_paused["effective_stage"] == "paused"
+        assert st_paused["live"]["completed_chunks"] == 2
+
+        r_del_last = client.post("/api/checkpoints/delete", json={"path": str(cp_dir)})
+        assert r_del_last.status_code == 200
+        st_after_del = client.get("/api/status").json()["pipeline"]
+        assert st_after_del["effective_stage"] == "idle"
+        assert st_after_del["live"]["completed_chunks"] == 0
+        assert st_after_del["checkpoints"] == []

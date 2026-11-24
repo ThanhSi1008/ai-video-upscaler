@@ -18,6 +18,7 @@ import time
 from typing import Any, AsyncIterator, Callable, Deque, Dict, List, Optional, Sequence
 
 from scripts.telemetry_collector import default_gpu_query
+from web.fs_browser import is_unc_path, strip_wrapping_quotes
 
 
 def _sanitize_json_payload(val: Any) -> Any:
@@ -179,10 +180,15 @@ _CHECKPOINT_VIDEO_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".avi", ".ts", ".
 def _resolve_checkpoint_search_dir(workspace_root: Path, raw_dir_or_file: Optional[str]) -> Optional[Path]:
     if not raw_dir_or_file or not str(raw_dir_or_file).strip():
         return None
-    raw = str(raw_dir_or_file).strip()
-    if "\x00" in raw:
+    raw_str = str(raw_dir_or_file)
+    if "\x00" in raw_str or is_unc_path(raw_str):
+        return None
+    raw = strip_wrapping_quotes(raw_str)
+    if not raw or "\x00" in raw or is_unc_path(raw):
         return None
     p = Path(os.path.expanduser(raw))
+    if p.drive and not p.is_absolute():
+        return None
     if not p.is_absolute():
         p = workspace_root / p
     try:
@@ -225,12 +231,17 @@ def scan_temp_checkpoints(
     seen_dirs: set[str] = set()
     for cand_dir in search_dirs:
         try:
-            norm_d = os.path.normcase(os.path.abspath(str(cand_dir)))
+            resolved_d = cand_dir.resolve()
+            norm_d = os.path.normcase(str(resolved_d))
         except OSError:
-            continue
+            try:
+                resolved_d = cand_dir
+                norm_d = os.path.normcase(os.path.abspath(str(cand_dir)))
+            except OSError:
+                continue
         if norm_d not in seen_dirs:
             seen_dirs.add(norm_d)
-            unique_dirs.append(cand_dir)
+            unique_dirs.append(resolved_d)
 
     seen: set[str] = set()
 
@@ -242,19 +253,25 @@ def scan_temp_checkpoints(
         except OSError:
             continue
         for entry in entries:
-            if not entry.name.startswith(".temp_"):
+            if not entry.name.startswith(".temp_") or len(entry.name) <= len(".temp_"):
                 continue
             try:
-                if not entry.is_dir(follow_symlinks=False):
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                st_no_follow = entry.stat(follow_symlinks=False)
+                if getattr(st_no_follow, "st_file_attributes", 0) & 0x0400:
                     continue
             except OSError:
                 continue
-            norm = os.path.normcase(os.path.abspath(entry.path))
+            try:
+                t_path = Path(entry.path).resolve()
+                norm = os.path.normcase(str(t_path))
+            except OSError:
+                t_path = Path(entry.path)
+                norm = os.path.normcase(os.path.abspath(entry.path))
             if norm in seen:
                 continue
             seen.add(norm)
-
-            t_path = Path(entry.path)
             raw_segs_dir = t_path / "raw_segs"
             up_segs_dir = t_path / "upscaled_segs"
             manifest_path = t_path / "manifest.json"
@@ -708,11 +725,18 @@ class TelemetryHub:
                 last_type = str(last_job.get("job_type") or "")
                 last_status = str(last_job.get("status") or "")
                 fin_str = str(last_job.get("finished_at") or "")
-                last_finished_ts = _parse_iso_timestamp(fin_str)
+                raw_fin_epoch = last_job.get("finished_epoch")
+                has_exact_fin_epoch = (
+                    isinstance(raw_fin_epoch, (int, float))
+                    and not isinstance(raw_fin_epoch, bool)
+                    and float(raw_fin_epoch) > 0.0
+                )
+                last_finished_ts = float(raw_fin_epoch) if has_exact_fin_epoch else _parse_iso_timestamp(fin_str)
+                newer_slack = 0.002 if has_exact_fin_epoch else 1.05
                 live_from_newer_upscale = bool(
                     live_file.is_file()
                     and last_finished_ts > 0.0
-                    and live_file_mtime > last_finished_ts + 1.05
+                    and live_file_mtime > last_finished_ts + newer_slack
                     and not self._live_matches_web_job(live_data, last_job, live_file_mtime)
                     and str(live_data.get("stage") or "idle") != "idle"
                 )
@@ -974,6 +998,39 @@ class TelemetryHub:
                     else:
                         live_data["active_chunk"] = None
                         live_data["stage_detail"] = "Hệ thống sẵn sàng chờ lệnh."
+
+            if (
+                effective_stage == "paused"
+                and not pid_alive
+                and not gpu_lock.get("locked")
+                and live_data
+                and checkpoints
+            ):
+                live_in_raw = str(live_data.get("input_path") or "").strip()
+                live_vname = str(live_data.get("video_name") or "").strip()
+                live_vstem = Path(live_vname).stem.lower() if live_vname else ""
+                live_in_norm = os.path.normcase(os.path.abspath(live_in_raw)) if live_in_raw else ""
+                matched_paused_cp = next(
+                    (
+                        cp
+                        for cp in checkpoints
+                        if (
+                            live_in_norm
+                            and cp.get("source_file")
+                            and os.path.normcase(os.path.abspath(str(cp["source_file"]))) == live_in_norm
+                        )
+                        or (live_vstem and str(cp.get("episode_name") or "").lower() in {live_vstem, live_vname.lower()})
+                    ),
+                    None,
+                )
+                if matched_paused_cp is not None:
+                    cp_done = int(matched_paused_cp.get("completed_chunks") or 0)
+                    cp_tot = int(matched_paused_cp.get("total_chunks") or 0)
+                    if cp_done > int(live_data.get("completed_chunks") or 0):
+                        live_data = dict(live_data)
+                        live_data["completed_chunks"] = cp_done
+                        if cp_tot > 0 and int(live_data.get("total_chunks") or 0) <= 0:
+                            live_data["total_chunks"] = cp_tot
 
         return {
             "active_source": active_source,

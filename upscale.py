@@ -313,10 +313,9 @@ def _parse_preview_start_arg(raw_val: str) -> float:
                 raise argparse.ArgumentTypeError(f"Số phút trong {raw_val!r} phải nhỏ hơn 60.")
             sec = int(parts[0]) * 3600.0 + mm * 60.0 + ss
     else:
-        try:
-            sec = float(cleaned)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(f"Số giây --preview-start không hợp lệ: {raw_val!r}.") from exc
+        if not _ASCII_FLOAT_ARG_RE.fullmatch(cleaned):
+            raise argparse.ArgumentTypeError(f"Số giây --preview-start không hợp lệ: {raw_val!r}.")
+        sec = float(cleaned)
     if not (0.0 <= sec <= 86400.0 and sec == sec and sec != float("inf")):
         raise argparse.ArgumentTypeError("--preview-start phải nằm trong khoảng 0..86400 giây.")
     return round(sec, 3)

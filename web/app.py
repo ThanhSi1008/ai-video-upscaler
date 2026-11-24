@@ -45,9 +45,10 @@ from web.fs_browser import (
     is_valid_dedup_policy,
     match_show_pattern,
     match_show_rule,
+    strip_wrapping_quotes,
 )
 from web.job_manager import MODEL_REFERENCE_FPS, JobManager, parse_preview_start_value
-from web.sse_hub import TelemetryHub, check_active_gpu_lock, scan_temp_checkpoints
+from web.sse_hub import TelemetryHub, _coerce_pid, check_active_gpu_lock, scan_temp_checkpoints
 
 ALLOWED_OPEN_MEDIA_EXTS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -175,6 +176,11 @@ class StartUpscaleRequest(BaseModel):
     def _validate_batch_size_type(cls, v: Any) -> Any:
         return _reject_bool_or_float_int(v, "batch_size")
 
+    @field_validator("sub_offset_ms", mode="before")
+    @classmethod
+    def _validate_sub_offset_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "sub_offset_ms")
+
     @field_validator("output_dir")
     @classmethod
     def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
@@ -294,6 +300,11 @@ class StartSubtransRequest(BaseModel):
     @classmethod
     def _validate_paths_no_nul(cls, v: Optional[str]) -> Optional[str]:
         return _validate_no_nul_str(v, "path")
+
+    @field_validator("sub_offset_ms", mode="before")
+    @classmethod
+    def _validate_sub_offset_type(cls, v: Any) -> Any:
+        return _reject_bool_or_float_int(v, "sub_offset_ms")
 
 
 class StartSubsPendingRequest(BaseModel):
@@ -765,9 +776,16 @@ def _resolve_dir_from_raw(
 ) -> Optional[Path]:
     if not raw_val or not str(raw_val).strip():
         return None
-    cleaned = str(raw_val).strip()
+    _validate_no_nul_str(str(raw_val), "output_dir")
+    cleaned = strip_wrapping_quotes(str(raw_val))
+    if not cleaned:
+        return None
     _validate_no_nul_str(cleaned, "output_dir")
     raw_path = Path(os.path.expanduser(cleaned))
+    if raw_path.drive and not raw_path.is_absolute():
+        if strict_secret:
+            raise ValueError("Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
+        return None
     if (
         is_secret_filename(cleaned)
         or is_secret_filename(raw_path.name)
@@ -1610,16 +1628,25 @@ def create_app(
     @app.post("/api/jobs/subtrans")
     def api_start_subtrans(req: StartSubtransRequest) -> Dict[str, Any]:
         """Start standalone subtitle translation job."""
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _resolve_dir_from_raw(root, req.glossary, strict_secret=True)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if is_mock and popen_factory is None:
-            if not (req.input_path or "").strip():
+            if not strip_wrapping_quotes(req.input_path):
                 raise HTTPException(status_code=400, detail="Thiếu input_path.")
-            return _build_mock_job_response("subtrans", [req.input_path], req.model_dump())
+            return _build_mock_job_response("subtrans", [strip_wrapping_quotes(req.input_path)], req.model_dump())
         try:
             job = job_manager.start_subtrans_job(req.model_dump())
             return {"ok": True, "job": job}
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except (ValueError, FileNotFoundError, PermissionError) as exc:
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/subs-pending")
@@ -1679,14 +1706,15 @@ def create_app(
                 detail=f"GPU đang bận xử lý tiến trình khác (PID={lock_state.get('pid')}); từ chối xóa checkpoint.",
             )
 
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
-            cleaned = cleaned[1:-1].strip()
-        if not cleaned or is_unc_path(cleaned):
+        cleaned = strip_wrapping_quotes(cleaned)
+        if not cleaned or "\x00" in cleaned or is_unc_path(cleaned):
             raise HTTPException(status_code=400, detail="Đường dẫn thư mục checkpoint (.temp_*) không hợp lệ.")
 
-        raw_cand = Path(os.path.expanduser(cleaned))
-        if not raw_cand.is_absolute():
-            raw_cand = root / raw_cand
+        user_cand = Path(os.path.expanduser(cleaned))
+        if user_cand.drive and not user_cand.is_absolute():
+            raise HTTPException(status_code=400, detail="Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
+        orig_was_abs = user_cand.is_absolute()
+        raw_cand = user_cand if orig_was_abs else (root / user_cand)
         raw_abs = Path(os.path.abspath(str(raw_cand)))
 
         def _is_link_or_reparse(p: Path) -> bool:
@@ -1699,22 +1727,28 @@ def create_app(
                 return False
 
         root_norm = os.path.normcase(os.path.abspath(str(root)))
+
+        def _is_root_or_root_ancestor(p: Path) -> bool:
+            pn = os.path.normcase(os.path.abspath(str(p))).rstrip(os.sep)
+            rn = root_norm.rstrip(os.sep)
+            return pn == rn or rn.startswith(pn + os.sep)
+
         has_link_ancestor = False
-        if ".." in raw_cand.parts:
-            acc = Path(raw_cand.anchor) if raw_cand.is_absolute() else root
-            rel_parts = raw_cand.parts[1:] if raw_cand.is_absolute() else raw_cand.parts
+        if ".." in user_cand.parts:
+            acc = Path(user_cand.anchor) if orig_was_abs else root
+            rel_parts = user_cand.parts[1:] if orig_was_abs else user_cand.parts
             for part in rel_parts:
                 if part == "..":
                     acc = acc.parent
                 elif part != ".":
                     acc = acc / part
-                    if _is_link_or_reparse(acc):
+                    if not _is_root_or_root_ancestor(acc) and _is_link_or_reparse(acc):
                         has_link_ancestor = True
                         break
         cur_par = raw_abs.parent
         while not has_link_ancestor:
             cur_norm = os.path.normcase(str(cur_par))
-            if cur_norm == root_norm or cur_par.parent == cur_par:
+            if cur_norm == root_norm or cur_par.parent == cur_par or _is_root_or_root_ancestor(cur_par):
                 break
             if _is_link_or_reparse(cur_par):
                 has_link_ancestor = True
@@ -1729,7 +1763,11 @@ def create_app(
         ):
             raise HTTPException(status_code=400, detail="Chỉ cho phép xóa thư mục checkpoint .temp_* hợp lệ.")
         cand = raw_abs.resolve()
-        if cand.is_symlink() or not cand.name.startswith(".temp_") or len(cand.name) <= len(".temp_"):
+        if (
+            _is_link_or_reparse(cand)
+            or not cand.name.startswith(".temp_")
+            or len(cand.name) <= len(".temp_")
+        ):
             raise HTTPException(status_code=400, detail="Chỉ cho phép xóa thư mục checkpoint .temp_* hợp lệ.")
         if not cand.is_dir():
             raise HTTPException(status_code=404, detail=f"Không tìm thấy thư mục checkpoint: {cand}")
@@ -1737,8 +1775,17 @@ def create_app(
         known_outs = _collect_known_output_dirs(root, job_manager)
         known_cps = scan_temp_checkpoints(root, extra_dirs=known_outs)
         norm_cand = os.path.normcase(str(cand))
+
+        def _norm_cp_path(raw_cp_p: str) -> str:
+            if not raw_cp_p:
+                return ""
+            try:
+                return os.path.normcase(str(Path(raw_cp_p).resolve()))
+            except OSError:
+                return os.path.normcase(os.path.abspath(raw_cp_p))
+
         matched_cp = next(
-            (cp for cp in known_cps if os.path.normcase(os.path.abspath(str(cp.get("path") or ""))) == norm_cand),
+            (cp for cp in known_cps if _norm_cp_path(str(cp.get("path") or "")) == norm_cand),
             None,
         )
         has_cp_markers = any(
@@ -1755,14 +1802,45 @@ def create_app(
             shutil.rmtree(cand)
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Không thể xóa checkpoint: {exc}") from exc
+
+        try:
+            remaining_cps = scan_temp_checkpoints(root, extra_dirs=known_outs)
+            live_file = root / "logs" / "live_status.json"
+            if not remaining_cps and live_file.is_file() and not check_active_gpu_lock(root).get("locked"):
+                ldata = json.loads(live_file.read_text(encoding="utf-8"))
+                if isinstance(ldata, dict):
+                    lpid = _coerce_pid(ldata.get("pid"))
+                    lpid_alive = False
+                    if lpid is not None:
+                        import psutil
+
+                        lpid_alive = psutil.pid_exists(lpid)
+                    if not lpid_alive and str(ldata.get("stage") or "") not in {"idle", "completed", "error"}:
+                        ldata = dict(ldata)
+                        ldata["stage"] = "idle"
+                        ldata["stage_detail"] = "Đã dọn sạch checkpoint — hệ thống sẵn sàng chờ lệnh."
+                        ldata["completed_chunks"] = 0
+                        ldata["total_chunks"] = 0
+                        ldata["chunks"] = []
+                        ldata["resumed_chunks"] = []
+                        ldata["active_chunk"] = None
+                        ldata["active_chunk_fraction"] = 0.0
+                        ldata["eta_seconds"] = None
+                        tmp_lf = live_file.with_suffix(".json.tmp")
+                        tmp_lf.write_text(json.dumps(ldata, ensure_ascii=False, indent=2), encoding="utf-8")
+                        os.replace(tmp_lf, live_file)
+        except Exception:
+            pass
         return {"ok": True, "deleted": str(cand), "freed_mb": freed_mb}
 
     @app.post("/api/open-media")
     def api_open_media(req: OpenMediaRequest) -> Dict[str, Any]:
-        cleaned = (req.path or "").strip()
-        if not cleaned or "\x00" in cleaned:
+        cleaned = strip_wrapping_quotes(req.path)
+        if not cleaned or "\x00" in cleaned or is_unc_path(cleaned):
             raise HTTPException(status_code=400, detail="Đường dẫn không hợp lệ.")
         cand = Path(os.path.expanduser(cleaned))
+        if cand.drive and not cand.is_absolute():
+            raise HTTPException(status_code=400, detail="Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
         if not cand.is_absolute():
             cand = (root / cand).resolve()
         else:
@@ -1970,15 +2048,17 @@ def create_app(
 
     @app.post("/api/preview/compare-frames")
     def api_compare_frames(req: CompareFramesRequest) -> Dict[str, Any]:
-        raw_src = (req.source_path or "").strip()
-        raw_up = (req.upscaled_path or "").strip()
-        if not raw_src or not raw_up:
+        raw_src = strip_wrapping_quotes(req.source_path)
+        raw_up = strip_wrapping_quotes(req.upscaled_path)
+        if not raw_src or not raw_up or is_unc_path(raw_src) or is_unc_path(raw_up):
             raise HTTPException(
                 status_code=400,
                 detail="Vui lòng cung cấp đầy đủ đường dẫn video gốc (1080p) và video thành phẩm (4K).",
             )
         src_p = Path(os.path.expanduser(raw_src))
         up_p = Path(os.path.expanduser(raw_up))
+        if (src_p.drive and not src_p.is_absolute()) or (up_p.drive and not up_p.is_absolute()):
+            raise HTTPException(status_code=400, detail="Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
         if not src_p.is_absolute():
             src_p = (root / src_p).resolve()
         else:
@@ -2219,8 +2299,8 @@ def create_app(
 
     @app.post("/api/config/test-match")
     def api_test_shows_match(req: TestShowsMatchRequest) -> Dict[str, Any]:
-        sample = (req.sample_path or "").strip()
-        if not sample:
+        sample = strip_wrapping_quotes(req.sample_path)
+        if not sample or is_unc_path(sample):
             raise HTTPException(status_code=400, detail="Vui lòng nhập tên file hoặc đường dẫn mẫu để kiểm thử.")
 
         if req.yaml_content is not None:

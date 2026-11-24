@@ -6,7 +6,7 @@
  * - Tab 5: Subtrans Studio (normal 24/7 operation + 3-Key .env manager) & Mux Audit Vault
  */
 
-import { openFsPicker } from "./fs_picker.js";
+import { openFsPicker, stripOuterQuotes } from "./fs_picker.js";
 import {
   apiFetch,
   clearChildren,
@@ -607,12 +607,9 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   const handleManualAdd = async () => {
     if (!manualInput) return;
-    let val = manualInput.value.trim();
-    if (val.length >= 2 && val[0] === val[val.length - 1] && (val[0] === '"' || val[0] === "'")) {
-      val = val.slice(1, -1).trim();
-    }
+    const val = stripOuterQuotes(manualInput.value);
     if (!val) return;
-    if (/^(\\\\|\/\/)/.test(val) || val.includes("\0")) {
+    if (/^[\\/]{2}/.test(val) || /^\\\?\?\\unc\\/i.test(val.replace(/\//g, "\\")) || val.includes("\0")) {
       const msg = "Không hỗ trợ đường dẫn mạng UNC (\\\\server\\share) hoặc ký tự không hợp lệ.";
       setFieldError(manualInput, manualErrorEl, msg);
       manualInput.focus();
@@ -918,6 +915,9 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       const cpSubsAfter = opts.subsAfterUpscale ?? opts.subs_after_upscale;
       if (typeof cpSubsAfter === "boolean" && optSubsAfter instanceof HTMLInputElement) {
         optSubsAfter.checked = cpSubsAfter;
+        cfgChanged = true;
+      } else if (replaceQueue && optSubsAfter instanceof HTMLInputElement && optSubsAfter.checked) {
+        optSubsAfter.checked = false;
         cfgChanged = true;
       }
       const cpSubsQual = String(opts.subsQuality ?? opts.subs_quality ?? "").trim();

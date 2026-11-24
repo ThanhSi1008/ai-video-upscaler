@@ -22,6 +22,7 @@ from web.fs_browser import (
     SafeLocalFSBrowser,
     is_secret_filename,
     is_unc_path,
+    strip_wrapping_quotes,
 )
 from web.sse_hub import _coerce_pid, check_active_gpu_lock, live_matches_web_job
 
@@ -146,6 +147,8 @@ def parse_preview_start_value(raw: Any) -> Optional[float]:
                     raise ValueError("Số phút trong HH:MM:SS phải nhỏ hơn 60.")
                 sec = int(parts[0]) * 3600.0 + mm * 60.0 + ss
         else:
+            if not _ASCII_NONNEG_FLOAT_RE.fullmatch(text):
+                raise ValueError("preview_start_sec phải là số giây >= 0 hoặc MM:SS / HH:MM:SS.")
             sec = float(text)
     else:
         raise ValueError("preview_start_sec phải là số giây hoặc chuỗi MM:SS / HH:MM:SS.")
@@ -234,14 +237,17 @@ def _validate_batch_size(val: Any) -> Optional[int]:
     return bs
 
 
-def _validate_output_dir(workspace_root: Path, val: Optional[str]) -> Optional[str]:
+def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = "output_dir") -> Optional[str]:
     if val is None:
         return None
-    raw = str(val).strip()
+    _validate_no_nul(str(val), field)
+    raw = strip_wrapping_quotes(str(val))
     if not raw:
         return None
-    _validate_no_nul(raw, "output_dir")
+    _validate_no_nul(raw, field)
     p = Path(os.path.expanduser(raw))
+    if p.drive and not p.is_absolute():
+        raise ValueError(f"Đường dẫn tương đối theo ổ đĩa tại '{field}' không hợp lệ.")
     try:
         target = (p if p.is_absolute() else workspace_root / p).resolve()
     except OSError:
@@ -251,6 +257,7 @@ def _validate_output_dir(workspace_root: Path, val: Optional[str]) -> Optional[s
         or is_secret_filename(p.name)
         or is_secret_filename(target.name)
         or any(is_secret_filename(part) for part in p.parts)
+        or any(is_secret_filename(part) for part in target.parts)
     ):
         raise PermissionError("Từ chối đường dẫn đích trỏ tới tệp cấu hình nhạy cảm.")
     return raw
@@ -262,11 +269,16 @@ def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> t
     - Đường dẫn tương đối được phân giải theo workspace_root (không dùng os.getcwd()).
     - Nếu trỏ thẳng tới tệp video (.mkv, .mp4, ...), tách thành (thư mục cha, tệp đích).
     """
-    if not output_dir or not str(output_dir).strip():
+    if not output_dir:
         return (workspace_root / "out").resolve(), None
-    raw = str(output_dir).strip()
+    _validate_no_nul(str(output_dir), "output_dir")
+    raw = strip_wrapping_quotes(str(output_dir))
+    if not raw:
+        return (workspace_root / "out").resolve(), None
     _validate_no_nul(raw, "output_dir")
     p = Path(os.path.expanduser(raw))
+    if p.drive and not p.is_absolute():
+        raise ValueError("Đường dẫn tương đối theo ổ đĩa tại 'output_dir' không hợp lệ.")
     if not p.is_absolute():
         p = workspace_root / p
     resolved = p.resolve()
@@ -505,6 +517,7 @@ class JobManager:
         self._active_job["status"] = final_status
         self._active_job["return_code"] = int(return_code)
         self._active_job["finished_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self._active_job["finished_epoch"] = time.time()
         self._history.appendleft(dict(self._active_job))
         self._proc = None
 
@@ -1000,12 +1013,11 @@ class JobManager:
 
     def start_subtrans_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Khởi chạy dịch phụ đề trực tiếp (--subs-only hoặc subtrans.py) bình thường ở mọi khung giờ."""
-        target_raw = str(payload.get("input_path") or "").strip()
-        _validate_no_nul(target_raw, "input_path")
-        if payload.get("output_dir"):
-            _validate_no_nul(str(payload.get("output_dir")), "output_dir")
-        if payload.get("glossary"):
-            _validate_no_nul(str(payload.get("glossary")), "glossary")
+        raw_input_val = str(payload.get("input_path") or "")
+        _validate_no_nul(raw_input_val, "input_path")
+        target_raw = strip_wrapping_quotes(raw_input_val)
+        out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"), field="output_dir")
+        glossary_val = _validate_output_dir(self.workspace_root, payload.get("glossary"), field="glossary") or ""
 
         if not target_raw:
             raise ValueError("Vui lòng chọn file video (.mkv/.mp4) hoặc phụ đề (.srt/.ass) để dịch.")
@@ -1017,13 +1029,12 @@ class JobManager:
         needs_gpu = bool(prefer_whisper and not dry_run)
         self._ensure_ready_to_launch(requires_gpu=needs_gpu)
 
-        glossary_val = str(payload.get("glossary") or "").strip()
         sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
         is_subtitle_only = len(items) == 1 and os.path.splitext(items[0])[1].lower() in sub_exts
 
         if is_subtitle_only:
             target_file = items[0]
-            out_dir = str(payload.get("output_dir") or (self.workspace_root / "out"))
+            out_dir = out_dir_val or str(self.workspace_root / "out")
             cmd = [
                 self.python_executable,
                 str(self.workspace_root / "subtrans.py"),
@@ -1055,8 +1066,8 @@ class JobManager:
             else:
                 cmd.extend(["--queue", *items])
             cmd.extend(["--subs-quality", subs_quality])
-            if payload.get("output_dir"):
-                cmd.extend(["-o", str(payload["output_dir"]).strip()])
+            if out_dir_val:
+                cmd.extend(["-o", out_dir_val])
             if glossary_val:
                 cmd.extend(["--glossary", glossary_val])
             if payload.get("subs_upgrade"):

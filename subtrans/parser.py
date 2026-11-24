@@ -20,8 +20,31 @@ DEFAULT_SKIP_STYLES_RE = re.compile(DEFAULT_SKIP_STYLES)
 TYPESET_TAG_REGEX = re.compile(r"\\(pos|move|org|clip|iclip|p[1-9])\b", re.IGNORECASE)
 ASS_TAG_REGEX = re.compile(r"\{[^\}]*\}")
 _HTML_TAG_REGEX = re.compile(r"<[^>]+>")
+_TRAILING_HWS_REGEX = re.compile(r"[ \t]+\n")
 _WS_REGEX = re.compile(r"\s+")
 _ITEM_SORT_KEY_01 = itemgetter(0, 1)
+
+
+def _read_subtitle_text_with_fallback(file_path: str | Path) -> Tuple[str, str]:
+    """Decode subtitle bytes trying UTF-8-SIG, UTF-16 BOM, CP932 (Shift-JIS), and CP1252."""
+    raw_bytes = Path(file_path).read_bytes()
+    if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw_bytes.decode("utf-16"), "utf-16"
+    for enc in ("utf-8-sig", "cp932", "utf-16", "cp1252"):
+        try:
+            return raw_bytes.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8-sig", errors="replace"), "utf-8-sig"
+
+
+def _load_ssa_with_fallback(file_path: str | Path) -> pysubs2.SSAFile:
+    """Load SSA/ASS/SRT via pysubs2 with automatic legacy encoding fallback."""
+    try:
+        return pysubs2.load(file_path)
+    except UnicodeDecodeError:
+        _txt, enc = _read_subtitle_text_with_fallback(file_path)
+        return pysubs2.load(file_path, encoding=enc)
 NON_SPEAKER_ACTOR_REGEX = re.compile(
     r"^(?:sign|signs|comment|title|op|ed|ntp|sfx|text|caption|note|insert|screen|eyecatch|song|lyrics|karaoke|default|main)$",
     re.IGNORECASE,
@@ -484,7 +507,7 @@ def parse_and_align_subtitles(
     Returns:
         (cues, original_ja_ssa, original_en_ssa)
     """
-    ja_ssa = pysubs2.load(ja_path)
+    ja_ssa = _load_ssa_with_fallback(ja_path)
     # Loại bỏ các dòng Comment: trong file ASS/SSA trước khi xử lý (chú thích của fansub / karaoke template)
     ja_ssa.events = [ev for ev in ja_ssa.events if not getattr(ev, "is_comment", False)]
     if piecewise_ja_offsets and len(piecewise_ja_offsets) >= 2:
@@ -518,7 +541,7 @@ def parse_and_align_subtitles(
         logger.info(f"Đã dịch chuyển mốc thời gian phụ đề tiếng Nhật (ja_offset_ms={ja_offset_ms}ms).")
     ja_ssa.events = deduplicate_consecutive_cc_events(ja_ssa.events)
     ja_ssa.events = split_multi_speaker_cc_events(ja_ssa.events)
-    en_ssa = pysubs2.load(en_path) if en_path else None
+    en_ssa = _load_ssa_with_fallback(en_path) if en_path else None
     if is_whisper is None:
         is_whisper = "whisper" in Path(ja_path).name.lower()
 
@@ -812,16 +835,23 @@ def detect_auto_offset(
     default_style_skipped = bool(skip_re.search("Default"))
 
     def _try_fast_srt_items(file_path: str, check_fw_q: bool) -> Optional[List[Tuple[int, int, int, bool]]]:
-        if default_style_skipped or not str(file_path).lower().endswith(".srt"):
+        if (
+            default_style_skipped
+            or not str(file_path).lower().endswith(".srt")
+            or getattr(pysubs2.load, "__module__", "") != "pysubs2.ssafile"
+        ):
             return None
         try:
-            raw = Path(file_path).read_text(encoding="utf-8-sig")
+            raw, _enc = _read_subtitle_text_with_fallback(file_path)
         except (OSError, UnicodeDecodeError):
             return None
-        if raw.lstrip().startswith("[Script Info]"):
+        stripped_lead = raw.lstrip()
+        if stripped_lead.startswith(("[Script Info]", "WEBVTT")):
             return None
         if "\r" in raw:
             raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        if " \n" in raw or "\t\n" in raw:
+            raw = _TRAILING_HWS_REGEX.sub("\n", raw)
         items_fast: List[Tuple[int, int, int, bool]] = []
         saw_arrow = False
         for blk in raw.split("\n\n"):
@@ -832,6 +862,9 @@ def detect_auto_offset(
             ts_idx = 0 if "-->" in lines[0] else (1 if len(lines) > 1 and "-->" in lines[1] else -1)
             if ts_idx < 0 or ts_idx + 1 >= len(lines):
                 return None
+            body_lines = lines[ts_idx + 1 :]
+            if any("-->" in ln for ln in body_lines):
+                return None
             ts_line = lines[ts_idx]
             arrow_pos = ts_line.find("-->")
             l_ts = ts_line[:arrow_pos].strip()
@@ -841,24 +874,36 @@ def detect_auto_offset(
                 ls, lms = l_rest.split(",") if "," in l_rest else l_rest.split(".")
                 rh, rm, r_rest = r_ts.split(":")
                 rs, rms = r_rest.split(",") if "," in r_rest else r_rest.split(".")
-                s = int(lh) * 3600000 + int(lm) * 60000 + int(ls) * 1000 + int(lms)
-                end = int(rh) * 3600000 + int(rm) * 60000 + int(rs) * 1000 + int(rms)
+                if not (
+                    1 <= len(lms) <= 3
+                    and 1 <= len(rms) <= 3
+                    and all(p.isascii() and p.isdigit() for p in (lh, lm, ls, lms, rh, rm, rs, rms))
+                ):
+                    return None
+                l_ms_val = int(lms) * (100 if len(lms) == 1 else (10 if len(lms) == 2 else 1))
+                r_ms_val = int(rms) * (100 if len(rms) == 1 else (10 if len(rms) == 2 else 1))
+                s = int(lh) * 3600000 + int(lm) * 60000 + int(ls) * 1000 + l_ms_val
+                end = int(rh) * 3600000 + int(rm) * 60000 + int(rs) * 1000 + r_ms_val
             except Exception:
                 return None
             if end <= s:
                 continue
-            txt = "\n".join(lines[ts_idx + 1 :])
+            txt = "\n".join(body_lines)
             if "<" in txt:
                 txt = _HTML_TAG_REGEX.sub("", txt)
             if "{" not in txt and "\\" not in txt:
                 if not txt.strip():
                     continue
+                q_src = txt
             else:
-                if has_typesetting(txt) or not clean_subtitle_text(txt):
+                if has_typesetting(txt):
                     continue
-            has_q = ("?" in txt or "？" in txt) if check_fw_q else ("?" in txt)
+                q_src = clean_subtitle_text(txt)
+                if not q_src:
+                    continue
+            has_q = ("?" in q_src or "？" in q_src) if check_fw_q else ("?" in q_src)
             items_fast.append((s, end, end - s, has_q))
-        if not saw_arrow and raw.strip():
+        if not saw_arrow and stripped_lead:
             return None
         items_fast.sort(key=_ITEM_SORT_KEY_01)
         return items_fast
@@ -883,10 +928,14 @@ def detect_auto_offset(
             if "{" not in txt and "\\" not in txt:
                 if not txt.strip():
                     continue
+                q_src = txt
             else:
-                if has_typesetting(txt) or not clean_subtitle_text(txt):
+                if has_typesetting(txt):
                     continue
-            has_q = ("?" in txt or "？" in txt) if check_fw_q else ("?" in txt)
+                q_src = clean_subtitle_text(txt)
+                if not q_src:
+                    continue
+            has_q = ("?" in q_src or "？" in q_src) if check_fw_q else ("?" in q_src)
             items.append((s, end, end - s, has_q))
         items.sort(key=_ITEM_SORT_KEY_01)
         return items
@@ -895,9 +944,9 @@ def detect_auto_offset(
     en_items = _try_fast_srt_items(en_path, check_fw_q=False)
     try:
         if ja_items is None:
-            ja_items = _extract_items(pysubs2.load(ja_path), check_fw_q=True)
+            ja_items = _extract_items(_load_ssa_with_fallback(ja_path), check_fw_q=True)
         if en_items is None:
-            en_items = _extract_items(pysubs2.load(en_path), check_fw_q=False)
+            en_items = _extract_items(_load_ssa_with_fallback(en_path), check_fw_q=False)
     except Exception as e:
         return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
 
