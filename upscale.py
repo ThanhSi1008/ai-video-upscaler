@@ -287,6 +287,45 @@ def compute_pending_subs_reserved_seconds(
     return float(pending_count) * float(subtitles_overhead)
 
 
+def _parse_preview_start_arg(raw_val: str) -> float:
+    """Parse preview start timestamp in seconds ('845.5') or 'MM:SS' / 'HH:MM:SS' format."""
+    cleaned = str(raw_val or "").strip()
+    if not cleaned:
+        raise argparse.ArgumentTypeError("--preview-start không được để trống.")
+    if ":" in cleaned:
+        parts = cleaned.split(":")
+        if len(parts) not in (2, 3):
+            raise argparse.ArgumentTypeError(f"Định dạng thời gian không hợp lệ: {raw_val!r} (dùng giây, MM:SS hoặc HH:MM:SS).")
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Định dạng thời gian không hợp lệ: {raw_val!r}.") from exc
+        if any(n < 0 for n in nums):
+            raise argparse.ArgumentTypeError("--preview-start phải >= 0.")
+        sec = (nums[0] * 60.0 + nums[1]) if len(nums) == 2 else (nums[0] * 3600.0 + nums[1] * 60.0 + nums[2])
+    else:
+        try:
+            sec = float(cleaned)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Số giây --preview-start không hợp lệ: {raw_val!r}.") from exc
+    if not (sec >= 0.0 and sec == sec and sec != float("inf")):
+        raise argparse.ArgumentTypeError("--preview-start phải là số giây hữu hạn >= 0.")
+    return round(sec, 3)
+
+
+def _filter_pipeline_kwargs(fn, extra_kw: Dict[str, Any]) -> Dict[str, Any]:
+    """Pass optional pipeline kwargs only when accepted by fn (preserving strict test fakes)."""
+    if hasattr(fn, "_mock_name"):
+        return dict(extra_kw)
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(extra_kw)
+    return {k: v for k, v in extra_kw.items() if k in params}
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=f"🎬 AI Video Upscaler 4K - Tối ưu hóa chuyên sâu cho {DEVICE_NAME} ({DEFAULT_ENGINE.upper()} + {HEVC_ENCODER} 10-bit)",
@@ -435,6 +474,13 @@ def build_arg_parser():
         default=None,
         metavar="SECONDS",
         help="Chế độ xem trước: trích xuất nhanh N giây (mặc định: 10s) ở giữa phim, upscale và tự mở bằng trình phát video"
+    )
+    parser.add_argument(
+        "--preview-start",
+        type=_parse_preview_start_arg,
+        default=None,
+        metavar="SEC_OR_MM:SS",
+        help="Mốc thời gian bắt đầu trích xuất Preview (giây hoặc MM:SS / HH:MM:SS; mặc định: 30%% thời lượng tập)"
     )
     parser.add_argument(
         "--dry-run",
@@ -1305,6 +1351,22 @@ def main():
             try:
                 eff_cli_grain = str(getattr(args, "grain_restore", DEFAULT_GRAIN_RESTORE) or "auto").strip().lower()
                 grain_pipe_kw = {"grain_restore": eff_cli_grain} if eff_cli_grain != "auto" else {}
+                extra_pipe_kw = _filter_pipeline_kwargs(
+                    run_upscale_pipeline,
+                    {
+                        **(
+                            {"preview_start_sec_override": getattr(args, "preview_start", None)}
+                            if getattr(args, "preview_start", None) is not None
+                            else {}
+                        ),
+                        "manifest_extra_meta": {
+                            "subs_after_upscale": bool(getattr(args, "subs_after_upscale", True)),
+                            "subs_quality": str(getattr(args, "subs_quality", "normal") or "normal"),
+                            "prefer_whisper": bool(getattr(args, "prefer_whisper", False)),
+                            "async_subs": bool(getattr(args, "async_subs", False)),
+                        },
+                    },
+                )
                 out_file = run_upscale_pipeline(
                     input_path=vid,
                     output_path=args.output,
@@ -1330,6 +1392,7 @@ def main():
                     nvenc_multipass=getattr(args, "nvenc_multipass", HEVC_MULTIPASS_POLICY),
                     segment_time_explicit=explicit_segment_arg,
                     **grain_pipe_kw,
+                    **extra_pipe_kw,
                 )
                 # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):

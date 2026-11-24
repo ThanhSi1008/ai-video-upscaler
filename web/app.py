@@ -204,6 +204,7 @@ class StartUpscaleRequest(BaseModel):
 class StartPreviewRequest(BaseModel):
     video_path: str
     seconds: int = 10
+    preview_start_sec: Optional[float] = None
     output_dir: Optional[str] = None
     model: Optional[str] = None
     dedup_policy: Optional[str] = None
@@ -214,6 +215,34 @@ class StartPreviewRequest(BaseModel):
     use_tensorrt: bool = True
     force: bool = False
     auto_open_player: bool = False
+
+    @field_validator("preview_start_sec", mode="before")
+    @classmethod
+    def _validate_preview_start_type(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if isinstance(v, bool):
+            raise ValueError("preview_start_sec không được là kiểu boolean.")
+        if isinstance(v, str):
+            text = v.strip()
+            if ":" in text:
+                parts = text.split(":")
+                if len(parts) not in (2, 3):
+                    raise ValueError("preview_start_sec phải là số giây hoặc MM:SS / HH:MM:SS.")
+                nums = [float(p) for p in parts]
+                if any(n < 0 for n in nums):
+                    raise ValueError("preview_start_sec phải >= 0.")
+                return (nums[0] * 60.0 + nums[1]) if len(nums) == 2 else (nums[0] * 3600.0 + nums[1] * 60.0 + nums[2])
+        return v
+
+    @field_validator("preview_start_sec")
+    @classmethod
+    def _validate_preview_start(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        if not math.isfinite(v) or v < 0.0 or v > 86400.0:
+            raise ValueError("preview_start_sec phải nằm trong khoảng 0..86400 giây.")
+        return round(float(v), 3)
 
     @field_validator("video_path")
     @classmethod
@@ -1664,12 +1693,47 @@ def create_app(
                 detail=f"GPU đang bận xử lý tiến trình khác (PID={lock_state.get('pid')}); từ chối xóa checkpoint.",
             )
 
-        cand = Path(os.path.expanduser(cleaned))
-        if not cand.is_absolute():
-            cand = (root / cand).resolve()
-        else:
-            cand = cand.resolve()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+            cleaned = cleaned[1:-1].strip()
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="Thiếu đường dẫn thư mục checkpoint (.temp_*).")
 
+        raw_cand = Path(os.path.expanduser(cleaned))
+        if not raw_cand.is_absolute():
+            raw_cand = root / raw_cand
+        raw_abs = Path(os.path.abspath(str(raw_cand)))
+
+        def _is_link_or_reparse(p: Path) -> bool:
+            if p.is_symlink() or os.path.islink(str(p)):
+                return True
+            try:
+                st = p.lstat()
+                return bool(getattr(st, "st_file_attributes", 0) & 0x0400)
+            except OSError:
+                return False
+
+        root_norm = os.path.normcase(os.path.abspath(str(root)))
+        has_link_ancestor = False
+        cur_par = raw_abs.parent
+        while True:
+            cur_norm = os.path.normcase(str(cur_par))
+            if cur_norm == root_norm or cur_par.parent == cur_par:
+                break
+            if _is_link_or_reparse(cur_par):
+                has_link_ancestor = True
+                break
+            if not cur_norm.startswith(root_norm + os.sep) and cur_par != raw_abs.parent:
+                break
+            cur_par = cur_par.parent
+
+        if (
+            _is_link_or_reparse(raw_abs)
+            or has_link_ancestor
+            or not raw_abs.name.startswith(".temp_")
+            or len(raw_abs.name) <= len(".temp_")
+        ):
+            raise HTTPException(status_code=400, detail="Chỉ cho phép xóa thư mục checkpoint .temp_* hợp lệ.")
+        cand = raw_abs.resolve()
         if cand.is_symlink() or not cand.name.startswith(".temp_") or len(cand.name) <= len(".temp_"):
             raise HTTPException(status_code=400, detail="Chỉ cho phép xóa thư mục checkpoint .temp_* hợp lệ.")
         if not cand.is_dir():
@@ -2955,20 +3019,28 @@ def create_app(
                 "1. **Kiểm tra phụ đề tiếng Việt:** Đã sẵn sàng trong chế độ mô phỏng.",
                 "",
             ])
+            mock_sessions = ["night1"]
+            if session_name not in mock_sessions:
+                mock_sessions.append(session_name)
             return {
                 "ok": True,
                 "session_name": session_name,
+                "available_sessions": mock_sessions,
                 "markdown": mock_md,
                 "mock_mode": True,
             }
-        from src.night_report import generate_night_report_text
+        from src.night_report import generate_night_report_text, list_night_report_sessions
         try:
             markdown = generate_night_report_text(session_name=session_name, workspace_root=root)
+            sessions = list_night_report_sessions(workspace_root=root)
+            if session_name not in sessions:
+                sessions.append(session_name)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Không thể tạo báo cáo ca đêm: {exc}") from exc
         return {
             "ok": True,
             "session_name": session_name,
+            "available_sessions": sessions,
             "markdown": markdown,
             "mock_mode": False,
         }

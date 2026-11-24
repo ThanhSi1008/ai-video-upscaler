@@ -2497,13 +2497,14 @@ def generate_concat_demuxer_script(
     Mỗi file ảnh 4K được nạp duy nhất 1 lần vào bộ nhớ và nhân bản bằng duration.
     """
     frame_dur = fps_den / fps_num
+    abs_frames_dir = os.path.abspath(frames_out_dir)
 
     with open(concat_script_path, "w", encoding="utf-8") as f:
         f.write("ffconcat version 1.0\n")
         for r in runs:
             # 0-based frame_idx -> frame%08d.png (đồng bộ với extract_frames)
             img_name = f"frame{r['frame_idx'] + 1:08d}.{fmt}"
-            img_path = os.path.join(frames_out_dir, img_name)
+            img_path = os.path.join(abs_frames_dir, img_name)
             escaped = img_path.replace("'", "'\\''")
             dur = r["count"] * frame_dur
             f.write(f"file '{escaped}'\n")
@@ -2511,7 +2512,7 @@ def generate_concat_demuxer_script(
 
         # Quy chuẩn FFmpeg Concat Demuxer: dòng cuối cùng lặp lại file mà không có duration
         last_img_name = f"frame{runs[-1]['frame_idx'] + 1:08d}.{fmt}"
-        last_img_path = os.path.join(frames_out_dir, last_img_name)
+        last_img_path = os.path.join(abs_frames_dir, last_img_name)
         escaped_last = last_img_path.replace("'", "'\\''")
         f.write(f"file '{escaped_last}'\n")
 

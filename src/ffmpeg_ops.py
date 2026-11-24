@@ -964,6 +964,7 @@ def _apply_symmetric_s5_p010_filter(
         return []
     semi_h, w_int = full_frames[0].shape
     tier = str(grain_tier or "light").strip().lower()
+    # Match calibrated atad_spec (a=s): int(f * (1 << 10) - 1) -> (25, 49, 16, 33) heavy / (18, 37, 12, 25) light
     if tier == "heavy":
         thra_y, thrb_y, thra_uv, thrb_uv = 25, 49, 16, 33
     else:
@@ -1139,9 +1140,9 @@ def extract_frames_raw_yuv420(
     )
 
     atad_spec = (
-        "0a=0.024:0b=0.048:1a=0.016:1b=0.032:2a=0.016:2b=0.032:s=5"
+        "0a=0.0255:0b=0.049:1a=0.0167:1b=0.0333:2a=0.0167:2b=0.0333:s=5:a=s"
         if norm_grain == "heavy"
-        else "0a=0.018:0b=0.036:1a=0.012:1b=0.024:2a=0.012:2b=0.024:s=5"
+        else "0a=0.0186:0b=0.0372:1a=0.0128:1b=0.0255:2a=0.0128:2b=0.0255:s=5:a=s"
     )
 
     if n_discard > 0 and is_real_subproc:
@@ -1632,10 +1633,26 @@ def encode_chunk_hevc(
     frame_pattern = os.path.join(frames_dir, f"frame%08d.{ext}")
 
     rate_args = get_hevc_rate_args(bitrate=bitrate, multipass=multipass) if multipass else get_hevc_rate_args(bitrate=bitrate)
+    fps_arg = str(fps)
+    ts_args: List[str] = []
+    if "/" in fps_arg:
+        num_part = fps_arg.split("/", 1)[0].strip()
+        if num_part.isdigit() and int(num_part) > 0:
+            ts_args = ["-video_track_timescale", num_part]
+    else:
+        try:
+            fps_f = float(fps)
+            if abs(fps_f - (24000.0 / 1001.0)) < 0.02:
+                fps_arg = "24000/1001"
+                ts_args = ["-video_track_timescale", "24000"]
+            elif fps_f > 0 and abs(fps_f - round(fps_f)) < 1e-4:
+                ts_args = ["-video_track_timescale", str(int(round(fps_f)) * 1000)]
+        except (TypeError, ValueError):
+            pass
 
     encode_cmd = [
         "ffmpeg", "-y",
-        "-framerate", str(fps),
+        "-framerate", fps_arg,
         "-i", frame_pattern,
         "-vf", (
             "scale=in_color_matrix=bt709:in_range=pc:out_color_matrix=bt709:out_range=tv:"
@@ -1650,6 +1667,7 @@ def encode_chunk_hevc(
         "-colorspace", HEVC_COLORSPACE,
         "-color_primaries", HEVC_COLOR_PRIMARIES,
         "-color_trc", HEVC_COLOR_TRC,
+        *ts_args,
         "-tag:v", HEVC_TAG,
         output_path
     ]
@@ -1657,10 +1675,10 @@ def encode_chunk_hevc(
 
 
 def _write_concat_list(segment_files: List[str], concat_list: str) -> str:
-    """Ghi danh sách phân đoạn chuẩn UTF-8 và thoát ký tự nháy đơn an toàn cho FFmpeg Concat Demuxer."""
+    """Write UTF-8 FFmpeg concat demuxer file list with absolute paths and escaped single quotes."""
     with open(concat_list, "w", encoding="utf-8") as f:
         for f_seg in segment_files:
-            escaped = f_seg.replace("'", "'\\''")
+            escaped = os.path.abspath(f_seg).replace("'", "'\\''")
             f.write(f"file '{escaped}'\n")
     return concat_list
 

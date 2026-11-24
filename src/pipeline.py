@@ -138,6 +138,8 @@ def run_upscale_pipeline(
     nvenc_multipass: str = HEVC_MULTIPASS_POLICY,
     segment_time_explicit: bool = False,
     grain_restore: str = DEFAULT_GRAIN_RESTORE,
+    preview_start_sec_override: Optional[float] = None,
+    manifest_extra_meta: Optional[dict[str, Any]] = None,
 ) -> str:
     """Điều phối toàn bộ quy trình Upscale 4K trên NVIDIA CUDA"""
     validate_environment(engine=engine)
@@ -173,7 +175,9 @@ def run_upscale_pipeline(
         if is_preview:
             max_dur = max(1, int(round(meta["duration"]))) if meta.get("duration") else int(preview_seconds)
             preview_dur = min(int(preview_seconds), max_dur)
-            if preview_dur >= max_dur:
+            if preview_start_sec_override is not None:
+                start_pt = max(0, min(int(round(float(preview_start_sec_override))), max(0, max_dur - preview_dur)))
+            elif preview_dur >= max_dur:
                 start_pt = 0
             else:
                 start_pt = max(0, min(int(meta["duration"] * 0.3), max_dur - preview_dur))
@@ -391,6 +395,8 @@ def run_upscale_pipeline(
                 manifest_path = os.path.join(work_dir, "manifest.json")
                 resumed_episode_multipass: Optional[str] = None
                 resumed_pareto_routing: Optional[dict] = None
+                prev_segment_time = 0
+                preserved_sub_meta: dict[str, Any] = {}
                 if os.path.exists(manifest_path):
                     try:
                         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -403,16 +409,24 @@ def run_upscale_pipeline(
                             and abs(float(prev_alpha_raw) - eff_blend_alpha) > 1e-4
                         )
                         prev_mp = str(manifest_data.get("nvenc_multipass") or "").strip().lower()
-                        if prev_mp in ("fullres", "qres") and not force:
+                        if prev_mp in ("fullres", "qres") and not force and resume:
                             resumed_episode_multipass = prev_mp
-                        if isinstance(manifest_data.get("model_routing"), dict) and not force:
+                        if isinstance(manifest_data.get("model_routing"), dict) and not force and resume:
                             resumed_pareto_routing = manifest_data.get("model_routing")
+                        if not force and resume:
+                            try:
+                                prev_segment_time = max(0, int(manifest_data.get("segment_time") or 0))
+                            except (TypeError, ValueError):
+                                prev_segment_time = 0
+                            for sub_k in ("subs_after_upscale", "subs_quality", "prefer_whisper", "async_subs"):
+                                if sub_k in manifest_data:
+                                    preserved_sub_meta[sub_k] = manifest_data[sub_k]
                         if prev_model_id and (
                             prev_model_id != model_info["id"]
                             or prev_sha256 != model_sha256
                             or prev_alpha_conflict
                         ):
-                            if not force:
+                            if not force and resume:
                                 raise ValueError(
                                     f"❌ Xung đột mô hình: Thư mục tạm '{work_dir}' chứa phân đoạn của mô hình '{prev_model_id}' "
                                     f"(sha256: {prev_sha256[:8] if prev_sha256 else 'N/A'}), nhưng phiên hiện tại yêu cầu '{model_info['id']}' "
@@ -421,7 +435,7 @@ def run_upscale_pipeline(
                                     f"Sử dụng cờ --force để xóa sạch phân đoạn cũ và chạy lại từ đầu."
                                 )
                             else:
-                                logger.warn("⚠️ Cờ --force được kích hoạt: Xóa phân đoạn cũ khác mô hình và chạy lại...", to_console=True)
+                                logger.warn("⚠️ Cờ --force/--no-resume được kích hoạt: Xóa phân đoạn cũ khác mô hình và chạy lại...", to_console=True)
                                 shutil.rmtree(segs_dir, ignore_errors=True)
                                 shutil.rmtree(up_segs_dir, ignore_errors=True)
                                 plan_file_del = os.path.join(work_dir, "plan.json")
@@ -429,12 +443,13 @@ def run_upscale_pipeline(
                                     os.remove(plan_file_del)
                                 os.makedirs(segs_dir, exist_ok=True)
                                 os.makedirs(up_segs_dir, exist_ok=True)
+                                prev_segment_time = 0
                     except ValueError:
                         raise
                     except Exception as e:
                         logger.warn(f"Không thể đọc manifest.json cũ: {e}")
 
-                # Ghi nhận manifest mới
+                eff_sub_meta = {**preserved_sub_meta, **(manifest_extra_meta if isinstance(manifest_extra_meta, dict) else {})}
                 manifest_data = {
                     "source_file": original_input_path,
                     "output_dir": os.path.dirname(os.path.abspath(output_path)),
@@ -453,7 +468,9 @@ def run_upscale_pipeline(
                     "zero_disk": bool(zero_disk),
                     "use_tensorrt": bool(use_tensorrt),
                     "batch_size": int(batch_size) if batch_size is not None else None,
+                    "segment_time": int(segment_time),
                     "resolution_source": model_info.get("resolution_source", ""),
+                    **eff_sub_meta,
                     **(
                         {
                             "routing_mode": "auto-pareto",
@@ -467,9 +484,10 @@ def run_upscale_pipeline(
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(manifest_data, f, indent=2, ensure_ascii=False)
 
-                # Kích thước RAM Disk (ước lượng dựa theo độ dài phân đoạn và định dạng)
+                # Size RAMDisk for max(current segment_time, reused checkpoint segment_time) to prevent ENOSPC on --no-zero-disk resume
                 multiplier = 18.0 if fmt == "png" else 4.5
-                ramdisk_size = max(DEFAULT_RAMDISK_SIZE_MB, int(segment_time * 24 * multiplier / 1024) + 1024)
+                eff_ramdisk_seg_s = max(int(segment_time), prev_segment_time if (resume and not force) else 0)
+                ramdisk_size = max(DEFAULT_RAMDISK_SIZE_MB, int(eff_ramdisk_seg_s * 24 * multiplier / 1024) + 1024)
 
                 # Khởi tạo RAM Disk Context
                 with RAMDisk(size_mb=ramdisk_size, enabled=use_ramdisk) as cache_root:
@@ -709,6 +727,8 @@ def run_upscale_pipeline(
                     manifest_data["dedup_policy"] = str(effective_dedup_policy)
                     manifest_data["nvenc_multipass"] = episode_multipass
                     manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
+                    manifest_data["total_chunks"] = int(total_segs)
+                    manifest_data["segment_time"] = int(segment_time)
                     with open(manifest_path, "w", encoding="utf-8") as f:
                         json.dump(manifest_data, f, indent=2, ensure_ascii=False)
 
@@ -1212,11 +1232,13 @@ def run_upscale_pipeline(
                                             for w in (detail_wrap, fast_wrap)
                                             if getattr(w, "is_tensorrt", False)
                                         ]
-                                        pipe_b = (
-                                            min(int(eff_b), max(2, max(trt_caps)))
-                                            if (batch_size is None and trt_caps)
-                                            else int(eff_b)
-                                        )
+                                        if trt_caps:
+                                            pipe_b = min(int(eff_b), max(2, max(trt_caps)))
+                                        elif c_eng.device.type == "cuda" and torch.cuda.is_available() and not os.environ.get("PYTEST_CURRENT_TEST"):
+                                            free_b, _ = torch.cuda.mem_get_info(c_eng.device)
+                                            pipe_b = min(int(eff_b), 2 if free_b < int(6.2 * (1024 ** 3)) else 4)
+                                        else:
+                                            pipe_b = int(eff_b)
                                         shared_up = DoubleBufferedPipeUpscaler(
                                             detail_wrap,
                                             batch_size=pipe_b,
@@ -1310,11 +1332,22 @@ def run_upscale_pipeline(
                                                         {"weights_sha256": model_sha256},
                                                     ),
                                                 )
-                                                pre_pipe_bs = (
-                                                    min(int(pre_bs), max(2, int(getattr(pre_wrapped, "max_batch", pre_bs) or pre_bs)))
-                                                    if (batch_size is None and getattr(pre_wrapped, "is_tensorrt", False))
-                                                    else int(pre_bs)
-                                                )
+                                                if getattr(pre_wrapped, "is_tensorrt", False):
+                                                    pre_pipe_bs = min(
+                                                        int(pre_bs),
+                                                        max(2, int(getattr(pre_wrapped, "max_batch", pre_bs) or pre_bs)),
+                                                    )
+                                                elif pre_cuda.device.type == "cuda" and torch.cuda.is_available():
+                                                    free_pre, _ = torch.cuda.mem_get_info(pre_cuda.device)
+                                                    is_heavy_arch = "cugan" in str(model_info.get("id", "")).lower()
+                                                    if is_heavy_arch:
+                                                        pre_pipe_bs = min(int(pre_bs), 1 if free_pre < int(4.5 * (1024 ** 3)) else 2)
+                                                    elif free_pre < int(5.2 * (1024 ** 3)):
+                                                        pre_pipe_bs = min(int(pre_bs), 2 if free_pre < int(3.8 * (1024 ** 3)) else 4)
+                                                    else:
+                                                        pre_pipe_bs = int(pre_bs)
+                                                else:
+                                                    pre_pipe_bs = int(pre_bs)
                                                 pre_cuda._zero_disk_wrapper = pre_wrapped
                                                 pre_cuda._zero_disk_key = pre_key
                                                 pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
@@ -1681,11 +1714,26 @@ def run_upscale_pipeline(
                                                                 {"weights_sha256": model_sha256},
                                                             ),
                                                         )
-                                                        pipe_bs = (
-                                                            min(int(eff_bs), max(2, int(getattr(wrapped_model, "max_batch", eff_bs) or eff_bs)))
-                                                            if (batch_size is None and getattr(wrapped_model, "is_tensorrt", False))
-                                                            else int(eff_bs)
-                                                        )
+                                                        if getattr(wrapped_model, "is_tensorrt", False):
+                                                            pipe_bs = min(
+                                                                int(eff_bs),
+                                                                max(2, int(getattr(wrapped_model, "max_batch", eff_bs) or eff_bs)),
+                                                            )
+                                                        elif (
+                                                            cuda_engine.device.type == "cuda"
+                                                            and torch.cuda.is_available()
+                                                            and not os.environ.get("PYTEST_CURRENT_TEST")
+                                                        ):
+                                                            free_cur, _ = torch.cuda.mem_get_info(cuda_engine.device)
+                                                            is_heavy_arch = "cugan" in str(model_info.get("id", "")).lower()
+                                                            if is_heavy_arch:
+                                                                pipe_bs = min(int(eff_bs), 1 if free_cur < int(4.5 * (1024 ** 3)) else 2)
+                                                            elif free_cur < int(5.2 * (1024 ** 3)):
+                                                                pipe_bs = min(int(eff_bs), 2 if free_cur < int(3.8 * (1024 ** 3)) else 4)
+                                                            else:
+                                                                pipe_bs = int(eff_bs)
+                                                        else:
+                                                            pipe_bs = int(eff_bs)
                                                         cuda_engine._zero_disk_wrapper = wrapped_model
                                                         cuda_engine._zero_disk_key = runner_key
                                                         cuda_engine._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
@@ -2104,6 +2152,7 @@ def run_upscale_pipeline(
                                                                     chunk_start_sec=retry_start_sec,
                                                                     source_codec=meta.get("codec"),
                                                                     source_pix_fmt=meta.get("pix_fmt"),
+                                                                    **({"grain_tier": eff_grain_tier} if eff_grain_tier != "clean" else {}),
                                                                 )
                                                             except Exception:
                                                                 retry_yuv = None

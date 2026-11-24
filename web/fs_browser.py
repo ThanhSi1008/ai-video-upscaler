@@ -289,6 +289,16 @@ class SafeLocalFSBrowser:
             }
 
         cleaned = raw_path.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+            cleaned = cleaned[1:-1].strip()
+        if not cleaned or cleaned.lower() == "drives":
+            return {
+                "current_path": "",
+                "parent_path": None,
+                "workspace_root": str(self.workspace_root),
+                "entries": self.list_drives(),
+                "source_video_count": 0,
+            }
         if "\x00" in cleaned:
             raise ValueError("Đường dẫn chứa ký tự NUL (\\x00) không hợp lệ.")
         if is_unc_path(cleaned):
@@ -453,6 +463,10 @@ class SafeLocalFSBrowser:
             if not raw or not str(raw).strip():
                 continue
             item = str(raw).strip()
+            if len(item) >= 2 and item[0] == item[-1] and item[0] in ('"', "'"):
+                item = item[1:-1].strip()
+            if not item:
+                continue
             if "\x00" in item:
                 raise ValueError("Đường dẫn chứa ký tự không hợp lệ.")
             if is_unc_path(item):

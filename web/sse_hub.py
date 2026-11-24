@@ -289,6 +289,10 @@ def scan_temp_checkpoints(
             zero_disk = True
             use_tensorrt = True
             batch_size_val: Optional[int] = None
+            subs_after_upscale: Optional[bool] = None
+            subs_quality = ""
+            prefer_whisper: Optional[bool] = None
+            async_subs: Optional[bool] = None
             source_file = ""
             output_dir_str = ""
             if manifest_path.is_file():
@@ -306,6 +310,14 @@ def scan_temp_checkpoints(
                             zero_disk = bool(mdata.get("zero_disk"))
                         if "use_tensorrt" in mdata:
                             use_tensorrt = bool(mdata.get("use_tensorrt"))
+                        if "subs_after_upscale" in mdata and isinstance(mdata.get("subs_after_upscale"), bool):
+                            subs_after_upscale = bool(mdata.get("subs_after_upscale"))
+                        if mdata.get("subs_quality"):
+                            subs_quality = str(mdata.get("subs_quality") or "")
+                        if "prefer_whisper" in mdata and isinstance(mdata.get("prefer_whisper"), bool):
+                            prefer_whisper = bool(mdata.get("prefer_whisper"))
+                        if "async_subs" in mdata and isinstance(mdata.get("async_subs"), bool):
+                            async_subs = bool(mdata.get("async_subs"))
                         raw_bs = mdata.get("batch_size")
                         if isinstance(raw_bs, int) and not isinstance(raw_bs, bool) and 1 <= raw_bs <= 32:
                             batch_size_val = raw_bs
@@ -398,6 +410,10 @@ def scan_temp_checkpoints(
                 "zero_disk": zero_disk,
                 "use_tensorrt": use_tensorrt,
                 "batch_size": batch_size_val,
+                "subs_after_upscale": subs_after_upscale,
+                "subs_quality": subs_quality,
+                "prefer_whisper": prefer_whisper,
+                "async_subs": async_subs,
                 "size_mb": round(size_bytes / (1024 * 1024), 2),
             })
     return results
@@ -511,10 +527,11 @@ class TelemetryHub:
 
         vram_used = float(gpu.get("vram_used_mib", 0.0))
         vram_free = float(gpu.get("vram_free_mib", 0.0))
+        static_vram_total = float(self.gpu_static.get("vram_total_mib", 12288.0) or 12288.0)
         vram_total = (
-            round(vram_used + vram_free, 0)
+            max(round(vram_used + vram_free, 0), static_vram_total)
             if (vram_used + vram_free) > 0
-            else float(self.gpu_static.get("vram_total_mib", 12288.0))
+            else static_vram_total
         )
 
         sample: Dict[str, Any] = {

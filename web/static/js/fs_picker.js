@@ -11,6 +11,14 @@ let initialized = false;
 let activeSession = null;
 let lastVisitedPath = "";
 
+const stripOuterQuotes = (raw) => {
+  const s = String(raw || "").trim();
+  if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === '"' || s[0] === "'")) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+};
+
 export function initFsPickerModal() {
   if (initialized) return;
   const dialog = document.getElementById("fs-picker-dialog");
@@ -45,7 +53,7 @@ export function initFsPickerModal() {
 
   const triggerJump = () => {
     if (!activeSession || !(jumpInput instanceof HTMLInputElement)) return;
-    const target = jumpInput.value.trim();
+    const target = stripOuterQuotes(jumpInput.value);
     activeSession.browse(target || "drives");
   };
 
@@ -112,7 +120,7 @@ export function openFsPicker(options = {}) {
     foldersOnly: Boolean(options.foldersOnly),
     includeSubtitles: Boolean(options.includeSubtitles),
     allow4k: Boolean(options.allow4k),
-    initialPath: options.initialPath ?? (lastVisitedPath || ""),
+    initialPath: stripOuterQuotes(options.initialPath ?? (lastVisitedPath || "")),
   };
 
   if (titleEl) {
@@ -183,8 +191,9 @@ export function openFsPicker(options = {}) {
           );
         }
       },
-      async browse(targetPath) {
+      async browse(targetPath, { allowFallback = false } = {}) {
         if (!entriesList || activeSession !== this || this.resolved) return;
+        const cleanTarget = stripOuterQuotes(targetPath);
         const reqId = ++this.browseSeq;
         const isCurrent = () =>
           activeSession === this && !this.resolved && dialog.open && reqId === this.browseSeq;
@@ -196,7 +205,7 @@ export function openFsPicker(options = {}) {
 
         try {
           const qs = new URLSearchParams();
-          if (targetPath) qs.set("path", targetPath);
+          if (cleanTarget) qs.set("path", cleanTarget);
           if (cfg.includeSubtitles) qs.set("include_subtitles", "true");
           const data = await apiFetch(`/api/fs/browse?${qs.toString()}`);
           if (!isCurrent()) return;
@@ -241,6 +250,20 @@ export function openFsPicker(options = {}) {
           this.updateFooter();
         } catch (err) {
           if (!isCurrent()) return;
+          if (allowFallback && cleanTarget && cleanTarget.toLowerCase() !== "drives") {
+            const trimmed = cleanTarget.replace(/[\\/]+$/, "");
+            const sepIdx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+            const nextFallback =
+              sepIdx > 0
+                ? trimmed[sepIdx - 1] === ":"
+                  ? trimmed.slice(0, sepIdx + 1)
+                  : trimmed.slice(0, sepIdx)
+                : "";
+            if (nextFallback && nextFallback.toLowerCase() !== cleanTarget.toLowerCase()) {
+              return this.browse(nextFallback, { allowFallback: true });
+            }
+            return this.browse("", { allowFallback: false });
+          }
           for (const stale of entriesList.querySelectorAll(".fs-error-banner")) {
             stale.remove();
           }
@@ -417,6 +440,6 @@ export function openFsPicker(options = {}) {
     if (!dialog.open) {
       dialog.showModal();
     }
-    session.browse(cfg.initialPath);
+    session.browse(cfg.initialPath, { allowFallback: Boolean(cfg.initialPath) });
   });
 }

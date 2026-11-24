@@ -72,6 +72,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const btnBrowseOutDir = document.getElementById("btn-browse-opt-outdir");
   const optSubsQuality = document.getElementById("opt-subs-quality");
   const optPreviewSeconds = document.getElementById("opt-preview-seconds");
+  const optPreviewStart = document.getElementById("opt-preview-start");
+  const optPreviewStartError = document.getElementById("opt-preview-start-error");
   const optZeroDisk = document.getElementById("opt-zero-disk");
   const optTensorrt = document.getElementById("opt-tensorrt");
   const optAllowPartial = document.getElementById("opt-allow-partial");
@@ -131,13 +133,52 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     return Number.isFinite(n) && n >= 3 && n <= 60 ? Math.round(n) : 10;
   };
 
+  const parsePreviewStartInput = ({ focusOnError = false, toastOnError = false } = {}) => {
+    if (!(optPreviewStart instanceof HTMLInputElement)) return { ok: true, sec: null, label: "30% phim" };
+    const raw = optPreviewStart.value.trim();
+    if (!raw) {
+      setFieldError(optPreviewStart, optPreviewStartError, null);
+      return { ok: true, sec: null, label: "30% phim" };
+    }
+    let sec = Number.NaN;
+    if (raw.includes(":")) {
+      const parts = raw.split(":");
+      if ((parts.length === 2 || parts.length === 3) && parts.every((p) => /^\d+(\.\d+)?$/.test(p.trim()))) {
+        const nums = parts.map((p) => Number(p.trim()));
+        const validParts =
+          nums.every((n) => Number.isFinite(n) && n >= 0) &&
+          (parts.length === 2 ? nums[1] < 60 : nums[1] < 60 && nums[2] < 60);
+        if (validParts) {
+          sec = parts.length === 2 ? nums[0] * 60 + nums[1] : nums[0] * 3600 + nums[1] * 60 + nums[2];
+        }
+      }
+    } else if (/^\d+(\.\d+)?$/.test(raw)) {
+      sec = Number(raw);
+    }
+    if (!Number.isFinite(sec) || sec < 0 || sec > 86400) {
+      const msg = "Mốc bắt đầu Preview phải là số giây >= 0 hoặc MM:SS / HH:MM:SS (vd: 14:20 hoặc 860).";
+      setFieldError(optPreviewStart, optPreviewStartError, msg);
+      if (focusOnError) optPreviewStart.focus();
+      if (toastOnError) showToast(msg, "warn");
+      return { ok: false, sec: null, label: "30% phim" };
+    }
+    setFieldError(optPreviewStart, optPreviewStartError, null);
+    return {
+      ok: true,
+      sec: Math.round(sec * 1000) / 1000,
+      label: raw.includes(":") ? `từ ${raw}` : `từ ${Math.round(sec * 10) / 10}s`,
+    };
+  };
+
   const syncPreviewButtonLabel = () => {
     if (!(btnPreview10s instanceof HTMLButtonElement)) return;
     const sec = getPreviewSeconds();
+    const startRes = parsePreviewStartInput();
+    const posText = startRes.ok && startRes.sec !== null ? startRes.label : "30% phim";
     clearChildren(btnPreview10s);
     btnPreview10s.append(
       el("span", { "aria-hidden": "true", textContent: "🎬" }),
-      ` Chạy Xem trước ${sec}s (30% phim)`
+      ` Chạy Xem trước ${sec}s (${posText})`
     );
   };
 
@@ -233,6 +274,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         output_dir: optOutDir?.value.trim() || "",
         subs_quality: optSubsQuality?.value || "normal",
         preview_seconds: String(getPreviewSeconds()),
+        preview_start: optPreviewStart?.value.trim() || "",
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
         allow_partial: Boolean(optAllowPartial?.checked),
@@ -277,6 +319,9 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       }
       if (typeof cfg.preview_seconds === "string") {
         setSelectValueSafely(optPreviewSeconds, cfg.preview_seconds, "10");
+      }
+      if (typeof cfg.preview_start === "string" && optPreviewStart instanceof HTMLInputElement) {
+        optPreviewStart.value = cfg.preview_start;
       }
       if (typeof cfg.zero_disk === "boolean" && optZeroDisk instanceof HTMLInputElement) {
         optZeroDisk.checked = cfg.zero_disk;
@@ -558,7 +603,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   const handleManualAdd = async () => {
     if (!manualInput) return;
-    const val = manualInput.value.trim();
+    let val = manualInput.value.trim();
+    if (val.length >= 2 && val[0] === val[val.length - 1] && (val[0] === '"' || val[0] === "'")) {
+      val = val.slice(1, -1).trim();
+    }
     if (!val) return;
     if (/^(\\\\|\/\/)/.test(val) || val.includes("\0")) {
       const msg = "Không hỗ trợ đường dẫn mạng UNC (\\\\server\\share) hoặc ký tự không hợp lệ.";
@@ -659,6 +707,15 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     syncPreviewButtonLabel();
     persistQueueConfig();
   });
+  optPreviewStart?.addEventListener("input", () => {
+    setFieldError(optPreviewStart, optPreviewStartError, null);
+    syncPreviewButtonLabel();
+  });
+  optPreviewStart?.addEventListener("blur", () => {
+    parsePreviewStartInput();
+    syncPreviewButtonLabel();
+    persistQueueConfig();
+  });
 
   for (const ctrl of [
     optModel,
@@ -707,6 +764,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     }
     const batchVal = validateBatchSizeInput({ focusOnError: true, toastOnError: true });
     if (batchVal === null) return;
+    const startParsed = parsePreviewStartInput({ focusOnError: true, toastOnError: true });
+    if (!startParsed.ok) return;
 
     localLaunchInFlight = true;
     syncQueueLaunchButtons();
@@ -716,6 +775,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         body: {
           video_path: queueInputs[0],
           seconds: previewSec,
+          preview_start_sec: startParsed.sec,
           output_dir: optOutDir?.value.trim() || null,
           model: optModel?.value || null,
           dedup_policy: optDedup?.value || null,
@@ -851,6 +911,28 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         optTensorrt.checked = cpTrt;
         cfgChanged = true;
       }
+      const cpSubsAfter = opts.subsAfterUpscale ?? opts.subs_after_upscale;
+      if (typeof cpSubsAfter === "boolean" && optSubsAfter instanceof HTMLInputElement) {
+        optSubsAfter.checked = cpSubsAfter;
+        cfgChanged = true;
+      }
+      const cpSubsQual = String(opts.subsQuality ?? opts.subs_quality ?? "").trim();
+      if (cpSubsQual) {
+        setSelectValueSafely(optSubsQuality, cpSubsQual, "normal");
+        cfgChanged = true;
+      }
+      const cpWhisper = opts.preferWhisper ?? opts.prefer_whisper;
+      if (typeof cpWhisper === "boolean" && optPreferWhisper instanceof HTMLInputElement) {
+        optPreferWhisper.checked = cpWhisper;
+        cfgChanged = true;
+      }
+      const cpAsyncSubs = opts.asyncSubs ?? opts.async_subs;
+      if (typeof cpAsyncSubs === "boolean" && optAsyncSubs instanceof HTMLInputElement) {
+        optAsyncSubs.checked = cpAsyncSubs;
+        cfgChanged = true;
+      }
+      syncStageBControls();
+      syncStartUpscaleLabel();
       const cpBatch = Number(opts.batchSize ?? opts.batch_size);
       if (
         Number.isInteger(cpBatch) &&
@@ -963,7 +1045,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           allow_partial: false,
           zero_disk: Boolean(optZeroDisk?.checked ?? true),
           use_tensorrt: Boolean(optTensorrt?.checked ?? true),
-          subs_after_upscale: Boolean(optSubsAfter?.checked),
+          subs_after_upscale:
+            typeof (cp?.subsAfterUpscale ?? cp?.subs_after_upscale) === "boolean"
+              ? Boolean(cp?.subsAfterUpscale ?? cp?.subs_after_upscale)
+              : false,
           subs_quality: optSubsQuality?.value || "normal",
           async_subs: Boolean(optAsyncSubs?.checked),
           prefer_whisper: Boolean(optPreferWhisper?.checked),
@@ -1343,8 +1428,11 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const auditCode = document.getElementById("audit-detail-code");
 
   const nightReportDetails = document.getElementById("night-report-details");
+  const nightReportSession = document.getElementById("night-report-session");
   const btnRefreshNightReport = document.getElementById("btn-refresh-night-report");
   const btnCopyNightReport = document.getElementById("btn-copy-night-report");
+  const nightReportRendered = document.getElementById("night-report-rendered");
+  const nightReportPre = document.getElementById("night-report-pre");
   const nightReportCode = document.getElementById("night-report-code");
 
   let auditLoadSeq = 0;
@@ -1910,18 +1998,135 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     loadAudits().then(() => showToast("Đã làm mới Kho Kiểm định.", "info", 2600));
   });
 
+  const appendInlineMarkdownNodes = (parent, lineText) => {
+    const tokenRe = /(\*\*([^*]+)\*\*|`([^`]+)`|\*([^*]+)\*)/g;
+    let lastIdx = 0;
+    let match;
+    while ((match = tokenRe.exec(lineText)) !== null) {
+      if (match.index > lastIdx) {
+        parent.append(document.createTextNode(lineText.slice(lastIdx, match.index)));
+      }
+      if (match[2] !== undefined) {
+        parent.append(el("strong", { textContent: match[2] }));
+      } else if (match[3] !== undefined) {
+        parent.append(el("code", { textContent: match[3] }));
+      } else if (match[4] !== undefined) {
+        parent.append(el("em", { textContent: match[4] }));
+      }
+      lastIdx = tokenRe.lastIndex;
+    }
+    if (lastIdx < lineText.length) {
+      parent.append(document.createTextNode(lineText.slice(lastIdx)));
+    }
+  };
+
+  const renderSafeMarkdownToDom = (container, rawMarkdown) => {
+    if (!container) return;
+    clearChildren(container);
+    const lines = String(rawMarkdown || "").split(/\r?\n/);
+    let curList = null;
+    let curListTag = "";
+    const flushList = () => {
+      if (curList) {
+        container.append(curList);
+        curList = null;
+        curListTag = "";
+      }
+    };
+    for (const rawLine of lines) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) {
+        flushList();
+        continue;
+      }
+      const hMatch = /^(#{1,3})\s+(.*)$/.exec(trimmed);
+      if (hMatch) {
+        flushList();
+        const tag = hMatch[1].length === 1 ? "h3" : hMatch[1].length === 2 ? "h4" : "h5";
+        const hEl = el(tag);
+        appendInlineMarkdownNodes(hEl, hMatch[2]);
+        container.append(hEl);
+        continue;
+      }
+      const ulMatch = /^[-*]\s+(.*)$/.exec(trimmed);
+      if (ulMatch) {
+        if (curListTag !== "ul") {
+          flushList();
+          curList = el("ul");
+          curListTag = "ul";
+        }
+        const li = el("li");
+        appendInlineMarkdownNodes(li, ulMatch[1]);
+        curList.append(li);
+        continue;
+      }
+      const olMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+      if (olMatch) {
+        if (curListTag !== "ol") {
+          flushList();
+          curList = el("ol");
+          curListTag = "ol";
+        }
+        const li = el("li");
+        appendInlineMarkdownNodes(li, olMatch[1]);
+        curList.append(li);
+        continue;
+      }
+      flushList();
+      const pEl = el("p");
+      appendInlineMarkdownNodes(pEl, trimmed);
+      container.append(pEl);
+    }
+    flushList();
+  };
+
+  const syncNightReportSessions = (sessions, activeName) => {
+    if (!(nightReportSession instanceof HTMLSelectElement) || !Array.isArray(sessions) || sessions.length === 0) {
+      return;
+    }
+    const desired = activeName || nightReportSession.value || "night1";
+    clearChildren(nightReportSession);
+    for (const s of sessions) {
+      const cleanS = String(s || "").trim();
+      if (!cleanS) continue;
+      nightReportSession.append(
+        el("option", {
+          value: cleanS,
+          textContent: `Phiên: ${cleanS}`,
+        })
+      );
+    }
+    setSelectValueSafely(nightReportSession, desired, "night1");
+  };
+
   const loadNightReport = async ({ showToastOnDone = false } = {}) => {
     if (!nightReportCode) return;
     const reqId = ++nightReportSeq;
+    const chosenSession =
+      nightReportSession instanceof HTMLSelectElement && nightReportSession.value
+        ? nightReportSession.value
+        : "night1";
     if (btnRefreshNightReport instanceof HTMLButtonElement) {
       btnRefreshNightReport.disabled = true;
       btnRefreshNightReport.setAttribute("aria-busy", "true");
     }
     nightReportCode.textContent = "Đang tổng hợp báo cáo ca đêm từ logs/ & out/…";
+    if (nightReportRendered) nightReportRendered.hidden = true;
+    if (nightReportPre) nightReportPre.hidden = false;
     try {
-      const res = await apiFetch("/api/night-report");
+      const qs = new URLSearchParams({ session_name: chosenSession });
+      const res = await apiFetch(`/api/night-report?${qs.toString()}`);
       if (reqId !== nightReportSeq) return;
-      nightReportCode.textContent = String(res.markdown || "Chưa có dữ liệu báo cáo ca đêm.");
+      const mdText = String(res.markdown || "Chưa có dữ liệu báo cáo ca đêm.");
+      nightReportCode.textContent = mdText;
+      if (Array.isArray(res.available_sessions)) {
+        syncNightReportSessions(res.available_sessions, res.session_name || chosenSession);
+      }
+      if (nightReportRendered) {
+        renderSafeMarkdownToDom(nightReportRendered, mdText);
+        nightReportRendered.hidden = false;
+        if (nightReportPre) nightReportPre.hidden = true;
+      }
       nightReportLoaded = true;
       if (showToastOnDone) {
         showToast("Đã làm mới Báo cáo Ca đêm.", "info", 2400);
@@ -1929,6 +2134,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     } catch (err) {
       if (reqId !== nightReportSeq) return;
       nightReportCode.textContent = `Không thể tạo báo cáo ca đêm: ${err.message}`;
+      if (nightReportRendered) nightReportRendered.hidden = true;
+      if (nightReportPre) nightReportPre.hidden = false;
       showToast(err.message, "error");
     } finally {
       if (reqId === nightReportSeq && btnRefreshNightReport instanceof HTMLButtonElement) {
@@ -1937,6 +2144,13 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       }
     }
   };
+
+  nightReportSession?.addEventListener("change", () => {
+    if (nightReportDetails instanceof HTMLDetailsElement && !nightReportDetails.open) {
+      nightReportDetails.open = true;
+    }
+    loadNightReport({ showToastOnDone: true });
+  });
 
   nightReportDetails?.addEventListener("toggle", () => {
     if (nightReportDetails instanceof HTMLDetailsElement && nightReportDetails.open && !nightReportLoaded) {

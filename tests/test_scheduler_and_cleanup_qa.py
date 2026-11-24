@@ -109,3 +109,76 @@ def test_background_preflight_stop_cleans_unclaimed_zero_chunk_dirs_only(tmp_pat
     assert not wd_unclaimed.exists()
     assert wd_claimed.is_dir()
     assert wd_chunks.is_dir()
+
+
+def test_concat_lists_resolve_relative_paths_and_preview_start_parser(tmp_path: Path, monkeypatch) -> None:
+    """Verify relative paths become absolute in concat scripts and --preview-start parses seconds and MM:SS."""
+    import numpy as np
+    from src.dedup import generate_concat_demuxer_script
+    from src.ffmpeg_ops import _apply_symmetric_s5_p010_filter, _write_concat_list
+    from upscale import _parse_preview_start_arg
+
+    monkeypatch.chdir(tmp_path)
+    rel_frames = Path("sub_cache") / "chunk_out"
+    rel_frames.mkdir(parents=True, exist_ok=True)
+    c_script = Path("sub_cache") / "concat.txt"
+    generate_concat_demuxer_script(
+        [{"frame_idx": 0, "count": 2}],
+        str(rel_frames),
+        str(c_script),
+        fps_num=24000,
+        fps_den=1001,
+        fmt="png",
+    )
+    script_txt = c_script.read_text(encoding="utf-8")
+    assert str((tmp_path / rel_frames / "frame00000001.png").resolve()) in script_txt
+
+    seg_list = _write_concat_list([str(Path("sub_cache") / "up_0000.mp4")], str(Path("sub_cache") / "segs.txt"))
+    seg_txt = Path(seg_list).read_text(encoding="utf-8")
+    assert str((tmp_path / "sub_cache" / "up_0000.mp4").resolve()) in seg_txt
+
+    assert _parse_preview_start_arg("860.5") == 860.5
+    assert _parse_preview_start_arg("14:20") == 860.0
+    assert _parse_preview_start_arg("01:02:03.5") == 3723.5
+
+    # Verify directional s=5 filter matches calibrated FFmpeg vf_atadenoise.c (a=s) boundary (25 for heavy Y)
+    c_frame = np.full((6, 4), 272 << 6, dtype=np.uint16)
+    l1_over = np.full((6, 4), 298 << 6, dtype=np.uint16)  # |298 - 272| = 26 > 25 (excluded)
+    r1_ok = np.full((6, 4), 292 << 6, dtype=np.uint16)    # |292 - 272| = 20 <= 25 (included via a=s!)
+    out = _apply_symmetric_s5_p010_filter(
+        [l1_over, l1_over, c_frame, r1_ok, l1_over],
+        [2],
+        is_10bit_src=True,
+        grain_tier="heavy",
+        luma_h=4,
+    )[0]
+    # Serial a=s includes r1_ok (292) while rejecting l1_over (296): ((272 + 292 + 1) // 2) == 282
+    assert int(out[0, 0] >> 6) == 282
+
+
+def test_night_report_excludes_web_job_mirror_logs_and_lists_sessions(tmp_path: Path) -> None:
+    """Verify Night Report ignores mirrored web_job_*.log files and discovers available CSV sessions."""
+    from src.night_report import generate_night_report_text, list_night_report_sessions
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ep_log = logs_dir / "Frieren_Ep01_20261124_001000.log"
+    web_log = logs_dir / "web_job_20261124_001000_ab12.log"
+    sample_body = (
+        "# AI Video Upscaler 4K - Execution Log\n"
+        "# Started: 2026-11-24 00:10:00\n"
+        "# Video: Frieren_Ep01.mkv\n"
+        "[2026-11-24 00:10:15] [CHUNK 01/01] Hoàn tất 240 frames (AI GPU: 20.0s @ 12.00 fps | "
+        "Encode: 1.0s | Tổng: 21.0s | File: up_0000.mp4 12.0 MB)\n"
+        "[2026-11-24 00:10:20] [INFO] Mux Audit: PASS\n"
+    )
+    ep_log.write_text(sample_body, encoding="utf-8")
+    web_log.write_text("# Web Studio Job\n" + sample_body, encoding="utf-8")
+    (logs_dir / "soak_telemetry_friday_batch.csv").write_text("timestamp,elapsed_s\n", encoding="utf-8")
+
+    md = generate_night_report_text(session_name="night1", workspace_root=tmp_path)
+    assert md.count("### Tập ") == 1
+    assert "web_job_" not in md
+    sessions = list_night_report_sessions(workspace_root=tmp_path)
+    assert "night1" in sessions
+    assert "friday_batch" in sessions

@@ -331,13 +331,20 @@ function bootstrapStudio() {
       "subtrans",
     ]);
     if (activeTransitionStages.has(lastEffectiveStage) && stage === "completed") {
-      const lastJobRef = job.last_job || job.last_finished_job || null;
-      const wasDryRun = Boolean(live.dry_run || lastJobRef?.dry_run);
+      const lastJobRef =
+        job.last_job ||
+        job.last_finished_job ||
+        (Array.isArray(job.history) && job.history.length > 0 ? job.history[0] : null);
+      const wasDryRun = Boolean(
+        live.dry_run || lastJobRef?.dry_run || lastJobRef?.options?.dry_run
+      );
       if (wasDryRun) {
         showToast("🧪 Hoàn tất kiểm thử Dry-Run (không xuất media hay trừ hạn mức API).", "info", 5200);
       } else {
         const toastMsg =
-          lastEffectiveStage === "subtrans"
+          lastEffectiveStage === "subtrans" ||
+          live.job_type === "subtrans" ||
+          live.job_type === "subs_pending"
             ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
             : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
         showToast(toastMsg, "success", 6500);
@@ -400,7 +407,7 @@ function bootstrapStudio() {
     let busyReason = "";
     if (activeSource === "web") {
       const jobLabel = activeWebJob?.job_type || "upscale";
-      const pidLabel = activeWebJob?.pid || live.pid || "—";
+      const pidLabel = live.pid || activeWebJob?.pid || "—";
       const targetSuffix = live.video_name ? ` — ${live.video_name}` : "";
       busyReason = `Đang chạy Web Job (${jobLabel} • PID ${pidLabel})${targetSuffix}`;
     } else if (activeSource === "cli") {
@@ -444,6 +451,14 @@ function bootstrapStudio() {
       btnAbortJob.disabled = activeSource !== "web" || abortInFlight;
     }
 
+    const mIdRaw = live.model_id || "";
+    const isSubLive =
+      isSubtransWebJob ||
+      live.job_type === "subtrans" ||
+      live.job_type === "subs_pending" ||
+      String(mIdRaw).startsWith("subtrans");
+    const isDryRunLive = Boolean(live.dry_run || activeWebJob?.options?.dry_run);
+
     // 6-Stage Stepper
     if (stepperEl) {
       const normalizeStep = (st) => {
@@ -465,7 +480,27 @@ function bootstrapStudio() {
         const stepKey = li.dataset.step;
         const idx = STEP_ORDER.indexOf(stepKey);
         delete li.dataset.state;
-        if (stage === "completed") {
+        if (isSubLive) {
+          if (stage === "error") {
+            if (stepKey === "probing") li.dataset.state = "done";
+            else if (stepKey === "completed") li.dataset.state = "error";
+          } else if (stage === "completed" && !isDryRunLive) {
+            if (stepKey === "probing" || stepKey === "completed") li.dataset.state = "done";
+          } else if (stage === "completed" && isDryRunLive) {
+            if (stepKey === "probing") li.dataset.state = "done";
+          } else if (isRunning) {
+            if (stepKey === "probing") li.dataset.state = "done";
+            else if (stepKey === "completed") li.dataset.state = "active";
+          }
+        } else if (isDryRunLive) {
+          if (stage === "error") {
+            if (stepKey === "probing") li.dataset.state = "error";
+          } else if (stage === "completed") {
+            if (stepKey === "probing" || stepKey === "preflight_dedup") li.dataset.state = "done";
+          } else if (isRunning) {
+            if (stepKey === "probing") li.dataset.state = "active";
+          }
+        } else if (stage === "completed") {
           li.dataset.state = "done";
         } else if (stage === "error") {
           if (idx < anchorIdx) li.dataset.state = "done";
@@ -489,7 +524,7 @@ function bootstrapStudio() {
         : 0;
     const effectiveDoneChunks = Math.min(totChunks, doneChunks + activeFrac);
     let pct = 0;
-    if (stage === "completed") {
+    if (stage === "completed" && !isDryRunLive) {
       pct = 100;
     } else if (totChunks > 0) {
       pct = Math.min(99.5, (effectiveDoneChunks / totChunks) * 100);
@@ -499,7 +534,18 @@ function bootstrapStudio() {
       progressEl.style.setProperty("--progress-pct", pct.toFixed(1));
     }
     if (progressLabel) {
-      progressLabel.textContent = `Tiến độ phân đoạn: ${pct.toFixed(1)}%`;
+      if (isDryRunLive && stage === "completed") {
+        progressLabel.textContent = "Mô phỏng Dry-Run hoàn tất (0 chunk render)";
+      } else if (isSubLive && totChunks === 0) {
+        progressLabel.textContent =
+          stage === "completed"
+            ? "Tiến độ dịch phụ đề: 100%"
+            : isRunning
+              ? "Đang xử lý phụ đề Anime…"
+              : "Tiến độ phân đoạn: 0.0%";
+      } else {
+        progressLabel.textContent = `Tiến độ phân đoạn: ${pct.toFixed(1)}%`;
+      }
     }
     if (stageDetailEl) {
       const pauseNote = pausePending ? " [⏸ Sẽ dừng êm sau chunk hiện tại]" : "";
@@ -509,10 +555,6 @@ function bootstrapStudio() {
     // 6 KPI Boxes
     if (kpiModel) {
       const mId = live.model_id || "—";
-      const isSubLive =
-        live.job_type === "subtrans" ||
-        live.job_type === "subs_pending" ||
-        String(mId).startsWith("subtrans");
       const modeTag =
         live.model_id && !isSubLive ? (live.zero_disk ? "Zero-Disk" : "PNG Disk") : "";
       kpiModel.textContent = modeTag ? `${mId} (${modeTag})` : mId;
@@ -689,7 +731,7 @@ function bootstrapStudio() {
         cps
           .map(
             (cp) =>
-              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${isCpActive(cp) ? "1" : "0"}`
+              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${isCpActive(cp) ? "1" : "0"}`
           )
           .join(";;");
       if (cpSig !== lastCheckpointSignature) {

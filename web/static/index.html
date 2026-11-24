@@ -349,6 +349,12 @@
                   </div>
 
                   <div class="field-group">
+                    <label for="opt-preview-start">Mốc bắt đầu Xem trước (--preview-start, giây / MM:SS)</label>
+                    <input type="text" id="opt-preview-start" aria-describedby="opt-preview-start-error" placeholder="Mặc định: 30% phim (vd: 14:20 hoặc 860)">
+                    <p id="opt-preview-start-error" class="field-error" role="alert" hidden></p>
+                  </div>
+
+                  <div class="field-group">
                     <label for="opt-subs-quality">Chất lượng Dịch Phụ đề đi kèm</label>
                     <select id="opt-subs-quality">
                       <option value="normal">Chuẩn — Tiết kiệm hạn mức (gemini-3.5-flash-lite)</option>
@@ -765,10 +771,15 @@
                   <div class="section-header-inline night-report-toolbar">
                     <p class="muted-meta">Tổng hợp chỉ đọc từ <code>logs/</code> &amp; <code>out/</code> (không gọi API Gemini, không tải mô hình GPU).</p>
                     <div class="button-cluster">
+                      <label for="night-report-session" class="visually-hidden">Phiên báo cáo ca đêm</label>
+                      <select id="night-report-session" class="compact-select" title="Chọn phiên báo cáo ca đêm">
+                        <option value="night1" selected>Phiên: night1</option>
+                      </select>
                       <button type="button" id="btn-refresh-night-report" class="btn btn-secondary">↻ Làm mới</button>
                       <button type="button" id="btn-copy-night-report" class="btn btn-ghost">📋 Sao chép</button>
                     </div>
                   </div>
+                  <div id="night-report-rendered" class="night-report-rendered" role="region" aria-labelledby="night-report-heading" tabindex="0" hidden></div>
                   <pre id="night-report-pre" class="log-console" role="region" aria-labelledby="night-report-heading" tabindex="0"><code id="night-report-code">Mở mục này hoặc nhấn Làm mới để tạo báo cáo tổng hợp ca đêm.</code></pre>
                 </div>
               </details>

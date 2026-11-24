@@ -6152,3 +6152,93 @@ def test_eleven_keys_natural_slot_order_across_put_and_overview(tmp_path: Path, 
             2: "AIzaSy...2222",
             3: "AQ.Ab8...0003",
         }
+
+
+def test_reviewer_fixes_symlink_checkpoint_guard_unicode_quotes_preview_start_and_subs_meta(tmp_path: Path):
+    """Verify symlink delete rejection, Kanji/double-bracket checkpoints, quoted paths, preview_start_sec, and subs metadata."""
+    root = _seed_workspace(tmp_path / "reviewer_qa_ws")
+    kanji_ep = root / "anime_season" / "[[1080p]] 葬送のフリーレン 第01話.mkv"
+    kanji_ep.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 512)
+
+    cp_dir = root / "out" / ".temp_[[1080p]] 葬送のフリーレン 第01話"
+    (cp_dir / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+    (cp_dir / "upscaled_segs" / "up_0000.mp4").write_bytes(b"0" * 16384)
+    (cp_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source_file": str(kanji_ep),
+                "model_id": "animevideov3",
+                "total_chunks": 3,
+                "segment_time": 24,
+                "subs_after_upscale": False,
+                "subs_quality": "high",
+                "prefer_whisper": True,
+                "async_subs": False,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    spawned_cmds: List[List[str]] = []
+
+    def capture_factory(cmd: List[str], **_kw: Any) -> FakePopenProcess:
+        spawned_cmds.append(list(cmd))
+        return FakePopenProcess(cmd, pid=91234, running=False, return_code=0)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
+    with TestClient(app) as client:
+        # 1. Verify checkpoint subtitle metadata & total_chunks round-trip
+        st = client.get("/api/status").json()
+        cp = next(c for c in st["pipeline"]["checkpoints"] if c["name"] == cp_dir.name)
+        assert cp["total_chunks"] == 3
+        assert cp["subs_after_upscale"] is False
+        assert cp["subs_quality"] == "high"
+        assert cp["prefer_whisper"] is True
+        assert cp["async_subs"] is False
+
+        # 2. Verify symlink/junction pointing to real checkpoint is rejected BEFORE resolve() without deleting target
+        sym_path = root / "out" / ".temp_symlink_attack"
+        created_link = False
+        try:
+            os.symlink(str(cp_dir), str(sym_path), target_is_directory=True)
+            created_link = True
+        except OSError:
+            if sys.platform == "win32":
+                import subprocess as _sp
+                r_mk = _sp.run(["cmd", "/c", "mklink", "/J", str(sym_path), str(cp_dir)], capture_output=True)
+                created_link = r_mk.returncode == 0
+        if created_link:
+            res_sym = client.post("/api/checkpoints/delete", json={"path": str(sym_path)})
+            assert res_sym.status_code == 400
+            assert cp_dir.is_dir(), "Real checkpoint target must NOT be deleted through symlink/junction!"
+            try:
+                os.rmdir(sym_path) if sym_path.is_dir() and not sym_path.is_symlink() else sym_path.unlink()
+            except OSError:
+                pass
+
+        # 3. Verify Windows Explorer 'Copy as path' wrapped quotes work in browse & schedule
+        quoted_dir = f'"{kanji_ep.parent}"'
+        r_browse = client.get("/api/fs/browse", params={"path": quoted_dir})
+        assert r_browse.status_code == 200
+        assert any("葬送のフリーレン" in e["name"] for e in r_browse.json()["entries"])
+
+        quoted_file = f'"{kanji_ep}"'
+        r_sched = client.post("/api/queue/preview-schedule", json={"inputs": [quoted_file]})
+        assert r_sched.status_code == 200
+
+        # 4. Verify preview_start_sec ('14:20' -> 860.0) forwards --preview-start 860.0
+        spawned_cmds.clear()
+        r_prev = client.post(
+            "/api/jobs/preview",
+            json={"video_path": str(kanji_ep), "seconds": 15, "preview_start_sec": "14:20"},
+        )
+        assert r_prev.status_code == 200
+        prev_cmd = spawned_cmds[-1]
+        assert "--preview-start" in prev_cmd
+        assert float(prev_cmd[prev_cmd.index("--preview-start") + 1]) == 860.0
+
+        # 5. Cleanly delete the Unicode/double-bracket checkpoint
+        r_del_ok = client.post("/api/checkpoints/delete", json={"path": str(cp_dir)})
+        assert r_del_ok.status_code == 200
+        assert not cp_dir.exists()

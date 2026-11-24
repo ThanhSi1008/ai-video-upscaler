@@ -410,6 +410,10 @@ textarea.code-textarea {
     grid-column: 1 / -1;
     inline-size: 100%;
   }
+
+  .tablist {
+    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 1.5rem), transparent 100%);
+  }
 }
 
 /* ==========================================================================
@@ -1010,6 +1014,45 @@ textarea[aria-invalid="true"] {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.night-report-rendered {
+  margin-block-start: 0.55rem;
+  padding: 0.95rem 1.1rem;
+  max-block-size: 420px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.night-report-rendered h3,
+.night-report-rendered h4,
+.night-report-rendered h5 {
+  margin-block: 0.8rem 0.35rem;
+  color: var(--fg-primary);
+}
+
+.night-report-rendered h3:first-child {
+  margin-block-start: 0;
+}
+
+.night-report-rendered ul,
+.night-report-rendered ol {
+  margin-block: 0.25rem 0.65rem;
+  padding-inline-start: 1.35rem;
+}
+
+.night-report-rendered li {
+  margin-block: 0.18rem;
+}
+
+.night-report-rendered p {
+  margin-block: 0.35rem;
 }
 
 /* ==========================================================================

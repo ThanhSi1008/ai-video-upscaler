@@ -4,7 +4,7 @@
 
 ## 1. Entrypoints & Data Flows
 
-- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--model` incl. `auto-pareto`/`realcugan-pro-*`/`modernspanimation-v2-2x`, `--grain-restore auto|off|light|heavy`, `--nvenc-multipass auto|fullres|qres`, `--queue`, `--preview`, `--dedup-policy` incl. `dis-auto`/`sakuga`/`dis-sakuga` and dynamic `dis-auto-<float>`/`dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
+- [`upscale.py`](../../upscale.py) / [`upscale.bat`](../../upscale.bat) / [`upscale_turbo.bat`](../../upscale_turbo.bat): CLI (`--zero-disk=True` default, `--no-zero-disk`/`--disk`, `--model` incl. `auto-pareto`/`realcugan-pro-*`/`modernspanimation-v2-2x`, `--grain-restore auto|off|light|heavy`, `--nvenc-multipass auto|fullres|qres`, `--queue`, `--preview`, `--preview-start`, `--dedup-policy` incl. `dis-auto`/`sakuga`/`dis-sakuga` and dynamic `dis-auto-<float>`/`dis-<float>`/`drift-<float>`, `--subs-*`). `expand_video_inputs` natural-sorts folders.
 - [`subtrans.py`](../../subtrans.py) / [`subtrans.bat`](../../subtrans.bat) -> [`subtrans/cli.py`](../../subtrans/cli.py): Typer CLI (`run`, `batch`, `eval`, `rag`, `check`, `models`). Read [subtrans-anime-ops](../../.agents/skills/subtrans-anime-ops/SKILL.md) before editing.
 - [`web_gui.py`](../../web_gui.py) / [`web_gui.bat`](../../web_gui.bat) -> [`web/app.py`](../../web/app.py): Local Real-Time Web Studio (`http://127.0.0.1:8765`, `--mock` implies `--no-browser` & simulated job launches, `docs_url=None`, UNC path rejection, FastAPI + Uvicorn + SSE 1Hz), spawns subprocesses without holding static VRAM; bridges `logs/live_status.json`, `logs/web_job_<id>.log` (`N=20` retention) & `logs/.graceful_pause.flag`, and cleans `scratch/web_compare/*.png` in `_lifespan`.
 
@@ -56,7 +56,7 @@ subtrans.cli -> TranslationPipeline
 | [`preflight.py`](../../src/preflight.py) | `AntiSleepContext`, `configure_alder_lake_pcore_qos`, AC power & disk checks |
 | [`scheduler.py`](../../src/scheduler.py) | `BackgroundQueuePreflightManager` (`grain_restore` forwarding, `cleanup_unclaimed` 0-chunk hygiene), `_inspect_resumable_checkpoint`, `compute_overnight_schedule(..., force=False)`, `check_gemini_quota_for_queue` |
 | [`logger.py`](../../src/logger.py) | PEP 562 lazy `DEVICE_NAME`/`HEVC_ENCODER`, `get_logs_dir` (`UPSCALER_LOGS_DIR`), `get_live_status_path`, `_prune_old_run_logs`, `RunLogger` (`update_active_chunk_progress`, `active_chunk_fraction`, `job_id`/`ppid` in `live_status.json`), `logs/.graceful_pause.flag` |
-| [`night_report.py`](../../src/night_report.py) | Stdlib-only `parse_telemetry_window` (legacy + Windows 17-col `TelemetryCollector` CSV), `parse_episode_chunks_log`, `query_subtrans_api_stats`, `generate_night_report_text(..., workspace_root=...)` |
+| [`night_report.py`](../../src/night_report.py) | Stdlib-only `parse_telemetry_window` (legacy + Windows 17-col `TelemetryCollector` CSV), `parse_episode_chunks_log`, `query_subtrans_api_stats`, `list_night_report_sessions`, `generate_night_report_text(..., workspace_root=...)` (`web_job_*.log` dedup) |
 | [`subtitles.py`](../../src/subtitles.py) | `find_or_extract_subtitles`, `transcribe_japanese_audio` (`faster-whisper` + 5.1 FC mono + Silero VAD + Glossary prompt) |
 | [`pending_queue.py`](../../src/pending_queue.py) | Stdlib-only queue manager for `state/pending_subs.json` (with legacy root fallback; avoids importing `torch`) |
 

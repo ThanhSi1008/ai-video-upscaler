@@ -370,6 +370,7 @@ def _inspect_web_checkpoint_progress(
                 )
             except OSError:
                 tot_c_est = 0
+        seg_s_est = 24.0
         if tot_c_est <= 0:
             mf_path = w_dir / "manifest.json"
             if mf_path.is_file():
@@ -377,10 +378,12 @@ def _inspect_web_checkpoint_progress(
                     mdata = json.loads(mf_path.read_text(encoding="utf-8"))
                     if isinstance(mdata, dict):
                         tot_c_est = int(mdata.get("total_chunks") or 0)
+                        if mdata.get("segment_time"):
+                            seg_s_est = max(1.0, float(mdata["segment_time"]))
                 except Exception:
                     tot_c_est = 0
         if tot_c_est <= 0:
-            tot_c_est = max(len(done_idxs) + 1, int(round(max(1, total_frames) / (24.0 * 23.976))))
+            tot_c_est = max(len(done_idxs) + 1, int(round(max(1, total_frames) / (seg_s_est * 23.976))))
         valid_done = min(len(done_idxs), tot_c_est)
         rem_frac = max(0.0, float(tot_c_est - valid_done) / float(max(1, tot_c_est)))
         rem_u = max(0, int(round(float(n_unique) * rem_frac)))
@@ -921,6 +924,14 @@ class JobManager:
         grain_norm = _validate_grain_restore(payload.get("grain_restore"))
         self._ensure_ready_to_launch(requires_gpu=True)
 
+        raw_preview_start = payload.get("preview_start_sec")
+        preview_start_f: Optional[float] = None
+        if raw_preview_start is not None and str(raw_preview_start).strip() != "":
+            ps_val = float(raw_preview_start)
+            if not math.isfinite(ps_val) or ps_val < 0.0:
+                raise ValueError("preview_start_sec phải là số giây hữu hạn >= 0.")
+            preview_start_f = round(ps_val, 3)
+
         cmd = [
             self.python_executable,
             str(self.workspace_root / "upscale.py"),
@@ -929,6 +940,8 @@ class JobManager:
             str(seconds),
             "--no-subs",
         ]
+        if preview_start_f is not None:
+            cmd.extend(["--preview-start", str(preview_start_f)])
         if out_dir_val:
             cmd.extend(["-o", out_dir_val])
         if payload.get("model"):

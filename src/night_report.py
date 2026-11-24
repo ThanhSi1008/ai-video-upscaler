@@ -526,7 +526,9 @@ def _discover_session_logs(
         return []
     candidates = [
         p for p in sorted(glob.glob(os.path.join(logs_dir, "*.log")))
-        if os.path.basename(p).lower() != "latest.log" and not os.path.islink(p)
+        if os.path.basename(p).lower() != "latest.log"
+        and not os.path.basename(p).lower().startswith("web_job_")
+        and not os.path.islink(p)
     ]
     if not candidates:
         return []
@@ -548,6 +550,38 @@ def _discover_session_logs(
     cutoff = latest_ts - timedelta(hours=12)
     selected = [ep for ep in with_ts if (ep["ended_dt"] or ep["started_dt"]) >= cutoff]
     return sorted(selected, key=lambda ep: ep["started_dt"])
+
+
+def list_night_report_sessions(workspace_root: Optional[Path | str] = None) -> List[str]:
+    """Discover available telemetry session names across logs/ and out/benchmarks/ alongside default night1."""
+    base_root = Path(workspace_root).resolve() if workspace_root is not None else Path.cwd()
+    found: List[str] = ["night1"]
+    seen = {"night1"}
+    scan_dirs = [base_root / "logs", base_root / "out" / "benchmarks"]
+    patterns = (
+        re.compile(r"^soak_telemetry_([A-Za-z0-9_-]{1,64})\.csv$"),
+        re.compile(r"^telemetry_([A-Za-z0-9_-]{1,64})\.csv$"),
+        re.compile(r"^([A-Za-z0-9_-]{1,64})_telemetry\.csv$"),
+    )
+    for d in scan_dirs:
+        if not d.is_dir():
+            continue
+        try:
+            entries = sorted(d.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            for pat in patterns:
+                m = pat.match(entry.name)
+                if m:
+                    sname = m.group(1)
+                    if sname not in seen:
+                        seen.add(sname)
+                        found.append(sname)
+                    break
+    return found
 
 
 def generate_night_report_text(
@@ -652,6 +686,11 @@ def generate_night_report_text(
             lines.append(f"* **Tăng trưởng Pageouts:** **+{telem['delta_pageouts']:,}** trang")
             lines.append(f"* **Bộ nhớ Swap:** Ban đầu **{telem['start_swap_mb']:.2f} MB** ➔ Kết thúc **{telem['end_swap_mb']:.2f} MB** (Tăng: **+{telem['delta_swap_mb']:.2f} MB**, Đỉnh: **{telem['peak_swap_mb']:.2f} MB**)")
             lines.append(f"* **Trạng thái nhiệt:** {', '.join(telem.get('thermal_states', ['Nominal']))}")
+    elif not os.path.exists(csv_file):
+        lines.append(
+            f"* *Ghi chú:* Chưa chạy trình thu mẫu CSV nền (`{os.path.basename(csv_file)}`) — "
+            "báo cáo tổng hợp trực tiếp từ nhật ký phiên & kho kiểm định."
+        )
     else:
         lines.append(f"* Không nạp được telemetry từ {csv_file}")
     lines.append("")
