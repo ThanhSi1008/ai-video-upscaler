@@ -621,6 +621,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           const dimLabel = epW > 0 && epH > 0 ? ` (${epW}×${epH})` : "";
           const buildW = epW > 0 ? epW : 1920;
           const buildH = epH > 0 ? epH : 1080;
+          const epGrain =
+            typeof ep.grain_tier === "string" && ["clean", "off", "light", "heavy"].includes(ep.grain_tier)
+              ? ep.grain_tier
+              : null;
           const quickTrtBtn = el("button", {
             type: "button",
             className: "btn btn-secondary btn-xs",
@@ -641,6 +645,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
                     model_id: ep.model_id,
                     width: buildW,
                     height: buildH,
+                    grain_restore: epGrain,
                     force: false,
                   },
                 });
@@ -1342,13 +1347,22 @@ export function initModelsPanel({ selectTabById, onJobLaunched, onShowsUpdated }
     if (selVal === "custom") {
       const w = Number(trtCustomWidth?.value || 0);
       const h = Number(trtCustomHeight?.value || 0);
-      if (!Number.isInteger(w) || w < 64 || w > 4096 || !Number.isInteger(h) || h < 64 || h > 2304) {
+      if (
+        !Number.isInteger(w) ||
+        w < 64 ||
+        w > 4096 ||
+        w % 2 !== 0 ||
+        !Number.isInteger(h) ||
+        h < 64 ||
+        h > 2304 ||
+        h % 2 !== 0
+      ) {
         return {
           ok: false,
           width: 1920,
           height: 1080,
           hwProfile: "1080x1920",
-          error: "Kích thước tùy chỉnh TensorRT phải là số nguyên (Rộng 64..4096, Cao 64..2304).",
+          error: "Kích thước tùy chỉnh TensorRT phải là số nguyên chẵn (Rộng 64..4096, Cao 64..2304).",
         };
       }
       return { ok: true, width: w, height: h, hwProfile: `${h}x${w}` };
@@ -2854,6 +2868,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     loadSubtransOverview().then(() => showToast("Đã cập nhật thống kê Subtrans.", "info", 2600));
   });
   let cleanTempConfirmTimer = 0;
+  let cleanTempProbing = false;
   const resetCleanTempConfirm = () => {
     if (cleanTempConfirmTimer) {
       window.clearTimeout(cleanTempConfirmTimer);
@@ -2866,27 +2881,40 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   };
   chkCleanIncludeCheckpoints?.addEventListener("change", resetCleanTempConfirm);
+  optQueueOutDir?.addEventListener("input", resetCleanTempConfirm);
 
   btnCleanTemp?.addEventListener("click", async () => {
-    if (!(btnCleanTemp instanceof HTMLButtonElement)) return;
+    if (!(btnCleanTemp instanceof HTMLButtonElement) || cleanTempProbing) return;
     if (systemBusy || localSubLaunchInFlight) {
       showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
       return;
     }
+    const targetOutDir =
+      optQueueOutDir instanceof HTMLInputElement ? optQueueOutDir.value.trim() || null : null;
     const includeCheckpoints = Boolean(chkCleanIncludeCheckpoints?.checked);
     if (btnCleanTemp.dataset.confirming !== "true") {
       let confirmLabel = "Xác nhận dọn tạm (giữ .temp_*)?";
       if (includeCheckpoints) {
         confirmLabel = "⚠ Xác nhận xóa cả .temp_*?";
+        cleanTempProbing = true;
         try {
-          const st = await apiFetch("/api/status");
-          const cps = Array.isArray(st?.pipeline?.checkpoints) ? st.pipeline.checkpoints : [];
+          const qsOut = new URLSearchParams();
+          if (targetOutDir) qsOut.set("output_dir", targetOutDir);
+          const auditsUrl = qsOut.toString() ? `/api/audits?${qsOut.toString()}` : "/api/audits";
+          const st = await apiFetch(auditsUrl);
+          const cps = Array.isArray(st?.target_checkpoints)
+            ? st.target_checkpoints
+            : Array.isArray(st?.checkpoints)
+              ? st.checkpoints
+              : [];
           if (cps.length > 0) {
             const totalMb = cps.reduce((acc, cp) => acc + (Number(cp?.size_mb) || 0), 0);
             confirmLabel = `⚠ Xóa vĩnh viễn ${cps.length} checkpoint (${totalMb.toFixed(1)} MB)?`;
           }
         } catch {
-          // Fallback to generic checkpoint warning if status fetch fails
+          // Fallback to generic checkpoint warning if audits/checkpoint probe fails
+        } finally {
+          cleanTempProbing = false;
         }
       }
       btnCleanTemp.dataset.confirming = "true";
@@ -2900,8 +2928,6 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     localSubLaunchInFlight = true;
     syncSubtransLaunchButtons();
     try {
-      const targetOutDir =
-        optQueueOutDir instanceof HTMLInputElement ? optQueueOutDir.value.trim() || null : null;
       const res = await apiFetch("/api/jobs/clean-temp", {
         method: "POST",
         body: {

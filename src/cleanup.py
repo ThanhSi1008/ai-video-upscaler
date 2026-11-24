@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Optional, List, Dict, Any
 
 
@@ -17,6 +18,50 @@ def _is_symlink_or_reparse(path: str) -> bool:
         return bool(getattr(st, "st_file_attributes", 0) & 0x0400)
     except OSError:
         return False
+
+
+def _has_reparse_in_path(path: str, stop_at: Optional[str] = None) -> bool:
+    """Return True if path or any non-system ancestor segment is a symlink, junction, or reparse point."""
+    if not path:
+        return False
+    if _is_symlink_or_reparse(path):
+        return True
+    safe_roots: set[str] = set()
+    for candidate_root in (stop_at, os.getcwd(), tempfile.gettempdir()):
+        if candidate_root:
+            cur_r = os.path.normcase(os.path.abspath(candidate_root)).rstrip(os.sep)
+            while cur_r:
+                safe_roots.add(cur_r)
+                par_r = os.path.dirname(cur_r).rstrip(os.sep)
+                if par_r == cur_r:
+                    break
+                cur_r = par_r
+
+    p_obj = Path(path)
+    if ".." in p_obj.parts:
+        acc = Path(p_obj.anchor) if p_obj.is_absolute() else Path(os.getcwd())
+        rel_parts = p_obj.parts[1:] if p_obj.is_absolute() else p_obj.parts
+        for part in rel_parts:
+            if part == "..":
+                acc = acc.parent
+            elif part != ".":
+                acc = acc / part
+                acc_norm = os.path.normcase(os.path.abspath(str(acc))).rstrip(os.sep)
+                if acc_norm not in safe_roots and _is_symlink_or_reparse(str(acc)):
+                    return True
+
+    cur = os.path.abspath(path)
+    while cur:
+        cur_norm = os.path.normcase(cur).rstrip(os.sep)
+        if cur_norm in safe_roots:
+            break
+        if _is_symlink_or_reparse(cur):
+            return True
+        par = os.path.dirname(cur)
+        if par == cur:
+            break
+        cur = par
+    return False
 
 
 def _remove_reparse_entry_only(path: str) -> bool:
@@ -227,10 +272,12 @@ def organize_output_artifacts(
     vào thư mục con 'audit/' bên trong output_dir.
     Giữ cho thư mục output_dir chỉ chứa các file thành phẩm xem được (.mkv, .mp4, .srt).
     """
-    if not output_dir or not os.path.isdir(output_dir):
+    if not output_dir or _has_reparse_in_path(output_dir) or not os.path.isdir(output_dir):
         return []
 
     audit_dir = os.path.join(output_dir, audit_subdir_name)
+    if _is_symlink_or_reparse(audit_dir):
+        return []
     moved_files = []
 
     target_exts = [".audit.json", ".audit.md", ".cast.yaml"]
@@ -242,7 +289,7 @@ def organize_output_artifacts(
 
     for item in entries:
         item_path = os.path.join(output_dir, item)
-        if not os.path.isfile(item_path):
+        if _is_symlink_or_reparse(item_path) or not os.path.isfile(item_path):
             continue
 
         is_target = False
@@ -280,8 +327,12 @@ def organize_output_artifacts(
                 break
 
         if is_target:
+            if _is_symlink_or_reparse(audit_dir):
+                continue
             os.makedirs(audit_dir, exist_ok=True)
             dest_path = os.path.join(audit_dir, item)
+            if _is_symlink_or_reparse(dest_path):
+                continue
             try:
                 if os.path.exists(dest_path):
                     os.remove(dest_path)
@@ -326,7 +377,7 @@ def clean_all_temporary_data(
     include_checkpoints: bool = True,
 ) -> Dict[str, Any]:
     """Clean temporary artifacts and organize audits inside output_dir without following symlinks/reparse points."""
-    if not output_dir or _is_symlink_or_reparse(output_dir) or not os.path.isdir(output_dir):
+    if not output_dir or _has_reparse_in_path(output_dir) or not os.path.isdir(output_dir):
         return {
             "bytes_freed": 0,
             "cleaned_dirs": [],

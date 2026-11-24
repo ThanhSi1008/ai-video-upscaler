@@ -40,6 +40,7 @@ from web.fs_browser import (
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
     extract_trt_hw_profiles,
+    has_reparse_or_symlink_in_chain,
     inspect_model_trt_cache,
     is_secret_filename,
     is_unc_path,
@@ -47,6 +48,7 @@ from web.fs_browser import (
     is_valid_dedup_policy,
     match_show_pattern,
     match_show_rule,
+    natural_sort_key,
     resolve_allowed_trt_weights_shas,
     strip_wrapping_quotes,
     unwrap_outer_quotes_preserving_trailing_space,
@@ -357,7 +359,8 @@ class StartSubsPendingRequest(BaseModel):
 class BuildTrtRequest(BaseModel):
     model_id: str
     width: Optional[int] = Field(default=None, ge=64, le=4096)
-    height: Optional[int] = Field(default=None, ge=64, le=4096)
+    height: Optional[int] = Field(default=None, ge=64, le=2304)
+    grain_restore: Optional[str] = None
     force: bool = False
     dry_run: bool = False
 
@@ -372,6 +375,26 @@ class BuildTrtRequest(BaseModel):
         if v is None or (isinstance(v, str) and not v.strip()):
             return None
         return _reject_bool_or_float_int(v, "width/height")
+
+    @field_validator("width", "height")
+    @classmethod
+    def _validate_even_dims(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v % 2 != 0:
+            raise ValueError("width và height phải là số nguyên chẵn (chia hết cho 2) cho chuẩn 4:2:0.")
+        return v
+
+    @field_validator("grain_restore")
+    @classmethod
+    def _validate_trt_gr(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        norm = _validate_no_nul_str(v, "grain_restore", reject_unc=False)
+        clean = (norm or "").strip().lower()
+        if not clean:
+            return None
+        if clean not in (*VALID_GRAIN_RESTORE_POLICIES, "clean"):
+            raise ValueError(f"grain_restore '{v}' không hợp lệ (chỉ chấp nhận auto, off, clean, light, heavy).")
+        return clean
 
 
 class CleanTempRequest(BaseModel):
@@ -770,11 +793,16 @@ def _apply_subtrans_key_edits(
 
     all_keys = set(existing.keys()) | set(env_map.keys())
     numbered_vars: Dict[int, tuple[List[str], str]] = {}
+    alpha_vars: List[tuple[str, List[str], str]] = []
     for k in all_keys:
+        if not k.startswith("GEMINI_API_KEY_"):
+            continue
         m = _SLOT_ENV_KEY_RE.match(k)
+        raw_v, src_v = _eff_entry(k)
         if m:
-            raw_v, src_v = _eff_entry(k)
             numbered_vars[int(m.group(1))] = (_split_gemini_key_tokens(raw_v), src_v or "dotenv")
+        else:
+            alpha_vars.append((k, _split_gemini_key_tokens(raw_v), src_v or "dotenv"))
 
     # Phase 1: Build canonical 1-based slot_table matching _resolve_subtrans_key_slots_all().
     slot_table: Dict[int, tuple[str, str]] = {}
@@ -809,6 +837,15 @@ def _apply_subtrans_key_edits(
                 target += 1
             if target <= 32:
                 slot_table[target] = (tok, src_n)
+
+    for _alpha_name, toks_a, src_a in sorted(alpha_vars, key=lambda x: x[0]):
+        for tok in toks_a:
+            if tok in seen_tokens:
+                continue
+            seen_tokens.add(tok)
+            target = max(slot_table.keys(), default=0) + 1
+            if target <= 32:
+                slot_table[target] = (tok, src_a)
 
     # Phase 2: Apply requested Slot 1..32 edits or explicit clears.
     for slot_idx in sorted(requested_edits.keys()):
@@ -845,6 +882,9 @@ def _apply_subtrans_key_edits(
         "GEMINI_API_KEYS": "",
         "GEMINI_API_KEY": "" if "GEMINI_API_KEY" in env_map else slot1_dotenv,
     }
+    for k_alpha in existing:
+        if k_alpha.startswith("GEMINI_API_KEY_") and not _SLOT_ENV_KEY_RE.match(k_alpha):
+            updates[k_alpha] = ""
     all_indices = (
         {1, 2, 3}
         | set(slot_table.keys())
@@ -2002,35 +2042,27 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def _is_raw_reparse_or_symlink(p_chk: Path) -> bool:
-        try:
-            if p_chk.is_symlink() or os.path.islink(str(p_chk)) or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p_chk))):
-                return True
-            if os.path.lexists(str(p_chk)):
-                return bool(getattr(p_chk.lstat(), "st_file_attributes", 0) & 0x0400)
-        except OSError:
-            return False
-        return False
-
     @app.post("/api/jobs/clean-temp")
     def api_start_clean_temp(req: CleanTempRequest) -> Dict[str, Any]:
-        try:
-            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
-            out_clean = _validate_output_dir(root, req.output_dir, field="output_dir")
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        raw_clean_p = (
-            (Path(os.path.expanduser(out_clean)) if Path(os.path.expanduser(out_clean)).is_absolute() else (root / os.path.expanduser(out_clean)))
-            if out_clean
-            else (root / "out")
-        )
-        if _is_raw_reparse_or_symlink(raw_clean_p):
+        if req.output_dir is not None and str(req.output_dir).strip():
+            pre_raw = Path(os.path.expanduser(strip_wrapping_quotes(str(req.output_dir))))
+            if has_reparse_or_symlink_in_chain(pre_raw, workspace_root=root):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.",
+                )
+        elif has_reparse_or_symlink_in_chain(root / "out", workspace_root=root):
             raise HTTPException(
                 status_code=403,
                 detail="Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.",
             )
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if is_mock and popen_factory is None:
             return _build_mock_job_response("clean_temp", [req.output_dir or "out/"], req.model_dump())
         try:
@@ -2215,16 +2247,20 @@ def create_app(
 
     @app.post("/api/open-media")
     def api_open_media(req: OpenMediaRequest) -> Dict[str, Any]:
+        raw_unwrapped = unwrap_outer_quotes_preserving_trailing_space(req.path)
         cleaned = strip_wrapping_quotes(req.path)
         if not cleaned or "\x00" in cleaned or is_unc_path(cleaned):
             raise HTTPException(status_code=400, detail="Đường dẫn không hợp lệ.")
         cand = Path(os.path.expanduser(cleaned))
         if cand.drive and not cand.is_absolute():
             raise HTTPException(status_code=400, detail="Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
-        if not cand.is_absolute():
-            cand = (root / cand).resolve()
-        else:
-            cand = cand.resolve()
+        if sys.platform == "win32" and not cand.drive and cand.root:
+            raise HTTPException(status_code=400, detail="Đường dẫn gốc thiếu ký tự ổ đĩa không hợp lệ.")
+        try:
+            validate_win32_path_hygiene(Path(os.path.expanduser(raw_unwrapped)), field="path", raw_str=raw_unwrapped)
+            cand = (cand if cand.is_absolute() else (root / cand)).resolve()
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if is_secret_filename(cand.name):
             raise HTTPException(status_code=403, detail="Từ chối truy cập tệp nhạy cảm.")
@@ -2428,6 +2464,8 @@ def create_app(
 
     @app.post("/api/preview/compare-frames")
     def api_compare_frames(req: CompareFramesRequest) -> Dict[str, Any]:
+        raw_src_unw = unwrap_outer_quotes_preserving_trailing_space(req.source_path)
+        raw_up_unw = unwrap_outer_quotes_preserving_trailing_space(req.upscaled_path)
         raw_src = strip_wrapping_quotes(req.source_path)
         raw_up = strip_wrapping_quotes(req.upscaled_path)
         if not raw_src or not raw_up or is_unc_path(raw_src) or is_unc_path(raw_up):
@@ -2439,14 +2477,15 @@ def create_app(
         up_p = Path(os.path.expanduser(raw_up))
         if (src_p.drive and not src_p.is_absolute()) or (up_p.drive and not up_p.is_absolute()):
             raise HTTPException(status_code=400, detail="Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
-        if not src_p.is_absolute():
-            src_p = (root / src_p).resolve()
-        else:
-            src_p = src_p.resolve()
-        if not up_p.is_absolute():
-            up_p = (root / up_p).resolve()
-        else:
-            up_p = up_p.resolve()
+        if sys.platform == "win32" and ((not src_p.drive and src_p.root) or (not up_p.drive and up_p.root)):
+            raise HTTPException(status_code=400, detail="Đường dẫn gốc thiếu ký tự ổ đĩa không hợp lệ.")
+        try:
+            validate_win32_path_hygiene(Path(os.path.expanduser(raw_src_unw)), field="source_path", raw_str=raw_src_unw)
+            validate_win32_path_hygiene(Path(os.path.expanduser(raw_up_unw)), field="upscaled_path", raw_str=raw_up_unw)
+            src_p = (src_p if src_p.is_absolute() else (root / src_p)).resolve()
+            up_p = (up_p if up_p.is_absolute() else (root / up_p)).resolve()
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if is_secret_filename(src_p.name) or is_secret_filename(up_p.name):
             raise HTTPException(status_code=403, detail="Từ chối truy cập tệp nhạy cảm.")
@@ -2560,9 +2599,23 @@ def create_app(
                     up_png.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        # Retain at most the 12 most recent temporary comparison frames (6 pairs)
+        # Retain at most the 12 most recent finalized temporary comparison frames (6 pairs)
+        def _final_png_mtime(p_cand: Path) -> float:
+            try:
+                return p_cand.stat().st_mtime
+            except OSError:
+                return 0.0
+
         try:
-            pngs = sorted(compare_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+            pngs = sorted(
+                (
+                    p_f
+                    for p_f in compare_dir.glob("*.png")
+                    if not p_f.name.startswith(".") and not p_f.name.endswith(".tmp.png")
+                ),
+                key=_final_png_mtime,
+                reverse=True,
+            )
             for old_f in pngs[12:]:
                 with suppress(OSError):
                     old_f.unlink()
@@ -2671,7 +2724,8 @@ def create_app(
         pareto_fast_trt = bool(pareto_fast and pareto_fast.get("trt_cached"))
         pareto_shared_profiles = sorted(
             set((pareto_detail or {}).get("trt_hw_profiles") or [])
-            & set((pareto_fast or {}).get("trt_hw_profiles") or [])
+            & set((pareto_fast or {}).get("trt_hw_profiles") or []),
+            key=natural_sort_key,
         )
         pareto_med_fps, pareto_p5_fps = MODEL_REFERENCE_FPS.get(AUTO_PARETO_MODEL_ID, (16.5, 13.5))
         routing_modes = [
@@ -2683,7 +2737,7 @@ def create_app(
                 "weights_ready": bool(
                     pareto_detail and pareto_detail.get("weights_ready") and pareto_fast and pareto_fast.get("weights_ready")
                 ),
-                "trt_cached": bool(pareto_detail_trt and pareto_fast_trt),
+                "trt_cached": bool(pareto_detail_trt and pareto_fast_trt and pareto_shared_profiles),
                 "detail_trt_cached": pareto_detail_trt,
                 "fast_trt_cached": pareto_fast_trt,
                 "trt_hw_profiles": pareto_shared_profiles,
@@ -3299,6 +3353,19 @@ def create_app(
                     ar_v = parsed["address_rules"][ar_k]
                     if not isinstance(ar_v, list) or any(not isinstance(item_ar, dict) for item_ar in ar_v):
                         raise ValueError(f"Mục address_rules.{ar_k} phải là danh sách các đối tượng từ điển.")
+                    for idx_ar, item_ar in enumerate(ar_v, start=1):
+                        if ar_k == "relations":
+                            for rel_fld in ("case", "self", "other", "note"):
+                                if rel_fld in item_ar and item_ar[rel_fld] is not None and not isinstance(item_ar[rel_fld], str):
+                                    raise ValueError(f"Mục address_rules.relations #{idx_ar}.{rel_fld} phải là chuỗi văn bản.")
+                        else:
+                            for pr_fld in ("ja", "vi", "note"):
+                                if pr_fld in item_ar and item_ar[pr_fld] is not None and not isinstance(item_ar[pr_fld], str):
+                                    raise ValueError(f"Mục address_rules.{ar_k} #{idx_ar}.{pr_fld} phải là chuỗi văn bản.")
+                            if "alt" in item_ar:
+                                alt_v = item_ar["alt"]
+                                if not isinstance(alt_v, list) or any(not isinstance(x_alt, str) or not x_alt.strip() for x_alt in alt_v):
+                                    raise ValueError(f"Mục address_rules.{ar_k} #{idx_ar}.alt phải là danh sách chuỗi khác rỗng.")
         return {
             "terms_count": len(parsed.get("terms") or []),
             "characters_count": len(parsed.get("characters") or []),
@@ -3332,13 +3399,17 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        tmp_g = resolved_p.parent / f".{resolved_p.name}.{os.getpid()}.tmp"
+        tmp_g = (
+            resolved_p.parent
+            / f".{resolved_p.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp"
+        )
         norm_text = req.yaml_content.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
         try:
             tmp_g.write_text(norm_text, encoding="utf-8", newline="\n")
             os.replace(tmp_g, resolved_p)
         except Exception:
-            tmp_g.unlink(missing_ok=True)
+            with suppress(OSError):
+                tmp_g.unlink(missing_ok=True)
             raise
         return {
             "ok": True,
@@ -3870,9 +3941,20 @@ def create_app(
                 "mock_mode": True,
             })
 
+        all_cps = scan_temp_checkpoints(root, extra_dirs=out_dirs)
+        clean_target_dir = _resolve_dir_from_raw(root, output_dir, strict_secret=True) if (output_dir and output_dir.strip()) else (root / "out").resolve()
+        target_cps: List[Dict[str, Any]] = []
+        if clean_target_dir and clean_target_dir.is_dir():
+            for cp_it in all_cps:
+                try:
+                    if Path(str(cp_it.get("path") or "")).resolve().is_relative_to(clean_target_dir):
+                        target_cps.append(cp_it)
+                except OSError:
+                    pass
         result_payload = {
             "audits": audits,
-            "checkpoints": scan_temp_checkpoints(root, extra_dirs=out_dirs),
+            "checkpoints": all_cps,
+            "target_checkpoints": target_cps,
         }
         with audits_cache_lock:
             audits_cache["key"] = cache_key
@@ -3882,6 +3964,7 @@ def create_app(
         return {
             "audits": list(result_payload["audits"]),
             "checkpoints": list(result_payload["checkpoints"]),
+            "target_checkpoints": list(result_payload["target_checkpoints"]),
         }
 
     @app.get("/api/audits/detail")

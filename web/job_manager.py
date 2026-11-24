@@ -23,8 +23,10 @@ from web.fs_browser import (
     VALID_NVENC_MULTIPASS_POLICIES,
     SafeLocalFSBrowser,
     filter_paired_subtitle_paths,
+    has_reparse_or_symlink_in_chain,
     inspect_model_trt_cache,
     is_secret_filename,
+    is_single_path_reparse_or_symlink,
     is_unc_path,
     resolve_allowed_trt_weights_shas,
     strip_wrapping_quotes,
@@ -815,6 +817,7 @@ class JobManager:
                 "file_name": os.path.basename(vid),
                 "width": vid_w or 1920,
                 "height": vid_h or 1080,
+                "grain_tier": eff_ep_grain,
                 "model_id": m_id,
                 "model_name": routing["model_name"],
                 "dedup_policy": routing["dedup_policy"],
@@ -1322,8 +1325,11 @@ class JobManager:
                 height_val = int(raw_h)
             except (TypeError, ValueError) as exc:
                 raise ValueError("width và height phải là số nguyên dương hợp lệ.") from exc
-            if not (64 <= width_val <= 4096 and 64 <= height_val <= 4096):
-                raise ValueError("Độ phân giải biên dịch TRT phải nằm trong khoảng 64..4096 px.")
+            if not (64 <= width_val <= 4096 and 64 <= height_val <= 2304):
+                raise ValueError("Độ phân giải biên dịch TRT phải nằm trong khoảng Rộng 64..4096 px, Cao 64..2304 px.")
+            if width_val % 2 != 0 or height_val % 2 != 0:
+                raise ValueError("Độ phân giải biên dịch TRT (width, height) phải là số chẵn cho chuẩn video 4:2:0.")
+        grain_norm = _validate_grain_restore(payload.get("grain_restore"))
         force = bool(payload.get("force", False))
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=not dry_run)
@@ -1335,6 +1341,8 @@ class JobManager:
         ]
         if width_val is not None and height_val is not None:
             cmd.extend(["--width", str(width_val), "--height", str(height_val)])
+        if grain_norm and grain_norm != "auto":
+            cmd.extend(["--grain-restore", "clean" if grain_norm == "off" else grain_norm])
         if force:
             cmd.append("--force")
         if dry_run:
@@ -1344,14 +1352,14 @@ class JobManager:
 
     def start_clean_temp_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Run global temporary artifact cleanup and audit folder organization via upscale.py --clean-temp."""
-        out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"), field="output_dir")
-        raw_chk_dir = (
-            (Path(os.path.expanduser(out_dir_val)) if Path(os.path.expanduser(out_dir_val)).is_absolute() else (self.workspace_root / os.path.expanduser(out_dir_val)))
-            if out_dir_val
-            else (self.workspace_root / "out")
-        )
-        if _is_path_reparse_or_symlink(raw_chk_dir):
+        raw_out_arg = payload.get("output_dir")
+        if raw_out_arg is not None and str(raw_out_arg).strip():
+            pre_cand = Path(os.path.expanduser(strip_wrapping_quotes(str(raw_out_arg))))
+            if has_reparse_or_symlink_in_chain(pre_cand, workspace_root=self.workspace_root):
+                raise ValueError("Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.")
+        elif has_reparse_or_symlink_in_chain(self.workspace_root / "out", workspace_root=self.workspace_root):
             raise ValueError("Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.")
+        out_dir_val = _validate_output_dir(self.workspace_root, raw_out_arg, field="output_dir")
         include_checkpoints = bool(payload.get("include_checkpoints", False))
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=False)
@@ -1729,26 +1737,35 @@ class JobManager:
                 and not aborted_keep_temp
             ):
                 import shutil
+                out_base_clean: Optional[Path] = None
                 try:
                     out_base_clean, _ = _resolve_output_target(self.workspace_root, aborted_output_dir)
                 except Exception:
-                    out_base_clean = (self.workspace_root / "out").resolve()
-                for q_vid in aborted_queue_items:
-                    q_stem = os.path.splitext(os.path.basename(q_vid))[0]
-                    if not q_stem:
-                        continue
-                    temp_cand = out_base_clean / f".temp_{q_stem}"
-                    if not temp_cand.exists() or temp_cand.is_symlink() or os.path.islink(str(temp_cand)):
-                        continue
-                    try:
-                        st_cand = temp_cand.lstat()
-                        if bool(getattr(st_cand, "st_file_attributes", 0) & 0x0400) or not temp_cand.is_dir():
+                    out_base_clean = (
+                        None if (aborted_output_dir and str(aborted_output_dir).strip()) else (self.workspace_root / "out").resolve()
+                    )
+                if out_base_clean is not None and not has_reparse_or_symlink_in_chain(
+                    out_base_clean, workspace_root=self.workspace_root
+                ):
+                    for q_vid in aborted_queue_items:
+                        q_stem = os.path.splitext(os.path.basename(q_vid))[0].rstrip(". ")
+                        if not q_stem:
                             continue
-                        up_dir_cand = temp_cand / "upscaled_segs"
-                        has_done_up = False
-                        if up_dir_cand.exists():
+                        temp_cand = out_base_clean / f".temp_{q_stem}"
+                        if not os.path.lexists(str(temp_cand)) or is_single_path_reparse_or_symlink(temp_cand):
+                            continue
+                        try:
+                            st_cand = temp_cand.lstat()
+                            if bool(getattr(st_cand, "st_file_attributes", 0) & 0x0400) or not temp_cand.is_dir():
+                                continue
+                            up_dir_cand = temp_cand / "upscaled_segs"
+                            has_done_up = False
                             try:
-                                if _is_path_reparse_or_symlink(up_dir_cand):
+                                st_up = up_dir_cand.lstat()
+                                if (
+                                    is_single_path_reparse_or_symlink(up_dir_cand)
+                                    or bool(getattr(st_up, "st_file_attributes", 0) & 0x0400)
+                                ):
                                     has_done_up = True
                                 elif up_dir_cand.is_dir():
                                     with os.scandir(up_dir_cand) as up_it:
@@ -1758,12 +1775,14 @@ class JobManager:
                                                 if up_entry.is_file() and up_entry.stat().st_size > 0:
                                                     has_done_up = True
                                                     break
+                            except FileNotFoundError:
+                                has_done_up = False
                             except OSError:
                                 has_done_up = True
-                        if not has_done_up:
-                            shutil.rmtree(temp_cand, ignore_errors=True)
-                    except OSError:
-                        pass
+                            if not has_done_up:
+                                shutil.rmtree(temp_cand, ignore_errors=True)
+                        except OSError:
+                            pass
         finally:
             if killed_proc is not None or abort_token is not None:
                 with self._lock:

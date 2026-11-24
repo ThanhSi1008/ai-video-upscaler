@@ -92,7 +92,7 @@ def test_t3_03_queue_deadline_and_allow_partial(mock_pipeline_env, tmp_path, mon
     out_dir = tmp_path / "out"
 
     def _fake_eta(video_path, *_args, **_kwargs):
-        if "ep1" in str(video_path):
+        if Path(video_path).name.startswith("ep1"):
             return (True, False, datetime.now() + timedelta(hours=1))
         return (True, True, datetime.now() - timedelta(seconds=1))
 

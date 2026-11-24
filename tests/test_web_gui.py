@@ -7890,7 +7890,7 @@ def test_round2_queue_leakage_deadline_checkpoint_resume_and_abort_safety(tmp_pa
         assert st_dl_paused["effective_stage"] == "paused"
         assert st_dl_paused["live"]["queue_stats"]["failed_items"] == 2
 
-        # 5. abort_job 0-chunk cleanup honors keep_temp=True AND treats os.scandir OSError as has_done_up=True (never deleting)
+        # 5. abort_job 0-chunk cleanup (multi-item queue len >= 2) honors keep_temp=True, lstat/scandir OSError, and cleans true 0-chunk dirs
         cp_ep2 = root / "out" / f".temp_{ep2.stem}"
         (cp_ep2 / "upscaled_segs").mkdir(parents=True, exist_ok=True)
         (cp_ep2 / "manifest.json").write_text(json.dumps({"source_file": str(ep2)}), encoding="utf-8")
@@ -7898,22 +7898,42 @@ def test_round2_queue_leakage_deadline_checkpoint_resume_and_abort_safety(tmp_pa
         running_flag["val"] = True
         r_keep = client.post(
             "/api/jobs/start",
-            json={"inputs": [str(ep2)], "keep_temp": True, "subs_after_upscale": False},
+            json={"inputs": [str(ep1), str(ep2)], "keep_temp": True, "subs_after_upscale": False},
         )
         assert r_keep.status_code == 200
         client.post("/api/jobs/abort")
         assert cp_ep2.is_dir(), "abort_job must preserve 0-chunk .temp_* when keep_temp=True!"
 
+        # Transient Win32 PermissionError on Path.lstat(upscaled_segs) -> must NOT delete (Path.exists() previously swallowed OSError -> False)!
+        r_lstat_lock = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(ep1), str(ep2)], "keep_temp": False, "subs_after_upscale": False},
+        )
+        assert r_lstat_lock.status_code == 200
+        orig_lstat = Path.lstat
+
+        def _locked_lstat(self_p: Path, *a: Any, **kw: Any):
+            if self_p.name == "upscaled_segs" and ep2.stem in str(self_p):
+                raise PermissionError("Simulated Win32 sharing violation on upscaled_segs stat")
+            return orig_lstat(self_p, *a, **kw)
+
+        monkeypatch.setattr(Path, "lstat", _locked_lstat)
+        try:
+            client.post("/api/jobs/abort")
+        finally:
+            monkeypatch.setattr(Path, "lstat", orig_lstat)
+        assert cp_ep2.is_dir(), "abort_job must NEVER delete .temp_* when upscaled_segs.lstat() hits transient OSError!"
+
         # Now with keep_temp=False, simulate transient Win32 OSError on os.scandir(upscaled_segs) -> must NOT delete!
         r_lock = client.post(
             "/api/jobs/start",
-            json={"inputs": [str(ep2)], "keep_temp": False, "subs_after_upscale": False},
+            json={"inputs": [str(ep1), str(ep2)], "keep_temp": False, "subs_after_upscale": False},
         )
         assert r_lock.status_code == 200
         orig_scandir = os.scandir
 
         def _locked_scandir(p_arg: Any):
-            if "upscaled_segs" in str(p_arg):
+            if "upscaled_segs" in str(p_arg) and ep2.stem in str(p_arg):
                 raise PermissionError("Simulated Win32 sharing violation")
             return orig_scandir(p_arg)
 
@@ -7923,6 +7943,16 @@ def test_round2_queue_leakage_deadline_checkpoint_resume_and_abort_safety(tmp_pa
         finally:
             monkeypatch.setattr(os, "scandir", orig_scandir)
         assert cp_ep2.is_dir(), "abort_job must NEVER delete .temp_* when os.scandir hits transient OSError!"
+
+        # Control check: without keep_temp or OSError, multi-item abort_job DOES clean the 0-chunk cp_ep2 while preserving 1-chunk cp_off (ep1)!
+        r_clean_ok = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(ep1), str(ep2)], "keep_temp": False, "subs_after_upscale": False},
+        )
+        assert r_clean_ok.status_code == 200
+        client.post("/api/jobs/abort")
+        assert not cp_ep2.exists(), "abort_job must clean genuine 0-chunk preflight .temp_* on multi-item queue abort!"
+        assert cp_off.is_dir(), "abort_job must preserve .temp_* that already has >= 1 completed up_*.mp4 chunk!"
 
         # Dead PIDs in _aborted_owned_pids_by_job are pruned automatically
         jm = app.state.job_manager
@@ -8265,3 +8295,332 @@ def test_round2_cli_bare_resume_sub_meta_deadline_ep1_and_pending_subs_fields(tm
     assert sp["no_embed"] is True
     assert sp["sound_cues"] == "translate"
     assert sp["sub_offset_ms"] == 120
+
+
+def test_round3_review_remediations_ancestor_reparse_trt_grain_multifolder_and_episode_reset(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify ancestor reparse guards, blank -o guard, target_checkpoints, TRT grain/even/disjoint pareto, multi-folder subtrans stems, alpha .env slots, and cross-episode live_status reset."""
+    import hashlib
+    from typer.testing import CliRunner
+    import upscale
+    import src.logger as logger_mod
+    from src.build_trt_engine import main as build_trt_main
+    from src.cleanup import clean_all_temporary_data, organize_output_artifacts
+    from subtrans.cli import app as subtrans_cli_app
+    from subtrans.glossary import load_glossary
+    from web.fs_browser import compute_upcunet2x_blended_sha256_stdlib
+    from web.job_manager import _validate_output_dir
+
+    root = _seed_workspace(tmp_path / "r3_review_ws")
+    out_dir = root / "out"
+    ep1 = root / "anime_season" / "[SubsPlease] Frieren - 02 (1080p).mkv"
+    ep2 = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    monkeypatch.setattr("src.config.DEFAULT_OUTPUT_DIR", str(out_dir))
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", str(root / "logs"))
+
+    # 1. Explicit blank -o "" or -o "   " on --clean-temp exits 1 instead of wiping DEFAULT_OUTPUT_DIR (out/)
+    cp_default = out_dir / ".temp_DefaultSafe"
+    (cp_default / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+    (cp_default / "upscaled_segs" / "up_0000.mp4").write_bytes(b"SAFE" * 64)
+    (cp_default / "manifest.json").write_text('{"source_file":"Ep.mkv"}\n', encoding="utf-8")
+    for blank_out in ("", "   "):
+        monkeypatch.setattr(sys, "argv", ["upscale.py", "--clean-temp", "-o", blank_out])
+        with pytest.raises(SystemExit) as exc_blank:
+            upscale.main()
+        assert exc_blank.value.code == 1
+    assert cp_default.is_dir()
+
+    # 2. Ancestor NTFS junction / reparse point (out/junc/sub) & audit/ junction blocked before traversal
+    ext_secret_dir = tmp_path / "ext_outside_vault"
+    (ext_secret_dir / "sub" / ".temp_DoNotTouch").mkdir(parents=True)
+    (ext_secret_dir / "sub" / ".temp_DoNotTouch" / "marker.txt").write_text("precious", encoding="utf-8")
+    junc_anc = out_dir / "junc_anc"
+    mk_j1 = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junc_anc), str(ext_secret_dir)],
+        capture_output=True,
+        check=False,
+    )
+    if mk_j1.returncode != 0:
+        (junc_anc / "sub").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(
+            os.path,
+            "isjunction",
+            lambda p: os.path.normcase(str(p)) == os.path.normcase(str(junc_anc)),
+        )
+    nested_via_junc = junc_anc / "sub"
+    clean_all_temporary_data(str(nested_via_junc), include_checkpoints=True)
+    assert (ext_secret_dir / "sub" / ".temp_DoNotTouch" / "marker.txt").is_file()
+
+    # Audit junction inside normal directory must NOT receive moved .audit.json files
+    audit_test_dir = tmp_path / "audit_junc_check"
+    audit_test_dir.mkdir()
+    (audit_test_dir / "Ep_4K.audit.json").write_text('{"status":"PASS"}\n', encoding="utf-8")
+    ext_audit_sink = tmp_path / "ext_audit_sink"
+    ext_audit_sink.mkdir()
+    mk_j2 = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(audit_test_dir / "audit"), str(ext_audit_sink)],
+        capture_output=True,
+        check=False,
+    )
+    if mk_j2.returncode == 0:
+        moved_a = organize_output_artifacts(str(audit_test_dir))
+        assert moved_a == []
+        assert (audit_test_dir / "Ep_4K.audit.json").is_file()
+        assert not (ext_audit_sink / "Ep_4K.audit.json").exists()
+
+    # 3. Superscript Win32 DOS device stems rejected
+    if sys.platform == "win32":
+        for sup_dos in ("out/COM\u00b9", "out/LPT\u00b2.txt"):
+            with pytest.raises(ValueError):
+                _validate_output_dir(root, sup_dos, field="output_dir")
+
+    # 4. Multi-folder subtrans.py batch disambiguates colliding 01.ja.srt stems across Season1 & Season2
+    s1_dir = tmp_path / "Season1"
+    s2_dir = tmp_path / "Season2"
+    s1_dir.mkdir()
+    s2_dir.mkdir()
+    (s1_dir / "01.ja.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nS1\n", encoding="utf-8")
+    (s2_dir / "01.ja.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nS2\n", encoding="utf-8")
+    batch_out_dirs: List[Path] = []
+
+    class _CaptureBatchPipe:
+        def __init__(self, **kw: Any) -> None:
+            batch_out_dirs.append(Path(kw["output_dir"]))
+
+        def run(self, **_kw: Any) -> Dict[str, Any]:
+            return {"subtitle_path": None}
+
+    monkeypatch.setattr("subtrans.cli.TranslationPipeline", _CaptureBatchPipe)
+    multi_out = tmp_path / "sub_multi_out"
+    res_cli = CliRunner().invoke(
+        subtrans_cli_app,
+        [
+            "batch",
+            str(s1_dir),
+            "-o",
+            str(multi_out),
+            "--file",
+            str(s1_dir / "01.ja.srt"),
+            "--file",
+            str(s2_dir / "01.ja.srt"),
+            "--dry-run",
+        ],
+    )
+    assert res_cli.exit_code == 0, res_cli.output
+    assert batch_out_dirs == [multi_out / "Season1", multi_out / "Season2"]
+
+    # 5. build_trt_engine --grain-restore light/heavy & odd-dimension rejection
+    cons_sha = "b8ae522511111111222222223333333344444444555555556666666677777777"
+    dn3x_sha = "8157aa5e8888888899999999aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+    compact_sha = "1111111122222222333333334444444455555555666666667777777788888888"
+    ultra_sha = "99999999aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000"
+    models_yaml = root / "models" / "models.yaml"
+    models_yaml.write_text(
+        models_yaml.read_text(encoding="utf-8")
+        + f"""  realcugan-pro-conservative-2x:
+    name: Real-CUGAN Pro Conservative 2x
+    arch:
+      type: UpCunet2x
+      upscale: 2
+    downsample: none
+    weights_path: models_bench/cugan_pro_cons_2x.pth
+    sha256: "{cons_sha}"
+    license: MIT
+    default: false
+  realcugan-pro-denoise3x-2x:
+    name: Real-CUGAN Pro Denoise3x 2x
+    arch:
+      type: UpCunet2x
+      upscale: 2
+    downsample: none
+    weights_path: models_bench/cugan_pro_dn3x_2x.pth
+    sha256: "{dn3x_sha}"
+    license: MIT
+    default: false
+  animejanai-hd-v3-compact:
+    name: AnimeJaNai HD V3 Compact 2x
+    arch:
+      type: SRVGGNetCompact
+      upscale: 2
+    downsample: none
+    weights_path: models_bench/aj_compact.pth
+    sha256: "{compact_sha}"
+    license: MIT
+    default: false
+  animejanai-hd-v3-ultracompact:
+    name: AnimeJaNai HD V3 UltraCompact 2x
+    arch:
+      type: SRVGGNetCompact
+      upscale: 2
+    downsample: none
+    weights_path: models_bench/aj_ultra.pth
+    sha256: "{ultra_sha}"
+    license: MIT
+    default: false
+""",
+        encoding="utf-8",
+    )
+    assert build_trt_main(["--model", "animevideov3", "--width", "1921", "--height", "800", "--dry-run"]) == 2
+    _ = capsys.readouterr()
+
+    monkeypatch.setattr("src.models_resolver.MODELS_YAML", str(models_yaml))
+    from src.models_resolver import _YAML_STAT_CACHE
+
+    _YAML_STAT_CACHE.clear()
+    light_blend_sha = compute_upcunet2x_blended_sha256_stdlib(cons_sha, dn3x_sha, 0.45)
+    assert (
+        build_trt_main(
+            [
+                "--model",
+                "realcugan-pro-conservative-2x",
+                "--width",
+                "1920",
+                "--height",
+                "800",
+                "--grain-restore",
+                "light",
+                "--cache-dir",
+                str(root / ".cache" / "trt_engines"),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    out_light = capsys.readouterr().out
+    assert f"_ps2x_{light_blend_sha[:8]}_" in out_light and "800x1920" in out_light
+
+    # 6. Web routes: ancestor junction blocked on /api/jobs/clean-temp, disjoint auto-pareto trt_cached=False, odd/tall TRT dims rejected, target_checkpoints scoped, alpha .env slot deleted, address_rules.alt null validated
+    trt_dir = root / ".cache" / "trt_engines"
+    trt_dir.mkdir(parents=True, exist_ok=True)
+    payload_b = b"TRT_DATA_" * 32
+    payload_h = hashlib.sha256(payload_b).hexdigest()
+    c_1080 = trt_dir / "animejanai-hd-v3-compact_RTX3060_trt10_1080x1920_b1-2.engine"
+    u_720 = trt_dir / "animejanai-hd-v3-ultracompact_RTX3060_trt10_720x1280_b1-4.engine"
+    c_1080.write_bytes(payload_b)
+    u_720.write_bytes(payload_b)
+    Path(f"{c_1080}.sha256").write_text(json.dumps({"engine_sha256": payload_h, "weights_sha256": compact_sha}), encoding="utf-8")
+    Path(f"{u_720}.sha256").write_text(json.dumps({"engine_sha256": payload_h, "weights_sha256": ultra_sha}), encoding="utf-8")
+
+    custom_empty_out = root / "custom_empty_out"
+    custom_empty_out.mkdir()
+    spawned_cmds: List[List[str]] = []
+    app = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: spawned_cmds.append(list(cmd)) or FakePopenProcess(cmd, pid=77123),
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/jobs/clean-temp", json={"output_dir": str(nested_via_junc)}).status_code in {400, 403}
+
+        # Disjoint {H}x{W} profiles -> auto-pareto trt_cached MUST be False!
+        rm_disjoint = client.get("/api/config/models-and-shows").json()["routing_modes"][0]
+        assert rm_disjoint["trt_hw_profiles"] == []
+        assert rm_disjoint["trt_cached"] is False
+
+        # Odd width/height and height > 2304 rejected; grain_restore='light' forwarded to build_trt_engine.py
+        assert client.post("/api/jobs/build-trt", json={"model_id": "animevideov3", "width": 1921, "height": 800}).status_code == 422
+        assert client.post("/api/jobs/build-trt", json={"model_id": "animevideov3", "width": 1920, "height": 2306}).status_code == 422
+        r_gr_trt = client.post(
+            "/api/jobs/build-trt",
+            json={"model_id": "realcugan-pro-conservative-2x", "width": 1920, "height": 800, "grain_restore": "light"},
+        )
+        assert r_gr_trt.status_code == 200
+        assert spawned_cmds[-1][spawned_cmds[-1].index("--grain-restore") + 1] == "light"
+
+        # target_checkpoints in /api/audits scopes strictly to custom_empty_out (0) vs default out/ (1)
+        assert len(client.get("/api/audits").json()["target_checkpoints"]) == 1
+        assert client.get("/api/audits", params={"output_dir": str(custom_empty_out)}).json()["target_checkpoints"] == []
+
+        # Win32 hygiene on /api/open-media and /api/preview/compare-frames returns 400 (not 500)
+        if sys.platform == "win32":
+            assert client.post("/api/open-media", json={"path": "/out/driveless.mkv"}).status_code == 400
+            assert (
+                client.post(
+                    "/api/preview/compare-frames",
+                    json={"source_path": "/out/a.mkv", "upscaled_path": str(ep1), "timestamp_sec": 1.0},
+                ).status_code
+                == 400
+            )
+
+        # Alpha-suffixed GEMINI_API_KEY_BACKUP slot parity on PUT /api/subtrans/api-keys
+        for env_k in list(os.environ.keys()):
+            if env_k.startswith("GEMINI_API_KEY"):
+                monkeypatch.delenv(env_k, raising=False)
+        dotenv_p = root / ".env"
+        dotenv_p.write_text(
+            "GEMINI_API_KEY_1=AIzaSySlotOne1111\nGEMINI_API_KEY_BACKUP=AIzaSyAlphaFour4444\n",
+            encoding="utf-8",
+        )
+        ov_before = client.get("/api/subtrans/overview").json()["all_key_slots"]
+        backup_slot = next(s["slot"] for s in ov_before if s["masked"] == "AIzaSy...4444")
+        r_del_alpha = client.put("/api/subtrans/api-keys", json={"slots": {str(backup_slot): ""}})
+        assert r_del_alpha.status_code == 200
+        assert "AIzaSyAlphaFour4444" not in dotenv_p.read_text(encoding="utf-8")
+        assert all(s["masked"] != "AIzaSy...4444" for s in r_del_alpha.json()["all_key_slots"])
+
+        # Glossary address_rules.first_person alt: null rejected by API (400), tolerated by load_glossary, and subtrans/glossary.yaml passes
+        assert (
+            client.put(
+                "/api/subtrans/glossary",
+                json={
+                    "name": "frieren.yaml",
+                    "yaml_content": "address_rules:\n  first_person:\n    - ja: 俺\n      vi: ta\n      alt: null\n",
+                },
+            ).status_code
+            == 400
+        )
+        base_repo_g = (Path(__file__).resolve().parent.parent / "subtrans" / "glossary.yaml").read_text(encoding="utf-8")
+        assert client.put("/api/subtrans/glossary", json={"name": "frieren.yaml", "yaml_content": base_repo_g}).status_code == 200
+
+    alt_null_file = tmp_path / "addr_alt_null.yaml"
+    alt_null_file.write_text("address_rules:\n  first_person:\n    - ja: 俺\n      vi: ta\n      alt: null\n", encoding="utf-8")
+    parsed_ag = load_glossary(alt_null_file)
+    assert parsed_ag is not None and parsed_ag.address_rules.first_person[0].alt == []
+
+    # 7. Cross-episode live_status reset in upscale.main(): Ep1 (12/12 chunks) completes, Ep2 hits --deadline -> Ep2 paused with 0/0 chunks!
+    live_file = root / "logs" / "live_status.json"
+    monkeypatch.setenv("UPSCALER_WEB_JOB_ID", "webjob-r3-ep-reset")
+
+    def _fake_ep1_pipe(*_a: Any, **kw: Any) -> str:
+        in_v = str(kw.get("input_path") or _a[0])
+        live_file.parent.mkdir(parents=True, exist_ok=True)
+        live_file.write_text(
+            json.dumps(
+                {
+                    "video_name": os.path.basename(in_v),
+                    "input_path": in_v,
+                    "pid": os.getpid(),
+                    "job_id": "webjob-r3-ep-reset",
+                    "stage": "completed",
+                    "total_chunks": 12,
+                    "completed_chunks": 12,
+                    "chunks": list(range(12)),
+                    "total_frames": 2880,
+                }
+            ),
+            encoding="utf-8",
+        )
+        out_v = out_dir / f"{Path(in_v).stem}_4K.mkv"
+        out_v.write_bytes(b"\x00" * (1024 * 1024 + 64))
+        return str(out_v)
+
+    monkeypatch.setattr("src.pipeline.run_upscale_pipeline", _fake_ep1_pipe)
+    monkeypatch.setattr(upscale, "run_upscale_pipeline", _fake_ep1_pipe, raising=False)
+    monkeypatch.setattr(
+        upscale,
+        "check_deadline_and_eta",
+        lambda vid_p, *_a, **_kw: (os.path.basename(str(vid_p)) == ep1.name, False, None),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["upscale.py", "--queue", str(ep1), str(ep2), "-o", str(out_dir), "--deadline", "23:59", "--no-subs"],
+    )
+    with pytest.raises(SystemExit) as exc_q:
+        upscale.main()
+    assert exc_q.value.code == 1
+    ep2_live = json.loads(live_file.read_text(encoding="utf-8"))
+    assert ep2_live["stage"] == "paused"
+    assert ep2_live["video_name"] == ep2.name
+    assert ep2_live["completed_chunks"] == 0 and ep2_live["total_chunks"] == 0 and ep2_live["chunks"] == []

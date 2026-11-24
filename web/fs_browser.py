@@ -160,8 +160,78 @@ def is_upscaled_output_stem(stem: str) -> bool:
 
 _FORBIDDEN_WIN32_CHARS = frozenset('<>:"|?*')
 _RESERVED_WIN32_STEMS = frozenset(
-    {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+        "com\u00b9",
+        "com\u00b2",
+        "com\u00b3",
+        "lpt\u00b9",
+        "lpt\u00b2",
+        "lpt\u00b3",
+    }
 )
+
+
+def is_single_path_reparse_or_symlink(p: Path) -> bool:
+    """Return True before resolve() if path entry itself is a symlink, Win32 junction, or reparse point."""
+    try:
+        s = str(p)
+        if p.is_symlink() or os.path.islink(s) or (hasattr(os.path, "isjunction") and os.path.isjunction(s)):
+            return True
+        if os.path.lexists(s):
+            return bool(getattr(p.lstat(), "st_file_attributes", 0) & 0x0400)
+    except OSError:
+        return False
+    return False
+
+
+def has_reparse_or_symlink_in_chain(raw_path: Path, workspace_root: Optional[Path] = None) -> bool:
+    """Return True before resolve() if raw_path or any non-system ancestor is a symlink/reparse point."""
+    import tempfile
+
+    if is_single_path_reparse_or_symlink(raw_path):
+        return True
+    safe_roots: set[str] = set()
+    for r_cand in (str(workspace_root) if workspace_root else None, tempfile.gettempdir()):
+        if r_cand:
+            cur_r = os.path.normcase(os.path.abspath(r_cand)).rstrip(os.sep)
+            while cur_r:
+                safe_roots.add(cur_r)
+                par_r = os.path.dirname(cur_r).rstrip(os.sep)
+                if par_r == cur_r:
+                    break
+                cur_r = par_r
+
+    orig_abs = raw_path.is_absolute()
+    if ".." in raw_path.parts:
+        acc = Path(raw_path.anchor) if orig_abs else (workspace_root or Path.cwd())
+        rel_parts = raw_path.parts[1:] if orig_abs else raw_path.parts
+        for part in rel_parts:
+            if part == "..":
+                acc = acc.parent
+            elif part != ".":
+                acc = acc / part
+                acc_norm = os.path.normcase(os.path.abspath(str(acc))).rstrip(os.sep)
+                if acc_norm not in safe_roots and is_single_path_reparse_or_symlink(acc):
+                    return True
+
+    target_raw = raw_path if orig_abs else ((workspace_root / raw_path) if workspace_root else raw_path)
+    cur = Path(os.path.abspath(str(target_raw)))
+    while True:
+        cur_norm = os.path.normcase(str(cur)).rstrip(os.sep)
+        if cur_norm in safe_roots:
+            break
+        if is_single_path_reparse_or_symlink(cur):
+            return True
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return False
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _BLENDED_PS2X_SHA8_RE = re.compile(r"_ps2x_([0-9a-f]{8})_")
 _TRT_HW_PROFILE_RE = re.compile(r"_(\d{2,5}x\d{2,5})_b1-\d+\.engine$", re.IGNORECASE)

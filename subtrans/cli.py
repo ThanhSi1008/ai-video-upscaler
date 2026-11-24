@@ -1,5 +1,6 @@
 """Typer CLI commands (run, batch, eval, rag, check, models) for subtitle translation."""
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -421,11 +422,36 @@ def batch(
         return
 
     console.print(f"[bold green]Found {len(sub_files)} subtitle files in {input_dir}[/bold green]")
+    multi_parents = len({p.parent for p in sub_files}) > 1
+    out_stem_counts: dict[str, int] = {}
+    if multi_parents:
+        for p_sf in sub_files:
+            c_stem = re.sub(r"\.(ja|en|vi|jpn|eng|vie)$", "", p_sf.stem, flags=re.IGNORECASE).lower()
+            out_stem_counts[c_stem] = out_stem_counts.get(c_stem, 0) + 1
+    common_parent: Optional[Path] = None
+    if multi_parents and any(cnt > 1 for cnt in out_stem_counts.values()):
+        try:
+            common_parent = Path(os.path.commonpath([str(p.parent) for p in sub_files]))
+        except ValueError:
+            common_parent = None
+
     failed_files: List[str] = []
     for idx, f in enumerate(sub_files):
         console.print(f"\n[{idx+1}/{len(sub_files)}] Processing {f.name}...")
         eff_file_en_dir = en_dir if en_dir is not None else f.parent
         en_f = None if _EN_STEM_RE.search(f.stem) else _match_en_subtitle(f, eff_file_en_dir)
+        f_stem_key = re.sub(r"\.(ja|en|vi|jpn|eng|vie)$", "", f.stem, flags=re.IGNORECASE).lower()
+        eff_out_dir = out_dir
+        if multi_parents and out_stem_counts.get(f_stem_key, 0) > 1:
+            rel_sub: Optional[Path] = None
+            if common_parent is not None:
+                try:
+                    cand_rel = f.parent.relative_to(common_parent)
+                    if str(cand_rel) not in ("", "."):
+                        rel_sub = cand_rel
+                except ValueError:
+                    rel_sub = None
+            eff_out_dir = out_dir / (rel_sub or Path(f.parent.name or f"dir_{idx+1}"))
 
         try:
             pipeline = TranslationPipeline(
@@ -436,7 +462,7 @@ def batch(
                 enable_cascade=not no_cascade,
                 enable_rag=not no_rag,
                 limit_cues=limit,
-                output_dir=out_dir,
+                output_dir=eff_out_dir,
                 output_format=format_,
                 wrap_chars=wrap,
                 smart_wrap=smart_wrap,

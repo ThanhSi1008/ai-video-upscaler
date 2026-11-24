@@ -828,7 +828,20 @@ def _build_stage_b_sub_cmd(
 
 
 _RESERVED_WIN32_CLI_STEMS = frozenset(
-    {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+        "com\u00b9",
+        "com\u00b2",
+        "com\u00b3",
+        "lpt\u00b9",
+        "lpt\u00b2",
+        "lpt\u00b3",
+    }
 )
 _CLI_QUOTE_PAIRS = {'"': '"', "'": "'", "\u201c": "\u201d", "\u201d": "\u201c", "\u2018": "\u2019", "\u2019": "\u2018"}
 
@@ -942,12 +955,18 @@ def main():
     # Xử lý cờ --clean-temp / --cleanup (Dọn dẹp nhanh thư mục tạm và gom gọn audit)
     if getattr(args, "clean_temp", False):
         _validate_cli_output_path(args.output, multi_queue=True)
-        from src.cleanup import _is_symlink_or_reparse
+        from src.cleanup import _has_reparse_in_path
         from src.config import DEFAULT_OUTPUT_DIR
         from src.logger import format_bytes
-        if args.output and str(args.output).strip():
-            target_clean_dir = os.path.expanduser(str(args.output).strip())
-            if _is_symlink_or_reparse(target_clean_dir):
+        if args.output is not None:
+            unwrapped_out = _unwrap_cli_path_preserving_trailing_space(str(args.output)).strip()
+            if not unwrapped_out:
+                print("❌ Lỗi: Đường dẫn đích -o không được để trống khi chạy --clean-temp.")
+                sys.exit(1)
+            if sys.platform == "win32" and re.match(r"^\\\\\?\\[A-Za-z]:(?:\\|$)", unwrapped_out.replace("/", "\\")):
+                unwrapped_out = unwrapped_out.replace("/", "\\")[4:]
+            target_clean_dir = os.path.expanduser(unwrapped_out)
+            if _has_reparse_in_path(target_clean_dir):
                 print(f"❌ Lỗi: Từ chối dọn dẹp qua symlink/reparse point tại -o: '{target_clean_dir}'")
                 sys.exit(1)
             if not os.path.isdir(target_clean_dir):
@@ -958,7 +977,7 @@ def main():
                 sys.exit(0)
         else:
             target_clean_dir = DEFAULT_OUTPUT_DIR
-            if _is_symlink_or_reparse(target_clean_dir):
+            if _has_reparse_in_path(target_clean_dir):
                 print(f"❌ Lỗi: Thư mục xuất mặc định '{target_clean_dir}' là symlink/reparse point.")
                 sys.exit(1)
             if not os.path.isdir(target_clean_dir):
@@ -1524,7 +1543,7 @@ def main():
         ref_vid: Optional[str] = None,
         cur_idx_1based: int = 1,
         in_stage_b: bool = False,
-        create_if_missing: bool = False,
+        create_if_missing: bool = True,
     ) -> None:
         live_p = get_live_status_path()
         cur_job_env = os.environ.get("UPSCALER_WEB_JOB_ID", "")
@@ -1539,8 +1558,8 @@ def main():
                         (cur_job_env and str(loaded.get("job_id") or "") == cur_job_env)
                         or (not cur_job_env and loaded.get("pid") == cur_pid)
                     )
-                    if same_lineage or not create_if_missing:
-                        cur_dict = loaded
+                    if same_lineage:
+                        cur_dict = dict(loaded)
             except Exception:
                 cur_dict = {}
         elif not create_if_missing:
@@ -1549,6 +1568,25 @@ def main():
             return
         os.makedirs(os.path.dirname(live_p), exist_ok=True)
         v_ref = ref_vid or (videos[0] if videos else "")
+        prev_in_str = str(cur_dict.get("input_path") or "").strip()
+        switched_episode = bool(
+            ref_vid
+            and prev_in_str
+            and os.path.normcase(os.path.abspath(prev_in_str)) != os.path.normcase(os.path.abspath(ref_vid))
+        )
+        if switched_episode:
+            cur_dict["total_frames"] = 0
+            cur_dict["unique_frames"] = 0
+            cur_dict["total_chunks"] = 0
+            cur_dict["completed_chunks"] = 0
+            cur_dict["chunks"] = []
+            cur_dict["resumed_chunks"] = []
+            cur_dict["active_chunk"] = None
+            cur_dict["active_chunk_fraction"] = 0.0
+            cur_dict["steady_fps"] = 0.0
+            cur_dict["latest_fps"] = 0.0
+            cur_dict["effective_fps"] = 0.0
+            cur_dict["eta_seconds"] = None
         cur_dict.setdefault("video_name", os.path.basename(v_ref) if v_ref else "")
         cur_dict.setdefault("input_path", str(v_ref) if v_ref else "")
         cur_dict.setdefault("model_id", str(args.model or ""))
@@ -1560,6 +1598,7 @@ def main():
         cur_dict.setdefault("chunks", [])
         cur_dict.setdefault("resumed_chunks", [])
         cur_dict.setdefault("active_chunk", None)
+        cur_dict.setdefault("active_chunk_fraction", 0.0)
         cur_dict.setdefault("steady_fps", 0.0)
         cur_dict.setdefault("latest_fps", 0.0)
         cur_dict.setdefault("effective_fps", 0.0)

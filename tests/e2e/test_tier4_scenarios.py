@@ -199,10 +199,10 @@ def test_t4_04_overnight_batch_queue_with_deadline(mock_pipeline_env, tmp_path, 
     out_dir = tmp_path / "out"
 
     def _fake_eta(video_path, *_args, **_kwargs):
-        name = str(video_path)
-        if "ep1" in name:
+        bname = Path(video_path).name
+        if bname.startswith("ep1"):
             return (True, False, datetime.now() + timedelta(hours=1))
-        if "ep2" in name:
+        if bname.startswith("ep2"):
             return (True, True, datetime.now() - timedelta(seconds=1))
         return (False, False, datetime.now() - timedelta(seconds=1))
 

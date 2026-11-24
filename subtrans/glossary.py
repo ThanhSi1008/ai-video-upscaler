@@ -63,13 +63,13 @@ def find_series_glossary(series_or_filename: str, glossaries_dir: Optional[Path]
 def _parse_pronoun_list(raw_list: List[Dict[str, Any]]) -> List[PronounRule]:
     res = []
     for item in raw_list or []:
-        if item.get("ja") and item.get("vi"):
+        if isinstance(item, dict) and item.get("ja") and item.get("vi"):
             res.append(
                 PronounRule(
                     ja=str(item["ja"]),
                     vi=str(item["vi"]),
-                    alt=[str(a) for a in item.get("alt", [])],
-                    note=item.get("note"),
+                    alt=[str(a) for a in (item.get("alt") or []) if a is not None],
+                    note=str(item["note"]) if item.get("note") is not None else None,
                 )
             )
     return res

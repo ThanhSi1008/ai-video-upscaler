@@ -1089,6 +1089,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--width", type=int, default=1920, help="Input frame width in pixels (default: 1920).")
     parser.add_argument("--height", type=int, default=1080, help="Input frame height in pixels (default: 1080).")
+    parser.add_argument(
+        "--grain-restore",
+        choices=["off", "clean", "light", "heavy"],
+        default="clean",
+        help="Optional Real-CUGAN Pro grain-restore blend tier ('clean'/'off', 'light' alpha=0.45, 'heavy' alpha=1.0).",
+    )
     parser.add_argument("--max-batch", type=int, default=8, help="Requested max profile batch size (default: 8).")
     parser.add_argument("--workspace-gb", type=int, default=2, help="TensorRT workspace cap in GiB (default: 2).")
     parser.add_argument("--cache-dir", default=None, help="Optional directory for .engine and .sha256 outputs.")
@@ -1107,7 +1113,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.width <= 0 or args.height <= 0 or args.max_batch < 1 or args.workspace_gb < 1:
         print("[TRT-ERROR] width, height, max-batch, and workspace-gb must be positive integers.", file=sys.stderr)
         return 2
+    if args.width % 2 != 0 or args.height % 2 != 0:
+        print("[TRT-ERROR] width and height must be even integers for 4:2:0 video pipelines.", file=sys.stderr)
+        return 2
 
+    from src.cuda_engine import resolve_episode_model_blend
     from src.models_resolver import get_default_model_id, load_models_registry
 
     registry = load_models_registry()
@@ -1131,6 +1141,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     input_hw = (int(args.height), int(args.width))
+    grain_tier_req = str(getattr(args, "grain_restore", "clean") or "clean").strip().lower()
+    if grain_tier_req == "off":
+        grain_tier_req = "clean"
     if args.dry_run:
         vram_gb = 12.0
         if torch.cuda.is_available():
@@ -1139,7 +1152,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             except Exception:
                 vram_gb = 12.0
         for mid in model_ids:
-            info = registry[mid]
+            info = resolve_episode_model_blend({"id": mid, **registry[mid]}, grain_tier=grain_tier_req)
             arch_cfg = info.get("arch") or {}
             arch_type = str(arch_cfg.get("type") or "")
             up_scale = int(arch_cfg.get("upscale") or 2)
@@ -1156,7 +1169,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 eff_b = min(req_b, 2)
             else:
                 eff_b = min(req_b, 4)
-            w_sha = str(info.get("sha256") or "").strip().lower() or None
+            w_sha = str(info.get("blended_weights_sha256") or info.get("sha256") or "").strip().lower() or None
             eng_path = get_trt_engine_path(
                 model_id=mid,
                 max_batch=eff_b,
@@ -1187,8 +1200,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     with gpu_exclusivity_lock():
         for mid in model_ids:
-            info = registry[mid]
-            w_sha = str(info.get("sha256") or "").strip().lower() or None
+            info = resolve_episode_model_blend({"id": mid, **registry[mid]}, grain_tier=grain_tier_req)
+            w_sha = str(info.get("blended_weights_sha256") or info.get("sha256") or "").strip().lower() or None
             worker = GPUPersistentWorker(
                 model_id=mid,
                 weights_path=info["weights_path"],
@@ -1196,6 +1209,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 device="cuda",
                 batch_size=int(args.max_batch),
                 use_tensorrt=False,
+                blend_alpha=float(info.get("blend_alpha") or 0.0),
+                secondary_weights_path=info.get("blend_secondary_weights_path"),
                 weights_sha256=w_sha,
             )
             try:
