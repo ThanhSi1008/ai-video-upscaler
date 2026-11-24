@@ -47,12 +47,13 @@ MODEL_REFERENCE_FPS: Dict[str, tuple[float, float]] = {
 
 
 _FRAME_PROBE_CACHE: Dict[tuple[str, int, int], int] = {}
+_DIMS_PROBE_CACHE: Dict[tuple[str, int, int], tuple[int, int]] = {}
 _FRAME_PROBE_CACHE_LOCK = threading.Lock()
 _FRAME_PROBE_CACHE_MAX = 2048
 
 
-def _probe_frames_lightweight(video_path: str) -> int:
-    """Đo nhanh tổng số frame video bằng PyAV in-process (cache theo abs_path, mtime_ns, size)."""
+def _probe_video_meta_lightweight(video_path: str) -> tuple[int, int, int]:
+    """Probe (frames, height, width) in a single PyAV header open cached by (abs_path, mtime_ns, size)."""
     cache_key: Optional[tuple[str, int, int]] = None
     try:
         abs_p = os.path.abspath(video_path)
@@ -63,16 +64,20 @@ def _probe_frames_lightweight(video_path: str) -> int:
 
     if cache_key is not None:
         with _FRAME_PROBE_CACHE_LOCK:
-            cached = _FRAME_PROBE_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+            cached_f = _FRAME_PROBE_CACHE.get(cache_key)
+            cached_hw = _DIMS_PROBE_CACHE.get(cache_key)
+        if cached_f is not None and cached_hw is not None:
+            return cached_f, cached_hw[0], cached_hw[1]
 
     probed = 34000
+    v_h, v_w = 0, 0
     try:
         import av
         with av.open(video_path) as container:
             if container.streams.video:
                 vs = container.streams.video[0]
+                v_h = int(vs.height or 0)
+                v_w = int(vs.width or 0)
                 if vs.frames and vs.frames > 0:
                     probed = int(vs.frames)
                 else:
@@ -87,8 +92,16 @@ def _probe_frames_lightweight(video_path: str) -> int:
         with _FRAME_PROBE_CACHE_LOCK:
             if len(_FRAME_PROBE_CACHE) >= _FRAME_PROBE_CACHE_MAX:
                 _FRAME_PROBE_CACHE.clear()
+                _DIMS_PROBE_CACHE.clear()
             _FRAME_PROBE_CACHE[cache_key] = probed
-    return probed
+            _DIMS_PROBE_CACHE[cache_key] = (v_h, v_w)
+    return probed, v_h, v_w
+
+
+def _probe_frames_lightweight(video_path: str) -> int:
+    """Đo nhanh tổng số frame video bằng PyAV in-process (cache theo abs_path, mtime_ns, size)."""
+    frames, _, _ = _probe_video_meta_lightweight(video_path)
+    return frames
 
 
 def _has_valid_upscaled_output(out_4k: Path) -> bool:
@@ -583,25 +596,38 @@ class JobManager:
         routing_tables = self.fs_browser._load_routing_tables()
         models_reg = routing_tables[0] if isinstance(routing_tables, tuple) and routing_tables else {}
         trt_cache_dir = self.workspace_root / ".cache" / "trt_engines"
-        trt_ready_memo: Dict[str, bool] = {}
+        trt_valid_memo: Dict[str, List[str]] = {}
 
-        def _is_model_trt_ready(mid_check: str) -> bool:
+        def _get_valid_trt_engines(mid_check: str) -> List[str]:
+            if mid_check in trt_valid_memo:
+                return trt_valid_memo[mid_check]
+            m_info = models_reg.get(mid_check) if isinstance(models_reg, dict) else None
+            w_sha = str(m_info.get("sha256") or "") if isinstance(m_info, dict) else None
+            arch_type = str(((m_info or {}).get("arch") or {}).get("type") or "") if isinstance(m_info, dict) else ""
+            valid_engs, _ = inspect_model_trt_cache(trt_cache_dir, mid_check, expected_weights_sha256=w_sha)
+            if arch_type == "UpCunet2x":
+                valid_engs = [n for n in valid_engs if "_ps2x_" in n.lower()]
+                if (grain_norm or "auto") == "off" and w_sha:
+                    base_tag = f"_ps2x_{w_sha.strip().lower()[:8]}_"
+                    valid_engs = [n for n in valid_engs if base_tag in n.lower()]
+            trt_valid_memo[mid_check] = valid_engs
+            return valid_engs
+
+        def _is_model_trt_ready(mid_check: str, in_h: int = 0, in_w: int = 0) -> bool:
             if not use_tensorrt:
                 return True
-            if mid_check in trt_ready_memo:
-                return trt_ready_memo[mid_check]
             if mid_check == AUTO_PARETO_MODEL_ID:
                 sub_ids = [
                     k for k in ("animejanai-hd-v3-compact", "animejanai-hd-v3-ultracompact") if k in models_reg
                 ]
-                ready = bool(sub_ids) and all(_is_model_trt_ready(sid) for sid in sub_ids)
-            else:
-                m_info = models_reg.get(mid_check) if isinstance(models_reg, dict) else None
-                w_sha = str(m_info.get("sha256") or "") if isinstance(m_info, dict) else None
-                valid_engs, _ = inspect_model_trt_cache(trt_cache_dir, mid_check, expected_weights_sha256=w_sha)
-                ready = len(valid_engs) > 0
-            trt_ready_memo[mid_check] = ready
-            return ready
+                return bool(sub_ids) and all(_is_model_trt_ready(sid, in_h, in_w) for sid in sub_ids)
+            valid_engs = _get_valid_trt_engines(mid_check)
+            if not valid_engs:
+                return False
+            if in_h > 0 and in_w > 0:
+                hw_tokens = (f"_{in_h}x{in_w}_", f"_{in_w}x{in_h}_")
+                return any(any(tok in n.lower() for tok in hw_tokens) for n in valid_engs)
+            return True
 
         out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         sub_overhead = 300.0 if subs_after_upscale else 0.0
@@ -730,6 +756,7 @@ class JobManager:
                         sim_med = ep_finish
                         total_sched_s += eta_med_s
 
+            _, vid_h, vid_w = _probe_video_meta_lightweight(vid)
             episodes.append({
                 "index": idx + 1,
                 "file_path": vid,
@@ -754,7 +781,7 @@ class JobManager:
                 "can_run": can_run,
                 "is_partial": is_partial,
                 "already_done": already_done,
-                "trt_ready": _is_model_trt_ready(m_id),
+                "trt_ready": _is_model_trt_ready(m_id, vid_h, vid_w),
                 "resumed_done_chunks": resumed_done_c,
                 "resumed_total_chunks": resumed_tot_c,
                 "decision": decision,
@@ -1080,18 +1107,19 @@ class JobManager:
         out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"), field="output_dir")
         glossary_val = _validate_output_dir(self.workspace_root, payload.get("glossary"), field="glossary") or ""
 
-        if not target_raw:
-            raise ValueError("Vui lòng chọn file video (.mkv/.mp4) hoặc phụ đề (.srt/.ass) để dịch.")
-
-        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         raw_inputs_list = payload.get("inputs")
         if isinstance(raw_inputs_list, list) and raw_inputs_list:
+            for raw_el in raw_inputs_list:
+                _validate_no_nul(str(raw_el or ""), "inputs")
             sub_raw_targets = [strip_wrapping_quotes(str(x)) for x in raw_inputs_list if str(x or "").strip()]
         else:
-            sub_raw_targets = [target_raw]
+            sub_raw_targets = [target_raw] if target_raw else []
+        if not sub_raw_targets:
+            raise ValueError("Vui lòng chọn file video (.mkv/.mp4) hoặc phụ đề (.srt/.ass) để dịch.")
         for s_item in sub_raw_targets:
             _validate_no_nul(s_item, "input_path")
 
+        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
         items = self.fs_browser.expand_inputs(sub_raw_targets, allow_subtitles=True, allow_upscaled_4k=True)
         sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
         has_sub_items = any(os.path.splitext(x)[1].lower() in sub_exts for x in items)
@@ -1107,12 +1135,6 @@ class JobManager:
         else:
             resolved_first_in = resolved_first_in.resolve()
         is_single_dir_input = len(sub_raw_targets) == 1 and resolved_first_in.is_dir()
-        if all_subtitles and len(items) > 1 and not is_single_dir_input:
-            parent_dirs = {os.path.normcase(os.path.dirname(os.path.abspath(x))) for x in items}
-            if len(parent_dirs) > 1:
-                raise ValueError(
-                    "Khi dịch hàng loạt nhiều tệp phụ đề rời (.srt/.ass), hãy chọn trực tiếp thư mục chứa phụ đề để chạy 'subtrans.py batch'."
-                )
 
         prefer_whisper = bool(payload.get("prefer_whisper", False))
         dry_run = bool(payload.get("dry_run", False))
@@ -1133,6 +1155,9 @@ class JobManager:
                     "--subs-quality",
                     subs_quality,
                 ]
+                if not is_single_dir_input:
+                    for sel_sub in items:
+                        cmd.extend(["--file", sel_sub])
             else:
                 target_file = items[0]
                 cmd = [
@@ -1599,10 +1624,15 @@ class JobManager:
                         up_dir_cand = temp_cand / "upscaled_segs"
                         has_done_up = False
                         if up_dir_cand.is_dir():
-                            has_done_up = any(
-                                fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4")
-                                for fn in os.listdir(up_dir_cand)
-                            )
+                            for up_entry in os.scandir(up_dir_cand):
+                                fn = up_entry.name
+                                if fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4"):
+                                    try:
+                                        if up_entry.is_file() and up_entry.stat().st_size > 0:
+                                            has_done_up = True
+                                            break
+                                    except OSError:
+                                        pass
                         if not has_done_up:
                             shutil.rmtree(temp_cand, ignore_errors=True)
                     except OSError:

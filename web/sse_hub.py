@@ -279,6 +279,7 @@ def scan_temp_checkpoints(
 
             raw_count = 0
             up_count = 0
+            done_chunk_indices: List[int] = []
             size_bytes = 0
             if raw_segs_dir.is_dir():
                 for f in os.scandir(raw_segs_dir):
@@ -291,11 +292,16 @@ def scan_temp_checkpoints(
             if up_segs_dir.is_dir():
                 for f in os.scandir(up_segs_dir):
                     if f.name.startswith("up_") and f.name.endswith(".mp4") and not f.name.endswith(".tmp.mp4"):
-                        up_count += 1
                         try:
-                            size_bytes += f.stat().st_size
+                            f_sz = f.stat().st_size
                         except OSError:
-                            pass
+                            f_sz = 0
+                        if f_sz > 0:
+                            up_count += 1
+                            size_bytes += f_sz
+                            stem_num = f.name[3:-4]
+                            if stem_num.isdigit():
+                                done_chunk_indices.append(int(stem_num))
 
             episode_name = entry.name[len(".temp_"):]
             model_id = ""
@@ -440,6 +446,7 @@ def scan_temp_checkpoints(
                 "path": str(t_path),
                 "completed_chunks": up_count,
                 "total_chunks": total_chunks,
+                "resumed_chunks": sorted(set(done_chunk_indices)),
                 "model_id": model_id,
                 "model_requested": model_requested,
                 "dedup_policy": dedup_policy,
@@ -800,7 +807,12 @@ class TelemetryHub:
                         if cand_done > 0:
                             init_done_chunks = cand_done
                             init_tot_chunks = max(cand_done, int(matched_init_cp.get("total_chunks") or 0))
-                            init_resumed_chunks = list(range(cand_done))
+                            raw_res_idxs = matched_init_cp.get("resumed_chunks")
+                            init_resumed_chunks = (
+                                [int(x) for x in raw_res_idxs]
+                                if isinstance(raw_res_idxs, list) and raw_res_idxs
+                                else list(range(cand_done))
+                            )
                             init_detail = (
                                 f"Đang khôi phục tiến trình từ checkpoint ({init_done_chunks}/{init_tot_chunks} chunk đã lưu)..."
                             )
@@ -829,6 +841,42 @@ class TelemetryHub:
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
+            elif (
+                active_type == "upscale"
+                and not bool((active_job.get("options") or {}).get("force"))
+                and effective_stage in {"initializing", "probing", "splitting"}
+                and int(live_data.get("total_chunks") or 0) <= 0
+                and checkpoints
+            ):
+                # Keep checkpoint progress & heatmap steady while RunLogger is in probing/splitting before chunk scan
+                cur_in_raw = str(live_data.get("input_path") or (q_items[0] if q_items else "")).strip()
+                cur_in_norm = os.path.normcase(os.path.abspath(cur_in_raw)) if cur_in_raw else ""
+                cur_in_stem = Path(cur_in_raw).stem.lower() if cur_in_raw else ""
+                matched_probe_cp = next(
+                    (
+                        cp
+                        for cp in checkpoints
+                        if (
+                            cur_in_norm
+                            and cp.get("source_file")
+                            and os.path.normcase(os.path.abspath(str(cp["source_file"]))) == cur_in_norm
+                        )
+                        or (cur_in_stem and str(cp.get("episode_name") or "").lower() == cur_in_stem)
+                    ),
+                    None,
+                )
+                if matched_probe_cp is not None:
+                    cand_done_p = int(matched_probe_cp.get("completed_chunks") or 0)
+                    if cand_done_p > 0:
+                        live_data = dict(live_data)
+                        live_data["completed_chunks"] = cand_done_p
+                        live_data["total_chunks"] = max(cand_done_p, int(matched_probe_cp.get("total_chunks") or 0))
+                        raw_res_p = matched_probe_cp.get("resumed_chunks")
+                        live_data["resumed_chunks"] = (
+                            [int(x) for x in raw_res_p]
+                            if isinstance(raw_res_p, list) and raw_res_p
+                            else list(range(cand_done_p))
+                        )
 
             if active_type == "upscale" and len(q_items) > 1:
                 live_in_str = str(live_data.get("input_path") or "").strip()

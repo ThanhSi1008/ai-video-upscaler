@@ -787,6 +787,7 @@ class GPUPersistentWorker:
         pinned_out_slots: List[Optional[torch.Tensor]] = [None, None]
         slot_futures: List[list] = [[], []]
         num_distinct = total_frames
+        used_trt = False
 
         def _resolve_runner(in_h: int, in_w: int):
             if (
@@ -897,6 +898,16 @@ class GPUPersistentWorker:
                     distinct_arrs[clear_i] = None
 
                 active_runner = _resolve_runner(h0, w0) if same_shape else self.model
+                if getattr(active_runner, "is_tensorrt", False):
+                    used_trt = True
+                if b_start == 0 and logger is not None and hasattr(logger, "update_live_context"):
+                    logger.update_live_context(
+                        runtime_backend=(
+                            "cpu"
+                            if self.device.type == "cpu"
+                            else ("tensorrt" if used_trt else "pytorch-cuda")
+                        )
+                    )
 
                 # Run GPU inference and uint8 BGR quantization in VRAM with one D2H sync
                 with torch.inference_mode():
@@ -1000,7 +1011,8 @@ class GPUPersistentWorker:
             "distinct_frames": num_distinct,
             "peak_rss_mb": rss_mb,
             "current_alloc_mb": curr_alloc_peak,
-            "driver_alloc_mb": driver_alloc_peak
+            "driver_alloc_mb": driver_alloc_peak,
+            "runtime_backend": "cpu" if self.device.type == "cpu" else ("tensorrt" if used_trt else "pytorch-cuda"),
         }
 
 
@@ -1306,6 +1318,7 @@ def upscale_frames_with_fallback(
             )
             worker_fp32.restart_if_needed(logger=logger)
             res["engine_used"] = f"{engine}_fp32_fallback"
+            res["runtime_backend"] = "cpu" if engine == "cpu" else "pytorch-cuda"
             return res
 
         if os.path.exists(REALESRGAN_BIN) or os.path.exists(REALESRGAN_BIN + ".exe"):
@@ -1326,6 +1339,7 @@ def upscale_frames_with_fallback(
                     thread_cfg="1:2:2"
                 )
                 res["engine_used"] = "ncnn_fallback"
+                res["runtime_backend"] = "ncnn-vulkan"
                 return res
 
         raise RuntimeError(

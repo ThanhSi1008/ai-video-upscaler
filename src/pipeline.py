@@ -439,6 +439,7 @@ def run_upscale_pipeline(
                                 prev_segment_time = 0
                             for sub_k in (
                                 "model_requested",
+                                "total_chunks",
                                 "subs_after_upscale",
                                 "subs_quality",
                                 "prefer_whisper",
@@ -473,6 +474,7 @@ def run_upscale_pipeline(
                                 os.makedirs(segs_dir, exist_ok=True)
                                 os.makedirs(up_segs_dir, exist_ok=True)
                                 prev_segment_time = 0
+                                preserved_sub_meta.pop("total_chunks", None)
                     except ValueError:
                         raise
                     except Exception as e:
@@ -519,6 +521,36 @@ def run_upscale_pipeline(
                 }
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+
+                if resume and not force and os.path.isdir(up_segs_dir):
+                    early_done_idxs: list[int] = []
+                    try:
+                        for fn_u in os.listdir(up_segs_dir):
+                            if fn_u.startswith("up_") and fn_u.endswith(".mp4") and not fn_u.endswith(".tmp.mp4"):
+                                fp_u = os.path.join(up_segs_dir, fn_u)
+                                if os.path.getsize(fp_u) > 0 and fn_u[3:-4].isdigit():
+                                    early_done_idxs.append(int(fn_u[3:-4]))
+                    except OSError:
+                        early_done_idxs = []
+                    if early_done_idxs:
+                        early_done_idxs = sorted(set(early_done_idxs))
+                        early_tot_c = int(manifest_data.get("total_chunks") or 0)
+                        if early_tot_c <= 0:
+                            plan_early_p = os.path.join(work_dir, "plan.json")
+                            if os.path.isfile(plan_early_p):
+                                try:
+                                    with open(plan_early_p, "r", encoding="utf-8") as pf_e:
+                                        pd_e = json.load(pf_e)
+                                    if isinstance(pd_e, dict):
+                                        early_tot_c = len(pd_e.get("chunks") or [])
+                                except Exception:
+                                    early_tot_c = 0
+                        if early_tot_c > 0:
+                            logger.update_live_context(
+                                total_chunks=max(len(early_done_idxs), early_tot_c),
+                                completed_chunks=len(early_done_idxs),
+                                resumed_chunks=early_done_idxs,
+                            )
 
                 # Size RAMDisk for max(current segment_time, reused checkpoint segment_time) to prevent ENOSPC on --no-zero-disk resume
                 multiplier = 18.0 if fmt == "png" else 4.5
@@ -1269,6 +1301,13 @@ def run_upscale_pipeline(
                                             for w in (detail_wrap, fast_wrap)
                                             if getattr(w, "is_tensorrt", False)
                                         ]
+                                        logger.update_live_context(
+                                            runtime_backend=(
+                                                "cpu"
+                                                if engine == "cpu" or getattr(c_eng.device, "type", "") == "cpu"
+                                                else ("tensorrt" if trt_caps else "pytorch-cuda")
+                                            )
+                                        )
                                         if trt_caps:
                                             pipe_b = min(int(eff_b), max(2, max(trt_caps)))
                                         elif c_eng.device.type == "cuda" and torch.cuda.is_available() and not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -1393,9 +1432,13 @@ def run_upscale_pipeline(
                                                 pre_cuda._zero_disk_key = pre_key
                                                 logger.update_live_context(
                                                     runtime_backend=(
-                                                        "tensorrt"
-                                                        if getattr(pre_wrapped, "is_tensorrt", False)
-                                                        else "pytorch-cuda"
+                                                        "cpu"
+                                                        if engine == "cpu" or getattr(pre_cuda.device, "type", "") == "cpu"
+                                                        else (
+                                                            "tensorrt"
+                                                            if getattr(pre_wrapped, "is_tensorrt", False)
+                                                            else "pytorch-cuda"
+                                                        )
                                                     )
                                                 )
                                                 pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
@@ -1846,9 +1889,13 @@ def run_upscale_pipeline(
                                                 pipe_upscaler = cuda_engine._zero_disk_upscaler
                                                 logger.update_live_context(
                                                     runtime_backend=(
-                                                        "tensorrt"
-                                                        if getattr(wrapped_model, "is_tensorrt", False)
-                                                        else "pytorch-cuda"
+                                                        "cpu"
+                                                        if engine == "cpu" or getattr(cuda_engine.device, "type", "") == "cpu"
+                                                        else (
+                                                            "tensorrt"
+                                                            if getattr(wrapped_model, "is_tensorrt", False)
+                                                            else "pytorch-cuda"
+                                                        )
                                                     )
                                                 )
                                                 out_h, out_w = pipe_upscaler.output_hw
@@ -2061,6 +2108,10 @@ def run_upscale_pipeline(
                                                     use_tensorrt=use_tensorrt,
                                                     dedup=allow_cyclic_dedup,
                                                 )
+                                                if isinstance(ai_result, dict) and ai_result.get("runtime_backend"):
+                                                    logger.update_live_context(
+                                                        runtime_backend=str(ai_result["runtime_backend"])
+                                                    )
 
                                                 # Tích lũy kích thước frame PNG thực tế
                                                 try:

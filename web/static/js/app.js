@@ -791,7 +791,7 @@ function bootstrapStudio() {
         cps
           .map(
             (cp) =>
-              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${isCpActive(cp) ? "1" : isCpQueued(cp) ? "Q" : "0"}`
+              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.model_requested || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${cp.glossary || ""}|${cp.subs_upgrade ?? ""}|${cp.no_embed ?? ""}|${cp.sound_cues || ""}|${isCpActive(cp) ? "1" : isCpQueued(cp) ? "Q" : "0"}`
           )
           .join(";;");
       if (cpSig !== lastCheckpointSignature) {

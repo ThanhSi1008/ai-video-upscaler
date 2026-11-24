@@ -2005,59 +2005,55 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       }
       if (pendingSubsBox && pendingSubsList) {
         clearChildren(pendingSubsList);
-        if (pendingItems.length === 0) {
-          pendingSubsBox.hidden = true;
-        } else {
-          pendingSubsBox.hidden = false;
-          for (const item of pendingItems) {
-            const targetKey = String(
-              item.base_name || item.episode || item.video_path || item.ja_path || ""
-            ).trim();
-            if (!targetKey) continue;
-            const shortName = targetKey.split(/[\\/]/).pop();
-            const qualTag = item.subs_quality ? ` • ${item.subs_quality}` : "";
-            const chip = el("div", { className: "key-slot-chip" }, [
-              el("span", { className: "badge badge-warn", textContent: `⏳ ${shortName}${qualTag}` }),
-            ]);
-            let pendConfirmTimer = 0;
-            const delPendBtn = el(
-              "button",
-              {
-                type: "button",
-                className: "btn btn-ghost btn-xs",
-                "aria-label": `Xóa ${shortName} khỏi pending_subs.json`,
-                onClick: async () => {
-                  if (delPendBtn.dataset.confirming !== "true") {
-                    delPendBtn.dataset.confirming = "true";
-                    delPendBtn.className = "btn btn-danger btn-xs";
-                    delPendBtn.textContent = "Xác nhận xóa?";
-                    if (pendConfirmTimer) window.clearTimeout(pendConfirmTimer);
-                    pendConfirmTimer = window.setTimeout(() => {
-                      delete delPendBtn.dataset.confirming;
-                      delPendBtn.className = "btn btn-ghost btn-xs";
-                      delPendBtn.textContent = "✕ Xóa";
-                    }, 4000);
-                    return;
-                  }
+        for (const item of pendingItems) {
+          const targetKey = String(
+            item.video_path || item.ja_path || item.base_name || item.episode || ""
+          ).trim();
+          if (!targetKey) continue;
+          const shortName = targetKey.split(/[\\/]/).pop();
+          const qualTag = item.subs_quality ? ` • ${item.subs_quality}` : "";
+          const chip = el("div", { className: "key-slot-chip", title: targetKey }, [
+            el("span", { className: "badge badge-warn", textContent: `⏳ ${shortName}${qualTag}` }),
+          ]);
+          let pendConfirmTimer = 0;
+          const delPendBtn = el(
+            "button",
+            {
+              type: "button",
+              className: "btn btn-ghost btn-xs",
+              "aria-label": `Xóa ${shortName} khỏi pending_subs.json`,
+              onClick: async () => {
+                if (delPendBtn.dataset.confirming !== "true") {
+                  delPendBtn.dataset.confirming = "true";
+                  delPendBtn.className = "btn btn-danger btn-xs";
+                  delPendBtn.textContent = "Xác nhận xóa?";
                   if (pendConfirmTimer) window.clearTimeout(pendConfirmTimer);
-                  delPendBtn.disabled = true;
-                  try {
-                    const qs = new URLSearchParams({ target: targetKey });
-                    await apiFetch(`/api/subtrans/pending?${qs.toString()}`, { method: "DELETE" });
-                    showToast(`Đã xóa '${shortName}' khỏi pending_subs.json.`, "info", 2800);
-                    await loadSubtransOverview();
-                  } catch (err) {
-                    delPendBtn.disabled = false;
-                    showToast(err.message, "error");
-                  }
-                },
+                  pendConfirmTimer = window.setTimeout(() => {
+                    delete delPendBtn.dataset.confirming;
+                    delPendBtn.className = "btn btn-ghost btn-xs";
+                    delPendBtn.textContent = "✕ Xóa";
+                  }, 4000);
+                  return;
+                }
+                if (pendConfirmTimer) window.clearTimeout(pendConfirmTimer);
+                delPendBtn.disabled = true;
+                try {
+                  const qs = new URLSearchParams({ target: targetKey });
+                  await apiFetch(`/api/subtrans/pending?${qs.toString()}`, { method: "DELETE" });
+                  showToast(`Đã xóa '${shortName}' khỏi pending_subs.json.`, "info", 2800);
+                  await loadSubtransOverview();
+                } catch (err) {
+                  delPendBtn.disabled = false;
+                  showToast(err.message, "error");
+                }
               },
-              ["✕ Xóa"]
-            );
-            chip.append(delPendBtn);
-            pendingSubsList.append(chip);
-          }
+            },
+            ["✕ Xóa"]
+          );
+          chip.append(delPendBtn);
+          pendingSubsList.append(chip);
         }
+        pendingSubsBox.hidden = pendingSubsList.childElementCount === 0;
       }
 
       const glossaryList = Array.isArray(data.glossaries) ? data.glossaries : [];
@@ -2076,8 +2072,12 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         const curDlgG = glossaryDialogSelect.value;
         clearChildren(glossaryDialogSelect);
         for (const g of glossaryList) {
+          const sizeLabel =
+            typeof g.size_kb === "number" && Number.isFinite(g.size_kb)
+              ? `${g.name} (${g.size_kb} KB)`
+              : g.name;
           glossaryDialogSelect.append(
-            el("option", { value: g.name, textContent: `${g.name} (${g.size_kb} KB)` })
+            el("option", { value: g.name, textContent: sizeLabel })
           );
         }
         if (curDlgG) {
@@ -2351,19 +2351,25 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     }
   };
 
-  subInputPath?.addEventListener("input", () => setSubFieldError(subInputPath, subInputError, null));
+  let selectedSubInputs = null;
+
+  subInputPath?.addEventListener("input", () => {
+    selectedSubInputs = null;
+    setSubFieldError(subInputPath, subInputError, null);
+  });
   subOffset?.addEventListener("input", () => setSubFieldError(subOffset, subOffsetError, null));
 
   btnBrowseSub?.addEventListener("click", async () => {
     const picked = await openFsPicker({
       title: "Chọn Video (.mkv/.mp4), Phụ đề (.srt/.ass) hoặc Thư mục",
-      multi: false,
+      multi: true,
       allowFolders: true,
       includeSubtitles: true,
       allow4k: true,
     });
     if (picked.length > 0 && subInputPath) {
-      subInputPath.value = picked[0];
+      selectedSubInputs = picked.length > 1 ? [...picked] : null;
+      subInputPath.value = picked.length > 1 ? picked.join("; ") : picked[0];
       setSubFieldError(subInputPath, subInputError, null);
     }
   });
@@ -2408,10 +2414,17 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     localSubLaunchInFlight = true;
     syncSubtransLaunchButtons();
     try {
+      const multiList =
+        Array.isArray(selectedSubInputs) && selectedSubInputs.length > 1
+          ? selectedSubInputs
+          : target.includes(";")
+            ? target.split(";").map((s) => s.trim()).filter(Boolean)
+            : null;
       const res = await apiFetch("/api/jobs/subtrans", {
         method: "POST",
         body: {
-          input_path: target,
+          input_path: multiList && multiList.length > 0 ? multiList[0] : target,
+          inputs: multiList && multiList.length > 1 ? multiList : null,
           output_dir: subOutDir?.value.trim() || null,
           subs_quality: subQuality?.value || "normal",
           subs_upgrade: Boolean(subUpgrade?.checked),

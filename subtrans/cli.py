@@ -331,6 +331,7 @@ def _collect_batch_input_files(input_dir: Path, en_dir: Optional[Path]) -> List[
 @app.command()
 def batch(
     input_dir: Path = typer.Argument(..., help="Directory containing subtitle files", exists=True),
+    files: Optional[List[Path]] = typer.Option(None, "--file", help="Optional explicit subtitle file(s) to translate instead of scanning all files in input_dir"),
     en_dir: Optional[Path] = typer.Option(None, "--en-dir", help="Directory containing matching English subtitles"),
     en_offset_ms: int = typer.Option(0, "--en-offset-ms", help="Offset applied to English timing in milliseconds"),
     sub_offset_ms: int = typer.Option(0, "--sub-offset-ms", help="Offset applied to Japanese/Output subtitle timing in milliseconds (e.g. -11154)"),
@@ -366,7 +367,20 @@ def batch(
         )
         raise typer.Exit(code=1)
 
-    sub_files = _collect_batch_input_files(input_dir, en_dir)
+    if files:
+        seen_explicit: set[Path] = set()
+        sub_files = []
+        for raw_f in files:
+            resolved_f = raw_f.resolve()
+            if not resolved_f.is_file():
+                console.print(f"[bold red]❌ Subtitle file not found: {raw_f}[/bold red]")
+                raise typer.Exit(code=1)
+            if resolved_f in seen_explicit or resolved_f.name.lower().endswith(_OUTPUT_ARTIFACT_SUFFIXES):
+                continue
+            seen_explicit.add(resolved_f)
+            sub_files.append(resolved_f)
+    else:
+        sub_files = _collect_batch_input_files(input_dir, en_dir)
     if not sub_files:
         console.print(f"[yellow]No .ass or .srt files found in {input_dir}[/yellow]")
         return

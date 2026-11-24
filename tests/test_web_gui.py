@@ -7030,11 +7030,26 @@ def test_m3_p2_trt_sidecar_build_stage_b_flags_glossary_editor_pending_delete_an
         ).json()
         assert sched_stale["episodes"][0]["trt_ready"] is False
 
-        # Write matching .engine.sha256 sidecar -> trt_cached=True & trt_ready=True
+        # Sidecar missing weights_sha256 is still rejected when model has registered sha256 (build_trt_engine parity)
         eng_digest = hashlib.sha256(eng_bytes).hexdigest()
         sidecar_file = Path(f"{eng_file}.sha256")
         sidecar_file.write_text(
             json.dumps({"engine_sha256": eng_digest}),
+            encoding="utf-8",
+        )
+        av3_no_wsha = next(
+            m for m in client.get("/api/config/models-and-shows").json()["models"] if m["id"] == "animevideov3"
+        )
+        assert av3_no_wsha["trt_cached"] is False
+
+        # Write matching .engine.sha256 sidecar with weights_sha256 -> trt_cached=True & trt_ready=True
+        sidecar_file.write_text(
+            json.dumps(
+                {
+                    "engine_sha256": eng_digest,
+                    "weights_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                }
+            ),
             encoding="utf-8",
         )
         ms_valid = client.get("/api/config/models-and-shows").json()
@@ -7210,3 +7225,211 @@ def test_m3_p2_trt_sidecar_build_stage_b_flags_glossary_editor_pending_delete_an
         assert "/api/jobs/clean-temp" in panels_js
         assert "/api/subtrans/glossary" in panels_js
         assert "/api/subtrans/pending" in panels_js
+
+
+def test_review_regressions_glossary_size_trt_blended_hw_resume_probe_key_clear_subtrans_files_pending_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify fixes for glossary size_kb/schema/pointer bounds, blended TRT & resolution readiness, probing resume chunks, Slot 2 clear, explicit subtrans --file batching, and path-scoped pending_subs delete."""
+    import hashlib
+    from web.app import _apply_subtrans_key_edits, _resolve_ffmpeg_binary
+
+    monkeypatch.delenv("SUBTRANS_DISABLE_DOTENV", raising=False)
+    for env_k in list(os.environ.keys()):
+        if env_k.startswith("GEMINI_API_KEY"):
+            monkeypatch.delenv(env_k, raising=False)
+
+    root = _seed_workspace(tmp_path / "review_reg_ws")
+    # Add UpCunet2x entry to models.yaml to verify --grain-restore blended _ps2x_<8hex>_ engine handling
+    models_yaml = root / "models" / "models.yaml"
+    models_yaml.write_text(
+        models_yaml.read_text(encoding="utf-8")
+        + """  realcugan-pro-conservative-2x:
+    name: Real-CUGAN Pro Conservative 2x
+    arch:
+      type: UpCunet2x
+      upscale: 2
+    downsample: none
+    weights_path: models_bench/cugan_pro_cons_2x.pth
+    sha256: "b8ae522511111111222222223333333344444444555555556666666677777777"
+    license: MIT
+    default: false
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Glossary overview includes numeric size_kb, enforces pointer bounds, and rejects malformed speaks_to / address_rules
+    (root / "subtrans").mkdir(parents=True, exist_ok=True)
+    (root / "subtrans" / "glossary.yaml").write_text("terms:\n  - ja: 魔法\n    vi: ma thuật\n", encoding="utf-8")
+    g_dir = root / "glossaries"
+    (g_dir / "base.yaml").write_text("../subtrans/glossary.yaml\n", encoding="utf-8")
+    (g_dir / "glossary.frieren.yaml").write_text("terms:\n  - ja: 勇者\n    vi: Dũng giả\n" * 40, encoding="utf-8")
+    (g_dir / "glossary.escape.yaml").write_text("../shows.yaml\n", encoding="utf-8")
+
+    # 2. Clearing Slot 2 when GEMINI_API_KEY != GEMINI_API_KEY_1 preserves Slot 3
+    upd_slot2 = _apply_subtrans_key_edits(
+        {"GEMINI_API_KEY": "keyA_1111", "GEMINI_API_KEY_1": "keyB_2222", "GEMINI_API_KEY_2": "keyC_3333"},
+        None,
+        None,
+        None,
+        slots={2: ""},
+    )
+    assert upd_slot2["GEMINI_API_KEY_1"] == "keyA_1111"
+    assert upd_slot2["GEMINI_API_KEY_2"] == ""
+    assert upd_slot2["GEMINI_API_KEY_3"] == "keyC_3333"
+
+    spawned_cmds: List[List[str]] = []
+    next_running = {"val": False}
+    app = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: spawned_cmds.append(list(cmd))
+        or FakePopenProcess(cmd, pid=99112, running=next_running["val"], return_code=0),
+    )
+
+    with TestClient(app) as client:
+        ov = client.get("/api/subtrans/overview").json()
+        by_gname = {g["name"]: g for g in ov["glossaries"]}
+        assert isinstance(by_gname["base.yaml"]["size_kb"], (int, float))
+        assert by_gname["base.yaml"]["read_only"] is True
+        assert by_gname["glossary.frieren.yaml"]["size_kb"] >= 1.0
+        # Pointer escaping glossaries/ to ../shows.yaml must be blocked with 403
+        assert client.get("/api/subtrans/glossary", params={"name": "glossary.escape.yaml"}).status_code == 403
+        # Malformed speaks_to (null/str) or address_rules.relations (str) rejected with 400
+        for bad_gyaml in (
+            "characters:\n  - name_ja: A\n    speaks_to: null\n",
+            "address_rules:\n  relations: not_a_list\n",
+        ):
+            assert (
+                client.put(
+                    "/api/subtrans/glossary",
+                    json={"name": "glossary.frieren.yaml", "yaml_content": bad_gyaml},
+                ).status_code
+                == 400
+            )
+
+        # 3. Blended --grain-restore UpCunet2x engine (_ps2x_<8hex>_) is valid (not stale), and schedule checks resolution
+        trt_dir = root / ".cache" / "trt_engines"
+        blend_bytes = b"BLENDED_CUGAN_PS2X_ENGINE" * 16
+        blend_sha = "94dd0fa7deadbeef" * 4
+        blend_eng = trt_dir / "realcugan-pro-conservative-2x_ps2x_94dd0fa7_RTX3060_trt10_1080x1920_b1-1.engine"
+        blend_eng.write_bytes(blend_bytes)
+        Path(f"{blend_eng}.sha256").write_text(
+            json.dumps({"engine_sha256": hashlib.sha256(blend_bytes).hexdigest(), "weights_sha256": blend_sha}),
+            encoding="utf-8",
+        )
+        ms = client.get("/api/config/models-and-shows").json()
+        cugan_m = next(m for m in ms["models"] if m["id"] == "realcugan-pro-conservative-2x")
+        assert cugan_m["trt_cached"] is True
+        assert cugan_m["stale_trt_engines"] == []
+
+        ff_bin = _resolve_ffmpeg_binary()
+        scope_vid = root / "anime_season" / "CinemaScope_1920x800.mkv"
+        r_scope = subprocess.run(
+            [
+                ff_bin,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=1920x800:r=24:d=0.2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(scope_vid),
+            ],
+            capture_output=True,
+            timeout=20.0,
+            check=False,
+        )
+        if r_scope.returncode == 0:
+            # Engine cached is 1080x1920 only -> 800x1920 episode must report trt_ready=False
+            sched_scope = client.post(
+                "/api/queue/preview-schedule",
+                json={"inputs": [str(scope_vid)], "model": "realcugan-pro-conservative-2x", "use_tensorrt": True},
+            ).json()
+            assert sched_scope["episodes"][0]["trt_ready"] is False
+
+        # 4. Multi-file standalone subtrans selection passes explicit --file entries without translating whole folder
+        subs_5_dir = root / "subs_five"
+        subs_5_dir.mkdir()
+        for idx in range(1, 6):
+            (subs_5_dir / f"ep{idx:02d}.srt").write_text(
+                f"1\n00:00:01,000 --> 00:00:02,000\n台詞{idx}\n", encoding="utf-8"
+            )
+        spawned_cmds.clear()
+        r_multi_sub = client.post(
+            "/api/jobs/subtrans",
+            json={
+                "inputs": [str(subs_5_dir / "ep01.srt"), str(subs_5_dir / "ep03.srt")],
+                "dry_run": True,
+            },
+        )
+        assert r_multi_sub.status_code == 200
+        cmd_msub = spawned_cmds[-1]
+        assert "batch" in cmd_msub
+        file_flag_vals = [cmd_msub[i + 1] for i, tok in enumerate(cmd_msub[:-1]) if tok == "--file"]
+        assert len(file_flag_vals) == 2
+        assert str((subs_5_dir / "ep01.srt").resolve()) in file_flag_vals
+        assert str((subs_5_dir / "ep03.srt").resolve()) in file_flag_vals
+
+        # 5. Path-scoped DELETE /api/subtrans/pending removes only matching show directory when bare stem '01' collides
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "pending_subs.json").write_text(
+            json.dumps(
+                [
+                    {"base_name": "01", "video_path": str(root / "ShowA" / "01.mkv")},
+                    {"base_name": "01", "video_path": str(root / "ShowB" / "01.mkv")},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        r_del_a = client.delete("/api/subtrans/pending", params={"target": str(root / "ShowA" / "01.mkv")})
+        assert r_del_a.status_code == 200
+        assert r_del_a.json()["removed"] == 1
+        assert r_del_a.json()["remaining_count"] == 1
+        assert "ShowB" in r_del_a.json()["pending_subs"][0]["video_path"]
+
+        # 6. Resume checkpoint chunks stay populated during stage='probing' / 'splitting' after RunLogger writes live_status.json
+        ep_res = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+        cp_res = root / "out" / f".temp_{ep_res.stem}"
+        (cp_res / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+        (cp_res / "upscaled_segs" / "up_0000.mp4").write_bytes(b"1234" * 32)
+        (cp_res / "upscaled_segs" / "up_0002.mp4").write_bytes(b"1234" * 32)
+        (cp_res / "manifest.json").write_text(
+            json.dumps({"source_file": str(ep_res), "total_chunks": 5, "model_id": "animevideov3"}),
+            encoding="utf-8",
+        )
+        next_running["val"] = True
+        r_start_res = client.post("/api/jobs/start", json={"inputs": [str(ep_res)], "subs_after_upscale": False})
+        assert r_start_res.status_code == 200
+        res_job = r_start_res.json()["job"]
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": ep_res.name,
+                    "input_path": str(ep_res),
+                    "pid": 99112,
+                    "job_id": res_job["job_id"],
+                    "stage": "probing",
+                    "total_chunks": 0,
+                    "completed_chunks": 0,
+                    "chunks": [],
+                    "resumed_chunks": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        st_probing = client.get("/api/status").json()["pipeline"]
+        assert st_probing["effective_stage"] == "probing"
+        assert st_probing["live"]["completed_chunks"] == 2
+        assert st_probing["live"]["total_chunks"] == 5
+        assert st_probing["live"]["resumed_chunks"] == [0, 2]
+        client.post("/api/jobs/abort")
+
+        # 7. Compare Stage syncs clamped timestamp back into #compare-ts-input & panels.js uses sizeLabel
+        compare_js = client.get("/static/js/compare_stage.js").text
+        panels_js_upd = client.get("/static/js/panels.js").text
+        assert "tsInput.value = String(res.upscaled_timestamp_sec)" in compare_js
+        assert "typeof g.size_kb === \"number\"" in panels_js_upd

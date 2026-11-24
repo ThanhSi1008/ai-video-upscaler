@@ -476,6 +476,16 @@ export function initCompareStage({ selectTabById } = {}) {
       if (Number.isFinite(probedFps) && probedFps > 0.5) {
         currentCompareFps = probedFps;
       }
+      if (
+        tsInput instanceof HTMLInputElement &&
+        typeof res.upscaled_timestamp_sec === "number" &&
+        Number.isFinite(res.upscaled_timestamp_sec)
+      ) {
+        const reqTsVal = Number(tsInput.value);
+        if (Number.isFinite(reqTsVal) && reqTsVal > res.upscaled_timestamp_sec + 1e-4) {
+          tsInput.value = String(res.upscaled_timestamp_sec);
+        }
+      }
       if (placeholder) {
         placeholder.hidden = true;
       }

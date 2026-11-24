@@ -299,7 +299,8 @@ class StartPreviewRequest(BaseModel):
 
 
 class StartSubtransRequest(BaseModel):
-    input_path: str
+    input_path: Optional[str] = None
+    inputs: Optional[List[str]] = None
     output_dir: Optional[str] = None
     subs_quality: str = "normal"
     subs_upgrade: bool = False
@@ -315,6 +316,15 @@ class StartSubtransRequest(BaseModel):
     @classmethod
     def _validate_paths_no_nul(cls, v: Optional[str]) -> Optional[str]:
         return _validate_no_nul_str(v, "path")
+
+    @field_validator("inputs")
+    @classmethod
+    def _validate_sub_inputs_no_nul(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        for item in v:
+            _validate_no_nul_str(item, "inputs")
+        return v
 
     @field_validator("output_format")
     @classmethod
@@ -745,7 +755,12 @@ def _apply_subtrans_key_edits(
             and n == 1
             and (
                 (eff_key_1 is not None and legacy_triple_coexist)
-                or (eff_key_2 is not None and not old_multi and len(old_prim_orig) == 1 and bool(numbered_vars.get(2)))
+                or (
+                    bool(eff_key_2 and eff_key_2.strip())
+                    and not old_multi
+                    and len(old_prim_orig) == 1
+                    and bool(numbered_vars.get(2))
+                )
             )
         ):
             continue
@@ -828,7 +843,10 @@ def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
                     try:
                         c_start_s = float(container.start_time / av.time_base) if container.start_time is not None else 0.0
                         seek_s = max(0.0, container_dur - 15.0) + c_start_s
-                        container.seek(int(seek_s * av.time_base), backward=True, any_frame=False)
+                        if vs.time_base is not None and float(vs.time_base) > 0.0:
+                            container.seek(int(seek_s / float(vs.time_base)), backward=True, any_frame=False, stream=vs)
+                        else:
+                            container.seek(int(seek_s * av.time_base), backward=True, any_frame=False)
                         max_end_s = 0.0
                         for pkt in container.demux(vs):
                             if pkt.pts is None or getattr(pkt, "is_discard", False):
@@ -1830,9 +1848,14 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if is_mock and popen_factory is None:
-            if not strip_wrapping_quotes(req.input_path):
+            mock_targets = [strip_wrapping_quotes(str(x)) for x in (req.inputs or []) if strip_wrapping_quotes(str(x))]
+            if not mock_targets and req.input_path:
+                cleaned_single = strip_wrapping_quotes(req.input_path)
+                if cleaned_single:
+                    mock_targets = [cleaned_single]
+            if not mock_targets:
                 raise HTTPException(status_code=400, detail="Thiếu input_path.")
-            return _build_mock_job_response("subtrans", [strip_wrapping_quotes(req.input_path)], req.model_dump())
+            return _build_mock_job_response("subtrans", mock_targets, req.model_dump())
         try:
             job = job_manager.start_subtrans_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -2766,13 +2789,40 @@ def create_app(
             }
 
         glossaries_dir = root / "glossaries"
+        sub_base_for_ov = (root / "subtrans" / "glossary.yaml").resolve()
+        gloss_root_for_ov = glossaries_dir.resolve() if glossaries_dir.is_dir() else glossaries_dir
         glossaries: List[Dict[str, Any]] = []
         if glossaries_dir.is_dir():
             for gf in sorted(glossaries_dir.glob("*.yaml")):
+                try:
+                    if gf.is_symlink() or os.path.islink(str(gf)) or bool(getattr(gf.lstat(), "st_file_attributes", 0) & 0x0400):
+                        continue
+                    gf_resolved = gf.resolve()
+                    curr_g = gf_resolved
+                    seen_ov: set[Path] = set()
+                    while curr_g.is_file() and curr_g not in seen_ov:
+                        seen_ov.add(curr_g)
+                        raw_ov = curr_g.read_text(encoding="utf-8").strip()
+                        if "\n" not in raw_ov and raw_ov.endswith((".yaml", ".yml")):
+                            nxt_ov_raw = curr_g.parent / raw_ov
+                            if nxt_ov_raw.is_symlink() or os.path.islink(str(nxt_ov_raw)):
+                                break
+                            nxt_ov = nxt_ov_raw.resolve()
+                            if ((nxt_ov.is_relative_to(gloss_root_for_ov) and nxt_ov.parent == gloss_root_for_ov) or nxt_ov == sub_base_for_ov) and nxt_ov.is_file() and nxt_ov != curr_g:
+                                curr_g = nxt_ov
+                                continue
+                        break
+                    sz_kb = round(curr_g.stat().st_size / 1024.0, 1)
+                    ro_flag = gf.name.lower() == "base.yaml" or curr_g == sub_base_for_ov or not curr_g.is_relative_to(gloss_root_for_ov)
+                except OSError:
+                    continue
                 glossaries.append({
                     "name": gf.name,
-                    "path": str(gf.resolve()),
-                    "read_only": gf.name.lower() == "base.yaml",
+                    "path": str(gf_resolved),
+                    "resolved_name": curr_g.name,
+                    "is_pointer": curr_g != gf_resolved,
+                    "read_only": ro_flag,
+                    "size_kb": sz_kb,
                 })
 
         # Pending subtitles queue (check state/, legacy root, then out/)
@@ -2859,6 +2909,18 @@ def create_app(
             "configured_count": active_key_count,
         }
 
+    def _is_reparse_or_symlink(p_check: Path) -> bool:
+        try:
+            if p_check.is_symlink() or os.path.islink(str(p_check)):
+                return True
+            if p_check.exists():
+                st_chk = p_check.lstat()
+                if bool(getattr(st_chk, "st_file_attributes", 0) & 0x0400):
+                    return True
+        except OSError:
+            return False
+        return False
+
     def _resolve_glossary_entry(raw_name: str) -> tuple[Path, Path, bool, bool]:
         """Resolve glossary file strictly inside glossaries/, following single-line text pointers."""
         cleaned = strip_wrapping_quotes(raw_name)
@@ -2875,8 +2937,8 @@ def create_app(
         else:
             entry_raw = gloss_root / cand_in
 
-        if entry_raw.is_symlink() or os.path.islink(str(entry_raw)):
-            raise HTTPException(status_code=403, detail="Từ chối truy cập symlink Glossary.")
+        if _is_reparse_or_symlink(entry_raw):
+            raise HTTPException(status_code=403, detail="Từ chối truy cập symlink/junction Glossary.")
         try:
             entry_path = entry_raw.resolve()
         except OSError as exc:
@@ -2894,8 +2956,6 @@ def create_app(
         if not entry_path.is_file():
             raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp Glossary: {entry_path.name}")
 
-        # Follow plain-text Git 100644 alias pointers safely within repository bounds.
-        repo_resolved = root.resolve()
         curr = entry_path
         seen_ptrs: set[Path] = set()
         while curr.is_file() and curr not in seen_ptrs:
@@ -2906,10 +2966,15 @@ def create_app(
                 break
             if "\n" not in raw_txt and raw_txt.endswith((".yaml", ".yml")):
                 nxt_raw = curr.parent / raw_txt
-                if nxt_raw.is_symlink() or os.path.islink(str(nxt_raw)):
-                    raise HTTPException(status_code=403, detail="Từ chối con trỏ trỏ tới symlink.")
+                if _is_reparse_or_symlink(nxt_raw):
+                    raise HTTPException(status_code=403, detail="Từ chối con trỏ trỏ tới symlink/junction.")
                 nxt = nxt_raw.resolve()
-                if nxt.is_relative_to(repo_resolved) and nxt.is_file() and nxt != curr:
+                if not ((nxt.is_relative_to(gloss_root) and nxt.parent == gloss_root) or nxt == sub_base_glossary):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Từ chối con trỏ Glossary trỏ ra ngoài thư mục glossaries/.",
+                    )
+                if nxt.is_file() and nxt != curr:
                     curr = nxt
                     continue
             break
@@ -2946,10 +3011,21 @@ def create_app(
             for idx, c in enumerate(parsed["characters"], start=1):
                 if not isinstance(c, dict):
                     raise ValueError(f"Mục characters #{idx} phải là đối tượng từ điển.")
+                if "speaks_to" in c:
+                    if not isinstance(c["speaks_to"], list) or any(not isinstance(s, dict) for s in c["speaks_to"]):
+                        raise ValueError(f"Mục characters #{idx}.speaks_to phải là danh sách các đối tượng từ điển.")
         if "style_rules" in parsed and parsed["style_rules"] is not None and not isinstance(parsed["style_rules"], list):
             raise ValueError("Mục 'style_rules' phải là danh sách chuỗi.")
-        if "address_rules" in parsed and parsed["address_rules"] is not None and not isinstance(parsed["address_rules"], dict):
-            raise ValueError("Mục 'address_rules' phải là bản đồ (mapping).")
+        if "difficulty_markers" in parsed and parsed["difficulty_markers"] is not None and not isinstance(parsed["difficulty_markers"], list):
+            raise ValueError("Mục 'difficulty_markers' phải là danh sách chuỗi.")
+        if "address_rules" in parsed and parsed["address_rules"] is not None:
+            if not isinstance(parsed["address_rules"], dict):
+                raise ValueError("Mục 'address_rules' phải là bản đồ (mapping).")
+            for ar_k in ("relations", "first_person", "second_person", "honorifics"):
+                if ar_k in parsed["address_rules"]:
+                    ar_v = parsed["address_rules"][ar_k]
+                    if not isinstance(ar_v, list) or any(not isinstance(item_ar, dict) for item_ar in ar_v):
+                        raise ValueError(f"Mục address_rules.{ar_k} phải là danh sách các đối tượng từ điển.")
         return {
             "terms_count": len(parsed.get("terms") or []),
             "characters_count": len(parsed.get("characters") or []),
@@ -3004,10 +3080,20 @@ def create_app(
         cleaned_target = strip_wrapping_quotes(target)
         if not cleaned_target or "\x00" in cleaned_target:
             raise HTTPException(status_code=400, detail="Mục cần xóa khỏi pending_subs.json không hợp lệ.")
+        has_path_sep = ("/" in cleaned_target) or ("\\" in cleaned_target)
         stem_t = os.path.splitext(os.path.basename(cleaned_target))[0]
-        cand_keys = {cleaned_target, stem_t, f"{stem_t}_4K"}
-        if stem_t.endswith("_4K"):
-            cand_keys.add(stem_t[:-3])
+        stem_variants = {stem_t, f"{stem_t}_4K", f"{stem_t}_4K_animejanai"}
+        if stem_t.lower().endswith("_4k_animejanai"):
+            stem_variants.add(stem_t[:-14])
+        elif stem_t.lower().endswith("_4k"):
+            stem_variants.add(stem_t[:-3])
+        cand_keys = {cleaned_target} | stem_variants
+        norm_target_dir = (
+            os.path.normcase(os.path.dirname(os.path.abspath(cleaned_target)))
+            if has_path_sep
+            else ""
+        )
+        norm_target_abs = os.path.normcase(os.path.abspath(cleaned_target)) if has_path_sep else ""
 
         pending_file: Optional[Path] = None
         raw_obj: Any = None
@@ -3028,6 +3114,19 @@ def create_app(
 
         def _matches_pending(it: Any) -> bool:
             if not isinstance(it, dict):
+                return False
+            if has_path_sep:
+                for path_k in ("video_path", "ja_path", "base_name", "episode"):
+                    vp_str = str(it.get(path_k) or "").strip()
+                    if not vp_str or (("/" not in vp_str) and ("\\" not in vp_str)):
+                        continue
+                    vp_abs = os.path.normcase(os.path.abspath(vp_str))
+                    if vp_abs == norm_target_abs:
+                        return True
+                    vp_dir = os.path.normcase(os.path.dirname(vp_abs))
+                    vp_stem = os.path.splitext(os.path.basename(vp_abs))[0]
+                    if vp_dir == norm_target_dir and vp_stem in stem_variants:
+                        return True
                 return False
             for field_k in ("base_name", "episode", "video_path", "ja_path"):
                 v_str = str(it.get(field_k) or "").strip()

@@ -136,7 +136,8 @@ def is_upscaled_output_stem(stem: str) -> bool:
 
 _FORBIDDEN_WIN32_CHARS = frozenset('<>:"|?*')
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_TRT_SIDECAR_CACHE: Dict[tuple[str, int, int, int, str], bool] = {}
+_BLENDED_PS2X_SHA8_RE = re.compile(r"_ps2x_([0-9a-f]{8})_")
+_TRT_SIDECAR_CACHE: Dict[tuple[str, int, int, int, str, str], bool] = {}
 
 
 def _hash_file_sha256_hex(path: Path) -> str:
@@ -153,6 +154,7 @@ def _hash_file_sha256_hex(path: Path) -> str:
 def verify_trt_engine_sidecar_stdlib(
     engine_file: Path,
     expected_weights_sha256: Optional[str] = None,
+    allow_blended_prefix_sha8: Optional[str] = None,
 ) -> bool:
     """Verify .engine file has a valid non-empty .sha256 sidecar matching engine & weights digests."""
     try:
@@ -168,7 +170,8 @@ def verify_trt_engine_sidecar_stdlib(
         if sc_st.st_size <= 0:
             return False
         exp_w = str(expected_weights_sha256 or "").strip().lower()
-        cache_key = (str(engine_file.resolve()), ef_st.st_mtime_ns, ef_st.st_size, sc_st.st_mtime_ns, exp_w)
+        blend_p8 = str(allow_blended_prefix_sha8 or "").strip().lower()
+        cache_key = (str(engine_file.resolve()), ef_st.st_mtime_ns, ef_st.st_size, sc_st.st_mtime_ns, exp_w, blend_p8)
         cached = _TRT_SIDECAR_CACHE.get(cache_key)
         if cached is not None:
             return cached
@@ -187,10 +190,15 @@ def verify_trt_engine_sidecar_stdlib(
             rec_w = ""
         if not _HEX64_RE.fullmatch(rec_eng):
             return False
-        if exp_w and rec_w and rec_w != exp_w:
-            ok = False
-        else:
-            ok = _hash_file_sha256_hex(engine_file) == rec_eng
+        weights_ok = True
+        if exp_w:
+            if rec_w == exp_w:
+                weights_ok = True
+            elif blend_p8 and _HEX64_RE.fullmatch(rec_w) and rec_w.startswith(blend_p8):
+                weights_ok = True
+            else:
+                weights_ok = False
+        ok = weights_ok and (_hash_file_sha256_hex(engine_file) == rec_eng)
         if len(_TRT_SIDECAR_CACHE) >= 512:
             _TRT_SIDECAR_CACHE.clear()
         _TRT_SIDECAR_CACHE[cache_key] = ok
@@ -216,7 +224,13 @@ def inspect_model_trt_cache(
     for ef in sorted(trt_cache_dir.glob("*.engine"), key=lambda p: p.name.lower()):
         if not any(ef.name.startswith(f"{pfx}_") for pfx in prefixes):
             continue
-        if verify_trt_engine_sidecar_stdlib(ef, expected_weights_sha256=expected_weights_sha256):
+        m_blend = _BLENDED_PS2X_SHA8_RE.search(ef.name.lower())
+        blend_sha8 = m_blend.group(1) if m_blend else None
+        if verify_trt_engine_sidecar_stdlib(
+            ef,
+            expected_weights_sha256=expected_weights_sha256,
+            allow_blended_prefix_sha8=blend_sha8,
+        ):
             valid_engines.append(ef.name)
         else:
             stale_engines.append(ef.name)
@@ -638,8 +652,9 @@ class SafeLocalFSBrowser:
                         found_subs.append(str(full_p))
                 chosen = found or found_4k or found_subs
                 if not chosen:
+                    sub_hint = " hoặc phụ đề .srt/.ass" if allow_subtitles else ""
                     raise ValueError(
-                        f"Thư mục '{cand}' không chứa file video gốc hợp lệ nào (hoặc tất cả đã là bản _4K)."
+                        f"Thư mục '{cand}' không chứa file video gốc{sub_hint} hợp lệ nào (hoặc tất cả đã là bản _4K)."
                     )
                 for fp in chosen:
                     _add(fp)
