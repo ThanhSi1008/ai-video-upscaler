@@ -299,6 +299,7 @@ def scan_temp_checkpoints(
 
             episode_name = entry.name[len(".temp_"):]
             model_id = ""
+            model_requested = ""
             dedup_policy = ""
             dedup_policy_requested = ""
             grain_restore = "auto"
@@ -310,6 +311,10 @@ def scan_temp_checkpoints(
             subs_quality = ""
             prefer_whisper: Optional[bool] = None
             async_subs: Optional[bool] = None
+            glossary_str = ""
+            subs_upgrade_val: Optional[bool] = None
+            no_embed_val: Optional[bool] = None
+            sound_cues_str = ""
             source_file = ""
             output_dir_str = ""
             if manifest_path.is_file():
@@ -317,6 +322,14 @@ def scan_temp_checkpoints(
                     mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
                     if isinstance(mdata, dict):
                         model_id = str(mdata.get("model_id") or "")
+                        if "model_requested" in mdata:
+                            model_requested = str(mdata.get("model_requested") or "").strip()
+                        else:
+                            res_src = str(mdata.get("resolution_source") or "").strip().lower()
+                            if res_src.startswith(("shows.yaml", "models.yaml", "default")) and model_id != "auto-pareto":
+                                model_requested = ""
+                            else:
+                                model_requested = model_id
                         dedup_policy = str(mdata.get("dedup_policy") or "")
                         dedup_policy_requested = str(mdata.get("dedup_policy_requested") or "")
                         if mdata.get("grain_restore"):
@@ -335,6 +348,14 @@ def scan_temp_checkpoints(
                             prefer_whisper = bool(mdata.get("prefer_whisper"))
                         if "async_subs" in mdata and isinstance(mdata.get("async_subs"), bool):
                             async_subs = bool(mdata.get("async_subs"))
+                        if mdata.get("glossary"):
+                            glossary_str = str(mdata.get("glossary") or "").strip()
+                        if "subs_upgrade" in mdata and isinstance(mdata.get("subs_upgrade"), bool):
+                            subs_upgrade_val = bool(mdata.get("subs_upgrade"))
+                        if "no_embed" in mdata and isinstance(mdata.get("no_embed"), bool):
+                            no_embed_val = bool(mdata.get("no_embed"))
+                        if mdata.get("sound_cues"):
+                            sound_cues_str = str(mdata.get("sound_cues") or "").strip()
                         raw_bs = mdata.get("batch_size")
                         if isinstance(raw_bs, int) and not isinstance(raw_bs, bool) and 1 <= raw_bs <= 32:
                             batch_size_val = raw_bs
@@ -420,6 +441,7 @@ def scan_temp_checkpoints(
                 "completed_chunks": up_count,
                 "total_chunks": total_chunks,
                 "model_id": model_id,
+                "model_requested": model_requested,
                 "dedup_policy": dedup_policy,
                 "dedup_policy_requested": dedup_policy_requested,
                 "grain_restore": grain_restore,
@@ -431,6 +453,10 @@ def scan_temp_checkpoints(
                 "subs_quality": subs_quality,
                 "prefer_whisper": prefer_whisper,
                 "async_subs": async_subs,
+                "glossary": glossary_str,
+                "subs_upgrade": subs_upgrade_val,
+                "no_embed": no_embed_val,
+                "sound_cues": sound_cues_str,
                 "size_mb": round(size_bytes / (1024 * 1024), 2),
             })
     return results

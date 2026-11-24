@@ -225,6 +225,7 @@ class RunLogger:
             "dedup_policy": "default",
             "zero_disk": True,
             "engine": "cuda",
+            "runtime_backend": "",
             "is_preview": False,
             "total_frames": 0,
             "unique_frames": 0,

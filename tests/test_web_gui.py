@@ -6555,3 +6555,231 @@ def test_mixed_slash_unc_quoted_output_dirs_subtrans_secret_guard_and_post_delet
         assert st_after_del["effective_stage"] == "idle"
         assert st_after_del["live"]["completed_chunks"] == 0
         assert st_after_del["checkpoints"] == []
+
+
+def test_m1_p0_srgb_compare_parity_video_tail_clamp_outdir_hygiene_subtrans_batch_and_checkpoint_isolation(
+    tmp_path: Path,
+):
+    """Verify M1 P0 fixes: 8-bit sRGB PNG parity, orphan cleanup, video-stream tail clamp, output_dir hygiene, subtrans batch routing, and isolated checkpoint resume."""
+    import struct
+    import cv2
+    import numpy as np
+    import upscale
+    from web.app import _resolve_ffmpeg_binary
+    from web.sse_hub import scan_temp_checkpoints
+
+    root = _seed_workspace(tmp_path / "m1_p0_ws")
+    ff_bin = _resolve_ffmpeg_binary()
+
+    # 1. Real FFmpeg 8-bit untagged vs 10-bit bt709 dark frame parity + longer-audio MKV tail clamp
+    src_vid = root / "anime_season" / "dark_ep.mkv"
+    up_vid = root / "out" / "dark_ep_preview_10s_4K.mkv"
+    r_src = subprocess.run(
+        [
+            ff_bin,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x161820:s=160x90:r=24:d=1.0,format=yuv420p,setparams=range=tv:colorspace=unknown:color_primaries=unknown:color_trc=unknown",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src_vid),
+        ],
+        capture_output=True,
+        timeout=25.0,
+        check=False,
+    )
+    r_up = subprocess.run(
+        [
+            ff_bin,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x161820:s=320x180:r=24:d=1.0,format=yuv420p10le,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo:d=2.4",
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "aac",
+            str(up_vid),
+        ],
+        capture_output=True,
+        timeout=25.0,
+        check=False,
+    )
+    if r_src.returncode == 0 and r_up.returncode == 0:
+        app_real = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics)
+        with TestClient(app_real) as client_real:
+            # Clamping timestamp_sec=9999 uses video stream duration (~1.0s), avoiding empty audio tail at 2.3s
+            r_cmp = client_real.post(
+                "/api/preview/compare-frames",
+                json={
+                    "source_path": str(src_vid),
+                    "upscaled_path": str(up_vid),
+                    "timestamp_sec": 9999.0,
+                    "source_offset_sec": 0.0,
+                },
+            )
+            assert r_cmp.status_code == 200, r_cmp.text
+            cmp_data = r_cmp.json()
+            assert cmp_data["upscaled_meta"]["duration"] <= 1.2
+            assert cmp_data["upscaled_meta"]["fps"] >= 23.0
+
+            b_src = client_real.get(cmp_data["source_frame_url"]).content
+            b_up = client_real.get(cmp_data["upscaled_frame_url"]).content
+            # Both PNGs must be 8-bit RGB24 (IHDR bit_depth=8, color_type=2) with no cICP mismatch
+            assert struct.unpack(">BB", b_src[24:26]) == (8, 2)
+            assert struct.unpack(">BB", b_up[24:26]) == (8, 2)
+            assert b"sRGB" in b_src and b"sRGB" in b_up
+            assert b"cICP" not in b_up
+
+            arr_src = cv2.imdecode(np.frombuffer(b_src, dtype=np.uint8), cv2.IMREAD_COLOR)
+            arr_up = cv2.imdecode(np.frombuffer(b_up, dtype=np.uint8), cv2.IMREAD_COLOR)
+            assert arr_src is not None and arr_up is not None
+            assert abs(float(arr_src.mean()) - float(arr_up.mean())) < 1.0
+
+    # 2. Orphan src_*.png cleanup when upscaled frame extraction raises RuntimeError
+    def _fail_on_up(vpath: Path, _ts: float, out_png: Path) -> None:
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        if out_png.name.startswith("up_"):
+            raise RuntimeError("Simulated upscaled frame decode error")
+        out_png.write_bytes(PNG_1X1_BYTES)
+
+    app_orphan = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, frame_extract_fn=_fail_on_up)
+    with TestClient(app_orphan) as client_orphan:
+        ep_src = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+        ep_up = root / "out" / "Fate_Ep22_4K.mkv"
+        ep_up.write_bytes(b"\x00" * 512)
+        r_fail_cmp = client_orphan.post(
+            "/api/preview/compare-frames",
+            json={"source_path": str(ep_src), "upscaled_path": str(ep_up), "timestamp_sec": 1.0},
+        )
+        assert r_fail_cmp.status_code == 422
+        assert list((root / "scratch" / "web_compare").glob("src_*.png")) == []
+
+    # 3. Preview seconds range (3..60), output_dir validation, and subtrans batch routing
+    spawned_cmds: List[List[str]] = []
+    app_jobs = create_app(
+        workspace_root=root,
+        gpu_query_fn=_idle_gpu_metrics,
+        popen_factory=lambda cmd, **_kw: spawned_cmds.append(list(cmd)) or FakePopenProcess(cmd, running=False),
+    )
+    ep1 = root / "anime_season" / "[SubsPlease] Frieren - 02 (1080p).mkv"
+    ep2 = root / "anime_season" / "[SubsPlease] Frieren - 10 (1080p).mkv"
+    existing_mkv = root / "out" / "existing_file_4K.mkv"
+    existing_mkv.write_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 256)
+
+    with TestClient(app_jobs) as client_jobs:
+        for bad_sec in (0, 2, 61, 999):
+            assert (
+                client_jobs.post("/api/jobs/preview", json={"video_path": str(ep1), "seconds": bad_sec}).status_code
+                == 422
+            )
+        assert client_jobs.post("/api/jobs/preview", json={"video_path": str(ep1), "seconds": 3}).status_code == 200
+        assert client_jobs.post("/api/jobs/preview", json={"video_path": str(ep1), "seconds": 60}).status_code == 200
+
+        bad_out_candidates = [str(existing_mkv), str(root / "scratch" / "bad<>dir")]
+        if sys.platform == "win32":
+            unmounted = next(
+                (f"{ch}:\\nonexistent_upscaler_out" for ch in "ZYXWVUTSRQPONM" if not Path(f"{ch}:\\").exists()),
+                None,
+            )
+            if unmounted:
+                bad_out_candidates.append(unmounted)
+
+        for bad_out in bad_out_candidates:
+            assert (
+                client_jobs.post(
+                    "/api/jobs/start",
+                    json={"inputs": [str(ep1)], "output_dir": bad_out, "dry_run": True},
+                ).status_code
+                == 400
+            )
+            assert (
+                client_jobs.post(
+                    "/api/jobs/preview",
+                    json={"video_path": str(ep1), "output_dir": bad_out},
+                ).status_code
+                == 400
+            )
+
+        # CLI upscale.py _validate_cli_output_path rejects --queue with single .mkv -o and bad chars
+        with pytest.raises(SystemExit) as exc_q:
+            upscale._validate_cli_output_path(str(existing_mkv), multi_queue=True)
+        assert exc_q.value.code == 1
+        if sys.platform == "win32":
+            with pytest.raises(SystemExit) as exc_ch:
+                upscale._validate_cli_output_path(str(root / "bad<>out"), multi_queue=False)
+            assert exc_ch.value.code == 1
+
+        # Subtrans directory of .srt files routes to `subtrans.py batch <dir>`
+        subs_dir = root / "subs_only_folder"
+        subs_dir.mkdir()
+        (subs_dir / "Ep01.ja.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nA\n", encoding="utf-8")
+        (subs_dir / "Ep02.ja.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nB\n", encoding="utf-8")
+        spawned_cmds.clear()
+        r_batch = client_jobs.post(
+            "/api/jobs/subtrans",
+            json={"input_path": str(subs_dir), "subs_quality": "high", "dry_run": True},
+        )
+        assert r_batch.status_code == 200
+        sub_cmd = spawned_cmds[-1]
+        assert any(part.endswith("subtrans.py") for part in sub_cmd)
+        assert "batch" in sub_cmd
+        assert str(subs_dir.resolve()) in sub_cmd
+        assert "--subs-only" not in sub_cmd
+
+        # Mixed video + .srt in JobManager.start_subtrans_job raises ValueError
+        jm_mix = app_jobs.state.job_manager
+        with pytest.raises(ValueError, match="trộn lẫn"):
+            jm_mix.start_subtrans_job(
+                {"input_path": str(ep1), "inputs": [str(ep1), str(subs_dir / "Ep01.ja.srt")], "dry_run": True}
+            )
+
+        # 4. Checkpoint model_requested="" preservation and isolated resumeCheckpointNow contract
+        cp_auto = root / "out" / f".temp_{ep2.stem}"
+        (cp_auto / "upscaled_segs").mkdir(parents=True)
+        (cp_auto / "upscaled_segs" / "up_0000.mp4").write_bytes(b"\x00" * 256)
+        (cp_auto / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "source_file": str(ep2),
+                    "output_dir": str(root / "out"),
+                    "model_id": "animejanai-hd-v3-ultracompact",
+                    "model_requested": "",
+                    "dedup_policy": "dis-auto",
+                    "dedup_policy_requested": "",
+                    "resolution_source": "shows.yaml (*[SubsPlease]*)",
+                    "total_chunks": 4,
+                }
+            ),
+            encoding="utf-8",
+        )
+        cps = scan_temp_checkpoints(root)
+        matched_cp = next(c for c in cps if c["episode_name"] == ep2.stem)
+        assert matched_cp["model_id"] == "animejanai-hd-v3-ultracompact"
+        assert matched_cp["model_requested"] == ""
+        assert matched_cp["dedup_policy_requested"] == ""
+
+        panels_js = client_jobs.get("/static/js/panels.js").text
+        resume_idx = panels_js.index("async resumeCheckpointNow(cp)")
+        resume_body = panels_js[resume_idx:]
+        assert "applyCheckpointOptions" not in resume_body
+        assert "model: cpModelReq || null" in resume_body

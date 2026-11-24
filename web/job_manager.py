@@ -23,6 +23,7 @@ from web.fs_browser import (
     is_secret_filename,
     is_unc_path,
     strip_wrapping_quotes,
+    validate_win32_path_hygiene,
 )
 from web.sse_hub import _coerce_pid, check_active_gpu_lock, live_matches_web_job
 
@@ -251,7 +252,7 @@ def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = 
     try:
         target = (p if p.is_absolute() else workspace_root / p).resolve()
     except OSError:
-        target = p
+        target = p if p.is_absolute() else (workspace_root / p)
     if (
         is_secret_filename(raw)
         or is_secret_filename(p.name)
@@ -260,6 +261,19 @@ def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = 
         or any(is_secret_filename(part) for part in target.parts)
     ):
         raise PermissionError("Từ chối đường dẫn đích trỏ tới tệp cấu hình nhạy cảm.")
+    validate_win32_path_hygiene(p, field=field)
+    if field == "output_dir":
+        if target.exists() and target.is_file():
+            raise ValueError(
+                f"Đường dẫn '{field}' phải là thư mục xuất, không được trỏ vào tệp tin có sẵn: '{target.name}'."
+            )
+        cur_parent = target.parent
+        while cur_parent and cur_parent != cur_parent.parent:
+            if cur_parent.exists() and cur_parent.is_file():
+                raise ValueError(
+                    f"Thành phần cha '{cur_parent.name}' là tệp tin, không thể tạo thư mục đích tại '{field}'."
+                )
+            cur_parent = cur_parent.parent
     return raw
 
 
@@ -279,6 +293,7 @@ def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> t
     p = Path(os.path.expanduser(raw))
     if p.drive and not p.is_absolute():
         raise ValueError("Đường dẫn tương đối theo ổ đĩa tại 'output_dir' không hợp lệ.")
+    validate_win32_path_hygiene(p, field="output_dir")
     if not p.is_absolute():
         p = workspace_root / p
     resolved = p.resolve()
@@ -1023,28 +1038,67 @@ class JobManager:
             raise ValueError("Vui lòng chọn file video (.mkv/.mp4) hoặc phụ đề (.srt/.ass) để dịch.")
 
         subs_quality = _validate_subs_quality(payload.get("subs_quality"))
-        items = self.fs_browser.expand_inputs([target_raw])
+        raw_inputs_list = payload.get("inputs")
+        if isinstance(raw_inputs_list, list) and raw_inputs_list:
+            sub_raw_targets = [strip_wrapping_quotes(str(x)) for x in raw_inputs_list if str(x or "").strip()]
+        else:
+            sub_raw_targets = [target_raw]
+        for s_item in sub_raw_targets:
+            _validate_no_nul(s_item, "input_path")
+
+        items = self.fs_browser.expand_inputs(sub_raw_targets, allow_subtitles=True, allow_upscaled_4k=True)
+        sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
+        has_sub_items = any(os.path.splitext(x)[1].lower() in sub_exts for x in items)
+        all_subtitles = bool(items) and all(os.path.splitext(x)[1].lower() in sub_exts for x in items)
+        if has_sub_items and not all_subtitles:
+            raise ValueError(
+                "Không thể trộn lẫn tệp video (.mkv/.mp4) và tệp phụ đề rời (.srt/.ass) trong cùng một tác vụ Subtrans."
+            )
+
+        resolved_first_in = Path(os.path.expanduser(sub_raw_targets[0]))
+        if not resolved_first_in.is_absolute():
+            resolved_first_in = (self.workspace_root / resolved_first_in).resolve()
+        else:
+            resolved_first_in = resolved_first_in.resolve()
+        is_single_dir_input = len(sub_raw_targets) == 1 and resolved_first_in.is_dir()
+        if all_subtitles and len(items) > 1 and not is_single_dir_input:
+            parent_dirs = {os.path.normcase(os.path.dirname(os.path.abspath(x))) for x in items}
+            if len(parent_dirs) > 1:
+                raise ValueError(
+                    "Khi dịch hàng loạt nhiều tệp phụ đề rời (.srt/.ass), hãy chọn trực tiếp thư mục chứa phụ đề để chạy 'subtrans.py batch'."
+                )
+
         prefer_whisper = bool(payload.get("prefer_whisper", False))
         dry_run = bool(payload.get("dry_run", False))
-        needs_gpu = bool(prefer_whisper and not dry_run)
+        needs_gpu = bool(prefer_whisper and not dry_run and not all_subtitles)
         self._ensure_ready_to_launch(requires_gpu=needs_gpu)
 
-        sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
-        is_subtitle_only = len(items) == 1 and os.path.splitext(items[0])[1].lower() in sub_exts
-
-        if is_subtitle_only:
-            target_file = items[0]
+        if all_subtitles:
             out_dir = out_dir_val or str(self.workspace_root / "out")
-            cmd = [
-                self.python_executable,
-                str(self.workspace_root / "subtrans.py"),
-                "run",
-                target_file,
-                "-o",
-                out_dir,
-                "--subs-quality",
-                subs_quality,
-            ]
+            if is_single_dir_input or len(items) > 1:
+                batch_dir = str(resolved_first_in) if is_single_dir_input else os.path.dirname(os.path.abspath(items[0]))
+                cmd = [
+                    self.python_executable,
+                    str(self.workspace_root / "subtrans.py"),
+                    "batch",
+                    batch_dir,
+                    "-o",
+                    out_dir,
+                    "--subs-quality",
+                    subs_quality,
+                ]
+            else:
+                target_file = items[0]
+                cmd = [
+                    self.python_executable,
+                    str(self.workspace_root / "subtrans.py"),
+                    "run",
+                    target_file,
+                    "-o",
+                    out_dir,
+                    "--subs-quality",
+                    subs_quality,
+                ]
             if glossary_val:
                 cmd.extend(["--glossary", glossary_val])
             if payload.get("subs_upgrade"):
@@ -1053,6 +1107,9 @@ class JobManager:
                 cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
             if payload.get("auto_align_en") is False:
                 cmd.append("--no-auto-align-en")
+            out_fmt = str(payload.get("output_format") or "srt").strip().lower()
+            if out_fmt == "ass":
+                cmd.extend(["--format", "ass"])
             if dry_run:
                 cmd.append("--dry-run")
         else:

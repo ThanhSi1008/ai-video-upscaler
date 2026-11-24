@@ -328,6 +328,15 @@ def run_upscale_pipeline(
         )
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+        initial_runtime_backend = (
+            "cpu"
+            if engine == "cpu"
+            else (
+                "ncnn-vulkan"
+                if engine == "ncnn"
+                else ("tensorrt" if (use_tensorrt and precision == "fp16") else "pytorch-cuda")
+            )
+        )
         logger.update_live_context(
             input_path=original_input_path,
             output_path=output_path,
@@ -336,6 +345,7 @@ def run_upscale_pipeline(
             dedup_policy=str(dedup_policy or "default"),
             zero_disk=bool(zero_disk),
             engine=str(engine),
+            runtime_backend=initial_runtime_backend,
             is_preview=bool(is_preview),
             total_frames=int(meta.get("nb_frames") or 0),
             **(
@@ -427,7 +437,17 @@ def run_upscale_pipeline(
                                 prev_segment_time = max(0, int(manifest_data.get("segment_time") or 0))
                             except (TypeError, ValueError):
                                 prev_segment_time = 0
-                            for sub_k in ("subs_after_upscale", "subs_quality", "prefer_whisper", "async_subs"):
+                            for sub_k in (
+                                "model_requested",
+                                "subs_after_upscale",
+                                "subs_quality",
+                                "prefer_whisper",
+                                "async_subs",
+                                "glossary",
+                                "subs_upgrade",
+                                "no_embed",
+                                "sound_cues",
+                            ):
                                 if sub_k in manifest_data:
                                     preserved_sub_meta[sub_k] = manifest_data[sub_k]
                         if prev_model_id and (
@@ -459,10 +479,17 @@ def run_upscale_pipeline(
                         logger.warn(f"Không thể đọc manifest.json cũ: {e}")
 
                 eff_sub_meta = {**preserved_sub_meta, **(manifest_extra_meta if isinstance(manifest_extra_meta, dict) else {})}
+                req_model_str = str(
+                    model
+                    if (model is not None and str(model).strip())
+                    else eff_sub_meta.get("model_requested", "")
+                ).strip()
+                eff_sub_meta.pop("model_requested", None)
                 manifest_data = {
                     "source_file": original_input_path,
                     "output_dir": os.path.dirname(os.path.abspath(output_path)),
                     "model_id": model_info["id"],
+                    "model_requested": req_model_str,
                     "model_name": model_info["name"],
                     "sha256": model_sha256,
                     "blended_weights_sha256": model_sha256,
@@ -710,9 +737,10 @@ def run_upscale_pipeline(
                                         except OSError:
                                             pass
                             stage_timings["Preflight Plan (mpdecimate)"] = time.time() - t_pref_start
+                            dedup_pct_val = float(dedup_plan.get("dedup_ratio_percent") or 0.0)
                             logger.info(
                                 f"⚡ Kế hoạch Deduplication: Giữ {dedup_plan['total_kept_frames']}/{dedup_plan['total_frames']} unique frames "
-                                f"({dedup_plan['dedup_ratio_percent']}% trùng lặp được loại bỏ - Tối ưu ~50% thời gian GPU)",
+                                f"({dedup_pct_val}% trùng lặp được loại bỏ - Tiết kiệm ~{dedup_pct_val:.1f}% suy luận GPU)",
                                 to_console=True
                             )
 
@@ -1363,6 +1391,13 @@ def run_upscale_pipeline(
                                                     pre_pipe_bs = int(pre_bs)
                                                 pre_cuda._zero_disk_wrapper = pre_wrapped
                                                 pre_cuda._zero_disk_key = pre_key
+                                                logger.update_live_context(
+                                                    runtime_backend=(
+                                                        "tensorrt"
+                                                        if getattr(pre_wrapped, "is_tensorrt", False)
+                                                        else "pytorch-cuda"
+                                                    )
+                                                )
                                                 pre_cuda._zero_disk_upscaler = DoubleBufferedPipeUpscaler(
                                                     pre_wrapped,
                                                     batch_size=pre_pipe_bs,
@@ -1809,6 +1844,13 @@ def run_upscale_pipeline(
                                                         pass
 
                                                 pipe_upscaler = cuda_engine._zero_disk_upscaler
+                                                logger.update_live_context(
+                                                    runtime_backend=(
+                                                        "tensorrt"
+                                                        if getattr(wrapped_model, "is_tensorrt", False)
+                                                        else "pytorch-cuda"
+                                                    )
+                                                )
                                                 out_h, out_w = pipe_upscaler.output_hw
                                                 tmp_seg_out = f"{c_seg_out}.tmp.mp4"
 

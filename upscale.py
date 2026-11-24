@@ -800,6 +800,52 @@ def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) 
     return sub_cmd
 
 
+def _validate_cli_output_path(raw_output: Optional[str], multi_queue: bool = False) -> None:
+    """Validate -o target drive, forbidden Win32 filename characters, and queue file conflicts."""
+    if not raw_output or not str(raw_output).strip():
+        return
+    raw_str = str(raw_output).strip()
+    if "\x00" in raw_str:
+        print("❌ Lỗi: Đường dẫn đích -o chứa ký tự NUL không hợp lệ.")
+        sys.exit(1)
+    expanded = os.path.expanduser(raw_str)
+    p = Path(expanded)
+    if sys.platform == "win32":
+        if p.drive and not p.is_absolute():
+            print(f"❌ Lỗi: Đường dẫn tương đối theo ổ đĩa tại -o không hợp lệ: '{raw_str}'")
+            sys.exit(1)
+        if p.drive and len(p.drive) == 2 and p.drive[1] == ":" and not os.path.exists(f"{p.drive}\\"):
+            print(f"❌ Lỗi: Ổ đĩa đích '{p.drive}\\' không tồn tại trên hệ thống.")
+            sys.exit(1)
+        non_drive_parts = p.parts[1:] if (p.drive or p.root) else p.parts
+        forbidden_win = set('<>:"|?*')
+        for part in non_drive_parts:
+            if part in (".", ".."):
+                continue
+            if any(ch in forbidden_win or ord(ch) < 32 for ch in part):
+                print(f"❌ Lỗi: Đường dẫn đích -o chứa ký tự cấm của Windows (<>:\"|?*): '{raw_str}'")
+                sys.exit(1)
+
+    abs_out = os.path.abspath(expanded)
+    vid_exts = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
+    out_ext = os.path.splitext(abs_out)[1].lower()
+    if multi_queue and (os.path.isfile(abs_out) or out_ext in vid_exts):
+        print(
+            f"❌ Lỗi: Khi chạy hàng đợi nhiều tập (--queue), đường dẫn đích -o phải là thư mục, "
+            f"không được trỏ vào tệp video đơn lẻ: '{raw_str}'"
+        )
+        sys.exit(1)
+    if os.path.isfile(abs_out) and out_ext not in vid_exts:
+        print(f"❌ Lỗi: Đường dẫn đích -o đang trỏ tới một tệp tin có sẵn không hợp lệ: '{raw_str}'")
+        sys.exit(1)
+    cur_parent = os.path.dirname(abs_out)
+    while cur_parent and cur_parent != os.path.dirname(cur_parent):
+        if os.path.isfile(cur_parent):
+            print(f"❌ Lỗi: Thành phần đường dẫn cha '{cur_parent}' là tệp tin, không thể tạo thư mục đích.")
+            sys.exit(1)
+        cur_parent = os.path.dirname(cur_parent)
+
+
 def parse_args(args=None):
     parsed = build_arg_parser().parse_args(args)
     if getattr(parsed, "subs_quality", None) == "fast":
@@ -1015,6 +1061,8 @@ def main():
             print("❌ Lỗi: Cần cung cấp đường dẫn video khi dùng cờ --subs-only (ví dụ: ./upscale.py --subs-only <tập.mkv>)")
             sys.exit(1)
 
+        _validate_cli_output_path(args.output, multi_queue=len(subs_targets) > 1)
+
         glossary_arg = getattr(args, "glossary", None)
         glossary_path_obj = Path(os.path.expanduser(str(glossary_arg).strip())) if glossary_arg else None
         from subtrans.pipeline import TranslationPipeline
@@ -1154,6 +1202,8 @@ def main():
     except ValueError as e_dir:
         print(f"❌ Lỗi: {e_dir}")
         sys.exit(1)
+
+    _validate_cli_output_path(args.output, multi_queue=len(videos) > 1)
 
     video_overhead = 420.0  # TensorRT FP16 Zero-Disk mặc định
     has_trt = False
@@ -1368,10 +1418,15 @@ def main():
                             else {}
                         ),
                         "manifest_extra_meta": {
+                            "model_requested": str(args.model or "").strip(),
                             "subs_after_upscale": bool(getattr(args, "subs_after_upscale", True)),
                             "subs_quality": str(getattr(args, "subs_quality", "normal") or "normal"),
                             "prefer_whisper": bool(getattr(args, "prefer_whisper", False)),
                             "async_subs": bool(getattr(args, "async_subs", False)),
+                            "glossary": str(getattr(args, "glossary", "") or "").strip(),
+                            "subs_upgrade": bool(getattr(args, "subs_upgrade", False)),
+                            "no_embed": bool(getattr(args, "no_embed", False)),
+                            "sound_cues": str(getattr(args, "sound_cues", "drop") or "drop"),
                         },
                     },
                 )

@@ -132,6 +132,28 @@ def is_upscaled_output_stem(stem: str) -> bool:
     return low.endswith("_4k") or low.endswith("_4k_animejanai")
 
 
+_FORBIDDEN_WIN32_CHARS = frozenset('<>:"|?*')
+
+
+def validate_win32_path_hygiene(p: Path, field: str = "path") -> None:
+    """Validate Win32 drive existence and reject illegal NTFS filename characters."""
+    if sys.platform != "win32":
+        return
+    if p.drive and not p.is_absolute():
+        raise ValueError(f"Đường dẫn tương đối theo ổ đĩa tại '{field}' không hợp lệ.")
+    if p.drive and len(p.drive) == 2 and p.drive[1] == ":":
+        if not Path(f"{p.drive}\\").exists():
+            raise ValueError(f"Ổ đĩa đích '{p.drive}\\' tại '{field}' không tồn tại.")
+    non_drive_parts = p.parts[1:] if (p.drive or p.root) else p.parts
+    for part in non_drive_parts:
+        if part in (".", ".."):
+            continue
+        if any(ch in _FORBIDDEN_WIN32_CHARS or ord(ch) < 32 for ch in part):
+            raise ValueError(
+                f"Đường dẫn tại '{field}' chứa ký tự cấm của Windows (<>:\"|?*)."
+            )
+
+
 class SafeLocalFSBrowser:
     """Sandboxed local directory browser and routing resolver for Web Studio."""
 
@@ -505,6 +527,8 @@ class SafeLocalFSBrowser:
 
             if cand.is_dir():
                 found: List[str] = []
+                found_4k: List[str] = []
+                found_subs: List[str] = []
                 for entry_name in sorted(os.listdir(cand), key=natural_sort_key):
                     if entry_name.startswith("."):
                         continue
@@ -512,16 +536,24 @@ class SafeLocalFSBrowser:
                     if not full_p.is_file():
                         continue
                     stem, ext = os.path.splitext(entry_name)
-                    if ext.lower() not in VIDEO_EXTENSIONS:
-                        continue
-                    if is_upscaled_output_stem(stem):
-                        continue
-                    found.append(str(full_p))
-                if not found:
+                    ext_low = ext.lower()
+                    if ext_low in VIDEO_EXTENSIONS:
+                        if is_upscaled_output_stem(stem):
+                            if allow_upscaled_4k:
+                                found_4k.append(str(full_p))
+                        else:
+                            found.append(str(full_p))
+                    elif allow_subtitles and ext_low in SUBTITLE_EXTENSIONS:
+                        low_name = entry_name.lower()
+                        if low_name.endswith((".vi.srt", ".vi.ass", ".review.srt", ".partial.srt")):
+                            continue
+                        found_subs.append(str(full_p))
+                chosen = found or found_4k or found_subs
+                if not chosen:
                     raise ValueError(
                         f"Thư mục '{cand}' không chứa file video gốc hợp lệ nào (hoặc tất cả đã là bản _4K)."
                     )
-                for fp in found:
+                for fp in chosen:
                     _add(fp)
             elif cand.is_file():
                 ext = cand.suffix.lower()

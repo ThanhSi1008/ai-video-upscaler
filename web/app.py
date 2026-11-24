@@ -46,8 +46,9 @@ from web.fs_browser import (
     match_show_pattern,
     match_show_rule,
     strip_wrapping_quotes,
+    validate_win32_path_hygiene,
 )
-from web.job_manager import MODEL_REFERENCE_FPS, JobManager, parse_preview_start_value
+from web.job_manager import MODEL_REFERENCE_FPS, JobManager, _validate_output_dir, parse_preview_start_value
 from web.sse_hub import TelemetryHub, _coerce_pid, check_active_gpu_lock, scan_temp_checkpoints
 
 ALLOWED_OPEN_MEDIA_EXTS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
@@ -259,8 +260,8 @@ class StartPreviewRequest(BaseModel):
     @field_validator("seconds")
     @classmethod
     def _validate_sec(cls, v: int) -> int:
-        if v < 1 or v > 3600:
-            raise ValueError("seconds phải nằm trong khoảng 1..3600.")
+        if v < 3 or v > 60:
+            raise ValueError("seconds phải nằm trong khoảng 3..60 giây.")
         return v
 
     @field_validator("nvenc_multipass")
@@ -660,29 +661,92 @@ def _apply_subtrans_key_edits(
     return updates
 
 
+_HMS_DURATION_RE = re.compile(r"^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$")
+
+
+def _parse_hms_duration_tag(raw_val: Any) -> float:
+    m = _HMS_DURATION_RE.match(str(raw_val or "").strip())
+    if not m:
+        return 0.0
+    try:
+        return int(m.group(1)) * 3600.0 + int(m.group(2)) * 60.0 + float(m.group(3))
+    except ValueError:
+        return 0.0
+
+
+def _resolve_ffmpeg_binary() -> str:
+    repo_root = Path(__file__).resolve().parent.parent
+    exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    bundled = repo_root / "bin" / "ffmpeg" / exe_name
+    if bundled.is_file():
+        return str(bundled)
+    return "ffmpeg"
+
+
 def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
-    """Read video duration and pixel dimensions via PyAV, returning zeros on failure."""
+    """Read video stream duration, FPS, and pixel dimensions via PyAV, returning zeros on failure."""
     try:
         import av
         with av.open(str(video_path)) as container:
             if container.streams.video:
                 vs = container.streams.video[0]
-                dur = float(container.duration / av.time_base) if container.duration else 0.0
+                rate = vs.average_rate or vs.base_rate
+                fps_val = float(rate) if rate and float(rate) > 0 else 23.976
+                container_dur = float(container.duration / av.time_base) if container.duration else 0.0
+                stream_dur = 0.0
+                if vs.duration is not None and vs.time_base is not None:
+                    cand_sd = float(vs.duration * vs.time_base)
+                    if cand_sd > 0.0:
+                        stream_dur = cand_sd
+                if stream_dur <= 0.0 and vs.metadata:
+                    for mk, mv in vs.metadata.items():
+                        if str(mk).upper().startswith("DURATION"):
+                            parsed_tag = _parse_hms_duration_tag(mv)
+                            if parsed_tag > 0.0:
+                                stream_dur = parsed_tag
+                                break
+                if stream_dur <= 0.0 and vs.frames and int(vs.frames) > 0 and fps_val > 0.0:
+                    stream_dur = float(vs.frames) / fps_val
+                if stream_dur <= 0.0 and container_dur > 0.0:
+                    try:
+                        c_start_s = float(container.start_time / av.time_base) if container.start_time is not None else 0.0
+                        seek_s = max(0.0, container_dur - 15.0) + c_start_s
+                        container.seek(int(seek_s * av.time_base), backward=True, any_frame=False)
+                        max_end_s = 0.0
+                        for pkt in container.demux(vs):
+                            if pkt.pts is None or getattr(pkt, "is_discard", False):
+                                continue
+                            tb = pkt.time_base or vs.time_base
+                            if tb is not None:
+                                pkt_s = float(pkt.pts * tb) - c_start_s
+                                pkt_d = float(pkt.duration * tb) if pkt.duration else (1.0 / fps_val)
+                                if pkt_s + pkt_d > max_end_s:
+                                    max_end_s = pkt_s + pkt_d
+                        if max_end_s > 0.0:
+                            stream_dur = max_end_s
+                    except Exception:
+                        pass
+                eff_dur = (
+                    min(stream_dur, container_dur)
+                    if (stream_dur > 0.0 and container_dur > 0.0)
+                    else (stream_dur if stream_dur > 0.0 else container_dur)
+                )
                 return {
-                    "duration": round(dur, 3),
+                    "duration": round(max(0.0, eff_dur), 3),
                     "width": int(vs.width or 0),
                     "height": int(vs.height or 0),
+                    "fps": round(fps_val, 3),
                 }
     except Exception:
         pass
-    return {"duration": 0.0, "width": 0, "height": 0}
+    return {"duration": 0.0, "width": 0, "height": 0, "fps": 23.976}
 
 
 def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path) -> None:
-    """Extract a single PNG frame using BT.709 limited->full color range conversion."""
+    """Extract an 8-bit rgb24 PNG frame with normalized BT.709->sRGB color tags for browser parity."""
     out_png.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg",
+        _resolve_ffmpeg_binary(),
         "-y",
         "-ss",
         f"{max(0.0, float(timestamp_sec)):.3f}",
@@ -691,7 +755,11 @@ def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path
         "-frames:v",
         "1",
         "-vf",
-        "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc",
+        (
+            "scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=pc:flags=bicubic+accurate_rnd+full_chroma_int,"
+            "format=rgb24,"
+            "setparams=colorspace=gbr:color_primaries=bt709:color_trc=iec61966-2-1:range=pc"
+        ),
         str(out_png),
     ]
     startupinfo = None
@@ -794,6 +862,8 @@ def _resolve_dir_from_raw(
         if strict_secret:
             raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
         return None
+    if strict_secret:
+        validate_win32_path_hygiene(raw_path, field="output_dir")
     p = raw_path if raw_path.is_absolute() else root / raw_path
     try:
         resolved = p.resolve()
@@ -1585,6 +1655,7 @@ def create_app(
     def api_start_upscale(req: StartUpscaleRequest) -> Dict[str, Any]:
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -1607,6 +1678,7 @@ def create_app(
     def api_start_preview(req: StartPreviewRequest) -> Dict[str, Any]:
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -1631,6 +1703,8 @@ def create_app(
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
             _resolve_dir_from_raw(root, req.glossary, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
+            _validate_output_dir(root, req.glossary, field="glossary")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -2080,9 +2154,11 @@ def create_app(
         src_meta = _probe_duration_and_dims(src_p)
         up_meta = _probe_duration_and_dims(up_p)
 
+        up_fps = max(1.0, float(up_meta.get("fps") or 23.976))
+        up_tail_guard = max(0.12, round(1.5 / up_fps, 3))
         up_ts = max(0.0, float(req.timestamp_sec))
-        if up_meta["duration"] > 0 and up_ts > max(0.0, up_meta["duration"] - 0.08):
-            up_ts = max(0.0, round(up_meta["duration"] - 0.1, 3))
+        if up_meta["duration"] > 0 and up_ts > max(0.0, up_meta["duration"] - up_tail_guard):
+            up_ts = max(0.0, round(up_meta["duration"] - up_tail_guard, 3))
 
         if req.source_offset_sec is not None:
             offset_s = float(req.source_offset_sec)
@@ -2112,6 +2188,10 @@ def create_app(
                 offset_s = 0.0
 
         src_ts = max(0.0, up_ts + offset_s)
+        src_fps = max(1.0, float(src_meta.get("fps") or up_fps))
+        src_tail_guard = max(0.12, round(1.5 / src_fps, 3))
+        if src_meta["duration"] > 0 and src_ts > max(0.0, src_meta["duration"] - src_tail_guard):
+            src_ts = max(0.0, round(src_meta["duration"] - src_tail_guard, 3))
 
         compare_dir = root / "scratch" / "web_compare"
         compare_dir.mkdir(parents=True, exist_ok=True)
@@ -2124,14 +2204,26 @@ def create_app(
         src_png = compare_dir / f"src_{digest}.png"
         up_png = compare_dir / f"up_{digest}.png"
 
+        created_src_png = False
+        created_up_png = False
         try:
             if not src_png.is_file():
+                created_src_png = True
                 extractor(src_p, src_ts, src_png)
             if not up_png.is_file():
+                created_up_png = True
                 extractor(up_p, up_ts, up_png)
         except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            if created_src_png:
+                src_png.unlink(missing_ok=True)
+            if created_up_png:
+                up_png.unlink(missing_ok=True)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
+            if created_src_png:
+                src_png.unlink(missing_ok=True)
+            if created_up_png:
+                up_png.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         # Retain at most the 12 most recent temporary comparison frames (6 pairs)

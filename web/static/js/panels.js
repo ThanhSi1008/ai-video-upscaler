@@ -880,15 +880,25 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
           cfgChanged = true;
         }
       }
-      const cpModel = String(opts.modelId ?? opts.model_id ?? "").trim();
-      if (cpModel) {
+      const hasModelReq =
+        opts.modelRequested !== undefined || opts.model_requested !== undefined;
+      const cpModel = String(
+        hasModelReq
+          ? (opts.modelRequested ?? opts.model_requested ?? "")
+          : (opts.modelId ?? opts.model_id ?? "")
+      ).trim();
+      if (hasModelReq || cpModel) {
         setDesiredSelectValue(optModel, cpModel, "");
         cfgChanged = true;
       }
+      const hasDedupReq =
+        opts.dedupPolicy !== undefined || opts.dedup_policy_requested !== undefined;
       const cpDedup = String(
-        opts.dedupPolicy ?? opts.dedup_policy_requested ?? opts.dedup_policy ?? ""
+        hasDedupReq
+          ? (opts.dedupPolicy ?? opts.dedup_policy_requested ?? "")
+          : (opts.dedup_policy ?? "")
       ).trim();
-      if (cpDedup) {
+      if (hasDedupReq || cpDedup) {
         setDesiredSelectValue(optDedup, cpDedup, "");
         cfgChanged = true;
       }
@@ -1033,7 +1043,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
         return;
       }
-      const { sourceFile } = applyCheckpointOptions(cp, { replaceQueue: true });
+      const isObj = typeof cp === "object" && cp !== null;
+      const sourceFile = isObj
+        ? String(cp.sourceFile ?? cp.source_file ?? "").trim()
+        : String(cp || "").trim();
       if (!sourceFile) {
         showToast(
           "Checkpoint cũ thiếu đường dẫn tệp nguồn đầy đủ — vui lòng chọn lại file nguồn ở Tab 2.",
@@ -1042,29 +1055,66 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         selectTabById?.("tab-queue");
         return;
       }
-      const batchVal = validateBatchSizeInput({ focusOnError: false, toastOnError: true }) ?? 8;
+      const cpOutputDir = isObj ? String(cp.outputDir ?? cp.output_dir ?? "").trim() : "";
+      const isCustomOut = isObj
+        ? typeof (cp.isCustomOutputDir ?? cp.is_custom_output_dir) === "boolean"
+          ? Boolean(cp.isCustomOutputDir ?? cp.is_custom_output_dir)
+          : Boolean(cpOutputDir && !/[\\/]out$/i.test(cpOutputDir))
+        : false;
+      const hasModelReq =
+        isObj && (cp.modelRequested !== undefined || cp.model_requested !== undefined);
+      const cpModelReq = isObj
+        ? String(
+            hasModelReq
+              ? (cp.modelRequested ?? cp.model_requested ?? "")
+              : (cp.modelId ?? cp.model_id ?? "")
+          ).trim()
+        : "";
+      const hasDedupReq =
+        isObj && (cp.dedupPolicy !== undefined || cp.dedup_policy_requested !== undefined);
+      const cpDedupReq = isObj
+        ? String(
+            hasDedupReq
+              ? (cp.dedupPolicy ?? cp.dedup_policy_requested ?? "")
+              : ""
+          ).trim()
+        : "";
+      const rawCpBatch = isObj ? (cp.batchSize ?? cp.batch_size) : null;
+      const parsedCpBatch =
+        rawCpBatch === null || rawCpBatch === undefined || rawCpBatch === ""
+          ? Number.NaN
+          : Number(rawCpBatch);
+      const batchVal =
+        Number.isInteger(parsedCpBatch) && parsedCpBatch >= 1 && parsedCpBatch <= 32
+          ? parsedCpBatch
+          : (validateBatchSizeInput({ focusOnError: false, toastOnError: false }) ?? 8);
+
       localLaunchInFlight = true;
       syncQueueLaunchButtons();
       try {
         const payload = {
           inputs: [sourceFile],
-          output_dir: optOutDir?.value.trim() || null,
-          model: (optModel?.dataset?.desiredValue ?? optModel?.value) || null,
-          dedup_policy: (optDedup?.dataset?.desiredValue ?? optDedup?.value) || null,
-          nvenc_multipass: (optNvencMultipass?.dataset?.desiredValue ?? optNvencMultipass?.value) || "auto",
-          grain_restore: optGrainRestore?.value || "auto",
+          output_dir: isCustomOut && cpOutputDir ? cpOutputDir : null,
+          model: cpModelReq || null,
+          dedup_policy: cpDedupReq || null,
+          nvenc_multipass: String(cp?.nvencMultipass ?? cp?.nvenc_multipass_policy ?? "auto") || "auto",
+          grain_restore: String(cp?.grainRestore ?? cp?.grain_restore ?? "auto") || "auto",
           batch_size: batchVal,
           deadline: null,
           allow_partial: false,
-          zero_disk: Boolean(optZeroDisk?.checked ?? true),
-          use_tensorrt: Boolean(optTensorrt?.checked ?? true),
+          zero_disk: typeof (cp?.zeroDisk ?? cp?.zero_disk) === "boolean" ? Boolean(cp?.zeroDisk ?? cp?.zero_disk) : true,
+          use_tensorrt: typeof (cp?.useTensorrt ?? cp?.use_tensorrt) === "boolean" ? Boolean(cp?.useTensorrt ?? cp?.use_tensorrt) : true,
           subs_after_upscale:
             typeof (cp?.subsAfterUpscale ?? cp?.subs_after_upscale) === "boolean"
               ? Boolean(cp?.subsAfterUpscale ?? cp?.subs_after_upscale)
               : false,
-          subs_quality: optSubsQuality?.value || "normal",
-          async_subs: Boolean(optAsyncSubs?.checked),
-          prefer_whisper: Boolean(optPreferWhisper?.checked),
+          subs_quality: String(cp?.subsQuality ?? cp?.subs_quality ?? "") || "normal",
+          async_subs: Boolean(cp?.asyncSubs ?? cp?.async_subs),
+          prefer_whisper: Boolean(cp?.preferWhisper ?? cp?.prefer_whisper),
+          glossary: String(cp?.glossary || "").trim() || null,
+          subs_upgrade: Boolean(cp?.subsUpgrade ?? cp?.subs_upgrade),
+          no_embed: Boolean(cp?.noEmbed ?? cp?.no_embed),
+          sound_cues: String(cp?.soundCues ?? cp?.sound_cues ?? "") || "drop",
           auto_align_en: true,
           sub_offset_ms: 0,
           keep_temp: false,
