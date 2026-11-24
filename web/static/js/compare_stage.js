@@ -481,8 +481,7 @@ export function initCompareStage({ selectTabById } = {}) {
         typeof res.upscaled_timestamp_sec === "number" &&
         Number.isFinite(res.upscaled_timestamp_sec)
       ) {
-        const reqTsVal = Number(tsInput.value);
-        if (Number.isFinite(reqTsVal) && reqTsVal > res.upscaled_timestamp_sec + 1e-4) {
+        if (rawTs === "" || tsSec > res.upscaled_timestamp_sec + 1e-4) {
           tsInput.value = String(res.upscaled_timestamp_sec);
         }
       }
@@ -526,6 +525,10 @@ export function initCompareStage({ selectTabById } = {}) {
       renderCanvas();
     } catch (err) {
       if (!isCurrentExtract()) return;
+      if (mismatchWarning) {
+        mismatchWarning.textContent = "";
+        mismatchWarning.hidden = true;
+      }
       showToast(err.message, "error");
       if (metaCaption) {
         metaCaption.textContent = `Không thể trích xuất khung hình: ${err.message}`;
@@ -550,6 +553,10 @@ export function initCompareStage({ selectTabById } = {}) {
     const chosenUp = candidateSelect.value;
     const item = candidatesCache.find((c) => c.upscaled_path === chosenUp);
     if (!item) {
+      if (mismatchWarning) {
+        mismatchWarning.textContent = "";
+        mismatchWarning.hidden = true;
+      }
       syncOpenMpvButton();
       return;
     }
@@ -562,6 +569,10 @@ export function initCompareStage({ selectTabById } = {}) {
       extractAndCompare();
     } else {
       ++extractSeq;
+      if (mismatchWarning) {
+        mismatchWarning.textContent = "";
+        mismatchWarning.hidden = true;
+      }
       if (btnExtract instanceof HTMLButtonElement) {
         btnExtract.disabled = false;
         btnExtract.removeAttribute("aria-busy");
@@ -649,8 +660,14 @@ export function initCompareStage({ selectTabById } = {}) {
     if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.isComposing) return;
     if (document.querySelector("dialog[open]")) return;
     const activeEl = document.activeElement;
+    const isNonTextControl =
+      activeEl instanceof HTMLInputElement &&
+      (activeEl.type === "range" ||
+        activeEl.type === "checkbox" ||
+        activeEl.type === "radio" ||
+        activeEl.type === "button");
     if (
-      activeEl instanceof HTMLInputElement ||
+      (!isNonTextControl && activeEl instanceof HTMLInputElement) ||
       activeEl instanceof HTMLTextAreaElement ||
       activeEl instanceof HTMLSelectElement ||
       activeEl?.isContentEditable

@@ -111,6 +111,28 @@ def strip_wrapping_quotes(raw: Optional[str]) -> str:
     return s
 
 
+def unwrap_outer_quotes_preserving_trailing_space(raw: Optional[str]) -> str:
+    """Unwrap outer quote pairs without stripping trailing spaces on path segments before validation."""
+    if raw is None:
+        return ""
+    raw_s = str(raw)
+    trimmed = raw_s.strip()
+    if not trimmed:
+        return ""
+    if len(trimmed) >= 2 and (
+        (trimmed[0] in ('"', "'") and trimmed[-1] == trimmed[0])
+        or _QUOTE_PAIRS.get(trimmed[0]) == trimmed[-1]
+    ):
+        cur = trimmed
+        while len(cur) >= 2 and (
+            (cur[0] in ('"', "'") and cur[-1] == cur[0])
+            or _QUOTE_PAIRS.get(cur[0]) == cur[-1]
+        ):
+            cur = cur[1:-1]
+        return cur
+    return raw_s.lstrip()
+
+
 def is_secret_filename(name: str) -> bool:
     """Block access to secret .env files over HTTP/LAN while permitting templates."""
     low = strip_wrapping_quotes(name).lower()
@@ -120,11 +142,13 @@ def is_secret_filename(name: str) -> bool:
 
 
 def is_unc_path(raw: Optional[str]) -> bool:
-    """Return True if raw string targets a Windows/POSIX UNC network share (\\\\... or //...)."""
+    """Return True if raw string targets a Windows/POSIX UNC share or raw device namespace."""
     s = strip_wrapping_quotes(raw)
     if not s:
         return False
     norm = s.replace("/", "\\")
+    if re.match(r"^\\\\\?\\[A-Za-z]:(?:\\|$)", norm):
+        return False
     return norm.startswith("\\\\") or norm.lower().startswith("\\??\\unc\\")
 
 
@@ -135,9 +159,98 @@ def is_upscaled_output_stem(stem: str) -> bool:
 
 
 _FORBIDDEN_WIN32_CHARS = frozenset('<>:"|?*')
+_RESERVED_WIN32_STEMS = frozenset(
+    {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+)
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _BLENDED_PS2X_SHA8_RE = re.compile(r"_ps2x_([0-9a-f]{8})_")
-_TRT_SIDECAR_CACHE: Dict[tuple[str, int, int, int, str, str], bool] = {}
+_TRT_HW_PROFILE_RE = re.compile(r"_(\d{2,5}x\d{2,5})_b1-\d+\.engine$", re.IGNORECASE)
+_SUBTITLE_ARTIFACT_SUFFIXES = tuple(
+    f"{mid}{ext}"
+    for mid in (".vi", ".vi.partial", ".partial", ".review")
+    for ext in (".srt", ".ass", ".ssa", ".vtt")
+)
+_SUB_JA_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._]whisper)?(?:[._](?:ja|jpn))(?:\[cc\])?$", re.IGNORECASE)
+_SUB_EN_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._](?:en|eng))(?:\[cc\])?$", re.IGNORECASE)
+_TRT_SIDECAR_CACHE: Dict[tuple[str, int, int, int, tuple[str, ...]], bool] = {}
+
+
+def filter_paired_subtitle_paths(sub_paths: Sequence[str]) -> List[str]:
+    """Exclude output artifacts and English sidecars that have a sibling non-EN subtitle in the same folder."""
+    cleaned = [
+        p for p in sub_paths if not os.path.basename(p).lower().endswith(_SUBTITLE_ARTIFACT_SUFFIXES)
+    ]
+    non_en_keys = {
+        (
+            os.path.normcase(os.path.dirname(os.path.abspath(p))),
+            _SUB_JA_STEM_RE.sub("", os.path.splitext(os.path.basename(p))[0]).lower(),
+        )
+        for p in cleaned
+        if not _SUB_EN_STEM_RE.search(os.path.splitext(os.path.basename(p))[0])
+    }
+    selected: List[str] = []
+    for p in cleaned:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        if _SUB_EN_STEM_RE.search(stem):
+            p_dir = os.path.normcase(os.path.dirname(os.path.abspath(p)))
+            en_base = _SUB_EN_STEM_RE.sub("", stem).lower()
+            if (p_dir, en_base) in non_en_keys:
+                continue
+        selected.append(p)
+    return selected
+
+
+def compute_upcunet2x_blended_sha256_stdlib(cons_sha: str, dn3x_sha: str, alpha: float) -> str:
+    """Stdlib mirror of src/cuda_engine.py:compute_blended_weights_sha256 for zero-VRAM TRT checks."""
+    a = round(max(0.0, min(1.0, float(alpha))), 4)
+    c_clean = str(cons_sha or "").strip().lower()
+    d_clean = str(dn3x_sha or "").strip().lower()
+    if a <= 0.0:
+        return c_clean
+    if a >= 1.0:
+        return d_clean
+    token = f"upcunet2x_blend_v2:{c_clean}:{d_clean}:{a:.4f}".encode("utf-8")
+    return hashlib.sha256(token).hexdigest().lower()
+
+
+def resolve_allowed_trt_weights_shas(
+    model_id: str,
+    models_reg: Dict[str, Any],
+    grain_restore: str = "auto",
+) -> set[str]:
+    """Return exact allowed 64-hex weights SHA-256 digests for model_id and grain_restore policy."""
+    m_info = models_reg.get(model_id) if isinstance(models_reg, dict) else None
+    if not isinstance(m_info, dict):
+        return set()
+    base_sha = str(m_info.get("sha256") or "").strip().lower()
+    if model_id != "realcugan-pro-conservative-2x":
+        return {base_sha} if base_sha else set()
+    dn3x_info = models_reg.get("realcugan-pro-denoise3x-2x") if isinstance(models_reg, dict) else None
+    dn3x_sha = str((dn3x_info or {}).get("sha256") or "").strip().lower() if isinstance(dn3x_info, dict) else ""
+    light_sha = (
+        compute_upcunet2x_blended_sha256_stdlib(base_sha, dn3x_sha, 0.45)
+        if (base_sha and dn3x_sha)
+        else base_sha
+    )
+    tier = str(grain_restore or "auto").strip().lower()
+    if tier in ("off", "clean"):
+        return {base_sha} if base_sha else set()
+    if tier == "light":
+        return {light_sha} if light_sha else set()
+    if tier == "heavy":
+        chosen_heavy = dn3x_sha or base_sha
+        return {chosen_heavy} if chosen_heavy else set()
+    return {s for s in (base_sha, light_sha, dn3x_sha) if s}
+
+
+def extract_trt_hw_profiles(engine_names: Sequence[str]) -> List[str]:
+    """Extract sorted unique '{H}x{W}' profile tags from verified TensorRT .engine filenames."""
+    profiles: set[str] = set()
+    for name in engine_names:
+        m = _TRT_HW_PROFILE_RE.search(str(name))
+        if m:
+            profiles.add(m.group(1).lower())
+    return sorted(profiles, key=natural_sort_key)
 
 
 def _hash_file_sha256_hex(path: Path) -> str:
@@ -154,9 +267,9 @@ def _hash_file_sha256_hex(path: Path) -> str:
 def verify_trt_engine_sidecar_stdlib(
     engine_file: Path,
     expected_weights_sha256: Optional[str] = None,
-    allow_blended_prefix_sha8: Optional[str] = None,
+    allowed_weights_shas: Optional[Sequence[str] | set[str]] = None,
 ) -> bool:
-    """Verify .engine file has a valid non-empty .sha256 sidecar matching engine & weights digests."""
+    """Verify .engine file has a valid .sha256 sidecar matching exact engine & registered/blended weights digests."""
     try:
         if not engine_file.is_file():
             return False
@@ -169,9 +282,13 @@ def verify_trt_engine_sidecar_stdlib(
         sc_st = sidecar.stat()
         if sc_st.st_size <= 0:
             return False
-        exp_w = str(expected_weights_sha256 or "").strip().lower()
-        blend_p8 = str(allow_blended_prefix_sha8 or "").strip().lower()
-        cache_key = (str(engine_file.resolve()), ef_st.st_mtime_ns, ef_st.st_size, sc_st.st_mtime_ns, exp_w, blend_p8)
+        allowed_tuple: tuple[str, ...]
+        if allowed_weights_shas is not None:
+            allowed_tuple = tuple(sorted({str(s).strip().lower() for s in allowed_weights_shas if str(s).strip()}))
+        else:
+            exp_single = str(expected_weights_sha256 or "").strip().lower()
+            allowed_tuple = (exp_single,) if exp_single else ()
+        cache_key = (str(engine_file.resolve()), ef_st.st_mtime_ns, ef_st.st_size, sc_st.st_mtime_ns, allowed_tuple)
         cached = _TRT_SIDECAR_CACHE.get(cache_key)
         if cached is not None:
             return cached
@@ -190,14 +307,10 @@ def verify_trt_engine_sidecar_stdlib(
             rec_w = ""
         if not _HEX64_RE.fullmatch(rec_eng):
             return False
-        weights_ok = True
-        if exp_w:
-            if rec_w == exp_w:
-                weights_ok = True
-            elif blend_p8 and _HEX64_RE.fullmatch(rec_w) and rec_w.startswith(blend_p8):
-                weights_ok = True
-            else:
-                weights_ok = False
+        m_ps2x = _BLENDED_PS2X_SHA8_RE.search(engine_file.name.lower())
+        if m_ps2x and (not _HEX64_RE.fullmatch(rec_w) or not rec_w.startswith(m_ps2x.group(1))):
+            return False
+        weights_ok = (rec_w in allowed_tuple) if allowed_tuple else True
         ok = weights_ok and (_hash_file_sha256_hex(engine_file) == rec_eng)
         if len(_TRT_SIDECAR_CACHE) >= 512:
             _TRT_SIDECAR_CACHE.clear()
@@ -211,6 +324,9 @@ def inspect_model_trt_cache(
     trt_cache_dir: Path,
     model_id: str,
     expected_weights_sha256: Optional[str] = None,
+    allowed_weights_shas: Optional[Sequence[str] | set[str]] = None,
+    arch_type: str = "",
+    native_upscale: int = 2,
 ) -> tuple[List[str], List[str]]:
     """Return (verified_engine_names, stale_unverified_engine_names) for model_id in trt_cache_dir."""
     valid_engines: List[str] = []
@@ -221,15 +337,25 @@ def inspect_model_trt_cache(
     prefixes = {safe_id}
     if model_id == "animevideov3":
         prefixes.add("realesr-animevideov3")
+    req_aa2x = (str(arch_type) == "SRVGGNetCompact") and (int(native_upscale or 2) > 2)
+    req_ps2x = str(arch_type) == "UpCunet2x"
     for ef in sorted(trt_cache_dir.glob("*.engine"), key=lambda p: p.name.lower()):
         if not any(ef.name.startswith(f"{pfx}_") for pfx in prefixes):
             continue
-        m_blend = _BLENDED_PS2X_SHA8_RE.search(ef.name.lower())
-        blend_sha8 = m_blend.group(1) if m_blend else None
-        if verify_trt_engine_sidecar_stdlib(
+        low_ef = ef.name.lower()
+        arch_tag_ok = True
+        if req_aa2x and not any(low_ef.startswith(f"{pfx.lower()}_aa2x_") for pfx in prefixes):
+            arch_tag_ok = False
+        elif not req_aa2x and "_aa2x_" in low_ef:
+            arch_tag_ok = False
+        if req_ps2x and "_ps2x_" not in low_ef:
+            arch_tag_ok = False
+        elif not req_ps2x and "_ps2x_" in low_ef:
+            arch_tag_ok = False
+        if arch_tag_ok and verify_trt_engine_sidecar_stdlib(
             ef,
             expected_weights_sha256=expected_weights_sha256,
-            allow_blended_prefix_sha8=blend_sha8,
+            allowed_weights_shas=allowed_weights_shas,
         ):
             valid_engines.append(ef.name)
         else:
@@ -237,22 +363,42 @@ def inspect_model_trt_cache(
     return valid_engines, stale_engines
 
 
-def validate_win32_path_hygiene(p: Path, field: str = "path") -> None:
-    """Validate Win32 drive existence and reject illegal NTFS filename characters."""
+def validate_win32_path_hygiene(p: Path, field: str = "path", raw_str: Optional[str] = None) -> None:
+    """Validate Win32 drive existence and reject illegal chars, trailing dots/spaces, and DOS stems."""
     if sys.platform != "win32":
         return
     if p.drive and not p.is_absolute():
         raise ValueError(f"Đường dẫn tương đối theo ổ đĩa tại '{field}' không hợp lệ.")
-    if p.drive and len(p.drive) == 2 and p.drive[1] == ":":
-        if not Path(f"{p.drive}\\").exists():
-            raise ValueError(f"Ổ đĩa đích '{p.drive}\\' tại '{field}' không tồn tại.")
-    non_drive_parts = p.parts[1:] if (p.drive or p.root) else p.parts
-    for part in non_drive_parts:
+    if not p.drive and p.root:
+        raise ValueError(f"Đường dẫn gốc thiếu ký tự ổ đĩa tại '{field}' không hợp lệ.")
+    drive_norm = p.drive[4:] if p.drive.startswith("\\\\?\\") else p.drive
+    if drive_norm and len(drive_norm) == 2 and drive_norm[0].isalpha() and drive_norm[1] == ":":
+        if not Path(f"{drive_norm}\\").exists():
+            raise ValueError(f"Ổ đĩa đích '{drive_norm}\\' tại '{field}' không tồn tại.")
+    raw_segments: List[str] = []
+    if raw_str:
+        norm_bs = str(raw_str).replace("/", "\\")
+        if re.match(r"^\\\\\?\\[A-Za-z]:", norm_bs):
+            norm_bs = norm_bs[6:]
+        elif re.match(r"^[A-Za-z]:", norm_bs):
+            norm_bs = norm_bs[2:]
+        raw_segments = [seg for seg in norm_bs.split("\\") if seg]
+    non_drive_parts = list(p.parts[1:] if (p.drive or p.root) else p.parts)
+    for part in [*raw_segments, *non_drive_parts]:
         if part in (".", ".."):
             continue
         if any(ch in _FORBIDDEN_WIN32_CHARS or ord(ch) < 32 for ch in part):
             raise ValueError(
                 f"Đường dẫn tại '{field}' chứa ký tự cấm của Windows (<>:\"|?*)."
+            )
+        if part.endswith(".") or part.endswith(" "):
+            raise ValueError(
+                f"Thành phần đường dẫn tại '{field}' không được kết thúc bằng dấu chấm '.' hoặc khoảng trắng."
+            )
+        stem0 = part.split(".", 1)[0].strip().lower()
+        if stem0 in _RESERVED_WIN32_STEMS:
+            raise ValueError(
+                f"Đường dẫn tại '{field}' chứa tên thiết bị hệ thống dành riêng của Windows ({stem0.upper()})."
             )
 
 
@@ -449,13 +595,20 @@ class SafeLocalFSBrowser:
         if is_unc_path(cleaned):
             raise ValueError("Từ chối truy cập đường dẫn mạng UNC (\\\\... hoặc //...).")
 
+        cand_raw = unwrap_outer_quotes_preserving_trailing_space(raw_path)
         cand = Path(os.path.expanduser(cleaned))
         if cand.drive and not cand.is_absolute():
             raise ValueError("Đường dẫn tương đối theo ổ đĩa (vd: E:folder) không hợp lệ.")
-        if not cand.is_absolute():
-            cand = (self.workspace_root / cand).resolve()
-        else:
-            cand = cand.resolve()
+        if sys.platform == "win32" and not cand.drive and cand.root:
+            raise ValueError("Đường dẫn gốc thiếu ký tự ổ đĩa không hợp lệ.")
+        validate_win32_path_hygiene(cand, field="path", raw_str=cand_raw)
+        try:
+            if not cand.is_absolute():
+                cand = (self.workspace_root / cand).resolve()
+            else:
+                cand = cand.resolve()
+        except OSError as exc:
+            raise ValueError(f"Đường dẫn không hợp lệ: {exc}") from exc
 
         if is_secret_filename(cand.name):
             raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
@@ -609,6 +762,7 @@ class SafeLocalFSBrowser:
         for raw in raw_inputs:
             if not raw or not str(raw).strip():
                 continue
+            raw_unwrapped = unwrap_outer_quotes_preserving_trailing_space(str(raw))
             item = strip_wrapping_quotes(str(raw))
             if not item:
                 continue
@@ -619,10 +773,16 @@ class SafeLocalFSBrowser:
             cand = Path(os.path.expanduser(item))
             if cand.drive and not cand.is_absolute():
                 raise ValueError("Đường dẫn tương đối theo ổ đĩa (vd: E:folder) không hợp lệ.")
-            if not cand.is_absolute():
-                cand = (self.workspace_root / cand).resolve()
-            else:
-                cand = cand.resolve()
+            if sys.platform == "win32" and not cand.drive and cand.root:
+                raise ValueError("Đường dẫn gốc thiếu ký tự ổ đĩa không hợp lệ.")
+            validate_win32_path_hygiene(cand, field="inputs", raw_str=raw_unwrapped)
+            try:
+                if not cand.is_absolute():
+                    cand = (self.workspace_root / cand).resolve()
+                else:
+                    cand = cand.resolve()
+            except OSError as exc:
+                raise ValueError(f"Đường dẫn đầu vào không hợp lệ: {exc}") from exc
 
             if is_secret_filename(cand.name):
                 raise PermissionError("Từ chối truy cập tệp nhạy cảm.")
@@ -630,7 +790,7 @@ class SafeLocalFSBrowser:
             if cand.is_dir():
                 found: List[str] = []
                 found_4k: List[str] = []
-                found_subs: List[str] = []
+                found_subs_raw: List[str] = []
                 for entry_name in sorted(os.listdir(cand), key=natural_sort_key):
                     if entry_name.startswith("."):
                         continue
@@ -647,9 +807,10 @@ class SafeLocalFSBrowser:
                             found.append(str(full_p))
                     elif allow_subtitles and ext_low in SUBTITLE_EXTENSIONS:
                         low_name = entry_name.lower()
-                        if low_name.endswith((".vi.srt", ".vi.ass", ".review.srt", ".partial.srt")):
+                        if low_name.endswith(_SUBTITLE_ARTIFACT_SUFFIXES):
                             continue
-                        found_subs.append(str(full_p))
+                        found_subs_raw.append(str(full_p))
+                found_subs = filter_paired_subtitle_paths(found_subs_raw)
                 chosen = found or found_4k or found_subs
                 if not chosen:
                     sub_hint = " hoặc phụ đề .srt/.ass" if allow_subtitles else ""
@@ -667,6 +828,10 @@ class SafeLocalFSBrowser:
                             f"Tệp phụ đề '{cand.name}' không phải là video nguồn để nâng cấp 4K (hãy dùng Tab Subtrans)."
                         )
                     raise ValueError(f"Định dạng file không được hỗ trợ: {cand.name}")
+                if ext in SUBTITLE_EXTENSIONS and cand.name.lower().endswith(_SUBTITLE_ARTIFACT_SUFFIXES):
+                    raise ValueError(
+                        f"Tệp '{cand.name}' là phụ đề thành phẩm/tạm (.vi/.partial/.review) — không nạp làm đầu vào."
+                    )
                 if (not allow_upscaled_4k) and (ext in VIDEO_EXTENSIONS) and is_upscaled_output_stem(cand.stem):
                     raise ValueError(
                         f"Tệp '{cand.name}' đã là bản thành phẩm 4K (_4K) — từ chối nạp làm nguồn đầu vào để tránh tràn VRAM 8K."

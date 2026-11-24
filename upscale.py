@@ -623,6 +623,18 @@ def build_arg_parser():
         help="Quét và dọn dẹp sạch sẽ toàn bộ thư mục tạm (.temp_*), symlinks mồ côi và gom báo cáo audit trong thư mục xuất xưởng"
     )
     parser.add_argument(
+        "--keep-checkpoints",
+        action="store_true",
+        default=False,
+        help="Khi đi kèm --clean-temp: giữ nguyên các thư mục checkpoint (.temp_*) có thể tiếp tục, chỉ dọn nháp phụ và gom audit/"
+    )
+    parser.add_argument(
+        "--sub-format",
+        choices=["srt", "ass"],
+        default="srt",
+        help="Định dạng phụ đề xuất trong chế độ --subs-only kèm --no-embed ('srt' mặc định hoặc 'ass')"
+    )
+    parser.add_argument(
         "--no-organize-audit",
         action="store_true",
         default=False,
@@ -753,10 +765,25 @@ def _resolve_sub_output_dir_and_target_4k(
     return resolved_dir, candidate_4k
 
 
-def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) -> List[str]:
-    """Tạo lệnh subprocess --subs-only cho một tập video đã hoàn tất 4K."""
+def _build_stage_b_sub_cmd(
+    args,
+    videos: List[str],
+    src_vid: str,
+    out_vid: str,
+    ep_sub_meta: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Build Stage B --subs-only subprocess command honoring explicit CLI flags and checkpoint metadata."""
+    meta = ep_sub_meta if isinstance(ep_sub_meta, dict) else {}
     abs_out_vid = os.path.abspath(out_vid)
     sub_out_dir = os.path.dirname(abs_out_vid)
+    eff_sound_cues = str(meta.get("sound_cues") or args.sound_cues or "drop")
+    eff_subs_quality = str(meta.get("subs_quality") or args.subs_quality or "normal")
+    eff_subs_upgrade = bool(meta["subs_upgrade"]) if "subs_upgrade" in meta else bool(args.subs_upgrade)
+    eff_no_embed = bool(meta["no_embed"]) if "no_embed" in meta else bool(getattr(args, "no_embed", False))
+    eff_prefer_whisper = (
+        bool(meta["prefer_whisper"]) if "prefer_whisper" in meta else bool(getattr(args, "prefer_whisper", False))
+    )
+    eff_glossary = meta["glossary"] if ("glossary" in meta and meta["glossary"]) else getattr(args, "glossary", None)
     sub_cmd = [
         sys.executable,
         os.path.abspath(__file__),
@@ -764,19 +791,19 @@ def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) 
         src_vid,
         "-o", sub_out_dir,
         "--target-4k", abs_out_vid,
-        "--sound-cues", args.sound_cues,
-        "--subs-quality", args.subs_quality,
+        "--sound-cues", eff_sound_cues,
+        "--subs-quality", eff_subs_quality,
     ]
-    if args.subs_upgrade:
+    if eff_subs_upgrade:
         sub_cmd.append("--subs-upgrade")
-    if getattr(args, "no_embed", False):
+    if eff_no_embed:
         sub_cmd.append("--no-embed")
     if not getattr(args, "auto_align_en", True):
         sub_cmd.append("--no-auto-align-en")
-    if getattr(args, "prefer_whisper", False):
+    if eff_prefer_whisper:
         sub_cmd.append("--prefer-whisper")
-    if getattr(args, "glossary", None):
-        sub_cmd.extend(["--glossary", str(args.glossary)])
+    if eff_glossary:
+        sub_cmd.extend(["--glossary", str(eff_glossary)])
 
     queue_auto_offset = not getattr(args, "no_auto_offset", False)
     manual_offset_applied = False
@@ -800,33 +827,78 @@ def _build_stage_b_sub_cmd(args, videos: List[str], src_vid: str, out_vid: str) 
     return sub_cmd
 
 
+_RESERVED_WIN32_CLI_STEMS = frozenset(
+    {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+)
+_CLI_QUOTE_PAIRS = {'"': '"', "'": "'", "\u201c": "\u201d", "\u201d": "\u201c", "\u2018": "\u2019", "\u2019": "\u2018"}
+
+
+def _unwrap_cli_path_preserving_trailing_space(raw_val: str) -> str:
+    trimmed = raw_val.strip()
+    if not trimmed:
+        return ""
+    if len(trimmed) >= 2 and (
+        (trimmed[0] in ('"', "'") and trimmed[-1] == trimmed[0])
+        or _CLI_QUOTE_PAIRS.get(trimmed[0]) == trimmed[-1]
+    ):
+        cur = trimmed
+        while len(cur) >= 2 and (
+            (cur[0] in ('"', "'") and cur[-1] == cur[0])
+            or _CLI_QUOTE_PAIRS.get(cur[0]) == cur[-1]
+        ):
+            cur = cur[1:-1]
+        return cur
+    return raw_val.lstrip()
+
+
 def _validate_cli_output_path(raw_output: Optional[str], multi_queue: bool = False) -> None:
-    """Validate -o target drive, forbidden Win32 filename characters, and queue file conflicts."""
-    if not raw_output or not str(raw_output).strip():
+    """Validate -o target drive, Win32 path hygiene, DOS stems, trailing dots/spaces, and queue conflicts."""
+    if raw_output is None:
         return
-    raw_str = str(raw_output).strip()
-    if "\x00" in raw_str:
+    raw_orig = str(raw_output)
+    if "\x00" in raw_orig:
         print("❌ Lỗi: Đường dẫn đích -o chứa ký tự NUL không hợp lệ.")
         sys.exit(1)
+    raw_str = _unwrap_cli_path_preserving_trailing_space(raw_orig)
+    if not raw_str or not raw_str.strip():
+        return
     expanded = os.path.expanduser(raw_str)
     p = Path(expanded)
     if sys.platform == "win32":
-        if p.drive and not p.is_absolute():
-            print(f"❌ Lỗi: Đường dẫn tương đối theo ổ đĩa tại -o không hợp lệ: '{raw_str}'")
+        norm_bs = expanded.replace("/", "\\")
+        if norm_bs.startswith("\\\\") and not re.match(r"^\\\\\?\\[A-Za-z]:(?:\\|$)", norm_bs):
+            print(f"❌ Lỗi: Đường dẫn mạng UNC hoặc thiết bị thô không hợp lệ tại -o: '{raw_str}'")
             sys.exit(1)
-        if p.drive and len(p.drive) == 2 and p.drive[1] == ":" and not os.path.exists(f"{p.drive}\\"):
-            print(f"❌ Lỗi: Ổ đĩa đích '{p.drive}\\' không tồn tại trên hệ thống.")
+        if (p.drive and not p.is_absolute()) or (not p.drive and p.root):
+            print(f"❌ Lỗi: Đường dẫn tương đối theo ổ đĩa hoặc thiếu ký tự ổ đĩa tại -o không hợp lệ: '{raw_str}'")
             sys.exit(1)
-        non_drive_parts = p.parts[1:] if (p.drive or p.root) else p.parts
+        drive_norm = p.drive[4:] if p.drive.startswith("\\\\?\\") else p.drive
+        if drive_norm and len(drive_norm) == 2 and drive_norm[0].isalpha() and drive_norm[1] == ":" and not os.path.exists(f"{drive_norm}\\"):
+            print(f"❌ Lỗi: Ổ đĩa đích '{drive_norm}\\' không tồn tại trên hệ thống.")
+            sys.exit(1)
+        raw_tail = norm_bs
+        if re.match(r"^\\\\\?\\[A-Za-z]:", raw_tail):
+            raw_tail = raw_tail[6:]
+        elif re.match(r"^[A-Za-z]:", raw_tail):
+            raw_tail = raw_tail[2:]
+        raw_segments = [seg for seg in raw_tail.split("\\") if seg]
+        non_drive_parts = list(p.parts[1:] if (p.drive or p.root) else p.parts)
         forbidden_win = set('<>:"|?*')
-        for part in non_drive_parts:
+        for part in [*raw_segments, *non_drive_parts]:
             if part in (".", ".."):
                 continue
             if any(ch in forbidden_win or ord(ch) < 32 for ch in part):
                 print(f"❌ Lỗi: Đường dẫn đích -o chứa ký tự cấm của Windows (<>:\"|?*): '{raw_str}'")
                 sys.exit(1)
+            if part.endswith(".") or part.endswith(" "):
+                print(f"❌ Lỗi: Thành phần đường dẫn đích -o không được kết thúc bằng dấu chấm '.' hoặc khoảng trắng: '{raw_str}'")
+                sys.exit(1)
+            stem0 = part.split(".", 1)[0].strip().lower()
+            if stem0 in _RESERVED_WIN32_CLI_STEMS:
+                print(f"❌ Lỗi: Đường dẫn đích -o chứa tên thiết bị dành riêng của Windows ({stem0.upper()}): '{raw_str}'")
+                sys.exit(1)
 
-    abs_out = os.path.abspath(expanded)
+    abs_out = os.path.abspath(expanded.strip())
     vid_exts = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".ts", ".m2ts"}
     out_ext = os.path.splitext(abs_out)[1].lower()
     if multi_queue and (os.path.isfile(abs_out) or out_ext in vid_exts):
@@ -869,17 +941,43 @@ def main():
 
     # Xử lý cờ --clean-temp / --cleanup (Dọn dẹp nhanh thư mục tạm và gom gọn audit)
     if getattr(args, "clean_temp", False):
+        _validate_cli_output_path(args.output, multi_queue=True)
+        from src.cleanup import _is_symlink_or_reparse
         from src.config import DEFAULT_OUTPUT_DIR
         from src.logger import format_bytes
-        target_clean_dir = args.output if (args.output and os.path.isdir(args.output)) else DEFAULT_OUTPUT_DIR
+        if args.output and str(args.output).strip():
+            target_clean_dir = os.path.expanduser(str(args.output).strip())
+            if _is_symlink_or_reparse(target_clean_dir):
+                print(f"❌ Lỗi: Từ chối dọn dẹp qua symlink/reparse point tại -o: '{target_clean_dir}'")
+                sys.exit(1)
+            if not os.path.isdir(target_clean_dir):
+                print(
+                    f"ℹ️ Thư mục đích '{target_clean_dir}' chưa tồn tại — bỏ qua dọn dẹp an toàn "
+                    f"(không tự động chuyển sang '{DEFAULT_OUTPUT_DIR}')."
+                )
+                sys.exit(0)
+        else:
+            target_clean_dir = DEFAULT_OUTPUT_DIR
+            if _is_symlink_or_reparse(target_clean_dir):
+                print(f"❌ Lỗi: Thư mục xuất mặc định '{target_clean_dir}' là symlink/reparse point.")
+                sys.exit(1)
+            if not os.path.isdir(target_clean_dir):
+                print(f"ℹ️ Thư mục '{target_clean_dir}' chưa tồn tại — không có tệp tạm cần dọn.")
+                sys.exit(0)
+        include_cps = not bool(getattr(args, "keep_checkpoints", False))
         if getattr(args, "dry_run", False):
-            print(f"\n🔍 [DRY RUN] Mô phỏng quét dọn thư mục tạm tại '{target_clean_dir}' (không xóa file thật).")
+            mode_note = "gồm cả checkpoint .temp_*" if include_cps else "bảo toàn checkpoint .temp_*"
+            print(f"\n🔍 [DRY RUN] Mô phỏng quét dọn thư mục tạm tại '{target_clean_dir}' ({mode_note}, không xóa file thật).")
             sys.exit(0)
         print(f"\n🧹 Bắt đầu quét và dọn dẹp thư mục: {target_clean_dir}...")
-        report = clean_all_temporary_data(target_clean_dir)
+        report = clean_all_temporary_data(target_clean_dir, include_checkpoints=include_cps)
         print(f"✅ Đã dọn dẹp {len(report['cleaned_dirs'])} thư mục/symlink tạm:")
         for cd in report['cleaned_dirs']:
             print(f"   • {cd}")
+        if report.get("preserved_checkpoints"):
+            print(f"🛡️  Đã bảo toàn {len(report['preserved_checkpoints'])} thư mục checkpoint (.temp_*) có thể tiếp tục:")
+            for p_cp in report["preserved_checkpoints"]:
+                print(f"   • {p_cp}")
         print(f"📁 Đã gom {len(report['organized_files'])} file báo cáo kỹ thuật vào 'audit/':")
         for of in report['organized_files']:
             print(f"   • {of}")
@@ -895,7 +993,10 @@ def main():
 
     # Xử lý cờ --subs-pending (Chạy lại phụ đề cho các tập dở dang trong pending_subs.json)
     if args.subs_pending:
+        _validate_cli_output_path(args.output, multi_queue=False)
         pending_items = load_pending_subs()
+        if len(pending_items) > 1:
+            _validate_cli_output_path(args.output, multi_queue=True)
         if not pending_items:
             print("ℹ️ Không có tập nào trong danh sách phụ đề dở dang (pending_subs.json).")
             sys.exit(0)
@@ -915,6 +1016,10 @@ def main():
             tok == "--sub-offset-ms" or tok.startswith("--sub-offset-ms=")
             for tok in sys.argv[1:]
         )
+        cli_sound_cues_explicit = any(
+            tok == "--sound-cues" or tok.startswith("--sound-cues=")
+            for tok in sys.argv[1:]
+        )
         from subtrans.pipeline import TranslationPipeline
         for it in pending_items:
             vid_p = it.get("video_path")
@@ -923,6 +1028,13 @@ def main():
             base_name_rec = it.get("base_name")
             saved_out_dir = it.get("output_dir")
             eff_prefer_whisper = bool(getattr(args, "prefer_whisper", False) or it.get("prefer_whisper", False))
+            eff_subs_upgrade = bool(getattr(args, "subs_upgrade", False) or it.get("subs_upgrade", False))
+            eff_no_embed = bool(getattr(args, "no_embed", False) or it.get("no_embed", False))
+            eff_sound_cues = (
+                args.sound_cues
+                if cli_sound_cues_explicit
+                else str(it.get("sound_cues") or args.sound_cues or "drop")
+            )
             eff_glossary_obj = glossary_path_obj
             if eff_glossary_obj is None and it.get("glossary"):
                 cand_g = Path(os.path.expanduser(str(it["glossary"]).strip()))
@@ -1010,31 +1122,31 @@ def main():
                 en_path=Path(en_s) if (en_s and os.path.exists(en_s)) else None,
                 output_basename=out_basename,
                 glossary_path=eff_glossary_obj,
-                subs_upgrade=bool(getattr(args, "subs_upgrade", False)),
+                subs_upgrade=eff_subs_upgrade,
                 sub_offset_ms=eff_sub_offset_ms,
                 auto_offset=pending_auto_offset,
-                sound_cues=args.sound_cues,
+                sound_cues=eff_sound_cues,
                 video_path=Path(vid_p) if vid_p else None,
                 prefer_whisper=eff_prefer_whisper,
             )
-            if eff_piecewise_ja_offsets is not None:
-                sig_params = inspect.signature(sub_pipe.run).parameters
-                if "piecewise_ja_offsets" in sig_params or any(
-                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
-                ):
-                    run_kwargs["piecewise_ja_offsets"] = eff_piecewise_ja_offsets
+            sig_params = inspect.signature(sub_pipe.run).parameters
+            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_params.values())
+            if eff_piecewise_ja_offsets is not None and ("piecewise_ja_offsets" in sig_params or has_var_kw):
+                run_kwargs["piecewise_ja_offsets"] = eff_piecewise_ja_offsets
+            if "no_embed" in sig_params or has_var_kw:
+                run_kwargs["no_embed"] = eff_no_embed
             res = sub_pipe.run(**run_kwargs)
             srt_p = res.get('subtitle_path') or res.get('output_path')
-            is_partial_pending = bool(not srt_p or str(srt_p).endswith(".partial.srt"))
+            is_partial_pending = bool(not srt_p or str(srt_p).endswith((".partial.srt", ".partial.ass")))
             if vid_p and not is_dry_run:
                 cleanup_subtitle_extracts(
                     os.path.dirname(os.path.abspath(vid_p)),
                     base_vid,
                     keep_whisper=is_partial_pending,
                 )
-            if not is_dry_run and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith(".partial.srt"):
+            if not is_dry_run and srt_p and os.path.exists(srt_p) and not str(srt_p).endswith((".partial.srt", ".partial.ass")):
                 remove_pending_sub(base_name_rec or vid_p or out_basename)
-                if os.path.exists(target_4k) and not getattr(args, "no_embed", False):
+                if os.path.exists(target_4k) and not eff_no_embed:
                     from src.ffmpeg_ops import embed_subtitle_track
                     embed_subtitle_track(target_4k, str(srt_p), original_source_path=vid_p)
         sys.exit(0)
@@ -1074,6 +1186,11 @@ def main():
         )
         multi_mode = len(subs_targets) > 1
         sub_failures = 0
+
+        sub_out_format = str(getattr(args, "sub_format", "srt") or "srt").strip().lower()
+        if sub_out_format == "ass" and not getattr(args, "no_embed", False):
+            print("❌ Lỗi: Định dạng xuất ASS chỉ hỗ trợ khi bật --no-embed; nhúng trực tiếp vào MKV yêu cầu chuẩn SRT.")
+            sys.exit(1)
 
         is_sub_dry_run = bool(getattr(args, "dry_run", False))
         for idx_sub, target_subs_vid in enumerate(subs_targets, start=1):
@@ -1120,7 +1237,7 @@ def main():
             sub_pipeline = TranslationPipeline(
                 local_only=False,
                 output_dir=sub_out_dir,
-                output_format="srt",
+                output_format=sub_out_format,
                 dry_run=is_sub_dry_run,
                 require_approved_cast=False,
                 allow_latest_alias=False,
@@ -1128,7 +1245,7 @@ def main():
                 auto_align_whisper_to_en=getattr(args, "auto_align_en", True),
             )
             out_base = os.path.splitext(os.path.basename(target_4k))[0] if os.path.exists(target_4k) else base_vid_name
-            res = sub_pipeline.run(
+            sub_run_kw: Dict[str, Any] = dict(
                 ja_path=Path(ja_sub),
                 en_path=Path(en_sub) if en_sub else None,
                 output_basename=out_base,
@@ -1140,6 +1257,10 @@ def main():
                 video_path=Path(target_subs_vid),
                 prefer_whisper=bool(getattr(args, "prefer_whisper", False)),
             )
+            sub_sig = inspect.signature(sub_pipeline.run).parameters
+            if "no_embed" in sub_sig or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sub_sig.values()):
+                sub_run_kw["no_embed"] = bool(getattr(args, "no_embed", False))
+            res = sub_pipeline.run(**sub_run_kw)
             srt_path = res.get('subtitle_path') or res.get('output_path')
             print(f"\n✅ Hoàn tất dịch phụ đề độc lập cho '{os.path.basename(target_subs_vid)}'. File: {srt_path}")
 
@@ -1150,7 +1271,7 @@ def main():
             # Đồng bộ file SRT và nhúng trực tiếp vào container MKV 4K nếu đã có file 4K, hoặc container MKV đích
             is_partial_sub = True
             if srt_path and os.path.exists(srt_path):
-                is_partial_sub = str(srt_path).endswith(".partial.srt")
+                is_partial_sub = str(srt_path).endswith((".partial.srt", ".partial.ass"))
                 if is_partial_sub:
                     print(f"⚠️ [CHƯA ĐỦ ĐIỀU KIỆN NHÚNG] File phụ đề là bản một phần ({os.path.basename(str(srt_path))}). Không nhúng vào MKV.")
                 else:
@@ -1332,10 +1453,141 @@ def main():
             bg_preflight.start()
 
     completed_videos = []
+    skipped_existing_videos: set[str] = set()
+    ep_stage_b_meta: Dict[str, Dict[str, Any]] = {}
     async_sub_procs = []          # [(src_vid, out_vid, Popen, launch_ts)]
     failed_resumable_videos = {}  # vid -> (up_segs_dir, chunk_idx)
     unfinished_videos = {}        # vid -> reason
     queue_halted = False
+
+    raw_cli_tokens = list(sys.argv[1:])
+
+    def _has_cli_opt(*names: str) -> bool:
+        return any(
+            tok in names or any(tok.startswith(f"{nm}=") for nm in names)
+            for tok in raw_cli_tokens
+        )
+
+    cli_explicit_map = {
+        "model_requested": _has_cli_opt("-m", "--model"),
+        "subs_after_upscale": _has_cli_opt("--no-subs", "--no-subs-after-upscale", "--subs-after-upscale"),
+        "subs_quality": _has_cli_opt("--subs-quality"),
+        "prefer_whisper": _has_cli_opt("--prefer-whisper"),
+        "async_subs": _has_cli_opt("--async-subs"),
+        "glossary": _has_cli_opt("-g", "--glossary"),
+        "subs_upgrade": _has_cli_opt("--subs-upgrade"),
+        "no_embed": _has_cli_opt("--no-embed"),
+        "sound_cues": _has_cli_opt("--sound-cues"),
+    }
+
+    def _read_existing_checkpoint_manifest(src_v: str) -> Dict[str, Any]:
+        if args.force or args.no_resume:
+            return {}
+        from src.config import DEFAULT_OUTPUT_DIR
+        v_stem = os.path.splitext(os.path.basename(src_v))[0].rstrip(". ")
+        out_root = DEFAULT_OUTPUT_DIR
+        if args.output:
+            abs_o = os.path.abspath(os.path.expanduser(str(args.output).strip()))
+            out_root = os.path.dirname(abs_o) if abs_o.lower().endswith(tuple(SUPPORTED_VIDEO_EXTS)) else abs_o
+        for cand_m in (
+            os.path.join(out_root, f".temp_{v_stem}", "manifest.json"),
+            os.path.join(DEFAULT_OUTPUT_DIR, f".temp_{v_stem}", "manifest.json"),
+            os.path.join(os.path.dirname(os.path.abspath(src_v)), f".temp_{v_stem}", "manifest.json"),
+        ):
+            if os.path.isfile(cand_m):
+                try:
+                    with open(cand_m, "r", encoding="utf-8") as mf:
+                        data_m = json.load(mf)
+                    if isinstance(data_m, dict):
+                        return data_m
+                except Exception:
+                    pass
+        return {}
+
+    def _current_queue_stats(cur_idx_1based: int, in_stage_b: bool = False) -> Dict[str, Any]:
+        newly_done = sum(1 for cv, _ in completed_videos if cv not in skipped_existing_videos)
+        skipped_cnt = sum(1 for cv, _ in completed_videos if cv in skipped_existing_videos)
+        failed_cnt = len(unfinished_videos)
+        return {
+            "total_items": len(videos),
+            "current_index": max(1, min(len(videos), int(cur_idx_1based))),
+            "completed_items": newly_done + skipped_cnt,
+            "rendered_items": newly_done,
+            "skipped_items": skipped_cnt,
+            "failed_items": failed_cnt,
+            "stage_b": bool(in_stage_b),
+        }
+
+    def _write_live_status_update(
+        stage_val: str,
+        detail_val: str,
+        ref_vid: Optional[str] = None,
+        cur_idx_1based: int = 1,
+        in_stage_b: bool = False,
+        create_if_missing: bool = False,
+    ) -> None:
+        live_p = get_live_status_path()
+        cur_job_env = os.environ.get("UPSCALER_WEB_JOB_ID", "")
+        cur_pid = os.getpid()
+        cur_dict: Dict[str, Any] = {}
+        if os.path.isfile(live_p):
+            try:
+                with open(live_p, "r", encoding="utf-8") as rf:
+                    loaded = json.load(rf)
+                if isinstance(loaded, dict):
+                    same_lineage = (
+                        (cur_job_env and str(loaded.get("job_id") or "") == cur_job_env)
+                        or (not cur_job_env and loaded.get("pid") == cur_pid)
+                    )
+                    if same_lineage or not create_if_missing:
+                        cur_dict = loaded
+            except Exception:
+                cur_dict = {}
+        elif not create_if_missing:
+            return
+        if not cur_dict and not create_if_missing:
+            return
+        os.makedirs(os.path.dirname(live_p), exist_ok=True)
+        v_ref = ref_vid or (videos[0] if videos else "")
+        cur_dict.setdefault("video_name", os.path.basename(v_ref) if v_ref else "")
+        cur_dict.setdefault("input_path", str(v_ref) if v_ref else "")
+        cur_dict.setdefault("model_id", str(args.model or ""))
+        cur_dict.setdefault("zero_disk", bool(getattr(args, "zero_disk", True)))
+        cur_dict.setdefault("total_frames", 0)
+        cur_dict.setdefault("unique_frames", 0)
+        cur_dict.setdefault("total_chunks", 0)
+        cur_dict.setdefault("completed_chunks", 0)
+        cur_dict.setdefault("chunks", [])
+        cur_dict.setdefault("resumed_chunks", [])
+        cur_dict.setdefault("active_chunk", None)
+        cur_dict.setdefault("steady_fps", 0.0)
+        cur_dict.setdefault("latest_fps", 0.0)
+        cur_dict.setdefault("effective_fps", 0.0)
+        cur_dict.setdefault("eta_seconds", None)
+        if ref_vid:
+            cur_dict["video_name"] = os.path.basename(ref_vid)
+            cur_dict["input_path"] = str(ref_vid)
+        cur_dict["pid"] = cur_pid
+        cur_dict["ppid"] = os.getppid()
+        if cur_job_env:
+            cur_dict["job_id"] = cur_job_env
+        cur_dict["updated_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        cur_dict["stage"] = stage_val
+        cur_dict["stage_detail"] = detail_val
+        if len(videos) > 1:
+            cur_dict["queue_stats"] = _current_queue_stats(cur_idx_1based, in_stage_b=in_stage_b)
+        tmp_lp = f"{live_p}.{cur_pid}.tmp"
+        try:
+            with open(tmp_lp, "w", encoding="utf-8") as wf:
+                json.dump(cur_dict, wf, ensure_ascii=False, indent=2)
+            os.replace(tmp_lp, live_p)
+        except Exception:
+            if os.path.exists(tmp_lp):
+                try:
+                    os.remove(tmp_lp)
+                except OSError:
+                    pass
+
     can_overlap_async_subs = bool(
         getattr(args, "async_subs", False)
         and args.subs_after_upscale
@@ -1359,6 +1611,14 @@ def main():
             print(f"\n{'='*75}")
             print(f"▶ [{idx+1}/{len(videos)}] Bắt đầu xử lý: {os.path.basename(vid)}")
             print(f"{'='*75}")
+
+            if len(videos) > 1 and idx > 0:
+                _write_live_status_update(
+                    "initializing",
+                    f"Đang chuẩn bị tập {idx+1}/{len(videos)}: {os.path.basename(vid)}...",
+                    ref_vid=vid,
+                    cur_idx_1based=idx + 1,
+                )
 
             if bg_preflight is not None:
                 bg_preflight.mark_main_started(vid)
@@ -1407,6 +1667,33 @@ def main():
                     break
 
             try:
+                prior_cp_manifest = _read_existing_checkpoint_manifest(vid)
+                full_cli_meta = {
+                    "model_requested": str(args.model or "").strip(),
+                    "subs_after_upscale": bool(getattr(args, "subs_after_upscale", True)),
+                    "subs_quality": str(getattr(args, "subs_quality", "normal") or "normal"),
+                    "prefer_whisper": bool(getattr(args, "prefer_whisper", False)),
+                    "async_subs": bool(getattr(args, "async_subs", False)),
+                    "glossary": str(getattr(args, "glossary", "") or "").strip(),
+                    "subs_upgrade": bool(getattr(args, "subs_upgrade", False)),
+                    "no_embed": bool(getattr(args, "no_embed", False)),
+                    "sound_cues": str(getattr(args, "sound_cues", "drop") or "drop"),
+                }
+                if prior_cp_manifest:
+                    eff_manifest_extra = {
+                        mk: mv for mk, mv in full_cli_meta.items() if cli_explicit_map.get(mk, False)
+                    }
+                    merged_ep_sub = {}
+                    for mk, mv in full_cli_meta.items():
+                        if cli_explicit_map.get(mk, False) or mk not in prior_cp_manifest:
+                            merged_ep_sub[mk] = mv
+                        else:
+                            merged_ep_sub[mk] = prior_cp_manifest[mk]
+                    ep_stage_b_meta[vid] = merged_ep_sub
+                else:
+                    eff_manifest_extra = full_cli_meta
+                    ep_stage_b_meta[vid] = dict(full_cli_meta)
+
                 eff_cli_grain = str(getattr(args, "grain_restore", DEFAULT_GRAIN_RESTORE) or "auto").strip().lower()
                 grain_pipe_kw = {"grain_restore": eff_cli_grain} if eff_cli_grain != "auto" else {}
                 extra_pipe_kw = _filter_pipeline_kwargs(
@@ -1417,17 +1704,7 @@ def main():
                             if getattr(args, "preview_start", None) is not None
                             else {}
                         ),
-                        "manifest_extra_meta": {
-                            "model_requested": str(args.model or "").strip(),
-                            "subs_after_upscale": bool(getattr(args, "subs_after_upscale", True)),
-                            "subs_quality": str(getattr(args, "subs_quality", "normal") or "normal"),
-                            "prefer_whisper": bool(getattr(args, "prefer_whisper", False)),
-                            "async_subs": bool(getattr(args, "async_subs", False)),
-                            "glossary": str(getattr(args, "glossary", "") or "").strip(),
-                            "subs_upgrade": bool(getattr(args, "subs_upgrade", False)),
-                            "no_embed": bool(getattr(args, "no_embed", False)),
-                            "sound_cues": str(getattr(args, "sound_cues", "drop") or "drop"),
-                        },
+                        "manifest_extra_meta": eff_manifest_extra,
                     },
                 )
                 out_file = run_upscale_pipeline(
@@ -1460,12 +1737,34 @@ def main():
                 # (b) Tập dang dở (do allow-partial) hoặc không hợp lệ bị loại khỏi mux/phụ đề:
                 if out_file and os.path.isfile(out_file) and out_file.endswith((".mkv", ".mp4")):
                     completed_videos.append((vid, out_file))
+                    if already_done_path:
+                        skipped_existing_videos.add(vid)
                     if vid in unfinished_videos:
                         del unfinished_videos[vid]
                     if vid in failed_resumable_videos:
                         del failed_resumable_videos[vid]
-                    if can_overlap_async_subs and idx < len(videos) - 1:
-                        bg_sub_cmd = _build_stage_b_sub_cmd(args, videos, vid, out_file)
+                    if len(videos) > 1 and idx < len(videos) - 1:
+                        _write_live_status_update(
+                            "initializing",
+                            f"Đã xong {idx+1}/{len(videos)} tập — đang chuyển sang tập kế tiếp...",
+                            ref_vid=videos[idx + 1],
+                            cur_idx_1based=idx + 2,
+                        )
+                    ep_meta_cur = ep_stage_b_meta.get(vid, {})
+                    ep_wants_subs = bool(ep_meta_cur.get("subs_after_upscale", args.subs_after_upscale))
+                    ep_async_ok = bool(
+                        (ep_meta_cur.get("async_subs", getattr(args, "async_subs", False)))
+                        and ep_wants_subs
+                        and not ep_meta_cur.get("prefer_whisper", getattr(args, "prefer_whisper", False))
+                        and len(videos) > 1
+                    )
+                    if (can_overlap_async_subs or ep_async_ok) and ep_wants_subs and idx < len(videos) - 1:
+                        _sb_params = inspect.signature(_build_stage_b_sub_cmd).parameters
+                        bg_sub_cmd = (
+                            _build_stage_b_sub_cmd(args, videos, vid, out_file, ep_sub_meta=ep_meta_cur)
+                            if "ep_sub_meta" in _sb_params
+                            else _build_stage_b_sub_cmd(args, videos, vid, out_file)
+                        )
                         print(f"\n⚡ [ASYNC-SUBS] Khởi chạy nền dịch phụ đề Cloud Gemini cho '{os.path.basename(vid)}' song song tập kế tiếp...")
                         try:
                             bg_sub_env = {**os.environ, "UPSCALER_FORCE_WHISPER_CPU": "1"}
@@ -1586,29 +1885,21 @@ def main():
 
     # STAGE B: DỊCH PHỤ ĐỀ (CHỈ CHẠY CHO CÁC TẬP ĐÃ HOÀN TẤT)
     # CHẠY TRONG TIẾN TRÌNH CON ĐỘC LẬP (SUBPROCESS), KHÔNG CHẶN HAY HỎNG VIDEO 4K
-    if args.subs_after_upscale and completed_videos:
+    stage_b_candidates = [
+        (src_v, out_v)
+        for src_v, out_v in completed_videos
+        if bool((ep_stage_b_meta.get(src_v) or {}).get("subs_after_upscale", args.subs_after_upscale))
+    ]
+    if (stage_b_candidates or async_sub_procs) and completed_videos:
         print(f"\n{'='*75}")
         print("📝 [STAGE B] HOÀN TẤT & ĐỒNG BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ ĐỘC LẬP")
         print(f"{'='*75}")
-        _stage_b_live_path = get_live_status_path()
-        def _set_stage_b_live_status(stage_val: str, detail_val: str) -> None:
-            if not os.path.isfile(_stage_b_live_path):
-                return
-            try:
-                import json as _json
-                with open(_stage_b_live_path, "r", encoding="utf-8") as _rf:
-                    _cur = _json.load(_rf)
-                if isinstance(_cur, dict):
-                    _cur["stage"] = stage_val
-                    _cur["stage_detail"] = detail_val
-                    _tmp = f"{_stage_b_live_path}.{os.getpid()}.tmp"
-                    with open(_tmp, "w", encoding="utf-8") as _wf:
-                        _json.dump(_cur, _wf, ensure_ascii=False, indent=2)
-                    os.replace(_tmp, _stage_b_live_path)
-            except Exception:
-                pass
-
-        _set_stage_b_live_status("subtrans", "Đang hoàn tất dịch & nhúng phụ đề (Stage B)...")
+        _write_live_status_update(
+            "subtrans",
+            "Đang hoàn tất dịch & nhúng phụ đề (Stage B)...",
+            cur_idx_1based=len(completed_videos),
+            in_stage_b=True,
+        )
 
         sub_timeout = 1560  # Watchdog 25 phút + 60s buffer
         launched_async_srcs = set()
@@ -1628,10 +1919,15 @@ def main():
             except Exception as bg_wait_err:
                 print(f"⚠️ [ASYNC-SUBS] Lỗi khi đồng bộ tiến trình phụ đề nền: {bg_wait_err}")
 
-        for src_vid, out_vid in completed_videos:
+        for src_vid, out_vid in stage_b_candidates:
             if src_vid in launched_async_srcs:
                 continue
-            sub_cmd = _build_stage_b_sub_cmd(args, videos, src_vid, out_vid)
+            _sb_params = inspect.signature(_build_stage_b_sub_cmd).parameters
+            sub_cmd = (
+                _build_stage_b_sub_cmd(args, videos, src_vid, out_vid, ep_sub_meta=ep_stage_b_meta.get(src_vid))
+                if "ep_sub_meta" in _sb_params
+                else _build_stage_b_sub_cmd(args, videos, src_vid, out_vid)
+            )
             print(f"\n🚀 Khởi chạy tiến trình con dịch phụ đề cho tập '{os.path.basename(src_vid)}'...")
             try:
                 proc = subprocess.run(sub_cmd, timeout=sub_timeout, check=False)
@@ -1644,7 +1940,13 @@ def main():
             except Exception as se:
                 print(f"⚠️ Lỗi khởi chạy tiến trình con phụ đề: {se}")
 
-        _set_stage_b_live_status("completed", "Hoàn tất dịch & nhúng phụ đề Stage B")
+        if not unfinished_videos and len(completed_videos) == len(videos):
+            _write_live_status_update(
+                "completed",
+                "Hoàn tất dịch & nhúng phụ đề Stage B",
+                cur_idx_1based=len(videos),
+                in_stage_b=False,
+            )
 
     # DỌN DẸP PHỤ ĐỀ TẠM & GOM GỌN CÁC FILE KỸ THUẬT (AUDIT/CAST) SAU KHI HOÀN TẤT
     if not getattr(args, "no_organize_audit", False) and completed_videos:
@@ -1678,30 +1980,26 @@ def main():
             print(f"[{u_idx+1:02d}] | {os.path.basename(u_vid)[:45]:<45} | {reason}")
         print(f"{'='*75}")
         print(f"⚠️ Có {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất. Hàng đợi kết thúc với trạng thái CHƯA XONG.\n")
-        _live_status_path = get_live_status_path()
-        if os.path.isfile(_live_status_path):
-            try:
-                is_paused_exit = was_graceful_paused() or any(
-                    "allow-partial" in unfinished_videos.get(u, "").lower()
-                    or "dừng êm" in unfinished_videos.get(u, "").lower()
-                    or "hạn chót" in unfinished_videos.get(u, "").lower()
-                    for u in unfinished_list
-                )
-                target_stage = "paused" if is_paused_exit else "error"
-                with open(_live_status_path, "r", encoding="utf-8") as _rf:
-                    _cur = json.load(_rf)
-                if isinstance(_cur, dict):
-                    _cur["stage"] = target_stage
-                    _cur["stage_detail"] = (
-                        f"Hàng đợi kết thúc với {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất "
-                        f"({unfinished_videos.get(unfinished_list[0], 'Chưa hoàn tất')})."
-                    )
-                    _tmp = f"{_live_status_path}.{os.getpid()}.tmp"
-                    with open(_tmp, "w", encoding="utf-8") as _wf:
-                        json.dump(_cur, _wf, ensure_ascii=False, indent=2)
-                    os.replace(_tmp, _live_status_path)
-            except Exception:
-                pass
+        is_paused_exit = was_graceful_paused() or any(
+            "allow-partial" in unfinished_videos.get(u, "").lower()
+            or "dừng êm" in unfinished_videos.get(u, "").lower()
+            or "hạn chót" in unfinished_videos.get(u, "").lower()
+            for u in unfinished_list
+        )
+        target_stage = "paused" if is_paused_exit else "error"
+        first_unfin = unfinished_list[0]
+        unfin_idx_1b = (videos.index(first_unfin) + 1) if first_unfin in videos else 1
+        _write_live_status_update(
+            target_stage,
+            (
+                f"Hàng đợi kết thúc với {len(unfinished_list)}/{len(videos)} tập chưa hoàn tất "
+                f"({unfinished_videos.get(first_unfin, 'Chưa hoàn tất')})."
+            ),
+            ref_vid=first_unfin,
+            cur_idx_1based=unfin_idx_1b,
+            in_stage_b=False,
+            create_if_missing=True,
+        )
         sys.exit(1)
 
     print("\n🎉 Toàn bộ công việc trong hàng đợi đã hoàn tất thành công!")

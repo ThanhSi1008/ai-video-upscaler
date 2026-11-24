@@ -556,7 +556,22 @@
             <section class="card-panel">
               <div class="section-header-inline">
                 <h2 id="models-catalog-heading" class="section-heading" tabindex="-1">Danh mục Mô hình Super-Resolution Cục bộ (models/models.yaml)</h2>
-                <button type="button" id="btn-refresh-models" class="btn btn-ghost">↻ Kiểm tra lại Trọng số &amp; Engine</button>
+                <div class="trt-build-controls">
+                  <label for="trt-build-resolution" class="visually-hidden">Độ phân giải nguồn biên dịch TensorRT</label>
+                  <select id="trt-build-resolution" title="Độ phân giải khung hình nguồn (Width × Height) khi biên dịch TensorRT 10 FP16">
+                    <option value="1920x1080" selected>Khung nguồn: 1920×1080 (16:9 FHD)</option>
+                    <option value="1920x800">Khung nguồn: 1920×800 (2.40:1 Scope)</option>
+                    <option value="1920x1040">Khung nguồn: 1920×1040 (1.85:1 Flat)</option>
+                    <option value="1280x720">Khung nguồn: 1280×720 (HD 720p)</option>
+                    <option value="custom">Khung nguồn: Tùy chỉnh (W×H)…</option>
+                  </select>
+                  <span id="trt-custom-dims" class="trt-custom-dims" hidden>
+                    <input type="number" id="trt-custom-width" min="64" max="4096" step="2" value="1920" aria-label="Chiều rộng nguồn tùy chỉnh (px)">
+                    <span aria-hidden="true">×</span>
+                    <input type="number" id="trt-custom-height" min="64" max="2304" step="2" value="800" aria-label="Chiều cao nguồn tùy chỉnh (px)">
+                  </span>
+                  <button type="button" id="btn-refresh-models" class="btn btn-ghost">↻ Kiểm tra lại Trọng số &amp; Engine</button>
+                </div>
               </div>
 
               <div tabindex="0" role="region" aria-labelledby="models-table-caption" class="table-wrapper">
@@ -778,6 +793,10 @@
               <div class="section-header-inline">
                 <h2 class="section-heading">Kho Kiểm định Thành phẩm 4K (Mux Integrity &amp; Output Sanity Audit)</h2>
                 <div class="button-cluster">
+                  <label class="inline-check" title="Mặc định giữ an toàn các thư mục .temp_* có thể tiếp tục (resume). Tích chọn để xóa luôn checkpoint.">
+                    <input type="checkbox" id="chk-clean-include-checkpoints">
+                    <span>Xóa cả Checkpoint (.temp_*)</span>
+                  </label>
                   <button type="button" id="btn-clean-temp" class="btn btn-secondary" title="Dọn dẹp các tệp trung gian dư thừa và gom biên bản kiểm định vào out/audit/">🧹 Dọn tệp tạm &amp; Gom Audit</button>
                   <button type="button" id="btn-refresh-audits" class="btn btn-ghost">↻ Làm mới Kho Kiểm định</button>
                 </div>

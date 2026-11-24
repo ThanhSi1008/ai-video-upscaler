@@ -385,7 +385,10 @@ function bootstrapStudio() {
         sourceBadgeText.textContent = `Đang đồng bộ CLI ngoài (PID ${pipeline.gpu_lock?.pid || live.pid || "—"})`;
       } else if (stage === "paused") {
         sourceBadge.dataset.tone = "warn";
-        sourceBadgeText.textContent = "Đã tạm dừng (Có Checkpoint)";
+        const hasCheckpoints = Array.isArray(pipeline.checkpoints) && pipeline.checkpoints.length > 0;
+        sourceBadgeText.textContent = hasCheckpoints
+          ? "Đã tạm dừng (Có Checkpoint)"
+          : "Đã tạm dừng";
       } else {
         sourceBadge.dataset.tone = "idle";
         sourceBadgeText.textContent = "Hệ thống rảnh";
@@ -481,24 +484,59 @@ function bootstrapStudio() {
       const qs = pipeline.queue_summary;
       if (qs && Number(qs.total_items || 0) > 1) {
         clearChildren(queueProgressStrip);
-        queueProgressStrip.append(
-          el("span", {
-            className: "badge badge-ok",
-            textContent: `🗂️ Tập ${qs.current_index} / ${qs.total_items}`,
-          }),
-          el("span", {
-            textContent: `Đã hoàn tất: ${qs.completed_items} tập`,
-          })
-        );
-        if (Array.isArray(qs.remaining_names) && qs.remaining_names.length > 0) {
-          const extraCnt = Math.max(0, Number(qs.remaining_count || 0) - qs.remaining_names.length);
-          const extraSuffix = extraCnt > 0 ? ` (+${extraCnt} tập nữa)` : "";
+        const skippedCnt = Number(qs.skipped_items || 0);
+        const failedCnt = Number(qs.failed_items || 0);
+        const isStageBQueue = qs.phase === "stage_b" || stage === "subtrans";
+        if (isStageBQueue) {
           queueProgressStrip.append(
             el("span", {
-              className: "muted-meta",
-              textContent: `• Sắp chạy: ${qs.remaining_names.join(", ")}${extraSuffix}`,
+              className: "badge badge-ok",
+              textContent: `📝 Stage B Phụ đề (${qs.total_items} tập)`,
+            }),
+            el("span", {
+              textContent: `Đã hoàn tất 4K: ${qs.completed_items} tập`,
             })
           );
+          if (skippedCnt > 0) {
+            queueProgressStrip.append(
+              el("span", { className: "muted-meta", textContent: `• Đã có sẵn: ${skippedCnt}` })
+            );
+          }
+          if (failedCnt > 0) {
+            queueProgressStrip.append(
+              el("span", { className: "badge badge-warn", textContent: `Hoãn/Lỗi: ${failedCnt}` })
+            );
+          }
+        } else {
+          queueProgressStrip.append(
+            el("span", {
+              className: "badge badge-ok",
+              textContent: `🗂️ Tập ${qs.current_index} / ${qs.total_items}`,
+            }),
+            el("span", {
+              textContent: `Đã hoàn tất: ${qs.completed_items} tập`,
+            })
+          );
+          if (skippedCnt > 0) {
+            queueProgressStrip.append(
+              el("span", { className: "muted-meta", textContent: `• Đã có sẵn: ${skippedCnt}` })
+            );
+          }
+          if (failedCnt > 0) {
+            queueProgressStrip.append(
+              el("span", { className: "badge badge-warn", textContent: `Hoãn/Lỗi: ${failedCnt}` })
+            );
+          }
+          if (Array.isArray(qs.remaining_names) && qs.remaining_names.length > 0) {
+            const extraCnt = Math.max(0, Number(qs.remaining_count || 0) - qs.remaining_names.length);
+            const extraSuffix = extraCnt > 0 ? ` (+${extraCnt} tập nữa)` : "";
+            queueProgressStrip.append(
+              el("span", {
+                className: "muted-meta",
+                textContent: `• Sắp chạy: ${qs.remaining_names.join(", ")}${extraSuffix}`,
+              })
+            );
+          }
         }
         queueProgressStrip.hidden = false;
       } else {
@@ -762,10 +800,19 @@ function bootstrapStudio() {
       const isActiveUpscale =
         isRunning &&
         !isSubtransWebJob &&
+        !isAuxMaintJob &&
         activeWebJob?.job_type !== "preview" &&
+        live.job_type !== "build_trt" &&
+        live.job_type !== "clean_temp" &&
         !live.is_preview;
+      const normLiveInput = normPath(live.input_path);
+      const normLiveVideo = normPath(live.video_name);
       const activeTargets = isActiveUpscale
-        ? [live.input_path, live.video_name].map(normPath).filter(Boolean)
+        ? normLiveInput
+          ? [normLiveInput]
+          : normLiveVideo
+            ? [normLiveVideo]
+            : []
         : [];
       const queuedTargets = isActiveUpscale && Array.isArray(activeWebJob?.queue_items)
         ? activeWebJob.queue_items.map(normPath).filter(Boolean)
@@ -791,7 +838,7 @@ function bootstrapStudio() {
         cps
           .map(
             (cp) =>
-              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.model_requested || ""}|${cp.dedup_policy || ""}|${cp.subs_after_upscale ?? ""}|${cp.glossary || ""}|${cp.subs_upgrade ?? ""}|${cp.no_embed ?? ""}|${cp.sound_cues || ""}|${isCpActive(cp) ? "1" : isCpQueued(cp) ? "Q" : "0"}`
+              `${cp.name}|${cp.completed_chunks}|${cp.total_chunks ?? "?"}|${cp.size_mb}|${cp.source_file || ""}|${cp.output_dir || ""}|${cp.model_id || ""}|${cp.model_requested || ""}|${cp.dedup_policy || ""}|${cp.batch_size ?? ""}|${cp.subs_after_upscale ?? ""}|${cp.glossary || ""}|${cp.subs_upgrade ?? ""}|${cp.no_embed ?? ""}|${cp.sound_cues || ""}|${isCpActive(cp) ? "1" : isCpQueued(cp) ? "Q" : "0"}`
           )
           .join(";;");
       if (cpSig !== lastCheckpointSignature) {

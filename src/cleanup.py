@@ -1,15 +1,40 @@
 """Temporary checkpoint cleanup and final output artifact organization helpers."""
 
 import os
+from pathlib import Path
 import shutil
 from typing import Optional, List, Dict, Any
 
 
+def _is_symlink_or_reparse(path: str) -> bool:
+    """Return True before resolve()/realpath() when path is a symlink, junction, or Win32 reparse point."""
+    if not path:
+        return False
+    try:
+        if os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path)):
+            return True
+        st = os.lstat(path)
+        return bool(getattr(st, "st_file_attributes", 0) & 0x0400)
+    except OSError:
+        return False
+
+
+def _remove_reparse_entry_only(path: str) -> bool:
+    """Remove a symlink or Win32 directory junction entry itself without touching its target."""
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        try:
+            os.rmdir(path)
+            return True
+        except OSError:
+            return False
+
+
 def get_path_size(path: str) -> int:
     """Tính tổng dung lượng (bytes) của một file hoặc thư mục trên đĩa."""
-    if not os.path.lexists(path):
-        return 0
-    if os.path.islink(path):
+    if not os.path.lexists(path) or _is_symlink_or_reparse(path):
         return 0
     if os.path.isfile(path):
         try:
@@ -18,11 +43,12 @@ def get_path_size(path: str) -> int:
             return 0
     elif os.path.isdir(path):
         total = 0
-        for root, _, files in os.walk(path):
+        for root, dirs, files in os.walk(path, followlinks=False):
+            dirs[:] = [d for d in dirs if not _is_symlink_or_reparse(os.path.join(root, d))]
             for f in files:
                 fp = os.path.join(root, f)
                 try:
-                    if not os.path.islink(fp):
+                    if not _is_symlink_or_reparse(fp):
                         total += os.path.getsize(fp)
                 except Exception:
                     pass
@@ -30,37 +56,45 @@ def get_path_size(path: str) -> int:
     return 0
 
 
-def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logger=None) -> int:
-    """
-    Dọn dẹp an toàn và triệt để thư mục checkpoint tạm (.temp_<basename>)
-    cùng các symlink và tệp đệm trên SSD sau khi hoàn tất muxing & Mux Audit PASS.
-
-    Hỗ trợ xử lý:
-    - Thư mục thông thường trên SSD.
-    - Symlinks trỏ đến thư mục checkpoint ở vị trí khác (resolve target và xóa cả hai).
-    - Dọn dẹp thư mục cha nếu sau khi xóa thư mục tạm thì thư mục cha rỗng (trừ .DS_Store).
-    - Quét dọn các symlink mồ côi dạng .temp_* liên quan trong output_dir.
-
-    Trả về số byte đã giải phóng.
-    """
-    if not work_dir or not os.path.lexists(work_dir):
+def cleanup_checkpoint_dir(
+    work_dir: str,
+    output_dir: Optional[str] = None,
+    logger=None,
+    follow_internal_symlink: bool = True,
+) -> int:
+    """Clean temporary .temp_<basename> checkpoint directory while blocking external symlink/reparse traversal."""
+    if not work_dir or (not os.path.lexists(work_dir) and not _is_symlink_or_reparse(work_dir)):
         return 0
 
     bytes_freed = 0
     real_work_dir = None
+    work_is_reparse = _is_symlink_or_reparse(work_dir)
 
-    if os.path.islink(work_dir):
-        try:
-            target = os.path.realpath(work_dir)
-            if os.path.isdir(target):
-                real_work_dir = target
-        except Exception:
-            pass
+    if work_is_reparse:
+        if (
+            follow_internal_symlink
+            and output_dir
+            and not _is_symlink_or_reparse(output_dir)
+            and os.path.isdir(output_dir)
+        ):
+            try:
+                real_out = Path(os.path.realpath(output_dir))
+                target = Path(os.path.realpath(work_dir))
+                if (
+                    target.is_dir()
+                    and not _is_symlink_or_reparse(str(target))
+                    and target != real_out
+                    and target.is_relative_to(real_out)
+                    and target.name.startswith(".temp_")
+                ):
+                    real_work_dir = str(target)
+            except Exception:
+                real_work_dir = None
     elif os.path.isdir(work_dir):
         real_work_dir = work_dir
 
-    # 1. Xóa thư mục thực tế nếu tồn tại
-    if real_work_dir and os.path.isdir(real_work_dir):
+    # 1. Xóa thư mục thực tế nếu tồn tại (và không phải reparse point)
+    if real_work_dir and not _is_symlink_or_reparse(real_work_dir) and os.path.isdir(real_work_dir):
         bytes_freed += get_path_size(real_work_dir)
         try:
             shutil.rmtree(real_work_dir, ignore_errors=True)
@@ -68,47 +102,46 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
             if logger:
                 logger.warn(f"Không thể xóa thư mục tạm '{real_work_dir}': {e}")
 
-        # Dọn dẹp thư mục cha nếu rỗng (ví dụ ~/Documents/Upscaled/SeriesName chỉ chứa .temp)
         parent_real = os.path.dirname(real_work_dir)
+        real_out_str = os.path.realpath(output_dir) if (output_dir and os.path.isdir(output_dir)) else (output_dir or "")
         if (
             parent_real
+            and not _is_symlink_or_reparse(parent_real)
             and os.path.isdir(parent_real)
             and parent_real != output_dir
+            and parent_real != real_out_str
             and parent_real != os.path.dirname(output_dir or "")
+            and parent_real != os.path.dirname(real_out_str)
         ):
             try:
                 remaining = [f for f in os.listdir(parent_real) if f != ".DS_Store"]
                 if not remaining:
                     ds = os.path.join(parent_real, ".DS_Store")
-                    if os.path.exists(ds):
+                    if os.path.exists(ds) and not _is_symlink_or_reparse(ds):
                         os.remove(ds)
                     os.rmdir(parent_real)
             except Exception:
                 pass
 
-    # 2. Xóa chính symlink work_dir nếu nó là symlink
-    if os.path.islink(work_dir):
-        try:
-            os.unlink(work_dir)
-        except Exception:
-            pass
+    # 2. Xóa chính symlink/junction work_dir mà không đụng tới đích bên ngoài
+    if work_is_reparse:
+        _remove_reparse_entry_only(work_dir)
     elif os.path.exists(work_dir) and not os.path.isdir(work_dir):
         try:
             os.remove(work_dir)
         except Exception:
             pass
 
-    # 3. Quét dọn các symlink .temp_* mồ côi hoặc liên quan trong output_dir
-    if output_dir and os.path.isdir(output_dir):
+    # 3. Quét dọn các symlink/reparse .temp_* mồ côi hoặc liên quan trong output_dir
+    if output_dir and not _is_symlink_or_reparse(output_dir) and os.path.isdir(output_dir):
         work_base = os.path.basename(work_dir)
         try:
             for item in os.listdir(output_dir):
                 item_path = os.path.join(output_dir, item)
-                if os.path.islink(item_path) and item.startswith(".temp_"):
+                if item.startswith(".temp_") and _is_symlink_or_reparse(item_path):
                     should_remove = False
                     try:
                         resolved = os.path.realpath(item_path)
-                        # Nếu trỏ tới real_work_dir vừa xóa, hoặc link bị đứt, hoặc chứa work_base
                         if real_work_dir and resolved == real_work_dir:
                             should_remove = True
                         elif not os.path.exists(resolved):
@@ -118,10 +151,7 @@ def cleanup_checkpoint_dir(work_dir: str, output_dir: Optional[str] = None, logg
                     except Exception:
                         should_remove = True
                     if should_remove:
-                        try:
-                            os.unlink(item_path)
-                        except Exception:
-                            pass
+                        _remove_reparse_entry_only(item_path)
         except Exception:
             pass
 
@@ -271,44 +301,89 @@ def organize_output_artifacts(
     return moved_files
 
 
-def clean_all_temporary_data(output_dir: str, logger=None) -> Dict[str, Any]:
-    """
-    Quét và dọn dẹp toàn diện mọi thư mục tạm, symlinks gãy, và gom các file audit
-    trong output_dir.
-    """
-    if not output_dir or not os.path.isdir(output_dir):
-        return {"bytes_freed": 0, "cleaned_dirs": [], "organized_files": []}
+def _has_resumable_checkpoint_state(temp_dir: str) -> bool:
+    """Return True when a regular .temp_* directory holds checkpoint state rather than transient extracts."""
+    if not temp_dir or _is_symlink_or_reparse(temp_dir) or not os.path.isdir(temp_dir):
+        return False
+    base = os.path.basename(temp_dir)
+    if base.startswith(".temp_.preview_clip_"):
+        return False
+    for marker in ("manifest.json", "plan.json", "upscaled_segs", "raw_segs"):
+        if os.path.lexists(os.path.join(temp_dir, marker)):
+            return True
+    try:
+        for fn in os.listdir(temp_dir):
+            if fn.endswith((".mp4", ".mkv", ".whisper_ja.srt")):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def clean_all_temporary_data(
+    output_dir: str,
+    logger=None,
+    include_checkpoints: bool = True,
+) -> Dict[str, Any]:
+    """Clean temporary artifacts and organize audits inside output_dir without following symlinks/reparse points."""
+    if not output_dir or _is_symlink_or_reparse(output_dir) or not os.path.isdir(output_dir):
+        return {
+            "bytes_freed": 0,
+            "cleaned_dirs": [],
+            "organized_files": [],
+            "preserved_checkpoints": [],
+        }
 
     total_freed = 0
-    cleaned_dirs = []
+    cleaned_dirs: List[str] = []
+    preserved_checkpoints: List[str] = []
 
     try:
         entries = os.listdir(output_dir)
     except Exception:
         entries = []
 
-    # 1. Quét tìm các thư mục và symlink .temp_*
+    def _clean_temp_candidate(cand_path: str, label: str) -> None:
+        nonlocal total_freed
+        if _is_symlink_or_reparse(cand_path):
+            if _remove_reparse_entry_only(cand_path):
+                cleaned_dirs.append(label)
+            return
+        if not include_checkpoints and _has_resumable_checkpoint_state(cand_path):
+            preserved_checkpoints.append(label)
+            return
+        freed = cleanup_checkpoint_dir(
+            cand_path,
+            output_dir=output_dir,
+            logger=logger,
+            follow_internal_symlink=False,
+        )
+        if freed > 0 or not os.path.lexists(cand_path):
+            total_freed += freed
+            cleaned_dirs.append(label)
+
+    # 1. Clean top-level .temp_* and transient .preview_clip_* artifacts
     for item in entries:
         item_path = os.path.join(output_dir, item)
         if item.startswith(".temp_"):
-            freed = cleanup_checkpoint_dir(item_path, output_dir=output_dir, logger=logger)
-            if freed > 0 or not os.path.lexists(item_path):
-                total_freed += freed
+            _clean_temp_candidate(item_path, item)
+        elif item.startswith(".preview_clip_") and not _is_symlink_or_reparse(item_path) and os.path.isfile(item_path):
+            try:
+                sz = os.path.getsize(item_path)
+                os.remove(item_path)
+                total_freed += sz
                 cleaned_dirs.append(item)
+            except OSError:
+                pass
 
-    # 2. Quét sâu 1 cấp vào các thư mục con xem có .temp_* không
+    # 2. Scan 1 level into non-reparse subdirectories for .temp_*
     for item in entries:
         sub_dir = os.path.join(output_dir, item)
-        if os.path.isdir(sub_dir) and not item.startswith("."):
+        if not item.startswith(".") and not _is_symlink_or_reparse(sub_dir) and os.path.isdir(sub_dir):
             try:
-                sub_entries = os.listdir(sub_dir)
-                for sub_item in sub_entries:
+                for sub_item in os.listdir(sub_dir):
                     if sub_item.startswith(".temp_"):
-                        sub_path = os.path.join(sub_dir, sub_item)
-                        freed = cleanup_checkpoint_dir(sub_path, output_dir=output_dir, logger=logger)
-                        if freed > 0 or not os.path.lexists(sub_path):
-                            total_freed += freed
-                            cleaned_dirs.append(f"{item}/{sub_item}")
+                        _clean_temp_candidate(os.path.join(sub_dir, sub_item), f"{item}/{sub_item}")
             except Exception:
                 pass
 
@@ -318,5 +393,6 @@ def clean_all_temporary_data(output_dir: str, logger=None) -> Dict[str, Any]:
     return {
         "bytes_freed": total_freed,
         "cleaned_dirs": cleaned_dirs,
-        "organized_files": organized_files
+        "organized_files": organized_files,
+        "preserved_checkpoints": preserved_checkpoints,
     }

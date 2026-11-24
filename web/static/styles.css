@@ -1139,7 +1139,7 @@ textarea.code-textarea {
   min-inline-size: 0;
 }
 
-.field-group.span-full,
+.span-full,
 .checkbox-fieldset,
 .form-cta-row {
   grid-column: 1 / -1;
@@ -1154,12 +1154,19 @@ textarea.code-textarea {
 .manual-path-row {
   display: flex;
   gap: 0.45rem;
+  min-inline-size: 0;
 }
 
 .input-with-btn input,
+.input-with-btn > select,
 .manual-path-row input {
   flex: 1 1 auto;
   min-inline-size: 0;
+}
+
+.input-with-btn > .btn,
+.manual-path-row > .btn {
+  flex: none;
 }
 
 .checkbox-fieldset {
@@ -1680,6 +1687,24 @@ textarea.code-textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  min-inline-size: 0;
+}
+
+.key-slot-chip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: safe center;
+  gap: 0.35rem;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.key-slot-chip > .badge,
+#pending-subs-list .badge {
+  max-inline-size: 100%;
+  min-inline-size: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .pending-subs-box {
@@ -1690,6 +1715,7 @@ textarea.code-textarea {
   background-color: var(--bg-elevated);
   display: grid;
   gap: 0.5rem;
+  min-inline-size: 0;
 }
 
 .pending-subs-box[hidden] {
@@ -1711,6 +1737,32 @@ textarea.code-textarea {
   flex-wrap: wrap;
   align-items: safe center;
   gap: 0.35rem;
+}
+
+.trt-build-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: safe center;
+  gap: 0.45rem;
+}
+
+.trt-build-controls select {
+  inline-size: auto;
+  min-inline-size: 11.5rem;
+}
+
+.trt-custom-dims {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.trt-custom-dims[hidden] {
+  display: none;
+}
+
+.trt-custom-dims input {
+  inline-size: 5.5rem;
 }
 
 .glossary-dialog-toolbar {

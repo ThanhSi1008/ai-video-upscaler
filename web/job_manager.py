@@ -18,13 +18,17 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
 from web.fs_browser import (
     AUTO_PARETO_MODEL_ID,
+    SUBTITLE_EXTENSIONS,
     VALID_GRAIN_RESTORE_POLICIES,
     VALID_NVENC_MULTIPASS_POLICIES,
     SafeLocalFSBrowser,
+    filter_paired_subtitle_paths,
     inspect_model_trt_cache,
     is_secret_filename,
     is_unc_path,
+    resolve_allowed_trt_weights_shas,
     strip_wrapping_quotes,
+    unwrap_outer_quotes_preserving_trailing_space,
     validate_win32_path_hygiene,
 )
 from web.sse_hub import _coerce_pid, check_active_gpu_lock, live_matches_web_job
@@ -260,21 +264,39 @@ def _validate_batch_size(val: Any) -> Optional[int]:
     return bs
 
 
+def _is_path_reparse_or_symlink(p: Path) -> bool:
+    try:
+        if p.is_symlink() or os.path.islink(str(p)) or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p))):
+            return True
+        if os.path.lexists(str(p)):
+            st = p.lstat()
+            return bool(getattr(st, "st_file_attributes", 0) & 0x0400)
+    except OSError:
+        return False
+    return False
+
+
 def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = "output_dir") -> Optional[str]:
     if val is None:
         return None
     _validate_no_nul(str(val), field)
-    raw = strip_wrapping_quotes(str(val))
-    if not raw:
+    raw_unwrapped = unwrap_outer_quotes_preserving_trailing_space(str(val))
+    if not raw_unwrapped or not raw_unwrapped.strip():
         return None
-    _validate_no_nul(raw, field)
+    _validate_no_nul(raw_unwrapped, field)
+    p_raw = Path(os.path.expanduser(raw_unwrapped))
+    validate_win32_path_hygiene(p_raw, field=field, raw_str=raw_unwrapped)
+    raw = strip_wrapping_quotes(str(val))
     p = Path(os.path.expanduser(raw))
     if p.drive and not p.is_absolute():
         raise ValueError(f"Đường dẫn tương đối theo ổ đĩa tại '{field}' không hợp lệ.")
+    if sys.platform == "win32" and not p.drive and p.root:
+        raise ValueError(f"Đường dẫn gốc thiếu ký tự ổ đĩa tại '{field}' không hợp lệ.")
+    raw_target = p if p.is_absolute() else (workspace_root / p)
     try:
-        target = (p if p.is_absolute() else workspace_root / p).resolve()
-    except OSError:
-        target = p if p.is_absolute() else (workspace_root / p)
+        target = raw_target.resolve()
+    except OSError as exc:
+        raise ValueError(f"Đường dẫn '{field}' không hợp lệ: {exc}") from exc
     if (
         is_secret_filename(raw)
         or is_secret_filename(p.name)
@@ -283,11 +305,14 @@ def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = 
         or any(is_secret_filename(part) for part in target.parts)
     ):
         raise PermissionError("Từ chối đường dẫn đích trỏ tới tệp cấu hình nhạy cảm.")
-    validate_win32_path_hygiene(p, field=field)
     if field == "output_dir":
         if target.exists() and target.is_file():
             raise ValueError(
                 f"Đường dẫn '{field}' phải là thư mục xuất, không được trỏ vào tệp tin có sẵn: '{target.name}'."
+            )
+        if not (target.exists() and target.is_dir()) and p.suffix.lower() in (_VIDEO_FILE_SUFFIXES | SUBTITLE_EXTENSIONS):
+            raise ValueError(
+                f"Đường dẫn '{field}' phải là thư mục xuất, không được mang đuôi tệp video/phụ đề ('{p.suffix}'): '{p.name}'."
             )
         cur_parent = target.parent
         while cur_parent and cur_parent != cur_parent.parent:
@@ -300,25 +325,36 @@ def _validate_output_dir(workspace_root: Path, val: Optional[str], field: str = 
 
 
 def _resolve_output_target(workspace_root: Path, output_dir: Optional[str]) -> tuple[Path, Optional[Path]]:
-    """
-    Chuẩn hóa đường dẫn output (-o):
-    - Đường dẫn tương đối được phân giải theo workspace_root (không dùng os.getcwd()).
-    - Nếu trỏ thẳng tới tệp video (.mkv, .mp4, ...), tách thành (thư mục cha, tệp đích).
-    """
+    """Normalize output_dir relative to workspace_root and split explicit video file targets."""
     if not output_dir:
         return (workspace_root / "out").resolve(), None
     _validate_no_nul(str(output_dir), "output_dir")
-    raw = strip_wrapping_quotes(str(output_dir))
-    if not raw:
+    raw_unwrapped = unwrap_outer_quotes_preserving_trailing_space(str(output_dir))
+    if not raw_unwrapped or not raw_unwrapped.strip():
         return (workspace_root / "out").resolve(), None
-    _validate_no_nul(raw, "output_dir")
+    _validate_no_nul(raw_unwrapped, "output_dir")
+    p_raw = Path(os.path.expanduser(raw_unwrapped))
+    validate_win32_path_hygiene(p_raw, field="output_dir", raw_str=raw_unwrapped)
+    raw = strip_wrapping_quotes(str(output_dir))
     p = Path(os.path.expanduser(raw))
     if p.drive and not p.is_absolute():
         raise ValueError("Đường dẫn tương đối theo ổ đĩa tại 'output_dir' không hợp lệ.")
-    validate_win32_path_hygiene(p, field="output_dir")
+    if sys.platform == "win32" and not p.drive and p.root:
+        raise ValueError("Đường dẫn gốc thiếu ký tự ổ đĩa tại 'output_dir' không hợp lệ.")
     if not p.is_absolute():
         p = workspace_root / p
-    resolved = p.resolve()
+    try:
+        resolved = p.resolve()
+    except OSError as exc:
+        raise ValueError(f"Đường dẫn 'output_dir' không hợp lệ: {exc}") from exc
+    if (
+        is_secret_filename(raw)
+        or is_secret_filename(p.name)
+        or is_secret_filename(resolved.name)
+        or any(is_secret_filename(part) for part in p.parts)
+        or any(is_secret_filename(part) for part in resolved.parts)
+    ):
+        raise PermissionError("Từ chối đường dẫn đích trỏ tới tệp cấu hình nhạy cảm.")
     if resolved.suffix.lower() in _VIDEO_FILE_SUFFIXES:
         return resolved.parent, resolved
     return resolved, None
@@ -508,6 +544,7 @@ class JobManager:
             active = dict(self._active_job) if self._active_job else None
             hist = [dict(x) for x in self._history]
             is_aborting = bool(self._aborting_tokens)
+            self._prune_dead_aborted_pids_locked()
             aborted_pids = sorted({int(p) for pid_set in self._aborted_owned_pids_by_job.values() for p in pid_set})
         return {
             "status": active["status"] if active else "idle",
@@ -577,6 +614,7 @@ class JobManager:
         force: bool = False,
     ) -> Dict[str, Any]:
         """Dự báo chi tiết danh sách tập, model phân giải từ shows.yaml và thời gian hoàn thành theo --deadline."""
+        out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         videos = self.fs_browser.expand_inputs(
             inputs,
             allow_subtitles=False,
@@ -596,40 +634,49 @@ class JobManager:
         routing_tables = self.fs_browser._load_routing_tables()
         models_reg = routing_tables[0] if isinstance(routing_tables, tuple) and routing_tables else {}
         trt_cache_dir = self.workspace_root / ".cache" / "trt_engines"
-        trt_valid_memo: Dict[str, List[str]] = {}
+        trt_valid_memo: Dict[tuple[str, str], List[str]] = {}
 
-        def _get_valid_trt_engines(mid_check: str) -> List[str]:
-            if mid_check in trt_valid_memo:
-                return trt_valid_memo[mid_check]
+        def _get_valid_trt_engines(mid_check: str, eff_grain_tier: str) -> List[str]:
+            memo_key = (mid_check, eff_grain_tier)
+            if memo_key in trt_valid_memo:
+                return trt_valid_memo[memo_key]
             m_info = models_reg.get(mid_check) if isinstance(models_reg, dict) else None
             w_sha = str(m_info.get("sha256") or "") if isinstance(m_info, dict) else None
-            arch_type = str(((m_info or {}).get("arch") or {}).get("type") or "") if isinstance(m_info, dict) else ""
-            valid_engs, _ = inspect_model_trt_cache(trt_cache_dir, mid_check, expected_weights_sha256=w_sha)
-            if arch_type == "UpCunet2x":
-                valid_engs = [n for n in valid_engs if "_ps2x_" in n.lower()]
-                if (grain_norm or "auto") == "off" and w_sha:
-                    base_tag = f"_ps2x_{w_sha.strip().lower()[:8]}_"
-                    valid_engs = [n for n in valid_engs if base_tag in n.lower()]
-            trt_valid_memo[mid_check] = valid_engs
+            arch_cfg = (m_info or {}).get("arch") or {} if isinstance(m_info, dict) else {}
+            arch_type = str(arch_cfg.get("type") or "")
+            up_scale = int(arch_cfg.get("upscale") or 2)
+            allowed_shas = resolve_allowed_trt_weights_shas(
+                mid_check, models_reg, grain_restore=eff_grain_tier
+            )
+            valid_engs, _ = inspect_model_trt_cache(
+                trt_cache_dir,
+                mid_check,
+                expected_weights_sha256=w_sha,
+                allowed_weights_shas=allowed_shas if allowed_shas else None,
+                arch_type=arch_type,
+                native_upscale=up_scale,
+            )
+            trt_valid_memo[memo_key] = valid_engs
             return valid_engs
 
-        def _is_model_trt_ready(mid_check: str, in_h: int = 0, in_w: int = 0) -> bool:
+        def _is_model_trt_ready(mid_check: str, in_h: int = 0, in_w: int = 0, eff_grain_tier: str = "auto") -> bool:
             if not use_tensorrt:
                 return True
             if mid_check == AUTO_PARETO_MODEL_ID:
                 sub_ids = [
                     k for k in ("animejanai-hd-v3-compact", "animejanai-hd-v3-ultracompact") if k in models_reg
                 ]
-                return bool(sub_ids) and all(_is_model_trt_ready(sid, in_h, in_w) for sid in sub_ids)
-            valid_engs = _get_valid_trt_engines(mid_check)
+                return bool(sub_ids) and all(
+                    _is_model_trt_ready(sid, in_h, in_w, eff_grain_tier) for sid in sub_ids
+                )
+            valid_engs = _get_valid_trt_engines(mid_check, eff_grain_tier)
             if not valid_engs:
                 return False
             if in_h > 0 and in_w > 0:
-                hw_tokens = (f"_{in_h}x{in_w}_", f"_{in_w}x{in_h}_")
-                return any(any(tok in n.lower() for tok in hw_tokens) for n in valid_engs)
+                hw_token = f"_{in_h}x{in_w}_"
+                return any(hw_token in n.lower() for n in valid_engs)
             return True
 
-        out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         sub_overhead = 300.0 if subs_after_upscale else 0.0
         if zero_disk and use_tensorrt:
             vid_overhead = 420.0
@@ -757,10 +804,17 @@ class JobManager:
                         total_sched_s += eta_med_s
 
             _, vid_h, vid_w = _probe_video_meta_lightweight(vid)
+            eff_ep_grain = grain_norm or "auto"
+            if eff_ep_grain == "auto" and isinstance(plan, dict):
+                plan_dp = plan.get("dedup_params") or {}
+                if isinstance(plan_dp, dict) and str(plan_dp.get("grain_tier") or "") in {"clean", "light", "heavy"}:
+                    eff_ep_grain = str(plan_dp["grain_tier"])
             episodes.append({
                 "index": idx + 1,
                 "file_path": vid,
                 "file_name": os.path.basename(vid),
+                "width": vid_w or 1920,
+                "height": vid_h or 1080,
                 "model_id": m_id,
                 "model_name": routing["model_name"],
                 "dedup_policy": routing["dedup_policy"],
@@ -781,7 +835,7 @@ class JobManager:
                 "can_run": can_run,
                 "is_partial": is_partial,
                 "already_done": already_done,
-                "trt_ready": _is_model_trt_ready(m_id, vid_h, vid_w),
+                "trt_ready": _is_model_trt_ready(m_id, vid_h, vid_w, eff_ep_grain),
                 "resumed_done_chunks": resumed_done_c,
                 "resumed_total_chunks": resumed_tot_c,
                 "decision": decision,
@@ -1142,6 +1196,9 @@ class JobManager:
         self._ensure_ready_to_launch(requires_gpu=needs_gpu)
 
         if all_subtitles:
+            items = filter_paired_subtitle_paths(items)
+            if not items:
+                raise ValueError("Không tìm thấy tệp phụ đề nguồn hợp lệ (đã loại trừ tệp .vi/.review đã xuất).")
             out_dir = out_dir_val or str(self.workspace_root / "out")
             if is_single_dir_input or len(items) > 1:
                 batch_dir = str(resolved_first_in) if is_single_dir_input else os.path.dirname(os.path.abspath(items[0]))
@@ -1184,6 +1241,12 @@ class JobManager:
             if dry_run:
                 cmd.append("--dry-run")
         else:
+            out_fmt_vid = str(payload.get("output_format") or "srt").strip().lower()
+            if out_fmt_vid == "ass" and not payload.get("no_embed"):
+                raise ValueError(
+                    "Định dạng xuất ASS chỉ hỗ trợ cho tệp phụ đề rời (.srt/.ass) hoặc khi bật --no-embed; "
+                    "nhúng trực tiếp vào MKV luôn sử dụng chuẩn SRT."
+                )
             cmd = [
                 self.python_executable,
                 str(self.workspace_root / "upscale.py"),
@@ -1206,6 +1269,8 @@ class JobManager:
                 cmd.append("--no-auto-align-en")
             if payload.get("no_embed"):
                 cmd.append("--no-embed")
+                if out_fmt_vid == "ass":
+                    cmd.extend(["--sub-format", "ass"])
             if payload.get("sub_offset_ms"):
                 cmd.extend(["--sub-offset-ms", str(int(payload["sub_offset_ms"]))])
             if dry_run:
@@ -1215,16 +1280,21 @@ class JobManager:
 
     def start_subs_pending_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Chạy lại danh sách phụ đề tồn đọng trong pending_subs.json."""
-        subs_quality = _validate_subs_quality(payload.get("subs_quality"))
+        raw_sq = payload.get("subs_quality")
+        explicit_sq = (
+            _validate_subs_quality(raw_sq)
+            if (raw_sq is not None and str(raw_sq).strip() != "")
+            else None
+        )
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=False)
         cmd = [
             self.python_executable,
             str(self.workspace_root / "upscale.py"),
             "--subs-pending",
-            "--subs-quality",
-            subs_quality,
         ]
+        if explicit_sq:
+            cmd.extend(["--subs-quality", explicit_sq])
         if dry_run:
             cmd.append("--dry-run")
         return self._spawn_command("subs_pending", cmd, ["pending_subs.json"], payload, requires_gpu=False)
@@ -1236,8 +1306,24 @@ class JobManager:
         if not raw_model:
             raise ValueError("Vui lòng chọn ID mô hình cần biên dịch TensorRT.")
         models_reg, _, _ = self.fs_browser._load_routing_tables()
-        if raw_model.lower() != "all" and raw_model not in models_reg:
+        if raw_model.lower() not in {"all", AUTO_PARETO_MODEL_ID} and raw_model not in models_reg:
             raise ValueError(f"Mô hình '{raw_model}' không có trong danh mục models/models.yaml.")
+        raw_w = payload.get("width")
+        raw_h = payload.get("height")
+        width_val: Optional[int] = None
+        height_val: Optional[int] = None
+        if raw_w is not None or raw_h is not None:
+            if raw_w is None or raw_h is None:
+                raise ValueError("Cần cung cấp đồng thời cả 'width' và 'height' khi chọn độ phân giải biên dịch TRT.")
+            if isinstance(raw_w, bool) or isinstance(raw_h, bool):
+                raise ValueError("width và height phải là số nguyên dương.")
+            try:
+                width_val = int(raw_w)
+                height_val = int(raw_h)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("width và height phải là số nguyên dương hợp lệ.") from exc
+            if not (64 <= width_val <= 4096 and 64 <= height_val <= 4096):
+                raise ValueError("Độ phân giải biên dịch TRT phải nằm trong khoảng 64..4096 px.")
         force = bool(payload.get("force", False))
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=not dry_run)
@@ -1247,15 +1333,26 @@ class JobManager:
             "--model",
             raw_model,
         ]
+        if width_val is not None and height_val is not None:
+            cmd.extend(["--width", str(width_val), "--height", str(height_val)])
         if force:
             cmd.append("--force")
         if dry_run:
             cmd.append("--dry-run")
-        return self._spawn_command("build_trt", cmd, [raw_model], payload, requires_gpu=not dry_run)
+        target_label = f"{raw_model} ({width_val}×{height_val})" if (width_val and height_val) else raw_model
+        return self._spawn_command("build_trt", cmd, [target_label], payload, requires_gpu=not dry_run)
 
     def start_clean_temp_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Run global temporary artifact cleanup and audit folder organization via upscale.py --clean-temp."""
         out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"), field="output_dir")
+        raw_chk_dir = (
+            (Path(os.path.expanduser(out_dir_val)) if Path(os.path.expanduser(out_dir_val)).is_absolute() else (self.workspace_root / os.path.expanduser(out_dir_val)))
+            if out_dir_val
+            else (self.workspace_root / "out")
+        )
+        if _is_path_reparse_or_symlink(raw_chk_dir):
+            raise ValueError("Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.")
+        include_checkpoints = bool(payload.get("include_checkpoints", False))
         dry_run = bool(payload.get("dry_run", False))
         self._ensure_ready_to_launch(requires_gpu=False)
         lock_state = check_active_gpu_lock(self.workspace_root)
@@ -1268,6 +1365,8 @@ class JobManager:
             str(self.workspace_root / "upscale.py"),
             "--clean-temp",
         ]
+        if not include_checkpoints:
+            cmd.append("--keep-checkpoints")
         if out_dir_val:
             cmd.extend(["-o", out_dir_val])
         if dry_run:
@@ -1288,7 +1387,22 @@ class JobManager:
             return f"proc:{id(proc)}"
         return None
 
+    def _prune_dead_aborted_pids_locked(self) -> None:
+        if not self._aborted_owned_pids_by_job:
+            return
+        try:
+            import psutil
+            for tok in list(self._aborted_owned_pids_by_job.keys()):
+                alive_pids = {p for p in self._aborted_owned_pids_by_job[tok] if psutil.pid_exists(p)}
+                if alive_pids:
+                    self._aborted_owned_pids_by_job[tok] = alive_pids
+                else:
+                    self._aborted_owned_pids_by_job.pop(tok, None)
+        except Exception:
+            pass
+
     def _record_aborted_owned_pids_locked(self, token: str, pids: set[int]) -> None:
+        self._prune_dead_aborted_pids_locked()
         if not token or not pids:
             return
         self._aborted_owned_pids_by_job[token] = set(pids)
@@ -1305,6 +1419,7 @@ class JobManager:
     ) -> bool:
         if candidate_pid is None:
             return False
+        self._prune_dead_aborted_pids_locked()
         aborted_pid = _coerce_pid(aborted_job.get("pid"))
         if aborted_pid is not None and candidate_pid == aborted_pid:
             return True
@@ -1449,6 +1564,7 @@ class JobManager:
         owned_tree_pids: set[int] = set()
         aborted_queue_items: List[str] = []
         aborted_output_dir: Optional[str] = None
+        aborted_keep_temp = False
         external_lock_pid: Optional[int] = None
         concurrent_abort_pid: Optional[int] = None
         reclaimed_lineage_pid: Optional[int] = None
@@ -1464,8 +1580,10 @@ class JobManager:
                             str(x) for x in (self._active_job.get("queue_items") or []) if str(x or "").strip()
                         ]
                         raw_opts = self._active_job.get("options")
-                        if isinstance(raw_opts, dict) and raw_opts.get("output_dir"):
-                            aborted_output_dir = str(raw_opts.get("output_dir"))
+                        if isinstance(raw_opts, dict):
+                            aborted_keep_temp = bool(raw_opts.get("keep_temp"))
+                            if raw_opts.get("output_dir"):
+                                aborted_output_dir = str(raw_opts.get("output_dir"))
                     abort_token = self._job_abort_token(self._active_job, killed_proc)
                     if abort_token is not None:
                         self._aborting_tokens.add(abort_token)
@@ -1604,7 +1722,12 @@ class JobManager:
                     external_lock_pid = lock_state.get("pid")
 
             # Clean unclaimed 0-chunk preflight .temp_* directories left behind after aborting a multi-item queue.
-            if killed_proc is not None and len(aborted_queue_items) > 1 and external_lock_pid is None:
+            if (
+                killed_proc is not None
+                and len(aborted_queue_items) > 1
+                and external_lock_pid is None
+                and not aborted_keep_temp
+            ):
                 import shutil
                 try:
                     out_base_clean, _ = _resolve_output_target(self.workspace_root, aborted_output_dir)
@@ -1623,16 +1746,20 @@ class JobManager:
                             continue
                         up_dir_cand = temp_cand / "upscaled_segs"
                         has_done_up = False
-                        if up_dir_cand.is_dir():
-                            for up_entry in os.scandir(up_dir_cand):
-                                fn = up_entry.name
-                                if fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4"):
-                                    try:
-                                        if up_entry.is_file() and up_entry.stat().st_size > 0:
-                                            has_done_up = True
-                                            break
-                                    except OSError:
-                                        pass
+                        if up_dir_cand.exists():
+                            try:
+                                if _is_path_reparse_or_symlink(up_dir_cand):
+                                    has_done_up = True
+                                elif up_dir_cand.is_dir():
+                                    with os.scandir(up_dir_cand) as up_it:
+                                        for up_entry in up_it:
+                                            fn = up_entry.name
+                                            if fn.startswith("up_") and fn.endswith(".mp4") and not fn.endswith(".tmp.mp4"):
+                                                if up_entry.is_file() and up_entry.stat().st_size > 0:
+                                                    has_done_up = True
+                                                    break
+                            except OSError:
+                                has_done_up = True
                         if not has_done_up:
                             shutil.rmtree(temp_cand, ignore_errors=True)
                     except OSError:

@@ -1317,8 +1317,10 @@ def upscale_frames_with_fallback(
                 dedup=dedup,
             )
             worker_fp32.restart_if_needed(logger=logger)
-            res["engine_used"] = f"{engine}_fp32_fallback"
-            res["runtime_backend"] = "cpu" if engine == "cpu" else "pytorch-cuda"
+            raw_fp32_dev = getattr(getattr(worker_fp32, "device", None), "type", None)
+            fp32_dev_type = raw_fp32_dev if isinstance(raw_fp32_dev, str) and raw_fp32_dev else str(engine)
+            res["engine_used"] = f"{fp32_dev_type}_fp32_fallback"
+            res["runtime_backend"] = "cpu" if fp32_dev_type == "cpu" else "pytorch-cuda"
             return res
 
         if os.path.exists(REALESRGAN_BIN) or os.path.exists(REALESRGAN_BIN + ".exe"):

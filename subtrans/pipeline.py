@@ -208,6 +208,7 @@ class TranslationPipeline:
         video_path: Optional[Path] = None,
         prefer_whisper: bool = False,
         piecewise_ja_offsets: Optional[List[Dict[str, int]]] = None,
+        no_embed: bool = False,
     ) -> Dict[str, Any]:
         """Executes translation pipeline."""
         start_time = time.monotonic()
@@ -994,6 +995,9 @@ class TranslationPipeline:
                     "prefer_whisper": bool(prefer_whisper or str(ja_path).endswith(".whisper_ja.srt")),
                     "glossary": str(glossary_path) if glossary_path else None,
                     "subs_quality": str(self.subs_quality),
+                    "subs_upgrade": bool(effective_subs_upgrade),
+                    "sound_cues": str(sound_cues or "drop"),
+                    "no_embed": bool(no_embed),
                     "sub_offset_ms": int(sub_offset_ms),
                     "real_rate": round(real_rate, 4),
                     "uncertain_rate": round(uncertain_rate, 4),

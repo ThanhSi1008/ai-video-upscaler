@@ -337,7 +337,15 @@ def scan_temp_checkpoints(
                             else:
                                 model_requested = model_id
                         dedup_policy = str(mdata.get("dedup_policy") or "")
-                        dedup_policy_requested = str(mdata.get("dedup_policy_requested") or "")
+                        if dedup_policy == "off":
+                            dedup_policy_requested = "off"
+                        elif "dedup_policy_requested" in mdata:
+                            dedup_policy_requested = str(mdata.get("dedup_policy_requested") or "").strip()
+                        else:
+                            res_src_d = str(mdata.get("resolution_source") or "").strip().lower()
+                            dedup_policy_requested = (
+                                "" if res_src_d.startswith(("shows.yaml", "models.yaml", "default")) else dedup_policy
+                            )
                         if mdata.get("grain_restore"):
                             grain_restore = str(mdata.get("grain_restore") or "auto")
                         if mdata.get("nvenc_multipass_policy"):
@@ -698,7 +706,53 @@ class TelemetryHub:
             active_source = "cli"
 
         effective_stage = str(live_data.get("stage") or "idle")
+        raw_disk_stage = effective_stage
         queue_summary: Optional[Dict[str, Any]] = None
+
+        def _seed_early_resume_chunks(
+            cur_live: Dict[str, Any],
+            cur_stage: str,
+            fallback_in: str = "",
+            is_force: bool = False,
+        ) -> Dict[str, Any]:
+            if (
+                is_force
+                or cur_stage not in {"initializing", "probing", "preflight_dedup"}
+                or int(cur_live.get("total_chunks") or 0) > 0
+                or not checkpoints
+            ):
+                return cur_live
+            cur_in_raw = str(cur_live.get("input_path") or fallback_in).strip()
+            cur_in_norm = os.path.normcase(os.path.abspath(cur_in_raw)) if cur_in_raw else ""
+            cur_in_stem = Path(cur_in_raw).stem.lower() if cur_in_raw else ""
+            matched_cp = next(
+                (
+                    cp
+                    for cp in checkpoints
+                    if (
+                        cur_in_norm
+                        and cp.get("source_file")
+                        and os.path.normcase(os.path.abspath(str(cp["source_file"]))) == cur_in_norm
+                    )
+                    or (cur_in_stem and str(cp.get("episode_name") or "").lower() == cur_in_stem)
+                ),
+                None,
+            )
+            if matched_cp is None:
+                return cur_live
+            cand_done_p = int(matched_cp.get("completed_chunks") or 0)
+            if cand_done_p <= 0:
+                return cur_live
+            seeded = dict(cur_live)
+            seeded["completed_chunks"] = cand_done_p
+            seeded["total_chunks"] = max(cand_done_p, int(matched_cp.get("total_chunks") or 0))
+            raw_res_p = matched_cp.get("resumed_chunks")
+            seeded["resumed_chunks"] = (
+                [int(x) for x in raw_res_p]
+                if isinstance(raw_res_p, list) and raw_res_p
+                else list(range(cand_done_p))
+            )
+            return seeded
 
         if web_job_running and active_job is not None:
             active_type = str(active_job.get("job_type") or "upscale")
@@ -841,42 +895,25 @@ class TelemetryHub:
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
-            elif (
-                active_type == "upscale"
-                and not bool((active_job.get("options") or {}).get("force"))
-                and effective_stage in {"initializing", "probing", "splitting"}
-                and int(live_data.get("total_chunks") or 0) <= 0
-                and checkpoints
-            ):
-                # Keep checkpoint progress & heatmap steady while RunLogger is in probing/splitting before chunk scan
-                cur_in_raw = str(live_data.get("input_path") or (q_items[0] if q_items else "")).strip()
-                cur_in_norm = os.path.normcase(os.path.abspath(cur_in_raw)) if cur_in_raw else ""
-                cur_in_stem = Path(cur_in_raw).stem.lower() if cur_in_raw else ""
-                matched_probe_cp = next(
-                    (
-                        cp
-                        for cp in checkpoints
-                        if (
-                            cur_in_norm
-                            and cp.get("source_file")
-                            and os.path.normcase(os.path.abspath(str(cp["source_file"]))) == cur_in_norm
-                        )
-                        or (cur_in_stem and str(cp.get("episode_name") or "").lower() == cur_in_stem)
-                    ),
-                    None,
+            elif active_type == "upscale":
+                up_opts_cur = active_job.get("options") or {}
+                if effective_stage == "completed" and (
+                    len(q_items) > 1 or bool(up_opts_cur.get("subs_after_upscale"))
+                ):
+                    effective_stage = "initializing"
+                    live_data = dict(live_data)
+                    live_data["stage"] = "initializing"
+                    live_data["stage_detail"] = (
+                        "Đang chuyển sang tập tiếp theo trong hàng đợi..."
+                        if len(q_items) > 1
+                        else "Đang chuẩn bị bước xử lý phụ đề (Stage B)..."
+                    )
+                live_data = _seed_early_resume_chunks(
+                    live_data,
+                    effective_stage,
+                    fallback_in=str(q_items[0]) if q_items else "",
+                    is_force=bool(up_opts_cur.get("force")),
                 )
-                if matched_probe_cp is not None:
-                    cand_done_p = int(matched_probe_cp.get("completed_chunks") or 0)
-                    if cand_done_p > 0:
-                        live_data = dict(live_data)
-                        live_data["completed_chunks"] = cand_done_p
-                        live_data["total_chunks"] = max(cand_done_p, int(matched_probe_cp.get("total_chunks") or 0))
-                        raw_res_p = matched_probe_cp.get("resumed_chunks")
-                        live_data["resumed_chunks"] = (
-                            [int(x) for x in raw_res_p]
-                            if isinstance(raw_res_p, list) and raw_res_p
-                            else list(range(cand_done_p))
-                        )
 
             if active_type == "upscale" and len(q_items) > 1:
                 live_in_str = str(live_data.get("input_path") or "").strip()
@@ -893,16 +930,50 @@ class TelemetryHub:
                     ):
                         cur_q_idx = idx_q
                         break
-                next_names = [os.path.basename(str(x)) for x in q_items[cur_q_idx + 1 : cur_q_idx + 4]]
+                qs_disk = live_data.get("queue_stats") if isinstance(live_data.get("queue_stats"), dict) else None
+                in_stage_b_q = bool((qs_disk or {}).get("stage_b")) or effective_stage == "subtrans"
+                if qs_disk is not None:
+                    eff_cur_1b = max(1, min(len(q_items), int(qs_disk.get("current_index") or (cur_q_idx + 1))))
+                    eff_done_cnt = max(0, int(qs_disk.get("completed_items") or 0))
+                    eff_skip_cnt = max(0, int(qs_disk.get("skipped_items") or 0))
+                    eff_fail_cnt = max(0, int(qs_disk.get("failed_items") or 0))
+                elif raw_disk_stage == "completed" and cur_q_idx < len(q_items) - 1:
+                    eff_done_cnt = cur_q_idx + 1
+                    eff_cur_1b = cur_q_idx + 2
+                    eff_skip_cnt = 0
+                    eff_fail_cnt = 0
+                else:
+                    eff_done_cnt = cur_q_idx
+                    eff_cur_1b = cur_q_idx + 1
+                    eff_skip_cnt = 0
+                    eff_fail_cnt = 0
+                eff_cur_0b = eff_cur_1b - 1
+                next_names = (
+                    []
+                    if in_stage_b_q
+                    else [os.path.basename(str(x)) for x in q_items[eff_cur_0b + 1 : eff_cur_0b + 4]]
+                )
                 queue_summary = {
                     "total_items": len(q_items),
-                    "current_index": cur_q_idx + 1,
-                    "completed_items": cur_q_idx,
-                    "current_name": os.path.basename(str(q_items[cur_q_idx])),
-                    "remaining_count": max(0, len(q_items) - (cur_q_idx + 1)),
+                    "current_index": eff_cur_1b,
+                    "completed_items": eff_done_cnt,
+                    "current_name": os.path.basename(str(q_items[eff_cur_0b])),
+                    "remaining_count": 0 if in_stage_b_q else max(0, len(q_items) - eff_cur_1b),
                     "remaining_names": next_names,
                 }
+                if eff_skip_cnt > 0:
+                    queue_summary["skipped_items"] = eff_skip_cnt
+                if eff_fail_cnt > 0:
+                    queue_summary["failed_items"] = eff_fail_cnt
+                if in_stage_b_q:
+                    queue_summary["phase"] = "stage_b"
         else:
+            if active_source == "cli":
+                live_data = _seed_early_resume_chunks(
+                    live_data,
+                    effective_stage,
+                    is_force=bool(live_data.get("force")),
+                )
             last_job = last_job_cand
             dying_owned_teardown = bool(is_aborted_web_teardown and (pid_alive or gpu_lock.get("locked") or job_state.get("aborting")))
             if (
@@ -1115,7 +1186,7 @@ class TelemetryHub:
                     and (not live_file.is_file() or last_finished_ts == 0.0 or last_finished_ts >= live_file_mtime - 1.0)
                 ):
                     if live_matches_last_job:
-                        if effective_stage != "error":
+                        if effective_stage not in {"error", "paused"}:
                             failed_step = (
                                 effective_stage
                                 if effective_stage not in {"idle", "starting", "initializing", "completed"}

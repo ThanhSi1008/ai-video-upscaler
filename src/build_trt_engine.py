@@ -1114,6 +1114,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     raw_model = str(args.model).strip() if args.model else ""
     if raw_model.lower() == "all":
         model_ids = list(registry.keys())
+    elif raw_model.lower() == "auto-pareto":
+        model_ids = [
+            k for k in ("animejanai-hd-v3-compact", "animejanai-hd-v3-ultracompact") if k in registry
+        ]
+        if not model_ids:
+            model_ids = [get_default_model_id(registry)]
     elif raw_model:
         model_ids = [raw_model]
     else:

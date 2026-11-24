@@ -409,11 +409,27 @@ def run_upscale_pipeline(
                 model_info = resolve_episode_model_blend(model_info, grain_tier=eff_grain_tier)
                 eff_blend_alpha = round(float(model_info.get("blend_alpha", 0.0) or 0.0), 4)
 
+                def _write_manifest_atomic(m_path: str, m_payload: dict[str, Any]) -> None:
+                    tmp_m = f"{m_path}.{os.getpid()}.tmp"
+                    try:
+                        with open(tmp_m, "w", encoding="utf-8") as mf:
+                            json.dump(m_payload, mf, indent=2, ensure_ascii=False)
+                        os.replace(tmp_m, m_path)
+                    except OSError:
+                        if os.path.exists(tmp_m):
+                            try:
+                                os.remove(tmp_m)
+                            except OSError:
+                                pass
+
                 # Kiểm tra tính đồng nhất của model qua manifest.json (D7)
                 model_sha256 = str(model_info.get("blended_weights_sha256") or model_info.get("sha256") or "")
                 manifest_path = os.path.join(work_dir, "manifest.json")
                 resumed_episode_multipass: Optional[str] = None
+                resumed_multipass_policy: Optional[str] = None
                 resumed_pareto_routing: Optional[dict] = None
+                preserved_dedup_policy = ""
+                preserved_dedup_req = ""
                 prev_segment_time = 0
                 preserved_sub_meta: dict[str, Any] = {}
                 if os.path.exists(manifest_path):
@@ -430,9 +446,14 @@ def run_upscale_pipeline(
                         prev_mp = str(manifest_data.get("nvenc_multipass") or "").strip().lower()
                         if prev_mp in ("fullres", "qres") and not force and resume:
                             resumed_episode_multipass = prev_mp
+                        prev_mp_pol = str(manifest_data.get("nvenc_multipass_policy") or "").strip().lower()
+                        if prev_mp_pol in ("auto", "fullres", "qres") and not force and resume:
+                            resumed_multipass_policy = prev_mp_pol
                         if isinstance(manifest_data.get("model_routing"), dict) and not force and resume:
                             resumed_pareto_routing = manifest_data.get("model_routing")
                         if not force and resume:
+                            preserved_dedup_policy = str(manifest_data.get("dedup_policy") or "").strip()
+                            preserved_dedup_req = str(manifest_data.get("dedup_policy_requested") or "").strip()
                             try:
                                 prev_segment_time = max(0, int(manifest_data.get("segment_time") or 0))
                             except (TypeError, ValueError):
@@ -474,6 +495,11 @@ def run_upscale_pipeline(
                                 os.makedirs(segs_dir, exist_ok=True)
                                 os.makedirs(up_segs_dir, exist_ok=True)
                                 prev_segment_time = 0
+                                resumed_episode_multipass = None
+                                resumed_multipass_policy = None
+                                resumed_pareto_routing = None
+                                preserved_dedup_policy = ""
+                                preserved_dedup_req = ""
                                 preserved_sub_meta.pop("total_chunks", None)
                     except ValueError:
                         raise
@@ -487,6 +513,18 @@ def run_upscale_pipeline(
                     else eff_sub_meta.get("model_requested", "")
                 ).strip()
                 eff_sub_meta.pop("model_requested", None)
+                if not dedup:
+                    eff_dedup_saved = "off"
+                    eff_dedup_req_saved = str(dedup_policy or "off")
+                elif dedup_policy is not None and str(dedup_policy).strip():
+                    eff_dedup_saved = str(dedup_policy).strip()
+                    eff_dedup_req_saved = str(dedup_policy).strip()
+                elif preserved_dedup_policy == "off":
+                    eff_dedup_saved = "off"
+                    eff_dedup_req_saved = "off"
+                else:
+                    eff_dedup_saved = preserved_dedup_policy or "default"
+                    eff_dedup_req_saved = preserved_dedup_req
                 manifest_data = {
                     "source_file": original_input_path,
                     "output_dir": os.path.dirname(os.path.abspath(output_path)),
@@ -496,8 +534,8 @@ def run_upscale_pipeline(
                     "sha256": model_sha256,
                     "blended_weights_sha256": model_sha256,
                     "blend_alpha": eff_blend_alpha,
-                    "dedup_policy": str(dedup_policy or ("off" if not dedup else "default")),
-                    "dedup_policy_requested": str(dedup_policy or ""),
+                    "dedup_policy": eff_dedup_saved,
+                    "dedup_policy_requested": eff_dedup_req_saved,
                     "grain_restore": norm_grain_restore,
                     "grain_tier": eff_grain_tier,
                     "grain_sigma_y": round(probed_sigma_y, 4),
@@ -507,7 +545,18 @@ def run_upscale_pipeline(
                     "use_tensorrt": bool(use_tensorrt),
                     "batch_size": int(batch_size) if batch_size is not None else None,
                     "segment_time": int(segment_time),
+                    "nvenc_multipass_policy": str(nvenc_multipass or resumed_multipass_policy or "auto").strip().lower(),
                     "resolution_source": model_info.get("resolution_source", ""),
+                    **(
+                        {"nvenc_multipass": resumed_episode_multipass}
+                        if resumed_episode_multipass
+                        else {}
+                    ),
+                    **(
+                        {"model_routing": resumed_pareto_routing}
+                        if isinstance(resumed_pareto_routing, dict)
+                        else {}
+                    ),
                     **eff_sub_meta,
                     **(
                         {
@@ -519,8 +568,7 @@ def run_upscale_pipeline(
                         else {}
                     ),
                 }
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+                _write_manifest_atomic(manifest_path, manifest_data)
 
                 if resume and not force and os.path.isdir(up_segs_dir):
                     early_done_idxs: list[int] = []
@@ -545,6 +593,17 @@ def run_upscale_pipeline(
                                         early_tot_c = len(pd_e.get("chunks") or [])
                                 except Exception:
                                     early_tot_c = 0
+                        if early_tot_c <= 0 and os.path.isdir(segs_dir):
+                            try:
+                                early_tot_c = sum(
+                                    1
+                                    for fn_s in os.listdir(segs_dir)
+                                    if fn_s.startswith("seg_")
+                                    and fn_s.endswith(".mp4")
+                                    and not fn_s.endswith(".tmp.mp4")
+                                )
+                            except OSError:
+                                early_tot_c = 0
                         if early_tot_c > 0:
                             logger.update_live_context(
                                 total_chunks=max(len(early_done_idxs), early_tot_c),
@@ -666,8 +725,13 @@ def run_upscale_pipeline(
                         "engine": engine,
                         "precision": precision,
                     }
-                    if dedup:
-                        effective_dedup_policy = resolve_dedup_policy(original_input_path, dedup_policy)
+                    if dedup and not (resume and not force and dedup_policy is None and preserved_dedup_policy == "off"):
+                        eff_pol_override = (
+                            dedup_policy
+                            if (dedup_policy is not None and str(dedup_policy).strip())
+                            else (preserved_dedup_req or None)
+                        )
+                        effective_dedup_policy = resolve_dedup_policy(original_input_path, eff_pol_override)
                         logger.update_live_context(dedup_policy=effective_dedup_policy)
                         t_pref_start = time.time()
                         plan_requires_sync_loader = False
@@ -794,12 +858,15 @@ def run_upscale_pipeline(
                     if rolling_planner is not None and hasattr(rolling_planner, "set_extra_fields"):
                         rolling_planner.set_extra_fields({"nvenc_multipass": episode_multipass})
                     manifest_data["dedup_policy"] = str(effective_dedup_policy)
+                    if effective_dedup_policy == "off" and not manifest_data.get("dedup_policy_requested"):
+                        manifest_data["dedup_policy_requested"] = "off"
                     manifest_data["nvenc_multipass"] = episode_multipass
-                    manifest_data["nvenc_multipass_policy"] = str(nvenc_multipass or "auto").strip().lower()
+                    manifest_data["nvenc_multipass_policy"] = str(
+                        nvenc_multipass or resumed_multipass_policy or "auto"
+                    ).strip().lower()
                     manifest_data["total_chunks"] = int(total_segs)
                     manifest_data["segment_time"] = int(segment_time)
-                    with open(manifest_path, "w", encoding="utf-8") as f:
-                        json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+                    _write_manifest_atomic(manifest_path, manifest_data)
 
                     measured_total_f = (
                         int(dedup_plan["total_frames"])
@@ -870,11 +937,10 @@ def run_upscale_pipeline(
                                     pass
                         chunks_to_process.append((idx, seg_file, seg_out_file))
 
-                    if resumed_chunk_indices:
-                        logger.update_live_context(
-                            resumed_chunks=resumed_chunk_indices,
-                            completed_chunks=len(resumed_chunk_indices),
-                        )
+                    logger.update_live_context(
+                        resumed_chunks=resumed_chunk_indices,
+                        completed_chunks=len(resumed_chunk_indices),
+                    )
 
                     is_auto_pareto = bool(model_info.get("is_auto_pareto"))
                     pareto_state = {
@@ -892,11 +958,7 @@ def run_upscale_pipeline(
                             "chunk_counts": dict(pareto_state["chunk_counts"]),
                             "chunks": list(pareto_state["chunks"]),
                         }
-                        try:
-                            with open(manifest_path, "w", encoding="utf-8") as mf_out:
-                                json.dump(manifest_data, mf_out, indent=2, ensure_ascii=False)
-                        except OSError:
-                            pass
+                        _write_manifest_atomic(manifest_path, manifest_data)
 
                     def _resolve_chunk_pareto_submodel(
                         c_idx_val: int,

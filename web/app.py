@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 import hashlib
 import ipaddress
@@ -39,6 +39,7 @@ from web.fs_browser import (
     VALID_NVENC_MULTIPASS_POLICIES,
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
+    extract_trt_hw_profiles,
     inspect_model_trt_cache,
     is_secret_filename,
     is_unc_path,
@@ -46,7 +47,9 @@ from web.fs_browser import (
     is_valid_dedup_policy,
     match_show_pattern,
     match_show_rule,
+    resolve_allowed_trt_weights_shas,
     strip_wrapping_quotes,
+    unwrap_outer_quotes_preserving_trailing_space,
     validate_win32_path_hygiene,
 )
 from web.job_manager import MODEL_REFERENCE_FPS, JobManager, _validate_output_dir, parse_preview_start_value
@@ -109,6 +112,8 @@ class SchedulePreviewRequest(BaseModel):
     @field_validator("batch_size", mode="before")
     @classmethod
     def _validate_batch_size_type(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
         return _reject_bool_or_float_int(v, "batch_size")
 
     @field_validator("inputs")
@@ -151,7 +156,7 @@ class StartUpscaleRequest(BaseModel):
     dedup_policy: Optional[str] = None
     nvenc_multipass: Optional[str] = None
     grain_restore: Optional[str] = None
-    batch_size: int = Field(default=8, ge=1, le=32)
+    batch_size: Optional[int] = Field(default=None, ge=1, le=32)
     deadline: Optional[str] = None
     allow_partial: bool = False
     zero_disk: bool = True
@@ -180,6 +185,8 @@ class StartUpscaleRequest(BaseModel):
     @field_validator("batch_size", mode="before")
     @classmethod
     def _validate_batch_size_type(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
         return _reject_bool_or_float_int(v, "batch_size")
 
     @field_validator("sub_offset_ms", mode="before")
@@ -263,6 +270,8 @@ class StartPreviewRequest(BaseModel):
     @field_validator("batch_size", mode="before")
     @classmethod
     def _validate_batch_size_type(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
         return _reject_bool_or_float_int(v, "batch_size")
 
     @field_validator("seconds", mode="before")
@@ -341,12 +350,14 @@ class StartSubtransRequest(BaseModel):
 
 
 class StartSubsPendingRequest(BaseModel):
-    subs_quality: str = "normal"
+    subs_quality: Optional[str] = None
     dry_run: bool = False
 
 
 class BuildTrtRequest(BaseModel):
     model_id: str
+    width: Optional[int] = Field(default=None, ge=64, le=4096)
+    height: Optional[int] = Field(default=None, ge=64, le=4096)
     force: bool = False
     dry_run: bool = False
 
@@ -355,9 +366,17 @@ class BuildTrtRequest(BaseModel):
     def _validate_mid(cls, v: str) -> str:
         return (_validate_no_nul_str(v, "model_id", reject_unc=False) or "").strip()
 
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def _validate_dims_type(cls, v: Any) -> Any:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return _reject_bool_or_float_int(v, "width/height")
+
 
 class CleanTempRequest(BaseModel):
     output_dir: Optional[str] = None
+    include_checkpoints: bool = False
     dry_run: bool = False
 
     @field_validator("output_dir")
@@ -591,11 +610,14 @@ def _split_gemini_key_tokens(raw: Optional[str]) -> List[str]:
     return [tok.strip() for tok in re.split(r"[;,]", raw) if tok.strip()]
 
 
+_SLOT_ENV_KEY_RE = re.compile(r"^GEMINI_API_KEY_([1-9]\d*)$")
+
+
 def _resolve_subtrans_key_slots_all(
     dotenv_path: Path,
     key_id_fn: Optional[Callable[[str], str]] = None,
 ) -> tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
-    """Resolve 3-slot summary and dynamic 1..N API key slot statuses matching subtrans/config.py precedence."""
+    """Resolve 3-slot summary and dynamic 1..N API key slot statuses matching _apply_subtrans_key_edits."""
     sub_dotenv_path = dotenv_path.parent / "subtrans" / ".env"
     dotenv_map = _read_dotenv_map(dotenv_path)
     if sub_dotenv_path.is_file():
@@ -610,68 +632,63 @@ def _resolve_subtrans_key_slots_all(
             return dotenv_map[name].strip(), "dotenv"
         return "", ""
 
-    ordered_entries: List[tuple[str, str, str]] = []
+    prefix_entries: List[tuple[str, str, str]] = []
     seen_keys: set[str] = set()
 
-    def _add_entries(toks: List[str], src: str, var_name: str) -> None:
-        for t in toks:
-            if t not in seen_keys:
-                seen_keys.add(t)
-                ordered_entries.append((t, src, var_name))
+    for p_name in ("GEMINI_API_KEYS", "GEMINI_API_KEY"):
+        p_raw, p_src = _effective_var(p_name)
+        for tok in _split_gemini_key_tokens(p_raw):
+            if tok not in seen_keys:
+                seen_keys.add(tok)
+                prefix_entries.append((tok, p_src, p_name))
 
-    multi_raw, multi_src = _effective_var("GEMINI_API_KEYS")
-    multi_tokens = _split_gemini_key_tokens(multi_raw)
-    _add_entries(multi_tokens, multi_src, "GEMINI_API_KEYS")
-
-    prim_raw, prim_src = _effective_var("GEMINI_API_KEY")
-    prim_tokens = _split_gemini_key_tokens(prim_raw)
-    _add_entries(prim_tokens, prim_src, "GEMINI_API_KEY")
-
-    prefix_len = len(ordered_entries)
-
-    def _extra_var_sort_key(name: str) -> tuple[int, Any]:
-        suffix = name[len("GEMINI_API_KEY_"):]
-        return (0, int(suffix)) if suffix.isdigit() else (1, suffix)
+    slot_table: Dict[int, tuple[str, str, str]] = {}
+    for idx, entry in enumerate(prefix_entries, start=1):
+        slot_table[idx] = entry
 
     all_var_names = set(dotenv_map.keys()) | set(os.environ.keys())
-    for extra_name in sorted(
-        (k for k in all_var_names if k.startswith("GEMINI_API_KEY_")),
-        key=_extra_var_sort_key,
-    ):
-        e_val, e_src = _effective_var(extra_name)
-        _add_entries(_split_gemini_key_tokens(e_val), e_src, extra_name)
-
-    max_numbered_slot = 3
-    for var_n in all_var_names:
-        m_num = re.match(r"^GEMINI_API_KEY_([1-9]\d*)$", var_n)
+    numbered_names: List[tuple[int, str]] = []
+    alpha_names: List[str] = []
+    for k in all_var_names:
+        if not k.startswith("GEMINI_API_KEY_"):
+            continue
+        m_num = _SLOT_ENV_KEY_RE.match(k)
         if m_num:
-            n_val, _ = _effective_var(var_n)
-            if _split_gemini_key_tokens(n_val):
-                max_numbered_slot = max(max_numbered_slot, min(32, int(m_num.group(1))))
-    total_slot_count = max(3, min(32, len(ordered_entries)), max_numbered_slot)
+            numbered_names.append((int(m_num.group(1)), k))
+        else:
+            alpha_names.append(k)
 
-    slot1_raw, _ = _effective_var("GEMINI_API_KEY_1")
-    slot1_tokens = _split_gemini_key_tokens(slot1_raw)
-    use_positional_slots = not multi_tokens and (not prim_tokens or prim_tokens == slot1_tokens)
+    for n_idx, var_name in sorted(numbered_names, key=lambda x: x[0]):
+        e_val, e_src = _effective_var(var_name)
+        for tok in _split_gemini_key_tokens(e_val):
+            if tok in seen_keys:
+                continue
+            seen_keys.add(tok)
+            target = n_idx
+            while target in slot_table:
+                target += 1
+            if target <= 32:
+                slot_table[target] = (tok, e_src, var_name)
+
+    for var_name in sorted(alpha_names):
+        e_val, e_src = _effective_var(var_name)
+        for tok in _split_gemini_key_tokens(e_val):
+            if tok in seen_keys:
+                continue
+            seen_keys.add(tok)
+            target = max(slot_table.keys(), default=0) + 1
+            if target <= 32:
+                slot_table[target] = (tok, e_src, var_name)
+
+    total_slot_count = max(3, min(32, max(slot_table.keys(), default=0)))
 
     all_slots_summary: List[Dict[str, Any]] = []
     for idx in range(1, total_slot_count + 1):
-        slot_key_name = f"GEMINI_API_KEY_{idx}"
-        chosen_val = ""
-        chosen_src = ""
-        chosen_var = slot_key_name
-
-        # Align slots with ordered_entries when GEMINI_API_KEYS or a distinct unnumbered GEMINI_API_KEY
-        # supplies prefix tokens; when GEMINI_API_KEY merely mirrors GEMINI_API_KEY_1 (or is absent),
-        # preserve positional GEMINI_API_KEY_1..N mapping so clearing any middle slot stays unconfigured.
-        if not use_positional_slots and prefix_len > 0:
-            if idx - 1 < len(ordered_entries):
-                chosen_val, chosen_src, chosen_var = ordered_entries[idx - 1]
+        default_var = f"GEMINI_API_KEY_{idx}"
+        if idx in slot_table:
+            chosen_val, chosen_src, chosen_var = slot_table[idx]
         else:
-            slot_val, slot_src = _effective_var(slot_key_name)
-            slot_tokens = _split_gemini_key_tokens(slot_val)
-            if slot_tokens:
-                chosen_val, chosen_src, chosen_var = slot_tokens[0], slot_src, slot_key_name
+            chosen_val, chosen_src, chosen_var = "", "", default_var
 
         all_slots_summary.append(
             {
@@ -684,7 +701,7 @@ def _resolve_subtrans_key_slots_all(
             }
         )
 
-    return all_slots_summary[:3], len(ordered_entries), all_slots_summary
+    return all_slots_summary[:3], len(seen_keys), all_slots_summary
 
 
 def _resolve_subtrans_key_slots(
@@ -695,15 +712,13 @@ def _resolve_subtrans_key_slots(
     return slots_3, active_cnt
 
 
-_SLOT_ENV_KEY_RE = re.compile(r"^GEMINI_API_KEY_([1-9]\d*)$")
-
-
 def _apply_subtrans_key_edits(
     existing: Dict[str, str],
     key_1: Optional[str],
     key_2: Optional[str],
     key_3: Optional[str],
     slots: Optional[Dict[int, Optional[str]]] = None,
+    env_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Optional[str]]:
     """Transform merged .env key entries into normalized GEMINI_API_KEY_1..N slots plus synced GEMINI_API_KEY."""
     requested_edits: Dict[int, str] = {}
@@ -717,79 +732,128 @@ def _apply_subtrans_key_edits(
     if not requested_edits:
         return {}
 
+    env_map = {k: str(v).strip() for k, v in (env_overrides or {}).items() if k.startswith("GEMINI_API_KEY")}
+
+    def _eff_entry(var_name: str) -> tuple[str, str]:
+        if var_name in env_map:
+            return env_map[var_name], "env"
+        if var_name in existing:
+            return str(existing[var_name]).strip(), "dotenv"
+        return "", ""
+
     eff_key_1 = requested_edits.get(1)
     eff_key_2 = requested_edits.get(2)
-    old_multi = _split_gemini_key_tokens(existing.get("GEMINI_API_KEYS"))
-    old_prim_orig = _split_gemini_key_tokens(existing.get("GEMINI_API_KEY"))
+    multi_raw, multi_src = _eff_entry("GEMINI_API_KEYS")
+    prim_raw, prim_src = _eff_entry("GEMINI_API_KEY")
+    old_multi = _split_gemini_key_tokens(multi_raw)
+    old_prim_orig = _split_gemini_key_tokens(prim_raw)
     old_prim = list(old_prim_orig)
-    legacy_triple_coexist = bool(old_multi and len(old_prim_orig) == 1 and existing.get("GEMINI_API_KEY_1"))
+    s1_raw, _ = _eff_entry("GEMINI_API_KEY_1")
+    legacy_triple_coexist = bool(
+        old_multi and len(old_prim_orig) == 1 and s1_raw and prim_src != "env" and multi_src != "env"
+    )
 
-    # Preserve tests/test_web_gui.py:1295: legacy single GEMINI_API_KEY coexisting with
-    # GEMINI_API_KEYS and GEMINI_API_KEY_1 is superseded when Slot 1 is explicitly edited.
     if legacy_triple_coexist and eff_key_1 is not None:
         old_prim = []
 
-    prefix_tokens: List[str] = []
+    prefix_tokens: List[tuple[str, str]] = []
     seen_tokens: set[str] = set()
-    for tok in old_multi + old_prim:
+    for tok in old_multi:
         if tok not in seen_tokens:
             seen_tokens.add(tok)
-            prefix_tokens.append(tok)
+            prefix_tokens.append((tok, multi_src or "dotenv"))
+    for tok in old_prim:
+        if tok not in seen_tokens:
+            seen_tokens.add(tok)
+            prefix_tokens.append((tok, prim_src or "dotenv"))
     prefix_len = len(prefix_tokens)
 
-    numbered_vars: Dict[int, List[str]] = {}
-    for k, v in existing.items():
+    all_keys = set(existing.keys()) | set(env_map.keys())
+    numbered_vars: Dict[int, tuple[List[str], str]] = {}
+    for k in all_keys:
         m = _SLOT_ENV_KEY_RE.match(k)
         if m:
-            numbered_vars[int(m.group(1))] = _split_gemini_key_tokens(v)
+            raw_v, src_v = _eff_entry(k)
+            numbered_vars[int(m.group(1))] = (_split_gemini_key_tokens(raw_v), src_v or "dotenv")
 
-    # Phase 1: Build canonical 1-based slot_table matching get_gemini_api_keys() order.
-    slot_table: Dict[int, str] = {}
-    for idx, tok in enumerate(prefix_tokens, start=1):
-        slot_table[idx] = tok
+    # Phase 1: Build canonical 1-based slot_table matching _resolve_subtrans_key_slots_all().
+    slot_table: Dict[int, tuple[str, str]] = {}
+    for idx, entry_pair in enumerate(prefix_tokens, start=1):
+        slot_table[idx] = entry_pair
 
     for n in sorted(numbered_vars.keys()):
-        # Drop GEMINI_API_KEY_1 only for legacy triple-coexist Slot 1 edits or Edit C's legacy Slot 2 shadow.
+        toks_n, src_n = numbered_vars[n]
         if (
             prefix_len > 0
             and n == 1
+            and src_n != "env"
             and (
                 (eff_key_1 is not None and legacy_triple_coexist)
                 or (
-                    bool(eff_key_2 and eff_key_2.strip())
+                    bool(key_2 and key_2.strip())
+                    and not slots
                     and not old_multi
                     and len(old_prim_orig) == 1
-                    and bool(numbered_vars.get(2))
+                    and prim_src != "env"
+                    and bool(numbered_vars.get(2, ([], ""))[0])
                 )
             )
         ):
             continue
-        for tok in numbered_vars[n]:
+        for tok in toks_n:
             if tok in seen_tokens:
                 continue
             seen_tokens.add(tok)
             target = n
             while target in slot_table:
                 target += 1
-            slot_table[target] = tok
+            if target <= 32:
+                slot_table[target] = (tok, src_n)
 
     # Phase 2: Apply requested Slot 1..32 edits or explicit clears.
     for slot_idx in sorted(requested_edits.keys()):
         raw_val = requested_edits[slot_idx]
         cleaned = _validate_dotenv_value(raw_val, key_name=f"GEMINI_API_KEY_{slot_idx}")
+        cur_pair = slot_table.get(slot_idx)
         if cleaned:
-            slot_table[slot_idx] = cleaned
+            if cur_pair and cur_pair[1] == "env":
+                raise ValueError(
+                    f"Khe {slot_idx} đang bị khóa bởi biến môi trường hệ thống (os.environ); hãy chỉnh biến môi trường trực tiếp."
+                )
+            slot_table[slot_idx] = (cleaned, "dotenv")
         else:
-            slot_table.pop(slot_idx, None)
+            if cur_pair and cur_pair[1] == "env":
+                shadowed_dotenv_toks = set(
+                    _split_gemini_key_tokens(str(existing.get(f"GEMINI_API_KEY_{slot_idx}") or ""))
+                )
+                if shadowed_dotenv_toks:
+                    for k_sl in [
+                        ks for ks, (ktok, ksrc) in slot_table.items()
+                        if ksrc == "dotenv" and ktok in shadowed_dotenv_toks
+                    ]:
+                        slot_table.pop(k_sl, None)
+                else:
+                    raise ValueError(
+                        f"Khe {slot_idx} đến từ biến môi trường hệ thống (os.environ), không thể xóa từ tệp .env."
+                    )
+            else:
+                slot_table.pop(slot_idx, None)
 
-    # Phase 3: Materialize normalized .env updates (GEMINI_API_KEYS cleared; GEMINI_API_KEY mirrors Slot 1).
+    # Phase 3: Materialize normalized .env updates without leaking os.environ secrets onto disk.
+    slot1_dotenv = slot_table[1][0] if (1 in slot_table and slot_table[1][1] == "dotenv") else ""
     updates: Dict[str, Optional[str]] = {
         "GEMINI_API_KEYS": "",
-        "GEMINI_API_KEY": slot_table.get(1, ""),
+        "GEMINI_API_KEY": "" if "GEMINI_API_KEY" in env_map else slot1_dotenv,
     }
-    all_indices = {1, 2, 3} | set(slot_table.keys()) | set(numbered_vars.keys()) | set(requested_edits.keys())
+    all_indices = (
+        {1, 2, 3}
+        | set(slot_table.keys())
+        | {int(m.group(1)) for k in existing if (m := _SLOT_ENV_KEY_RE.match(k))}
+        | set(requested_edits.keys())
+    )
     for idx in sorted(all_indices):
-        updates[f"GEMINI_API_KEY_{idx}"] = slot_table.get(idx, "")
+        pair = slot_table.get(idx)
+        updates[f"GEMINI_API_KEY_{idx}"] = pair[0] if (pair and pair[1] == "dotenv") else ""
     return updates
 
 
@@ -828,35 +892,40 @@ def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
                 stream_dur = 0.0
                 if vs.duration is not None and vs.time_base is not None:
                     cand_sd = float(vs.duration * vs.time_base)
-                    if cand_sd > 0.0:
+                    if cand_sd > 0.0 and (container_dur <= 0.0 or cand_sd <= container_dur + 1.0):
                         stream_dur = cand_sd
                 if stream_dur <= 0.0 and vs.metadata:
                     for mk, mv in vs.metadata.items():
                         if str(mk).upper().startswith("DURATION"):
                             parsed_tag = _parse_hms_duration_tag(mv)
-                            if parsed_tag > 0.0:
+                            if parsed_tag > 0.0 and (container_dur <= 0.0 or parsed_tag <= container_dur + 1.0):
                                 stream_dur = parsed_tag
                                 break
                 if stream_dur <= 0.0 and vs.frames and int(vs.frames) > 0 and fps_val > 0.0:
-                    stream_dur = float(vs.frames) / fps_val
+                    cand_fd = float(vs.frames) / fps_val
+                    if container_dur <= 0.0 or cand_fd <= container_dur + 1.0:
+                        stream_dur = cand_fd
                 if stream_dur <= 0.0 and container_dur > 0.0:
                     try:
                         c_start_s = float(container.start_time / av.time_base) if container.start_time is not None else 0.0
-                        seek_s = max(0.0, container_dur - 15.0) + c_start_s
-                        if vs.time_base is not None and float(vs.time_base) > 0.0:
-                            container.seek(int(seek_s / float(vs.time_base)), backward=True, any_frame=False, stream=vs)
-                        else:
-                            container.seek(int(seek_s * av.time_base), backward=True, any_frame=False)
                         max_end_s = 0.0
-                        for pkt in container.demux(vs):
-                            if pkt.pts is None or getattr(pkt, "is_discard", False):
-                                continue
-                            tb = pkt.time_base or vs.time_base
-                            if tb is not None:
-                                pkt_s = float(pkt.pts * tb) - c_start_s
-                                pkt_d = float(pkt.duration * tb) if pkt.duration else (1.0 / fps_val)
-                                if pkt_s + pkt_d > max_end_s:
-                                    max_end_s = pkt_s + pkt_d
+                        for tail_window_s in (15.0, 60.0, container_dur):
+                            seek_s = max(0.0, container_dur - tail_window_s) + c_start_s
+                            if vs.time_base is not None and float(vs.time_base) > 0.0:
+                                container.seek(int(seek_s / float(vs.time_base)), backward=True, any_frame=False, stream=vs)
+                            else:
+                                container.seek(int(seek_s * av.time_base), backward=True, any_frame=False)
+                            for pkt in container.demux(vs):
+                                if pkt.pts is None or getattr(pkt, "is_discard", False):
+                                    continue
+                                tb = pkt.time_base or vs.time_base
+                                if tb is not None:
+                                    pkt_s = float(pkt.pts * tb) - c_start_s
+                                    pkt_d = float(pkt.duration * tb) if pkt.duration else (1.0 / fps_val)
+                                    if pkt_s + pkt_d > max_end_s:
+                                        max_end_s = pkt_s + pkt_d
+                            if max_end_s > 0.0 or tail_window_s >= container_dur:
+                                break
                         if max_end_s > 0.0:
                             stream_dur = max_end_s
                     except Exception:
@@ -878,8 +947,12 @@ def _probe_duration_and_dims(video_path: Path) -> Dict[str, Any]:
 
 
 def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path) -> None:
-    """Extract an 8-bit rgb24 PNG frame with normalized BT.709->sRGB color tags for browser parity."""
+    """Extract an 8-bit rgb24 PNG frame atomically with normalized BT.709->sRGB color tags."""
     out_png.parent.mkdir(parents=True, exist_ok=True)
+    tmp_png = (
+        out_png.parent
+        / f".{out_png.stem}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp.png"
+    )
     cmd = [
         _resolve_ffmpeg_binary(),
         "-y",
@@ -895,25 +968,45 @@ def _default_extract_frame(video_path: Path, timestamp_sec: float, out_png: Path
             "format=rgb24,"
             "setparams=colorspace=gbr:color_primaries=bt709:color_trc=iec61966-2-1:range=pc"
         ),
-        str(out_png),
+        str(tmp_png),
     ]
     startupinfo = None
     if sys.platform == "win32":
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
-    res = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=25.0,
-        check=False,
-        startupinfo=startupinfo,
-    )
-    if res.returncode != 0 or not out_png.is_file():
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=25.0,
+            check=False,
+            startupinfo=startupinfo,
+        )
+    except subprocess.TimeoutExpired as exc:
+        with suppress(OSError):
+            tmp_png.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Quá thời gian chờ (25s) khi trích xuất khung hình tại {timestamp_sec:.2f}s từ '{video_path.name}'."
+        ) from exc
+
+    try:
+        valid_tmp = res.returncode == 0 and tmp_png.is_file() and tmp_png.stat().st_size > 0
+    except OSError:
+        valid_tmp = False
+    if not valid_tmp:
+        with suppress(OSError):
+            tmp_png.unlink(missing_ok=True)
         raise RuntimeError(
             f"FFmpeg không thể trích xuất khung hình tại {timestamp_sec:.2f}s từ '{video_path.name}'."
         )
+    try:
+        os.replace(tmp_png, out_png)
+    except OSError as exc:
+        with suppress(OSError):
+            tmp_png.unlink(missing_ok=True)
+        raise RuntimeError(f"Không thể lưu khung hình trích xuất '{out_png.name}': {exc}") from exc
 
 
 def _default_open_media(target_path: Path, prefer_mpv: bool = True) -> str:
@@ -980,14 +1073,15 @@ def _resolve_dir_from_raw(
     if not raw_val or not str(raw_val).strip():
         return None
     _validate_no_nul_str(str(raw_val), "output_dir")
+    raw_unwrapped = unwrap_outer_quotes_preserving_trailing_space(str(raw_val))
     cleaned = strip_wrapping_quotes(str(raw_val))
     if not cleaned:
         return None
     _validate_no_nul_str(cleaned, "output_dir")
     raw_path = Path(os.path.expanduser(cleaned))
-    if raw_path.drive and not raw_path.is_absolute():
+    if (raw_path.drive and not raw_path.is_absolute()) or (sys.platform == "win32" and not raw_path.drive and raw_path.root):
         if strict_secret:
-            raise ValueError("Đường dẫn tương đối theo ổ đĩa không hợp lệ.")
+            raise ValueError("Đường dẫn tương đối theo ổ đĩa hoặc thiếu ký tự ổ đĩa không hợp lệ.")
         return None
     if (
         is_secret_filename(cleaned)
@@ -998,7 +1092,11 @@ def _resolve_dir_from_raw(
             raise PermissionError("Từ chối truy cập tệp cấu hình nhạy cảm.")
         return None
     if strict_secret:
-        validate_win32_path_hygiene(raw_path, field="output_dir")
+        validate_win32_path_hygiene(
+            Path(os.path.expanduser(raw_unwrapped)),
+            field="output_dir",
+            raw_str=raw_unwrapped,
+        )
     p = raw_path if raw_path.is_absolute() else root / raw_path
     try:
         resolved = p.resolve()
@@ -1730,6 +1828,7 @@ def create_app(
     def api_preview_schedule(req: SchedulePreviewRequest) -> Dict[str, Any]:
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -1882,13 +1981,19 @@ def create_app(
     def api_start_build_trt(req: BuildTrtRequest) -> Dict[str, Any]:
         models_reg, _, _ = fs_browser._load_routing_tables()
         mid = req.model_id.strip()
-        if not mid or (mid.lower() != "all" and mid not in models_reg):
+        if not mid or (mid.lower() not in {"all", AUTO_PARETO_MODEL_ID} and mid not in models_reg):
             raise HTTPException(
                 status_code=400,
                 detail=f"Mô hình '{mid}' không hợp lệ hoặc không có trong models/models.yaml.",
             )
+        if (req.width is None) != (req.height is None):
+            raise HTTPException(
+                status_code=400,
+                detail="Cần cung cấp đồng thời cả 'width' và 'height' khi chỉ định độ phân giải biên dịch TRT.",
+            )
         if is_mock and popen_factory is None:
-            return _build_mock_job_response("build_trt", [mid], req.model_dump())
+            target_lbl = f"{mid} ({req.width}×{req.height})" if (req.width and req.height) else mid
+            return _build_mock_job_response("build_trt", [target_lbl], req.model_dump())
         try:
             job = job_manager.start_build_trt_job(req.model_dump())
             return {"ok": True, "job": job}
@@ -1897,15 +2002,35 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    def _is_raw_reparse_or_symlink(p_chk: Path) -> bool:
+        try:
+            if p_chk.is_symlink() or os.path.islink(str(p_chk)) or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p_chk))):
+                return True
+            if os.path.lexists(str(p_chk)):
+                return bool(getattr(p_chk.lstat(), "st_file_attributes", 0) & 0x0400)
+        except OSError:
+            return False
+        return False
+
     @app.post("/api/jobs/clean-temp")
     def api_start_clean_temp(req: CleanTempRequest) -> Dict[str, Any]:
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
-            _validate_output_dir(root, req.output_dir, field="output_dir")
+            out_clean = _validate_output_dir(root, req.output_dir, field="output_dir")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raw_clean_p = (
+            (Path(os.path.expanduser(out_clean)) if Path(os.path.expanduser(out_clean)).is_absolute() else (root / os.path.expanduser(out_clean)))
+            if out_clean
+            else (root / "out")
+        )
+        if _is_raw_reparse_or_symlink(raw_clean_p):
+            raise HTTPException(
+                status_code=403,
+                detail="Từ chối dọn tệp tạm qua thư mục symlink hoặc junction reparse point.",
+            )
         if is_mock and popen_factory is None:
             return _build_mock_job_response("clean_temp", [req.output_dir or "out/"], req.model_dump())
         try:
@@ -2373,6 +2498,9 @@ def create_app(
         src_tail_guard = max(0.12, round(1.5 / src_fps, 3))
         if src_meta["duration"] > 0 and src_ts > max(0.0, src_meta["duration"] - src_tail_guard):
             src_ts = max(0.0, round(src_meta["duration"] - src_tail_guard, 3))
+            up_ts = max(0.0, round(src_ts - offset_s, 3))
+            if up_meta["duration"] > 0 and up_ts > max(0.0, up_meta["duration"] - up_tail_guard):
+                up_ts = max(0.0, round(up_meta["duration"] - up_tail_guard, 3))
 
         compare_dir = root / "scratch" / "web_compare"
         compare_dir.mkdir(parents=True, exist_ok=True)
@@ -2385,36 +2513,59 @@ def create_app(
         src_png = compare_dir / f"src_{digest}.png"
         up_png = compare_dir / f"up_{digest}.png"
 
+        def _has_valid_png(png_p: Path) -> bool:
+            try:
+                return png_p.is_file() and png_p.stat().st_size > 0
+            except OSError:
+                return False
+
         created_src_png = False
         created_up_png = False
         try:
-            if not src_png.is_file():
+            if not _has_valid_png(src_png):
                 created_src_png = True
                 extractor(src_p, src_ts, src_png)
-            if not up_png.is_file():
+                if not _has_valid_png(src_png):
+                    raise RuntimeError(f"Tệp khung hình trích xuất rỗng: '{src_png.name}'.")
+            if not _has_valid_png(up_png):
                 created_up_png = True
                 extractor(up_p, up_ts, up_png)
+                if not _has_valid_png(up_png):
+                    raise RuntimeError(f"Tệp khung hình trích xuất rỗng: '{up_png.name}'.")
+        except subprocess.TimeoutExpired as exc:
+            if created_src_png:
+                with suppress(OSError):
+                    src_png.unlink(missing_ok=True)
+            if created_up_png:
+                with suppress(OSError):
+                    up_png.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail="Quá thời gian chờ khi trích xuất khung hình đối chiếu.",
+            ) from exc
         except (ValueError, RuntimeError, FileNotFoundError) as exc:
             if created_src_png:
-                src_png.unlink(missing_ok=True)
+                with suppress(OSError):
+                    src_png.unlink(missing_ok=True)
             if created_up_png:
-                up_png.unlink(missing_ok=True)
+                with suppress(OSError):
+                    up_png.unlink(missing_ok=True)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             if created_src_png:
-                src_png.unlink(missing_ok=True)
+                with suppress(OSError):
+                    src_png.unlink(missing_ok=True)
             if created_up_png:
-                up_png.unlink(missing_ok=True)
+                with suppress(OSError):
+                    up_png.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         # Retain at most the 12 most recent temporary comparison frames (6 pairs)
         try:
             pngs = sorted(compare_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
             for old_f in pngs[12:]:
-                try:
+                with suppress(OSError):
                     old_f.unlink()
-                except OSError:
-                    pass
         except OSError:
             pass
 
@@ -2434,7 +2585,11 @@ def create_app(
         if not re.fullmatch(r"(?:src|up)_[a-f0-9]{12}\.png", frame_name):
             raise HTTPException(status_code=400, detail="Tên khung hình không hợp lệ.")
         frame_file = (root / "scratch" / "web_compare" / frame_name).resolve()
-        if not frame_file.is_file():
+        try:
+            is_valid_frame = frame_file.is_file() and frame_file.stat().st_size > 0
+        except OSError:
+            is_valid_frame = False
+        if not is_valid_frame:
             raise HTTPException(status_code=404, detail="Không tìm thấy khung hình trích xuất.")
         return FileResponse(str(frame_file), media_type="image/png")
 
@@ -2446,6 +2601,7 @@ def create_app(
         trt_cache_dir = root / ".cache" / "trt_engines"
 
         models_list: List[Dict[str, Any]] = []
+        reg: Dict[str, Any] = {}
         if models_file.is_file():
             try:
                 raw_m = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
@@ -2460,27 +2616,35 @@ def create_app(
                 w_exists = bool(w_path and w_path.is_file())
                 w_size_mb = round(w_path.stat().st_size / (1024 * 1024), 2) if w_exists and w_path else 0.0
 
+                arch = info.get("arch") or {}
+                arch_type_str = str(arch.get("type") or "Unknown")
+                up_scale_int = int(arch.get("upscale", 2) or 2)
+                allowed_shas = resolve_allowed_trt_weights_shas(str(m_id), reg, grain_restore="auto")
                 trt_engines, stale_trt_engines = inspect_model_trt_cache(
                     trt_cache_dir,
                     str(m_id),
                     expected_weights_sha256=str(info.get("sha256") or ""),
+                    allowed_weights_shas=allowed_shas if allowed_shas else None,
+                    arch_type=arch_type_str,
+                    native_upscale=up_scale_int,
                 )
+                trt_hw_profiles = extract_trt_hw_profiles(trt_engines)
 
                 med_fps, p5_fps = MODEL_REFERENCE_FPS.get(str(m_id), (10.5, 8.5))
-                arch = info.get("arch") or {}
                 models_list.append({
                     "id": str(m_id),
                     "name": str(info.get("name") or m_id),
-                    "arch_type": str(arch.get("type") or "Unknown"),
+                    "arch_type": arch_type_str,
                     "num_feat": arch.get("num_feat"),
                     "num_conv": arch.get("num_conv"),
-                    "native_upscale": arch.get("upscale", 2),
+                    "native_upscale": up_scale_int,
                     "downsample": str(info.get("downsample") or "none"),
                     "weights_path": rel_w,
                     "weights_ready": w_exists,
                     "weights_size_mb": w_size_mb,
                     "trt_cached": len(trt_engines) > 0,
                     "trt_engine_files": trt_engines,
+                    "trt_hw_profiles": trt_hw_profiles,
                     "stale_trt_engines": stale_trt_engines,
                     "sha256_prefix": str(info.get("sha256") or "")[:12],
                     "license": str(info.get("license") or ""),
@@ -2500,11 +2664,29 @@ def create_app(
         dedup_policies = [
             {"id": k, **v} for k, v in DEDUP_POLICY_PARAMS.items()
         ]
+        by_model_id = {m["id"]: m for m in models_list}
+        pareto_detail = by_model_id.get("animejanai-hd-v3-compact")
+        pareto_fast = by_model_id.get("animejanai-hd-v3-ultracompact")
+        pareto_detail_trt = bool(pareto_detail and pareto_detail.get("trt_cached"))
+        pareto_fast_trt = bool(pareto_fast and pareto_fast.get("trt_cached"))
+        pareto_shared_profiles = sorted(
+            set((pareto_detail or {}).get("trt_hw_profiles") or [])
+            & set((pareto_fast or {}).get("trt_hw_profiles") or [])
+        )
         pareto_med_fps, pareto_p5_fps = MODEL_REFERENCE_FPS.get(AUTO_PARETO_MODEL_ID, (16.5, 13.5))
         routing_modes = [
             {
                 "id": AUTO_PARETO_MODEL_ID,
                 "name": AUTO_PARETO_MODEL_NAME,
+                "detail_model_id": "animejanai-hd-v3-compact",
+                "fast_model_id": "animejanai-hd-v3-ultracompact",
+                "weights_ready": bool(
+                    pareto_detail and pareto_detail.get("weights_ready") and pareto_fast and pareto_fast.get("weights_ready")
+                ),
+                "trt_cached": bool(pareto_detail_trt and pareto_fast_trt),
+                "detail_trt_cached": pareto_detail_trt,
+                "fast_trt_cached": pareto_fast_trt,
+                "trt_hw_profiles": pareto_shared_profiles,
                 "ref_median_fps": pareto_med_fps,
                 "ref_p5_fps": pareto_p5_fps,
             }
@@ -2658,6 +2840,28 @@ def create_app(
         return {"ok": True, "rules_count": len(rules)}
 
     # 5. SUBTRANS STUDIO & AUDIT VAULT
+    mock_pending_subs: List[Dict[str, Any]] = (
+        [{"episode": "[Demo] Anime_EP02 (1080p)", "status": "queued", "subs_quality": "high"}]
+        if is_mock
+        else []
+    )
+
+    def _is_reparse_or_symlink(p_check: Path) -> bool:
+        try:
+            if (
+                p_check.is_symlink()
+                or os.path.islink(str(p_check))
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(str(p_check)))
+            ):
+                return True
+            if os.path.lexists(str(p_check)):
+                st_chk = p_check.lstat()
+                if bool(getattr(st_chk, "st_file_attributes", 0) & 0x0400):
+                    return True
+        except OSError:
+            return False
+        return False
+
     @app.get("/api/subtrans/overview")
     def api_subtrans_overview(request: Request) -> Dict[str, Any]:
         now_pt = get_now_pt()
@@ -2789,13 +2993,22 @@ def create_app(
             }
 
         glossaries_dir = root / "glossaries"
-        sub_base_for_ov = (root / "subtrans" / "glossary.yaml").resolve()
-        gloss_root_for_ov = glossaries_dir.resolve() if glossaries_dir.is_dir() else glossaries_dir
+        sub_base_raw_ov = root / "subtrans" / "glossary.yaml"
+        sub_base_for_ov = sub_base_raw_ov.resolve() if not _is_reparse_or_symlink(sub_base_raw_ov) else sub_base_raw_ov
+        gloss_root_for_ov = (
+            glossaries_dir.resolve()
+            if (glossaries_dir.is_dir() and not _is_reparse_or_symlink(glossaries_dir))
+            else glossaries_dir
+        )
         glossaries: List[Dict[str, Any]] = []
-        if glossaries_dir.is_dir():
-            for gf in sorted(glossaries_dir.glob("*.yaml")):
+        if glossaries_dir.is_dir() and not _is_reparse_or_symlink(glossaries_dir):
+            cand_gloss_files = sorted(
+                {*glossaries_dir.glob("*.yaml"), *glossaries_dir.glob("*.yml")},
+                key=lambda p: p.name.lower(),
+            )
+            for gf in cand_gloss_files:
                 try:
-                    if gf.is_symlink() or os.path.islink(str(gf)) or bool(getattr(gf.lstat(), "st_file_attributes", 0) & 0x0400):
+                    if _is_reparse_or_symlink(gf) or is_secret_filename(gf.name):
                         continue
                     gf_resolved = gf.resolve()
                     curr_g = gf_resolved
@@ -2805,7 +3018,7 @@ def create_app(
                         raw_ov = curr_g.read_text(encoding="utf-8").strip()
                         if "\n" not in raw_ov and raw_ov.endswith((".yaml", ".yml")):
                             nxt_ov_raw = curr_g.parent / raw_ov
-                            if nxt_ov_raw.is_symlink() or os.path.islink(str(nxt_ov_raw)):
+                            if _is_reparse_or_symlink(nxt_ov_raw):
                                 break
                             nxt_ov = nxt_ov_raw.resolve()
                             if ((nxt_ov.is_relative_to(gloss_root_for_ov) and nxt_ov.parent == gloss_root_for_ov) or nxt_ov == sub_base_for_ov) and nxt_ov.is_file() and nxt_ov != curr_g:
@@ -2813,7 +3026,11 @@ def create_app(
                                 continue
                         break
                     sz_kb = round(curr_g.stat().st_size / 1024.0, 1)
-                    ro_flag = gf.name.lower() == "base.yaml" or curr_g == sub_base_for_ov or not curr_g.is_relative_to(gloss_root_for_ov)
+                    ro_flag = (
+                        gf.name.lower() in {"base.yaml", "base.yml"}
+                        or curr_g == sub_base_for_ov
+                        or not curr_g.is_relative_to(gloss_root_for_ov)
+                    )
                 except OSError:
                     continue
                 glossaries.append({
@@ -2827,8 +3044,10 @@ def create_app(
 
         # Pending subtitles queue (check state/, legacy root, then out/)
         pending_items: List[Dict[str, Any]] = []
+        found_disk_pending = False
         for p_cand in (root / "state" / "pending_subs.json", root / "pending_subs.json", root / "out" / "pending_subs.json"):
             if p_cand.is_file():
+                found_disk_pending = True
                 try:
                     p_raw = json.loads(p_cand.read_text(encoding="utf-8"))
                     if isinstance(p_raw, list):
@@ -2852,8 +3071,8 @@ def create_app(
             "glossaries": glossaries,
             "pending_subs": (
                 pending_items
-                if pending_items or not is_mock
-                else [{"episode": "[Demo] Anime_EP02 (1080p)", "status": "queued", "subs_quality": "high"}]
+                if (found_disk_pending or not is_mock)
+                else list(mock_pending_subs)
             ),
             "mock_mode": is_mock,
         }
@@ -2869,10 +3088,16 @@ def create_app(
             if sub_dotenv_path.is_file():
                 for sk, sv in _read_dotenv_map(sub_dotenv_path).items():
                     existing[sk] = sv
+            env_overrides = {k: v for k, v in os.environ.items() if k.startswith("GEMINI_API_KEY")}
 
             try:
                 updates = _apply_subtrans_key_edits(
-                    existing, req.key_1, req.key_2, req.key_3, slots=req.slots
+                    existing,
+                    req.key_1,
+                    req.key_2,
+                    req.key_3,
+                    slots=req.slots,
+                    env_overrides=env_overrides,
                 )
                 if updates:
                     _write_dotenv_keys(dotenv_path, updates)
@@ -2909,25 +3134,17 @@ def create_app(
             "configured_count": active_key_count,
         }
 
-    def _is_reparse_or_symlink(p_check: Path) -> bool:
-        try:
-            if p_check.is_symlink() or os.path.islink(str(p_check)):
-                return True
-            if p_check.exists():
-                st_chk = p_check.lstat()
-                if bool(getattr(st_chk, "st_file_attributes", 0) & 0x0400):
-                    return True
-        except OSError:
-            return False
-        return False
-
     def _resolve_glossary_entry(raw_name: str) -> tuple[Path, Path, bool, bool]:
         """Resolve glossary file strictly inside glossaries/, following single-line text pointers."""
         cleaned = strip_wrapping_quotes(raw_name)
         if not cleaned or "\x00" in cleaned or is_unc_path(cleaned):
             raise HTTPException(status_code=400, detail="Tên tệp Glossary không hợp lệ.")
-        gloss_root = (root / "glossaries").resolve()
-        sub_base_glossary = (root / "subtrans" / "glossary.yaml").resolve()
+        raw_gloss_dir = root / "glossaries"
+        raw_sub_base = root / "subtrans" / "glossary.yaml"
+        if _is_reparse_or_symlink(raw_gloss_dir) or _is_reparse_or_symlink(raw_sub_base):
+            raise HTTPException(status_code=403, detail="Từ chối truy cập symlink/junction Glossary.")
+        gloss_root = raw_gloss_dir.resolve()
+        sub_base_glossary = raw_sub_base.resolve()
 
         cand_in = Path(os.path.expanduser(cleaned))
         if cand_in.is_absolute():
@@ -2952,7 +3169,7 @@ def create_app(
         if not entry_path.is_relative_to(gloss_root) or entry_path.parent != gloss_root:
             raise HTTPException(status_code=403, detail="Chỉ cho phép truy cập các tệp *.yaml nằm trong thư mục glossaries/.")
         if entry_path.suffix.lower() not in {".yaml", ".yml"} or is_secret_filename(entry_path.name):
-            raise HTTPException(status_code=400, detail="Chỉ hỗ trợ tệp từ điển định dạng .yaml trong glossaries/.")
+            raise HTTPException(status_code=400, detail="Chỉ hỗ trợ tệp từ điển định dạng .yaml/.yml trong glossaries/.")
         if not entry_path.is_file():
             raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp Glossary: {entry_path.name}")
 
@@ -2981,7 +3198,7 @@ def create_app(
 
         is_pointer = curr != entry_path
         is_read_only = (
-            entry_path.name.lower() == "base.yaml"
+            entry_path.name.lower() in {"base.yaml", "base.yml"}
             or curr == sub_base_glossary
             or not curr.is_relative_to(gloss_root)
         )
@@ -2999,28 +3216,84 @@ def create_app(
             parsed = {}
         if not isinstance(parsed, dict):
             raise ValueError("Cấu trúc gốc của Glossary phải là một bản đồ (mapping) YAML.")
-        if "terms" in parsed and parsed["terms"] is not None:
+        for non_null_k in ("meta", "terms", "characters", "style_rules", "difficulty_markers", "address_rules"):
+            if non_null_k in parsed and parsed[non_null_k] is None:
+                raise ValueError(
+                    f"Mục '{non_null_k}' không được để giá trị null — hãy dùng danh sách rỗng [] hoặc bản đồ {{}}."
+                )
+        if "meta" in parsed:
+            if not isinstance(parsed["meta"], dict):
+                raise ValueError("Mục 'meta' phải là một bản đồ (mapping).")
+            if "schema" in parsed["meta"]:
+                sch_v = parsed["meta"]["schema"]
+                if isinstance(sch_v, bool) or not isinstance(sch_v, int) or sch_v < 1:
+                    raise ValueError("Mục 'meta.schema' phải là số nguyên dương (ví dụ: 2).")
+        if "terms" in parsed:
             if not isinstance(parsed["terms"], list):
                 raise ValueError("Mục 'terms' phải là danh sách (list).")
             for idx, t in enumerate(parsed["terms"], start=1):
-                if not isinstance(t, dict) or not str(t.get("ja") or "").strip() or not str(t.get("vi") or "").strip():
-                    raise ValueError(f"Mục terms #{idx} phải có đầy đủ khóa 'ja' và 'vi' khác rỗng.")
-        if "characters" in parsed and parsed["characters"] is not None:
+                if (
+                    not isinstance(t, dict)
+                    or not isinstance(t.get("ja"), str)
+                    or not t["ja"].strip()
+                    or not isinstance(t.get("vi"), str)
+                    or not t["vi"].strip()
+                ):
+                    raise ValueError(f"Mục terms #{idx} phải có đầy đủ chuỗi 'ja' và 'vi' khác rỗng.")
+                for list_fld in ("aliases", "alt"):
+                    if list_fld in t:
+                        lv = t[list_fld]
+                        if not isinstance(lv, list) or any(not isinstance(item_l, str) or not item_l.strip() for item_l in lv):
+                            raise ValueError(f"Mục terms #{idx}.{list_fld} phải là danh sách chuỗi khác rỗng.")
+                for opt_str_fld in ("en", "zh", "note", "genre"):
+                    if opt_str_fld in t and t[opt_str_fld] is not None and not isinstance(t[opt_str_fld], str):
+                        raise ValueError(f"Mục terms #{idx}.{opt_str_fld} phải là chuỗi văn bản.")
+        if "characters" in parsed:
             if not isinstance(parsed["characters"], list):
                 raise ValueError("Mục 'characters' phải là danh sách (list).")
             for idx, c in enumerate(parsed["characters"], start=1):
                 if not isinstance(c, dict):
                     raise ValueError(f"Mục characters #{idx} phải là đối tượng từ điển.")
+                for char_str_fld in (
+                    "name_ja",
+                    "name_vi",
+                    "name_en",
+                    "role",
+                    "gender",
+                    "register",
+                    "speaking_style",
+                    "first_person",
+                    "second_person",
+                    "note",
+                ):
+                    if char_str_fld in c and c[char_str_fld] is not None and not isinstance(c[char_str_fld], str):
+                        raise ValueError(f"Mục characters #{idx}.{char_str_fld} phải là chuỗi văn bản.")
+                for char_list_fld in ("aliases", "alt"):
+                    if char_list_fld in c:
+                        cal = c[char_list_fld]
+                        if not isinstance(cal, list) or any(not isinstance(x_al, str) or not x_al.strip() for x_al in cal):
+                            raise ValueError(f"Mục characters #{idx}.{char_list_fld} phải là danh sách chuỗi khác rỗng.")
                 if "speaks_to" in c:
                     if not isinstance(c["speaks_to"], list) or any(not isinstance(s, dict) for s in c["speaks_to"]):
                         raise ValueError(f"Mục characters #{idx}.speaks_to phải là danh sách các đối tượng từ điển.")
-        if "style_rules" in parsed and parsed["style_rules"] is not None and not isinstance(parsed["style_rules"], list):
-            raise ValueError("Mục 'style_rules' phải là danh sách chuỗi.")
-        if "difficulty_markers" in parsed and parsed["difficulty_markers"] is not None and not isinstance(parsed["difficulty_markers"], list):
-            raise ValueError("Mục 'difficulty_markers' phải là danh sách chuỗi.")
-        if "address_rules" in parsed and parsed["address_rules"] is not None:
+                    for s_obj in c["speaks_to"]:
+                        for s_fld in ("listener", "self", "other", "note"):
+                            if s_fld in s_obj and s_obj[s_fld] is not None and not isinstance(s_obj[s_fld], str):
+                                raise ValueError(f"Mục characters #{idx}.speaks_to.{s_fld} phải là chuỗi văn bản.")
+        for str_list_k in ("style_rules", "difficulty_markers"):
+            if str_list_k in parsed:
+                sl_val = parsed[str_list_k]
+                if not isinstance(sl_val, list) or any(not isinstance(x_s, str) or not x_s.strip() for x_s in sl_val):
+                    raise ValueError(f"Mục '{str_list_k}' phải là danh sách chuỗi văn bản khác rỗng.")
+        if "address_rules" in parsed:
             if not isinstance(parsed["address_rules"], dict):
                 raise ValueError("Mục 'address_rules' phải là bản đồ (mapping).")
+            if (
+                "principle" in parsed["address_rules"]
+                and parsed["address_rules"]["principle"] is not None
+                and not isinstance(parsed["address_rules"]["principle"], str)
+            ):
+                raise ValueError("Mục 'address_rules.principle' phải là chuỗi văn bản.")
             for ar_k in ("relations", "first_person", "second_person", "honorifics"):
                 if ar_k in parsed["address_rules"]:
                     ar_v = parsed["address_rules"][ar_k]
@@ -3080,6 +3353,34 @@ def create_app(
         cleaned_target = strip_wrapping_quotes(target)
         if not cleaned_target or "\x00" in cleaned_target:
             raise HTTPException(status_code=400, detail="Mục cần xóa khỏi pending_subs.json không hợp lệ.")
+        jstate = job_manager.get_state()
+        if jstate.get("status") in {"running", "pausing"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Không thể xóa mục pending_subs.json khi đang có tiến trình chạy. Hãy chờ hoặc dừng tác vụ trước.",
+            )
+        if not is_mock:
+            lock_state = check_active_gpu_lock(root)
+            if lock_state.get("locked"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"GPU đang bận xử lý tiến trình khác (PID={lock_state.get('pid')}); tạm khóa xóa pending_subs.json.",
+                )
+            pstate = telemetry_hub.read_pipeline_state()
+            if pstate.get("pid_alive") and str(pstate.get("effective_stage") or "") in {
+                "initializing",
+                "probing",
+                "preflight_dedup",
+                "upscaling",
+                "muxing",
+                "auditing",
+                "subtrans",
+            }:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Đang có tiến trình CLI hoạt động — tạm khóa xóa pending_subs.json để tránh ghi đè dữ liệu.",
+                )
+
         has_path_sep = ("/" in cleaned_target) or ("\\" in cleaned_target)
         stem_t = os.path.splitext(os.path.basename(cleaned_target))[0]
         stem_variants = {stem_t, f"{stem_t}_4K", f"{stem_t}_4K_animejanai"}
@@ -3094,23 +3395,6 @@ def create_app(
             else ""
         )
         norm_target_abs = os.path.normcase(os.path.abspath(cleaned_target)) if has_path_sep else ""
-
-        pending_file: Optional[Path] = None
-        raw_obj: Any = None
-        for p_cand in (root / "state" / "pending_subs.json", root / "pending_subs.json", root / "out" / "pending_subs.json"):
-            if p_cand.is_file():
-                pending_file = p_cand
-                try:
-                    raw_obj = json.loads(p_cand.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    raise HTTPException(status_code=500, detail=f"Không thể đọc pending_subs.json: {exc}") from exc
-                break
-
-        if pending_file is None:
-            raise HTTPException(status_code=404, detail="Không có tệp pending_subs.json nào đang tồn tại.")
-
-        is_wrapped_dict = isinstance(raw_obj, dict) and isinstance(raw_obj.get("items"), list)
-        items_list = list(raw_obj["items"] if is_wrapped_dict else (raw_obj if isinstance(raw_obj, list) else []))
 
         def _matches_pending(it: Any) -> bool:
             if not isinstance(it, dict):
@@ -3138,6 +3422,39 @@ def create_app(
                 if v_stem in cand_keys:
                     return True
             return False
+
+        pending_file: Optional[Path] = None
+        raw_obj: Any = None
+        for p_cand in (root / "state" / "pending_subs.json", root / "pending_subs.json", root / "out" / "pending_subs.json"):
+            if p_cand.is_file() and not _is_reparse_or_symlink(p_cand):
+                pending_file = p_cand
+                try:
+                    raw_obj = json.loads(p_cand.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise HTTPException(status_code=500, detail=f"Không thể đọc pending_subs.json: {exc}") from exc
+                break
+
+        if pending_file is None:
+            if is_mock:
+                remaining_mock = [it for it in mock_pending_subs if not _matches_pending(it)]
+                removed_mock = len(mock_pending_subs) - len(remaining_mock)
+                if removed_mock == 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Không tìm thấy mục '{cleaned_target}' trong pending_subs.json.",
+                    )
+                mock_pending_subs[:] = remaining_mock
+                return {
+                    "ok": True,
+                    "removed": removed_mock,
+                    "remaining_count": len(mock_pending_subs),
+                    "pending_subs": list(mock_pending_subs),
+                    "mock": True,
+                }
+            raise HTTPException(status_code=404, detail="Không có tệp pending_subs.json nào đang tồn tại.")
+
+        is_wrapped_dict = isinstance(raw_obj, dict) and isinstance(raw_obj.get("items"), list)
+        items_list = list(raw_obj["items"] if is_wrapped_dict else (raw_obj if isinstance(raw_obj, list) else []))
 
         remaining = [it for it in items_list if not _matches_pending(it)]
         removed_count = len(items_list) - len(remaining)

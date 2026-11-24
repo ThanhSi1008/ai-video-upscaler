@@ -210,10 +210,14 @@ def run(
         explicit_caching=explicit_cache,
     )
 
+    eff_en_file = en_file
+    if eff_en_file is None and not _EN_STEM_RE.search(ja_file.stem):
+        eff_en_file = _match_en_subtitle(ja_file, ja_file.parent)
+
     try:
         pipeline.run(
             ja_path=ja_file,
-            en_path=en_file,
+            en_path=eff_en_file,
             glossary_path=glossary,
             en_offset_ms=en_offset_ms,
             sub_offset_ms=sub_offset_ms,
@@ -260,13 +264,11 @@ def compare(
     console.print(table)
 
 
-_OUTPUT_ARTIFACT_SUFFIXES = (
-    ".vi.srt",
-    ".vi.ass",
-    ".vi.partial.srt",
-    ".vi.partial.ass",
-    ".review.srt",
-    ".review.ass",
+_SUBTITLE_INPUT_SUFFIXES = (".ass", ".srt", ".ssa", ".vtt")
+_OUTPUT_ARTIFACT_SUFFIXES = tuple(
+    f"{mid}{ext}"
+    for mid in (".vi", ".vi.partial", ".partial", ".review")
+    for ext in _SUBTITLE_INPUT_SUFFIXES
 )
 _JA_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._]whisper)?(?:[._](?:ja|jpn))(?:\[cc\])?$", re.IGNORECASE)
 _EN_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._](?:en|eng))(?:\[cc\])?$", re.IGNORECASE)
@@ -274,8 +276,10 @@ _EN_STEM_RE = re.compile(r"(?:\[cc\])?(?:[._](?:en|eng))(?:\[cc\])?$", re.IGNORE
 
 def _match_en_subtitle(ja_file: Path, en_dir: Path) -> Optional[Path]:
     """Finds the matching English reference subtitle for a Japanese subtitle file."""
+    if _EN_STEM_RE.search(ja_file.stem):
+        return None
     base_stem = _JA_STEM_RE.sub("", ja_file.stem)
-    exts = [ja_file.suffix] + [e for e in (".ass", ".srt") if e.lower() != ja_file.suffix.lower()]
+    exts = [ja_file.suffix] + [e for e in _SUBTITLE_INPUT_SUFFIXES if e.lower() != ja_file.suffix.lower()]
     candidates: List[Path] = []
     for ext in exts:
         candidates.extend(
@@ -287,20 +291,28 @@ def _match_en_subtitle(ja_file: Path, en_dir: Path) -> Optional[Path]:
                 en_dir / f"{base_stem}.en[cc]{ext}",
             ]
         )
-    candidates.extend([en_dir / ja_file.name, en_dir / f"{base_stem}.ass", en_dir / f"{base_stem}.srt"])
-
     ja_resolved = ja_file.resolve()
+    same_parent = en_dir.resolve() == ja_resolved.parent
+    if not same_parent:
+        candidates.append(en_dir / ja_file.name)
+        for ext in _SUBTITLE_INPUT_SUFFIXES:
+            candidates.append(en_dir / f"{base_stem}{ext}")
+
     for cand in candidates:
-        if cand.is_file() and cand.resolve() != ja_resolved:
+        if (
+            cand.is_file()
+            and not cand.name.lower().endswith(_OUTPUT_ARTIFACT_SUFFIXES)
+            and cand.resolve() != ja_resolved
+        ):
             return cand
     return None
 
 
-def _collect_batch_input_files(input_dir: Path, en_dir: Optional[Path]) -> List[Path]:
+def _collect_batch_input_files(input_dir: Path, en_dir: Optional[Path] = None) -> List[Path]:
     """Collects batch input subtitle files while skipping output artifacts and paired EN tracks."""
     raw_files = sorted(
         f for f in input_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in (".ass", ".srt")
+        if f.is_file() and f.suffix.lower() in _SUBTITLE_INPUT_SUFFIXES
         and not f.name.lower().endswith(_OUTPUT_ARTIFACT_SUFFIXES)
     )
     non_en_base_stems = {
@@ -309,12 +321,13 @@ def _collect_batch_input_files(input_dir: Path, en_dir: Optional[Path]) -> List[
         if not _EN_STEM_RE.search(f.stem)
     }
 
-    same_en_dir = bool(en_dir and en_dir.resolve() == input_dir.resolve())
+    eff_en_dir = en_dir if en_dir is not None else input_dir
+    same_en_dir = eff_en_dir.resolve() == input_dir.resolve()
     matched_en_resolved = set()
-    if same_en_dir and en_dir is not None:
+    if same_en_dir:
         for f in raw_files:
             if not _EN_STEM_RE.search(f.stem):
-                matched = _match_en_subtitle(f, en_dir)
+                matched = _match_en_subtitle(f, eff_en_dir)
                 if matched is not None:
                     matched_en_resolved.add(matched.resolve())
 
@@ -369,7 +382,7 @@ def batch(
 
     if files:
         seen_explicit: set[Path] = set()
-        sub_files = []
+        cand_explicit: List[Path] = []
         for raw_f in files:
             resolved_f = raw_f.resolve()
             if not resolved_f.is_file():
@@ -378,7 +391,29 @@ def batch(
             if resolved_f in seen_explicit or resolved_f.name.lower().endswith(_OUTPUT_ARTIFACT_SUFFIXES):
                 continue
             seen_explicit.add(resolved_f)
-            sub_files.append(resolved_f)
+            cand_explicit.append(resolved_f)
+        non_en_by_parent = {
+            (p.parent, _JA_STEM_RE.sub("", p.stem).lower())
+            for p in cand_explicit
+            if not _EN_STEM_RE.search(p.stem)
+        }
+        matched_explicit_en: set[Path] = set()
+        for p in cand_explicit:
+            if not _EN_STEM_RE.search(p.stem):
+                m_en = _match_en_subtitle(p, en_dir if en_dir is not None else p.parent)
+                if m_en is not None:
+                    matched_explicit_en.add(m_en.resolve())
+        sub_files = [
+            p
+            for p in cand_explicit
+            if not (
+                _EN_STEM_RE.search(p.stem)
+                and (
+                    (p.parent, _EN_STEM_RE.sub("", p.stem).lower()) in non_en_by_parent
+                    or p in matched_explicit_en
+                )
+            )
+        ]
     else:
         sub_files = _collect_batch_input_files(input_dir, en_dir)
     if not sub_files:
@@ -389,7 +424,8 @@ def batch(
     failed_files: List[str] = []
     for idx, f in enumerate(sub_files):
         console.print(f"\n[{idx+1}/{len(sub_files)}] Processing {f.name}...")
-        en_f = _match_en_subtitle(f, en_dir) if en_dir else None
+        eff_file_en_dir = en_dir if en_dir is not None else f.parent
+        en_f = None if _EN_STEM_RE.search(f.stem) else _match_en_subtitle(f, eff_file_en_dir)
 
         try:
             pipeline = TranslationPipeline(

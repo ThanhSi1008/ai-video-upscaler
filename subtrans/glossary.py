@@ -150,13 +150,13 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
             if target_path.exists() and target_path != resolved_path:
                 return load_glossary(target_path)
 
-        meta = data.get("meta", {})
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
         schema_ver = meta.get("schema", 2)
-        style_rules = [str(r) for r in data.get("style_rules", [])]
-        difficulty_markers = [str(m) for m in data.get("difficulty_markers", [])]
+        style_rules = [str(r) for r in (data.get("style_rules") or []) if r is not None]
+        difficulty_markers = [str(m) for m in (data.get("difficulty_markers") or []) if m is not None]
 
         # Parse address_rules
-        raw_addr = data.get("address_rules", {})
+        raw_addr = data.get("address_rules") if isinstance(data.get("address_rules"), dict) else {}
         addr_rules = None
         if raw_addr:
             relations = [
@@ -166,29 +166,29 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
                     other=str(r.get("other", "")),
                     note=r.get("note"),
                 )
-                for r in raw_addr.get("relations", [])
-                if r.get("case")
+                for r in (raw_addr.get("relations") or [])
+                if isinstance(r, dict) and r.get("case")
             ]
             addr_rules = AddressRules(
                 principle=raw_addr.get("principle"),
-                first_person=_parse_pronoun_list(raw_addr.get("first_person", [])),
-                second_person=_parse_pronoun_list(raw_addr.get("second_person", [])),
-                honorifics=_parse_pronoun_list(raw_addr.get("honorifics", [])),
+                first_person=_parse_pronoun_list(raw_addr.get("first_person") or []),
+                second_person=_parse_pronoun_list(raw_addr.get("second_person") or []),
+                honorifics=_parse_pronoun_list(raw_addr.get("honorifics") or []),
                 relations=relations,
             )
 
         # Parse terms
         terms = []
-        for t in data.get("terms", []):
-            if t.get("ja") and t.get("vi"):
+        for t in (data.get("terms") or []):
+            if isinstance(t, dict) and t.get("ja") and t.get("vi"):
                 terms.append(
                     GlossaryTerm(
                         ja=str(t["ja"]),
                         en=str(t["en"]) if t.get("en") else None,
                         zh=str(t["zh"]) if t.get("zh") else None,
-                        aliases=[str(a) for a in t.get("aliases", [])],
+                        aliases=[str(a) for a in (t.get("aliases") or []) if a is not None],
                         vi=str(t["vi"]),
-                        alt=[str(a) for a in t.get("alt", [])],
+                        alt=[str(a) for a in (t.get("alt") or []) if a is not None],
                         note=t.get("note"),
                         genre=t.get("genre"),
                     )
@@ -196,7 +196,9 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
 
         # Parse characters
         characters = []
-        for c in data.get("characters", []):
+        for c in (data.get("characters") or []):
+            if not isinstance(c, dict):
+                continue
             speaks = [
                 CharacterSpeaksTo(
                     listener=str(s.get("listener", "")),
@@ -204,13 +206,14 @@ def load_glossary(glossary_path: Optional[Path]) -> Optional[Glossary]:
                     other=str(s.get("other", "")),
                     note=s.get("note"),
                 )
-                for s in c.get("speaks_to", [])
+                for s in (c.get("speaks_to") or [])
+                if isinstance(s, dict)
             ]
             characters.append(
                 Character(
                     name_ja=str(c.get("name_ja", "")),
                     name_vi=str(c.get("name_vi", "")),
-                    aliases=[str(a) for a in c.get("aliases", []) if a],
+                    aliases=[str(a) for a in (c.get("aliases") or []) if a],
                     gender=c.get("gender"),
                     speaking_style=c.get("register") or c.get("speaking_style"),
                     note=c.get("note"),
