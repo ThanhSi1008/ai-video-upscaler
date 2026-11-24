@@ -734,6 +734,39 @@ class TelemetryHub:
                     "effective_fps": 0.0,
                     "eta_seconds": None,
                 }
+            elif active_type in {"build_trt", "clean_temp"}:
+                aux_opts = active_job.get("options") or {}
+                is_aux_dry = bool(aux_opts.get("dry_run"))
+                effective_stage = "initializing" if active_type == "build_trt" else "auditing"
+                live_data = {
+                    "video_name": target_label,
+                    "pid": active_pid,
+                    "job_id": active_job.get("job_id"),
+                    "job_type": active_type,
+                    "dry_run": is_aux_dry,
+                    "started_at": active_job.get("started_at"),
+                    "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "stage": effective_stage,
+                    "stage_detail": (
+                        f"{'[Dry-Run] ' if is_aux_dry else ''}⚡ Đang biên dịch & kiểm chứng TensorRT 10 FP16 Engine ({target_label})..."
+                        if active_type == "build_trt"
+                        else f"{'[Dry-Run] ' if is_aux_dry else ''}🧹 Đang quét dọn tệp tạm & gom gọn biên bản kiểm định ({target_label})..."
+                    ),
+                    "model_id": target_label if active_type == "build_trt" else "clean-temp",
+                    "runtime_backend": "tensorrt" if active_type == "build_trt" else "",
+                    "zero_disk": False,
+                    "total_frames": 0,
+                    "unique_frames": 0,
+                    "total_chunks": 0,
+                    "completed_chunks": 0,
+                    "chunks": [],
+                    "resumed_chunks": [],
+                    "active_chunk": None,
+                    "steady_fps": 0.0,
+                    "latest_fps": 0.0,
+                    "effective_fps": 0.0,
+                    "eta_seconds": None,
+                }
             elif (
                 ((live_data.get("job_id") and active_job.get("job_id")) or _coerce_pid(active_pid) is not None)
                 and not self._live_matches_web_job(live_data, active_job, live_file_mtime)
@@ -953,6 +986,49 @@ class TelemetryHub:
                             "effective_fps": 0.0,
                             "eta_seconds": None,
                         }
+                elif last_type in {"build_trt", "clean_temp"} and not live_from_newer_upscale:
+                    is_aux_dry = bool((last_job.get("options") or {}).get("dry_run"))
+                    if last_status == "completed":
+                        effective_stage = "completed"
+                        detail_done = (
+                            f"Hoàn tất biên dịch TensorRT 10 FP16 ({target_label_last})."
+                            if last_type == "build_trt"
+                            else f"Hoàn tất dọn tệp tạm & gom biên bản kiểm định ({target_label_last})."
+                        )
+                    elif last_status == "aborted":
+                        effective_stage = "paused" if checkpoints else "idle"
+                        detail_done = f"Đã dừng tác vụ {last_type} ({target_label_last})."
+                    else:
+                        effective_stage = "error"
+                        detail_done = (
+                            f"Tác vụ {last_type} thất bại ({target_label_last}, mã thoát {last_job.get('return_code')})."
+                        )
+                    live_data = {
+                        "video_name": target_label_last,
+                        "pid": last_job.get("pid"),
+                        "job_id": last_job.get("job_id"),
+                        "job_type": last_type,
+                        "dry_run": is_aux_dry,
+                        "started_at": last_job.get("started_at"),
+                        "updated_at": fin_str or datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "stage": effective_stage,
+                        "failed_stage": "probing" if effective_stage == "error" else None,
+                        "last_stage": "probing" if last_type == "build_trt" else "auditing",
+                        "stage_detail": detail_done,
+                        "model_id": target_label_last if last_type == "build_trt" else "clean-temp",
+                        "zero_disk": False,
+                        "total_frames": 0,
+                        "unique_frames": 0,
+                        "total_chunks": 0,
+                        "completed_chunks": 0,
+                        "chunks": [],
+                        "resumed_chunks": [],
+                        "active_chunk": None,
+                        "steady_fps": 0.0,
+                        "latest_fps": 0.0,
+                        "effective_fps": 0.0,
+                        "eta_seconds": None,
+                    }
                 elif (
                     last_type == "upscale"
                     and bool((last_job.get("options") or {}).get("dry_run"))

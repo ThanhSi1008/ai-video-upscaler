@@ -6949,3 +6949,264 @@ def test_m2_p1_dynamic_keys_queue_summary_resume_init_abort_teardown_and_zero_ch
         assert "stepCompareFrame" in compare_js
         assert "this.currentPath !== prevPath" in fs_js
         assert "Xác nhận xóa?" in panels_js
+
+
+def test_m3_p2_trt_sidecar_build_stage_b_flags_glossary_editor_pending_delete_and_clean_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify M3 TRT .sha256 sidecar & build-trt, Stage B CLI parity, pointer-safe glossary editor, pending_subs delete, --format ass, and --clean-temp."""
+    import hashlib
+    import psutil
+
+    root = _seed_workspace(tmp_path / "m3_p2_ws")
+    ep_file = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+    srt_file = root / "anime_season" / "Frieren_02.ja.srt"
+
+    # Seed subtrans/glossary.yaml + base.yaml pointer + canonical & alias series glossaries
+    (root / "subtrans").mkdir(parents=True, exist_ok=True)
+    (root / "subtrans" / "glossary.yaml").write_text(
+        "version: 2\nterms:\n  - ja: 魔法\n    vi: ma thuật\n",
+        encoding="utf-8",
+    )
+    g_dir = root / "glossaries"
+    g_dir.mkdir(parents=True, exist_ok=True)
+    (g_dir / "base.yaml").write_text("../subtrans/glossary.yaml\n", encoding="utf-8")
+    (g_dir / "glossary.frieren.yaml").write_text(
+        "version: 2\nseries: Frieren\nterms:\n  - ja: 勇者\n    vi: Dũng giả\n",
+        encoding="utf-8",
+    )
+    (g_dir / "glossary.aliasfrieren.yaml").write_text(
+        "glossary.frieren.yaml\n", encoding="utf-8", newline="\n"
+    )
+
+    # Seed state/pending_subs.json with 2 pending items
+    state_dir = root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "pending_subs.json").write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-11-24T17:00:00",
+                "items": [
+                    {
+                        "base_name": "Frieren_Ep01",
+                        "video_path": str(root / "out" / "Frieren_Ep01_4K.mkv"),
+                        "subs_quality": "normal",
+                    },
+                    {
+                        "base_name": "Fate_Ep22",
+                        "video_path": str(root / "out" / "Fate_Ep22_4K.mkv"),
+                        "subs_quality": "high",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    spawned_cmds: List[List[str]] = []
+
+    def capture_factory(cmd: List[str], **_kw: Any) -> FakePopenProcess:
+        spawned_cmds.append(list(cmd))
+        return FakePopenProcess(cmd, pid=77123, running=False, return_code=0)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
+    with TestClient(app) as client:
+        # 1. TRT .engine without .engine.sha256 is flagged stale (trt_cached=False, trt_ready=False)
+        trt_dir = root / ".cache" / "trt_engines"
+        trt_dir.mkdir(parents=True, exist_ok=True)
+        eng_file = trt_dir / "animevideov3_fp16_opt8_max8_1920x1080_trt10.engine"
+        eng_bytes = b"TRT10_FP16_SERIALIZED_PLAN_" * 64
+        eng_file.write_bytes(eng_bytes)
+
+        ms_stale = client.get("/api/config/models-and-shows").json()
+        av3_stale = next(m for m in ms_stale["models"] if m["id"] == "animevideov3")
+        assert av3_stale["trt_cached"] is False
+        assert eng_file.name in av3_stale["stale_trt_engines"]
+
+        sched_stale = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [str(ep_file)], "model": "animevideov3", "use_tensorrt": True},
+        ).json()
+        assert sched_stale["episodes"][0]["trt_ready"] is False
+
+        # Write matching .engine.sha256 sidecar -> trt_cached=True & trt_ready=True
+        eng_digest = hashlib.sha256(eng_bytes).hexdigest()
+        sidecar_file = Path(f"{eng_file}.sha256")
+        sidecar_file.write_text(
+            json.dumps({"engine_sha256": eng_digest}),
+            encoding="utf-8",
+        )
+        ms_valid = client.get("/api/config/models-and-shows").json()
+        av3_valid = next(m for m in ms_valid["models"] if m["id"] == "animevideov3")
+        assert av3_valid["trt_cached"] is True
+        assert av3_valid["stale_trt_engines"] == []
+
+        sched_ready = client.post(
+            "/api/queue/preview-schedule",
+            json={"inputs": [str(ep_file)], "model": "animevideov3", "use_tensorrt": True},
+        ).json()
+        assert sched_ready["episodes"][0]["trt_ready"] is True
+
+        # Corrupt .engine bytes -> sidecar mismatch caught
+        eng_file.write_bytes(eng_bytes + b"CORRUPT")
+        av3_corrupt = next(
+            m for m in client.get("/api/config/models-and-shows").json()["models"] if m["id"] == "animevideov3"
+        )
+        assert av3_corrupt["trt_cached"] is False
+        assert eng_file.name in av3_corrupt["stale_trt_engines"]
+
+        # POST /api/jobs/build-trt rejects unknown model and spawns src/build_trt_engine.py for valid model
+        assert client.post("/api/jobs/build-trt", json={"model_id": "nonexistent_sr"}).status_code == 400
+        spawned_cmds.clear()
+        r_trt = client.post("/api/jobs/build-trt", json={"model_id": "animevideov3", "force": True})
+        assert r_trt.status_code == 200
+        assert any("build_trt_engine.py" in part for part in spawned_cmds[-1])
+        assert "--model" in spawned_cmds[-1] and "animevideov3" in spawned_cmds[-1]
+        assert "--force" in spawned_cmds[-1]
+
+        # 2. Stage B CLI flags forwarded on POST /api/jobs/start and secret/enum guards enforced
+        assert (
+            client.post(
+                "/api/jobs/start",
+                json={"inputs": [str(ep_file)], "glossary": ".env", "dry_run": True},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/jobs/start",
+                json={"inputs": [str(ep_file)], "sound_cues": "invalid_mode", "dry_run": True},
+            ).status_code
+            == 422
+        )
+        spawned_cmds.clear()
+        g_frieren_path = str(g_dir / "glossary.frieren.yaml")
+        r_stage_b = client.post(
+            "/api/jobs/start",
+            json={
+                "inputs": [str(ep_file)],
+                "subs_after_upscale": True,
+                "subs_quality": "high",
+                "glossary": g_frieren_path,
+                "subs_upgrade": True,
+                "no_embed": True,
+                "sound_cues": "translate",
+                "dry_run": True,
+            },
+        )
+        assert r_stage_b.status_code == 200
+        cmd_sb = spawned_cmds[-1]
+        assert cmd_sb[cmd_sb.index("--glossary") + 1] == g_frieren_path
+        assert "--subs-upgrade" in cmd_sb
+        assert "--no-embed" in cmd_sb
+        assert cmd_sb[cmd_sb.index("--sound-cues") + 1] == "translate"
+
+        # 3. Glossary Editor: base.yaml read-only (403 on PUT), traversal blocked, pointer-safe LF write on alias
+        r_base = client.get("/api/subtrans/glossary", params={"name": "base.yaml"})
+        assert r_base.status_code == 200
+        assert r_base.json()["read_only"] is True
+        assert r_base.json()["is_pointer"] is True
+        assert r_base.json()["resolved_name"] == "glossary.yaml"
+        assert (
+            client.put(
+                "/api/subtrans/glossary",
+                json={"name": "base.yaml", "yaml_content": "version: 2\nterms: []\n"},
+            ).status_code
+            == 403
+        )
+        for bad_gname in ("../.env", "..\\models\\models.yaml", "sub/nested.yaml"):
+            assert client.get("/api/subtrans/glossary", params={"name": bad_gname}).status_code in (400, 403)
+
+        # Invalid YAML / missing 'vi' in terms rejected with 400
+        assert (
+            client.put(
+                "/api/subtrans/glossary",
+                json={"name": "glossary.frieren.yaml", "yaml_content": "terms:\n  - ja: 勇者\n"},
+            ).status_code
+            == 400
+        )
+
+        # Saving through 1-line alias pointer updates canonical target with LF newlines and keeps pointer intact
+        assert (
+            client.put(
+                "/api/subtrans/glossary",
+                json={
+                    "name": "glossary.aliasfrieren.yaml",
+                    "yaml_content": "characters:\n  フリーレン:\n    name_vi: Frieren\n",
+                },
+            ).status_code
+            == 400
+        )
+        r_save_alias = client.put(
+            "/api/subtrans/glossary",
+            json={
+                "name": "glossary.aliasfrieren.yaml",
+                "yaml_content": (
+                    "meta:\r\n  schema: 2\r\n  pair: ja-vi\r\n"
+                    "characters:\r\n  - name_ja: フリーレン\r\n    name_vi: Frieren\r\n"
+                    "terms:\r\n  - ja: 勇者\r\n    vi: Dũng giả\r\n  - ja: 魔族\r\n    vi: Ma tộc\r\n"
+                ),
+            },
+        )
+        assert r_save_alias.status_code == 200
+        save_payload = r_save_alias.json()
+        assert save_payload["is_pointer"] is True
+        assert save_payload["resolved_name"] == "glossary.frieren.yaml"
+        assert save_payload["terms_count"] == 2
+        assert save_payload["characters_count"] == 1
+        assert (g_dir / "glossary.aliasfrieren.yaml").read_bytes() == b"glossary.frieren.yaml\n"
+        saved_canon_bytes = (g_dir / "glossary.frieren.yaml").read_bytes()
+        assert b"\r\n" not in saved_canon_bytes
+        assert "Ma tộc".encode("utf-8") in saved_canon_bytes
+
+        # 4. Pending Subs DELETE & standalone subtrans --format ass
+        assert client.delete("/api/subtrans/pending", params={"target": "Unknown_Ep99"}).status_code == 404
+        r_del1 = client.delete("/api/subtrans/pending", params={"target": "Frieren_Ep01"})
+        assert r_del1.status_code == 200
+        assert r_del1.json()["remaining_count"] == 1
+        ov_after_del = client.get("/api/subtrans/overview").json()
+        assert len(ov_after_del["pending_subs"]) == 1
+        assert ov_after_del["pending_subs"][0]["base_name"] == "Fate_Ep22"
+
+        assert (
+            client.post(
+                "/api/jobs/subtrans",
+                json={"input_path": str(srt_file), "output_format": "vtt", "dry_run": True},
+            ).status_code
+            == 422
+        )
+        spawned_cmds.clear()
+        r_ass = client.post(
+            "/api/jobs/subtrans",
+            json={"input_path": str(srt_file), "output_format": "ass", "dry_run": True},
+        )
+        assert r_ass.status_code == 200
+        assert spawned_cmds[-1][spawned_cmds[-1].index("--format") + 1] == "ass"
+
+        # 5. Global Temp Cleanup refuses when GPU lock is active (409) and runs upscale.py --clean-temp when idle
+        live_gpu_pid = 66554
+        monkeypatch.setattr(psutil, "pid_exists", lambda p: p == live_gpu_pid)
+        (root / ".gpu_active.lock").write_text(f"{live_gpu_pid}\n", encoding="utf-8")
+        try:
+            assert client.post("/api/jobs/clean-temp", json={}).status_code == 409
+        finally:
+            (root / ".gpu_active.lock").unlink(missing_ok=True)
+
+        spawned_cmds.clear()
+        r_clean = client.post("/api/jobs/clean-temp", json={})
+        assert r_clean.status_code == 200
+        assert "--clean-temp" in spawned_cmds[-1]
+
+        # 6. Frontend M3 DOM & JS contracts
+        html = client.get("/").text
+        panels_js = client.get("/static/js/panels.js").text
+        assert 'id="opt-glossary"' in html and 'id="opt-sound-cues"' in html
+        assert 'id="opt-subs-upgrade"' in html and 'id="opt-no-embed"' in html
+        assert 'id="btn-open-glossary-editor"' in html and 'id="sub-format-select"' in html
+        assert 'id="pending-subs-box"' in html and 'id="btn-clean-temp"' in html
+        assert 'id="glossary-editor-dialog"' in html and 'closedby="any"' in html
+        assert "/api/jobs/build-trt" in panels_js
+        assert "/api/jobs/clean-temp" in panels_js
+        assert "/api/subtrans/glossary" in panels_js
+        assert "/api/subtrans/pending" in panels_js

@@ -71,6 +71,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const optOutDir = document.getElementById("opt-output-dir");
   const btnBrowseOutDir = document.getElementById("btn-browse-opt-outdir");
   const optSubsQuality = document.getElementById("opt-subs-quality");
+  const optGlossary = document.getElementById("opt-glossary");
+  const optSoundCues = document.getElementById("opt-sound-cues");
   const optPreviewSeconds = document.getElementById("opt-preview-seconds");
   const optPreviewStart = document.getElementById("opt-preview-start");
   const optPreviewStartError = document.getElementById("opt-preview-start-error");
@@ -80,6 +82,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   const optSubsAfter = document.getElementById("opt-subs-after");
   const optAsyncSubs = document.getElementById("opt-async-subs");
   const optPreferWhisper = document.getElementById("opt-prefer-whisper");
+  const optSubsUpgrade = document.getElementById("opt-subs-upgrade");
+  const optNoEmbed = document.getElementById("opt-no-embed");
   const optForce = document.getElementById("opt-force");
   const optDryRun = document.getElementById("opt-dry-run");
 
@@ -188,10 +192,18 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 
   const syncStageBControls = () => {
     const subsOn = Boolean(optSubsAfter?.checked);
-    for (const depEl of [optSubsQuality, optAsyncSubs, optPreferWhisper]) {
+    for (const depEl of [
+      optSubsQuality,
+      optGlossary,
+      optSoundCues,
+      optAsyncSubs,
+      optPreferWhisper,
+      optSubsUpgrade,
+      optNoEmbed,
+    ]) {
       if (!depEl) continue;
       depEl.disabled = !subsOn;
-      depEl.closest(".field-group, .check-item")?.classList.toggle("is-disabled-dep", !subsOn);
+      depEl.closest(".field-group, .inline-check, .check-item")?.classList.toggle("is-disabled-dep", !subsOn);
     }
   };
 
@@ -277,6 +289,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         deadline: optDeadline?.value.trim() || "",
         output_dir: optOutDir?.value.trim() || "",
         subs_quality: optSubsQuality?.value || "normal",
+        glossary: optGlossary?.dataset?.desiredValue ?? optGlossary?.value ?? "",
+        sound_cues: optSoundCues?.value || "drop",
         preview_seconds: String(getPreviewSeconds()),
         preview_start: optPreviewStart?.value.trim() || "",
         zero_disk: Boolean(optZeroDisk?.checked ?? true),
@@ -285,6 +299,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         subs_after_upscale: Boolean(optSubsAfter?.checked),
         async_subs: Boolean(optAsyncSubs?.checked),
         prefer_whisper: Boolean(optPreferWhisper?.checked),
+        subs_upgrade: Boolean(optSubsUpgrade?.checked),
+        no_embed: Boolean(optNoEmbed?.checked),
       };
       localStorage.setItem(QUEUE_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
     } catch {
@@ -321,6 +337,12 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       if (typeof cfg.subs_quality === "string") {
         setSelectValueSafely(optSubsQuality, cfg.subs_quality, "normal");
       }
+      if (typeof cfg.glossary === "string") {
+        setDesiredSelectValue(optGlossary, cfg.glossary, "");
+      }
+      if (typeof cfg.sound_cues === "string") {
+        setSelectValueSafely(optSoundCues, cfg.sound_cues, "drop");
+      }
       if (typeof cfg.preview_seconds === "string") {
         setSelectValueSafely(optPreviewSeconds, cfg.preview_seconds, "10");
       }
@@ -345,6 +367,12 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       if (typeof cfg.prefer_whisper === "boolean" && optPreferWhisper instanceof HTMLInputElement) {
         optPreferWhisper.checked = cfg.prefer_whisper;
       }
+      if (typeof cfg.subs_upgrade === "boolean" && optSubsUpgrade instanceof HTMLInputElement) {
+        optSubsUpgrade.checked = cfg.subs_upgrade;
+      }
+      if (typeof cfg.no_embed === "boolean" && optNoEmbed instanceof HTMLInputElement) {
+        optNoEmbed.checked = cfg.no_embed;
+      }
     } catch {
       // Ignore malformed stored state
     }
@@ -353,6 +381,21 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
   restoreQueueConfig();
   if (optForce instanceof HTMLInputElement) optForce.checked = false;
   if (optDryRun instanceof HTMLInputElement) optDryRun.checked = false;
+
+  window.addEventListener("studio:glossaries-loaded", (ev) => {
+    if (!(optGlossary instanceof HTMLSelectElement)) return;
+    const glossaries = Array.isArray(ev?.detail) ? ev.detail : [];
+    const desired = optGlossary.dataset.desiredValue ?? optGlossary.value ?? "";
+    clearChildren(optGlossary);
+    optGlossary.append(
+      el("option", { value: "", textContent: "Tự động nhận diện theo tên phim" })
+    );
+    for (const g of glossaries) {
+      if (!g?.path) continue;
+      optGlossary.append(el("option", { value: g.path, textContent: g.name }));
+    }
+    setSelectValueSafely(optGlossary, desired, "");
+  });
 
   window.addEventListener("studio:models-loaded", () => {
     let changed = false;
@@ -545,12 +588,22 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         if (ep.already_done || ep.is_partial) badgeTone = "badge-warn";
         else if (!ep.can_run) badgeTone = "badge-err";
 
+        const modelCellChildren = [
+          el("strong", { textContent: ep.model_id }),
+          el("div", { className: "muted-meta", textContent: ep.routing_source }),
+        ];
+        if (Boolean(optTensorrt?.checked ?? true) && ep.trt_ready === false && !ep.already_done) {
+          modelCellChildren.push(
+            el("div", {
+              className: "badge badge-warn",
+              textContent: "⚠ Chưa có TRT .engine (Tab 4 → Biên dịch TRT)",
+            })
+          );
+        }
+
         const tr = el("tr", {}, [
           el("th", { scope: "row", textContent: `${ep.index}. ${ep.file_name}` }),
-          el("td", {}, [
-            el("strong", { textContent: ep.model_id }),
-            el("div", { className: "muted-meta", textContent: ep.routing_source }),
-          ]),
+          el("td", {}, modelCellChildren),
           el("td", { textContent: ep.dedup_policy }),
           el("td", {
             textContent:
@@ -747,10 +800,21 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     });
   }
 
-  for (const extraCtrl of [optNvencMultipass, optSubsQuality, optAsyncSubs, optPreferWhisper]) {
+  for (const extraCtrl of [
+    optNvencMultipass,
+    optSubsQuality,
+    optGlossary,
+    optSoundCues,
+    optAsyncSubs,
+    optPreferWhisper,
+    optSubsUpgrade,
+    optNoEmbed,
+  ]) {
     extraCtrl?.addEventListener("change", () => {
       if (extraCtrl === optNvencMultipass && optNvencMultipass instanceof HTMLSelectElement) {
         optNvencMultipass.dataset.desiredValue = optNvencMultipass.value;
+      } else if (extraCtrl === optGlossary && optGlossary instanceof HTMLSelectElement) {
+        optGlossary.dataset.desiredValue = optGlossary.value;
       }
       persistQueueConfig();
     });
@@ -838,6 +902,10 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         use_tensorrt: Boolean(optTensorrt?.checked ?? true),
         subs_after_upscale: Boolean(optSubsAfter?.checked),
         subs_quality: optSubsQuality?.value || "normal",
+        glossary: optGlossary?.value || null,
+        subs_upgrade: Boolean(optSubsUpgrade?.checked),
+        no_embed: Boolean(optNoEmbed?.checked),
+        sound_cues: optSoundCues?.value || "drop",
         async_subs: Boolean(optAsyncSubs?.checked),
         prefer_whisper: Boolean(optPreferWhisper?.checked),
         auto_align_en: true,
@@ -946,6 +1014,25 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       const cpAsyncSubs = opts.asyncSubs ?? opts.async_subs;
       if (typeof cpAsyncSubs === "boolean" && optAsyncSubs instanceof HTMLInputElement) {
         optAsyncSubs.checked = cpAsyncSubs;
+        cfgChanged = true;
+      }
+      if (opts.glossary !== undefined) {
+        setDesiredSelectValue(optGlossary, String(opts.glossary || "").trim(), "");
+        cfgChanged = true;
+      }
+      const cpSubsUpgrade = opts.subsUpgrade ?? opts.subs_upgrade;
+      if (typeof cpSubsUpgrade === "boolean" && optSubsUpgrade instanceof HTMLInputElement) {
+        optSubsUpgrade.checked = cpSubsUpgrade;
+        cfgChanged = true;
+      }
+      const cpNoEmbed = opts.noEmbed ?? opts.no_embed;
+      if (typeof cpNoEmbed === "boolean" && optNoEmbed instanceof HTMLInputElement) {
+        optNoEmbed.checked = cpNoEmbed;
+        cfgChanged = true;
+      }
+      const cpSoundCues = String(opts.soundCues ?? opts.sound_cues ?? "").trim();
+      if (cpSoundCues) {
+        setSelectValueSafely(optSoundCues, cpSoundCues, "drop");
         cfgChanged = true;
       }
       syncStageBControls();
@@ -1147,7 +1234,7 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
 /* =====================================================================
  * TAB 4: MODELS REGISTRY & SHOWS.YAML CONFIGURATOR
  * ===================================================================== */
-export function initModelsPanel({ onShowsUpdated } = {}) {
+export function initModelsPanel({ selectTabById, onJobLaunched, onShowsUpdated } = {}) {
   const tbody = document.getElementById("models-tbody");
   const btnRefresh = document.getElementById("btn-refresh-models");
   const testInput = document.getElementById("test-match-input");
@@ -1170,13 +1257,25 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
   let editorDirty = false;
   let modelsSystemBusy = false;
   let modelsSystemBusyReason = "";
+  let trtLaunchInFlight = false;
+  let trtBuildBtns = [];
 
   const syncShowsSaveButton = () => {
-    if (!(btnSaveShows instanceof HTMLButtonElement)) return;
-    btnSaveShows.disabled = modelsSystemBusy;
-    btnSaveShows.title = modelsSystemBusy
-      ? modelsSystemBusyReason || "Đang có tiến trình chạy — tạm khóa lưu shows.yaml để tránh lệch cấu hình giữa ca."
-      : "";
+    const busyOrLaunching = modelsSystemBusy || trtLaunchInFlight;
+    if (btnSaveShows instanceof HTMLButtonElement) {
+      btnSaveShows.disabled = busyOrLaunching;
+      btnSaveShows.title = modelsSystemBusy
+        ? modelsSystemBusyReason || "Đang có tiến trình chạy — tạm khóa lưu shows.yaml để tránh lệch cấu hình giữa ca."
+        : "";
+    }
+    for (const btn of trtBuildBtns) {
+      if (btn instanceof HTMLButtonElement) {
+        btn.disabled = busyOrLaunching;
+        btn.title = modelsSystemBusy
+          ? modelsSystemBusyReason || "Hệ thống đang bận — vui lòng chờ trước khi biên dịch TensorRT."
+          : "";
+      }
+    }
   };
 
   const setShowsYamlError = (errMsg) => {
@@ -1323,6 +1422,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
       // Render Models Table
       if (tbody) {
         clearChildren(tbody);
+        trtBuildBtns = [];
         for (const m of models) {
           const idChildren = [el("code", { textContent: m.id })];
           if (m.default) {
@@ -1341,6 +1441,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
                 textContent: "⬇ Tự tải SHA-256 khi dùng",
               });
 
+          const staleEngines = Array.isArray(m.stale_trt_engines) ? m.stale_trt_engines : [];
           const trtBadge = m.trt_cached
             ? el("span", {
                 className: "badge badge-ok",
@@ -1350,6 +1451,58 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
                 className: "badge",
                 textContent: "Biên dịch lần đầu",
               });
+
+          const trtCellChildren = [trtBadge];
+          if (staleEngines.length > 0) {
+            trtCellChildren.push(
+              el("span", {
+                className: "badge badge-warn",
+                title: staleEngines.join(", "),
+                textContent: `⚠ ${staleEngines.length} thiếu .sha256`,
+              })
+            );
+          }
+
+          const shouldForceTrt = Boolean(m.trt_cached || staleEngines.length > 0);
+          const buildTrtBtn = el("button", {
+            type: "button",
+            className: "btn btn-secondary btn-xs",
+            disabled: modelsSystemBusy || trtLaunchInFlight,
+            textContent: m.trt_cached ? "↻ Biên dịch lại" : "⚡ Biên dịch TRT",
+            title: m.trt_cached
+              ? `Biên dịch lại TensorRT 10 FP16 cho ${m.id} (--force)`
+              : `Biên dịch trước TensorRT 10 FP16 Engine cho ${m.id}`,
+            onClick: async () => {
+              if (modelsSystemBusy || trtLaunchInFlight) {
+                showToast(
+                  modelsSystemBusyReason || "Hệ thống đang bận — vui lòng chờ trước khi biên dịch TensorRT.",
+                  "warn"
+                );
+                return;
+              }
+              trtLaunchInFlight = true;
+              syncShowsSaveButton();
+              try {
+                const res = await apiFetch("/api/jobs/build-trt", {
+                  method: "POST",
+                  body: { model_id: m.id, force: shouldForceTrt },
+                });
+                showToast(
+                  `Đã khởi chạy biên dịch TensorRT 10 cho ${m.id} (PID=${res.job?.pid || "—"}).`,
+                  "success"
+                );
+                selectTabById?.("tab-monitor");
+                onJobLaunched?.(res.job);
+              } catch (err) {
+                showToast(err.message, "error");
+              } finally {
+                trtLaunchInFlight = false;
+                syncShowsSaveButton();
+              }
+            },
+          });
+          trtBuildBtns.push(buildTrtBtn);
+          trtCellChildren.push(buildTrtBtn);
 
           const scaleText =
             m.downsample && m.downsample !== "none"
@@ -1365,7 +1518,7 @@ export function initModelsPanel({ onShowsUpdated } = {}) {
               ]),
               el("td", { textContent: scaleText }),
               el("td", {}, [weightBadge]),
-              el("td", {}, [trtBadge]),
+              el("td", {}, [el("div", { className: "trt-cell-stack" }, trtCellChildren)]),
               el("td", { textContent: `~${m.ref_median_fps} fps (P5: ${m.ref_p5_fps})` }),
               el("td", {}, [
                 el("code", { textContent: m.sha256_prefix ? `${m.sha256_prefix}…` : "N/A" }),
@@ -1459,6 +1612,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const btnBrowseSub = document.getElementById("btn-browse-sub-input");
   const subQuality = document.getElementById("sub-quality-select");
   const subGlossary = document.getElementById("sub-glossary-select");
+  const btnOpenGlossaryEditor = document.getElementById("btn-open-glossary-editor");
+  const subFormat = document.getElementById("sub-format-select");
   const subOffset = document.getElementById("sub-offset-input");
   const subOffsetError = document.getElementById("sub-offset-error");
   const subOutDir = document.getElementById("sub-output-dir");
@@ -1471,6 +1626,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const btnStartSubtrans = document.getElementById("btn-start-subtrans");
   const btnRunPending = document.getElementById("btn-run-subs-pending");
   const pendingCountSpan = document.getElementById("pending-subs-count");
+  const pendingSubsBox = document.getElementById("pending-subs-box");
+  const pendingSubsList = document.getElementById("pending-subs-list");
 
   const btnRefreshSubtrans = document.getElementById("btn-refresh-subtrans");
   const kpiKeys = document.getElementById("sub-kpi-keys");
@@ -1482,12 +1639,22 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const apiKeysInputsGrid = document.getElementById("api-keys-inputs-grid");
   const btnAddApiKeySlot = document.getElementById("btn-add-api-key-slot");
 
+  const btnCleanTemp = document.getElementById("btn-clean-temp");
   const btnRefreshAudits = document.getElementById("btn-refresh-audits");
   const auditsTbody = document.getElementById("audits-tbody");
   const auditDialog = document.getElementById("audit-detail-dialog");
   const auditTitle = document.getElementById("audit-detail-title");
   const auditSwitcher = document.getElementById("audit-doc-switcher");
   const auditCode = document.getElementById("audit-detail-code");
+
+  const glossaryDialog = document.getElementById("glossary-editor-dialog");
+  const glossaryDialogSelect = document.getElementById("glossary-dialog-select");
+  const glossaryReadonlyBadge = document.getElementById("glossary-readonly-badge");
+  const glossaryPointerNote = document.getElementById("glossary-pointer-note");
+  const glossaryYamlError = document.getElementById("glossary-yaml-error");
+  const glossaryEditor = document.getElementById("glossary-yaml-editor");
+  const btnReloadGlossary = document.getElementById("btn-reload-glossary");
+  const btnSaveGlossary = document.getElementById("btn-save-glossary");
 
   const nightReportDetails = document.getElementById("night-report-details");
   const nightReportSession = document.getElementById("night-report-session");
@@ -1498,6 +1665,8 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
   const nightReportCode = document.getElementById("night-report-code");
 
   let auditLoadSeq = 0;
+  let glossaryLoadSeq = 0;
+  let glossaryReadOnly = false;
   let pendingSubsCount = 0;
   let systemBusy = false;
   let systemBusyReason = "";
@@ -1519,6 +1688,12 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           ? "Không có tập nào trong hàng đợi tồn đọng."
           : "";
     }
+    if (btnCleanTemp instanceof HTMLButtonElement) {
+      btnCleanTemp.disabled = busyOrLaunching;
+      btnCleanTemp.title = systemBusy
+        ? systemBusyReason || "Hệ thống đang có tiến trình chạy — tạm khóa dọn tệp tạm."
+        : "Dọn dẹp các tệp trung gian dư thừa và gom biên bản kiểm định vào out/audit/";
+    }
   };
 
   if (auditDialog instanceof HTMLDialogElement) {
@@ -1530,6 +1705,155 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
       }
     });
   }
+
+  const setGlossaryError = (msg) => {
+    if (msg) {
+      glossaryEditor?.setAttribute("aria-invalid", "true");
+      if (glossaryYamlError) {
+        glossaryYamlError.textContent = msg;
+        glossaryYamlError.hidden = false;
+      }
+    } else {
+      glossaryEditor?.removeAttribute("aria-invalid");
+      if (glossaryYamlError) {
+        glossaryYamlError.textContent = "";
+        glossaryYamlError.hidden = true;
+      }
+    }
+  };
+
+  const loadGlossaryIntoDialog = async (fileName) => {
+    if (!fileName || !(glossaryEditor instanceof HTMLTextAreaElement)) return;
+    const reqId = ++glossaryLoadSeq;
+    setGlossaryError(null);
+    glossaryEditor.value = "# Đang tải nội dung từ điển…";
+    glossaryEditor.disabled = true;
+    if (btnSaveGlossary instanceof HTMLButtonElement) btnSaveGlossary.disabled = true;
+    try {
+      const qs = new URLSearchParams({ name: fileName });
+      const res = await apiFetch(`/api/subtrans/glossary?${qs.toString()}`);
+      if (reqId !== glossaryLoadSeq) return;
+      glossaryReadOnly = Boolean(res.read_only);
+      glossaryEditor.value = String(res.yaml_content || "");
+      glossaryEditor.disabled = false;
+      glossaryEditor.readOnly = glossaryReadOnly;
+      if (glossaryReadonlyBadge) {
+        glossaryReadonlyBadge.hidden = !glossaryReadOnly;
+      }
+      if (glossaryPointerNote) {
+        if (res.is_pointer && res.resolved_name) {
+          glossaryPointerNote.textContent = `↳ Alias trỏ tới ${res.resolved_name}`;
+          glossaryPointerNote.hidden = false;
+        } else {
+          glossaryPointerNote.textContent = "";
+          glossaryPointerNote.hidden = true;
+        }
+      }
+      if (btnSaveGlossary instanceof HTMLButtonElement) {
+        btnSaveGlossary.disabled = glossaryReadOnly;
+        btnSaveGlossary.title = glossaryReadOnly
+          ? "Từ điển gốc (base.yaml / subtrans/glossary.yaml) được khóa chỉ-đọc."
+          : "Lưu nguyên tử (LF) sau khi kiểm tra YAML Schema v2";
+      }
+    } catch (err) {
+      if (reqId !== glossaryLoadSeq) return;
+      glossaryEditor.disabled = false;
+      setGlossaryError(err.message);
+      showToast(err.message, "error");
+    }
+  };
+
+  if (glossaryDialog instanceof HTMLDialogElement) {
+    initDialogLightDismiss(glossaryDialog);
+    glossaryDialog.addEventListener("close", () => {
+      glossaryDialog.returnValue = "";
+      if (!glossaryDialog.open) {
+        glossaryLoadSeq++;
+      }
+    });
+  }
+
+  glossaryEditor?.addEventListener("input", () => setGlossaryError(null));
+
+  btnOpenGlossaryEditor?.addEventListener("click", async () => {
+    if (!(glossaryDialog instanceof HTMLDialogElement) || !(glossaryDialogSelect instanceof HTMLSelectElement)) {
+      return;
+    }
+    if (glossaryDialogSelect.options.length === 0) {
+      await loadSubtransOverview();
+    }
+    if (glossaryDialogSelect.options.length === 0) {
+      showToast("Không tìm thấy tệp từ điển nào trong thư mục glossaries/.", "warn");
+      return;
+    }
+    const curSubPath = String(subGlossary?.value || "").trim();
+    const curBaseName = curSubPath ? curSubPath.split(/[\\/]/).pop() : "";
+    if (curBaseName && Array.from(glossaryDialogSelect.options).some((o) => o.value === curBaseName)) {
+      glossaryDialogSelect.value = curBaseName;
+    } else if (!glossaryDialogSelect.value && glossaryDialogSelect.options.length > 0) {
+      const preferred = Array.from(glossaryDialogSelect.options).find(
+        (o) => o.value !== "base.yaml"
+      );
+      glossaryDialogSelect.value = preferred ? preferred.value : glossaryDialogSelect.options[0].value;
+    }
+    glossaryDialog.returnValue = "";
+    if (!glossaryDialog.open) {
+      glossaryDialog.showModal();
+    }
+    await loadGlossaryIntoDialog(glossaryDialogSelect.value);
+  });
+
+  glossaryDialogSelect?.addEventListener("change", () => {
+    if (glossaryDialogSelect.value) {
+      loadGlossaryIntoDialog(glossaryDialogSelect.value);
+    }
+  });
+
+  btnReloadGlossary?.addEventListener("click", () => {
+    if (glossaryDialogSelect instanceof HTMLSelectElement && glossaryDialogSelect.value) {
+      loadGlossaryIntoDialog(glossaryDialogSelect.value).then(() =>
+        showToast("Đã nạp lại tệp từ điển từ đĩa.", "info", 2400)
+      );
+    }
+  });
+
+  btnSaveGlossary?.addEventListener("click", async () => {
+    if (
+      !(glossaryDialogSelect instanceof HTMLSelectElement) ||
+      !(glossaryEditor instanceof HTMLTextAreaElement) ||
+      !glossaryDialogSelect.value
+    ) {
+      return;
+    }
+    if (glossaryReadOnly) {
+      showToast("Từ điển gốc (base.yaml) được khóa chỉ-đọc để bảo vệ quy tắc nền.", "warn");
+      return;
+    }
+    if (btnSaveGlossary instanceof HTMLButtonElement) btnSaveGlossary.disabled = true;
+    try {
+      const res = await apiFetch("/api/subtrans/glossary", {
+        method: "PUT",
+        body: {
+          name: glossaryDialogSelect.value,
+          yaml_content: glossaryEditor.value,
+        },
+      });
+      setGlossaryError(null);
+      showToast(
+        `Đã lưu ${res.resolved_name || res.name} (${res.terms_count} thuật ngữ • ${res.characters_count} nhân vật).`,
+        "success"
+      );
+      await loadSubtransOverview();
+    } catch (err) {
+      setGlossaryError(err.message);
+      glossaryEditor.focus();
+      showToast(err.message, "error");
+    } finally {
+      if (btnSaveGlossary instanceof HTMLButtonElement) {
+        btnSaveGlossary.disabled = glossaryReadOnly;
+      }
+    }
+  });
 
   let manualKeySlotCount = 3;
 
@@ -1673,24 +1997,94 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
         const hhmm = (data.next_reset_vn || "").slice(11, 16) || "14:00";
         kpiReset.textContent = `${formatDuration(data.reset_in_seconds)} (${hhmm})`;
       }
+      const pendingItems = Array.isArray(data.pending_subs) ? data.pending_subs : [];
       if (pendingCountSpan) {
-        const count = Array.isArray(data.pending_subs) ? data.pending_subs.length : 0;
-        pendingCountSpan.textContent = String(count);
-        pendingSubsCount = count;
+        pendingCountSpan.textContent = String(pendingItems.length);
+        pendingSubsCount = pendingItems.length;
         syncSubtransLaunchButtons();
       }
+      if (pendingSubsBox && pendingSubsList) {
+        clearChildren(pendingSubsList);
+        if (pendingItems.length === 0) {
+          pendingSubsBox.hidden = true;
+        } else {
+          pendingSubsBox.hidden = false;
+          for (const item of pendingItems) {
+            const targetKey = String(
+              item.base_name || item.episode || item.video_path || item.ja_path || ""
+            ).trim();
+            if (!targetKey) continue;
+            const shortName = targetKey.split(/[\\/]/).pop();
+            const qualTag = item.subs_quality ? ` • ${item.subs_quality}` : "";
+            const chip = el("div", { className: "key-slot-chip" }, [
+              el("span", { className: "badge badge-warn", textContent: `⏳ ${shortName}${qualTag}` }),
+            ]);
+            let pendConfirmTimer = 0;
+            const delPendBtn = el(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-ghost btn-xs",
+                "aria-label": `Xóa ${shortName} khỏi pending_subs.json`,
+                onClick: async () => {
+                  if (delPendBtn.dataset.confirming !== "true") {
+                    delPendBtn.dataset.confirming = "true";
+                    delPendBtn.className = "btn btn-danger btn-xs";
+                    delPendBtn.textContent = "Xác nhận xóa?";
+                    if (pendConfirmTimer) window.clearTimeout(pendConfirmTimer);
+                    pendConfirmTimer = window.setTimeout(() => {
+                      delete delPendBtn.dataset.confirming;
+                      delPendBtn.className = "btn btn-ghost btn-xs";
+                      delPendBtn.textContent = "✕ Xóa";
+                    }, 4000);
+                    return;
+                  }
+                  if (pendConfirmTimer) window.clearTimeout(pendConfirmTimer);
+                  delPendBtn.disabled = true;
+                  try {
+                    const qs = new URLSearchParams({ target: targetKey });
+                    await apiFetch(`/api/subtrans/pending?${qs.toString()}`, { method: "DELETE" });
+                    showToast(`Đã xóa '${shortName}' khỏi pending_subs.json.`, "info", 2800);
+                    await loadSubtransOverview();
+                  } catch (err) {
+                    delPendBtn.disabled = false;
+                    showToast(err.message, "error");
+                  }
+                },
+              },
+              ["✕ Xóa"]
+            );
+            chip.append(delPendBtn);
+            pendingSubsList.append(chip);
+          }
+        }
+      }
 
+      const glossaryList = Array.isArray(data.glossaries) ? data.glossaries : [];
       if (subGlossary instanceof HTMLSelectElement) {
         const curG = subGlossary.value;
         clearChildren(subGlossary);
         subGlossary.append(
           el("option", { value: "", textContent: "Tự động nhận diện theo tên phim" })
         );
-        for (const g of data.glossaries || []) {
+        for (const g of glossaryList) {
           subGlossary.append(el("option", { value: g.path, textContent: g.name }));
         }
         setSelectValueSafely(subGlossary, curG, "");
       }
+      if (glossaryDialogSelect instanceof HTMLSelectElement) {
+        const curDlgG = glossaryDialogSelect.value;
+        clearChildren(glossaryDialogSelect);
+        for (const g of glossaryList) {
+          glossaryDialogSelect.append(
+            el("option", { value: g.name, textContent: `${g.name} (${g.size_kb} KB)` })
+          );
+        }
+        if (curDlgG) {
+          setSelectValueSafely(glossaryDialogSelect, curDlgG, glossaryList[0]?.name || "");
+        }
+      }
+      window.dispatchEvent(new CustomEvent("studio:glossaries-loaded", { detail: glossaryList }));
 
       renderKeySlots(effectiveSlots);
 
@@ -2026,6 +2420,7 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
           no_embed: Boolean(subNoEmbed?.checked),
           sub_offset_ms: offsetMs,
           glossary: subGlossary?.value || null,
+          output_format: subFormat?.value || "srt",
           dry_run: Boolean(subDryRun?.checked),
         },
       });
@@ -2125,6 +2520,49 @@ export function initSubtransAndAuditsPanel({ selectTabById, compareCtrl, onJobLa
     lastRefreshMs = Date.now();
     loadSubtransOverview().then(() => showToast("Đã cập nhật thống kê Subtrans.", "info", 2600));
   });
+  let cleanTempConfirmTimer = 0;
+  btnCleanTemp?.addEventListener("click", async () => {
+    if (!(btnCleanTemp instanceof HTMLButtonElement)) return;
+    if (systemBusy || localSubLaunchInFlight) {
+      showToast(systemBusyReason || "Hệ thống đang có tiến trình chạy.", "warn");
+      return;
+    }
+    if (btnCleanTemp.dataset.confirming !== "true") {
+      btnCleanTemp.dataset.confirming = "true";
+      btnCleanTemp.className = "btn btn-danger";
+      btnCleanTemp.textContent = "Xác nhận dọn tạm?";
+      if (cleanTempConfirmTimer) window.clearTimeout(cleanTempConfirmTimer);
+      cleanTempConfirmTimer = window.setTimeout(() => {
+        delete btnCleanTemp.dataset.confirming;
+        btnCleanTemp.className = "btn btn-secondary";
+        btnCleanTemp.textContent = "🧹 Dọn tệp tạm & Gom Audit";
+      }, 4000);
+      return;
+    }
+    if (cleanTempConfirmTimer) window.clearTimeout(cleanTempConfirmTimer);
+    delete btnCleanTemp.dataset.confirming;
+    btnCleanTemp.className = "btn btn-secondary";
+    btnCleanTemp.textContent = "🧹 Dọn tệp tạm & Gom Audit";
+    localSubLaunchInFlight = true;
+    syncSubtransLaunchButtons();
+    try {
+      const res = await apiFetch("/api/jobs/clean-temp", {
+        method: "POST",
+        body: {
+          output_dir: subOutDir?.value.trim() || null,
+        },
+      });
+      showToast(`Đã khởi chạy dọn tệp tạm & gom Audit (PID=${res.job?.pid || "—"}).`, "success");
+      selectTabById?.("tab-monitor");
+      onJobLaunched?.(res.job);
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      localSubLaunchInFlight = false;
+      syncSubtransLaunchButtons();
+    }
+  });
+
   btnRefreshAudits?.addEventListener("click", () => {
     lastRefreshMs = Date.now();
     loadAudits().then(() => showToast("Đã làm mới Kho Kiểm định.", "info", 2600));

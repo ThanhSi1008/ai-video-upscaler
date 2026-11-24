@@ -39,6 +39,7 @@ from web.fs_browser import (
     VALID_NVENC_MULTIPASS_POLICIES,
     VIDEO_EXTENSIONS,
     SafeLocalFSBrowser,
+    inspect_model_trt_cache,
     is_secret_filename,
     is_unc_path,
     is_upscaled_output_stem,
@@ -157,6 +158,10 @@ class StartUpscaleRequest(BaseModel):
     use_tensorrt: bool = True
     subs_after_upscale: bool = True
     subs_quality: str = "normal"
+    glossary: Optional[str] = None
+    subs_upgrade: bool = False
+    no_embed: bool = False
+    sound_cues: str = "drop"
     async_subs: bool = False
     prefer_whisper: bool = False
     auto_align_en: bool = True
@@ -182,10 +187,18 @@ class StartUpscaleRequest(BaseModel):
     def _validate_sub_offset_type(cls, v: Any) -> Any:
         return _reject_bool_or_float_int(v, "sub_offset_ms")
 
-    @field_validator("output_dir")
+    @field_validator("output_dir", "glossary")
     @classmethod
     def _validate_outdir_no_nul(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_no_nul_str(v, "output_dir")
+        return _validate_no_nul_str(v, "path")
+
+    @field_validator("sound_cues")
+    @classmethod
+    def _validate_sc(cls, v: Optional[str]) -> str:
+        norm = str(v or "drop").strip().lower() or "drop"
+        if norm not in {"drop", "translate"}:
+            raise ValueError("sound_cues phải là 'drop' hoặc 'translate'.")
+        return norm
 
     @field_validator("nvenc_multipass")
     @classmethod
@@ -295,12 +308,21 @@ class StartSubtransRequest(BaseModel):
     no_embed: bool = False
     sub_offset_ms: int = 0
     glossary: Optional[str] = None
+    output_format: str = "srt"
     dry_run: bool = False
 
     @field_validator("input_path", "output_dir", "glossary")
     @classmethod
     def _validate_paths_no_nul(cls, v: Optional[str]) -> Optional[str]:
         return _validate_no_nul_str(v, "path")
+
+    @field_validator("output_format")
+    @classmethod
+    def _validate_sub_fmt(cls, v: Optional[str]) -> str:
+        norm = str(v or "srt").strip().lower() or "srt"
+        if norm not in {"srt", "ass"}:
+            raise ValueError("output_format phải là 'srt' hoặc 'ass'.")
+        return norm
 
     @field_validator("sub_offset_ms", mode="before")
     @classmethod
@@ -311,6 +333,42 @@ class StartSubtransRequest(BaseModel):
 class StartSubsPendingRequest(BaseModel):
     subs_quality: str = "normal"
     dry_run: bool = False
+
+
+class BuildTrtRequest(BaseModel):
+    model_id: str
+    force: bool = False
+    dry_run: bool = False
+
+    @field_validator("model_id")
+    @classmethod
+    def _validate_mid(cls, v: str) -> str:
+        return (_validate_no_nul_str(v, "model_id", reject_unc=False) or "").strip()
+
+
+class CleanTempRequest(BaseModel):
+    output_dir: Optional[str] = None
+    dry_run: bool = False
+
+    @field_validator("output_dir")
+    @classmethod
+    def _validate_clean_out(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_no_nul_str(v, "output_dir")
+
+
+class SaveGlossaryRequest(BaseModel):
+    name: str
+    yaml_content: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_gname(cls, v: str) -> str:
+        return (_validate_no_nul_str(v, "name") or "").strip()
+
+    @field_validator("yaml_content")
+    @classmethod
+    def _validate_gyaml(cls, v: str) -> str:
+        return _validate_no_nul_str(v, "yaml_content", reject_unc=False) or ""
 
 
 class OpenMediaRequest(BaseModel):
@@ -1715,7 +1773,9 @@ def create_app(
     def api_start_upscale(req: StartUpscaleRequest) -> Dict[str, Any]:
         try:
             _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _resolve_dir_from_raw(root, req.glossary, strict_secret=True)
             _validate_output_dir(root, req.output_dir, field="output_dir")
+            _validate_output_dir(root, req.glossary, field="glossary")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -1793,6 +1853,44 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (ValueError, FileNotFoundError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/build-trt")
+    def api_start_build_trt(req: BuildTrtRequest) -> Dict[str, Any]:
+        models_reg, _, _ = fs_browser._load_routing_tables()
+        mid = req.model_id.strip()
+        if not mid or (mid.lower() != "all" and mid not in models_reg):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mô hình '{mid}' không hợp lệ hoặc không có trong models/models.yaml.",
+            )
+        if is_mock and popen_factory is None:
+            return _build_mock_job_response("build_trt", [mid], req.model_dump())
+        try:
+            job = job_manager.start_build_trt_job(req.model_dump())
+            return {"ok": True, "job": job}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/clean-temp")
+    def api_start_clean_temp(req: CleanTempRequest) -> Dict[str, Any]:
+        try:
+            _resolve_dir_from_raw(root, req.output_dir, strict_secret=True)
+            _validate_output_dir(root, req.output_dir, field="output_dir")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if is_mock and popen_factory is None:
+            return _build_mock_job_response("clean_temp", [req.output_dir or "out/"], req.model_dump())
+        try:
+            job = job_manager.start_clean_temp_job(req.model_dump())
+            return {"ok": True, "job": job}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/jobs/pause-graceful")
@@ -2339,15 +2437,11 @@ def create_app(
                 w_exists = bool(w_path and w_path.is_file())
                 w_size_mb = round(w_path.stat().st_size / (1024 * 1024), 2) if w_exists and w_path else 0.0
 
-                trt_engines: List[str] = []
-                if trt_cache_dir.is_dir():
-                    safe_id = str(m_id).replace(" ", "_").replace("/", "_")
-                    prefixes = {safe_id}
-                    if m_id == "animevideov3":
-                        prefixes.add("realesr-animevideov3")
-                    for ef in trt_cache_dir.glob("*.engine"):
-                        if any(ef.name.startswith(f"{pfx}_") for pfx in prefixes):
-                            trt_engines.append(ef.name)
+                trt_engines, stale_trt_engines = inspect_model_trt_cache(
+                    trt_cache_dir,
+                    str(m_id),
+                    expected_weights_sha256=str(info.get("sha256") or ""),
+                )
 
                 med_fps, p5_fps = MODEL_REFERENCE_FPS.get(str(m_id), (10.5, 8.5))
                 arch = info.get("arch") or {}
@@ -2364,6 +2458,7 @@ def create_app(
                     "weights_size_mb": w_size_mb,
                     "trt_cached": len(trt_engines) > 0,
                     "trt_engine_files": trt_engines,
+                    "stale_trt_engines": stale_trt_engines,
                     "sha256_prefix": str(info.get("sha256") or "")[:12],
                     "license": str(info.get("license") or ""),
                     "default": bool(info.get("default", False)),
@@ -2671,10 +2766,14 @@ def create_app(
             }
 
         glossaries_dir = root / "glossaries"
-        glossaries: List[Dict[str, str]] = []
+        glossaries: List[Dict[str, Any]] = []
         if glossaries_dir.is_dir():
             for gf in sorted(glossaries_dir.glob("*.yaml")):
-                glossaries.append({"name": gf.name, "path": str(gf.resolve())})
+                glossaries.append({
+                    "name": gf.name,
+                    "path": str(gf.resolve()),
+                    "read_only": gf.name.lower() == "base.yaml",
+                })
 
         # Pending subtitles queue (check state/, legacy root, then out/)
         pending_items: List[Dict[str, Any]] = []
@@ -2758,6 +2857,208 @@ def create_app(
             "key_slots": slots_summary,
             "all_key_slots": all_slots_summary,
             "configured_count": active_key_count,
+        }
+
+    def _resolve_glossary_entry(raw_name: str) -> tuple[Path, Path, bool, bool]:
+        """Resolve glossary file strictly inside glossaries/, following single-line text pointers."""
+        cleaned = strip_wrapping_quotes(raw_name)
+        if not cleaned or "\x00" in cleaned or is_unc_path(cleaned):
+            raise HTTPException(status_code=400, detail="Tên tệp Glossary không hợp lệ.")
+        gloss_root = (root / "glossaries").resolve()
+        sub_base_glossary = (root / "subtrans" / "glossary.yaml").resolve()
+
+        cand_in = Path(os.path.expanduser(cleaned))
+        if cand_in.is_absolute():
+            entry_raw = cand_in
+        elif "/" in cleaned or "\\" in cleaned:
+            entry_raw = root / cand_in
+        else:
+            entry_raw = gloss_root / cand_in
+
+        if entry_raw.is_symlink() or os.path.islink(str(entry_raw)):
+            raise HTTPException(status_code=403, detail="Từ chối truy cập symlink Glossary.")
+        try:
+            entry_path = entry_raw.resolve()
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"Đường dẫn Glossary không hợp lệ: {exc}") from exc
+
+        if entry_path == sub_base_glossary:
+            if not entry_path.is_file():
+                raise HTTPException(status_code=404, detail="Không tìm thấy từ điển gốc subtrans/glossary.yaml.")
+            return entry_path, entry_path, True, False
+
+        if not entry_path.is_relative_to(gloss_root) or entry_path.parent != gloss_root:
+            raise HTTPException(status_code=403, detail="Chỉ cho phép truy cập các tệp *.yaml nằm trong thư mục glossaries/.")
+        if entry_path.suffix.lower() not in {".yaml", ".yml"} or is_secret_filename(entry_path.name):
+            raise HTTPException(status_code=400, detail="Chỉ hỗ trợ tệp từ điển định dạng .yaml trong glossaries/.")
+        if not entry_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp Glossary: {entry_path.name}")
+
+        # Follow plain-text Git 100644 alias pointers safely within repository bounds.
+        repo_resolved = root.resolve()
+        curr = entry_path
+        seen_ptrs: set[Path] = set()
+        while curr.is_file() and curr not in seen_ptrs:
+            seen_ptrs.add(curr)
+            try:
+                raw_txt = curr.read_text(encoding="utf-8").strip()
+            except Exception:
+                break
+            if "\n" not in raw_txt and raw_txt.endswith((".yaml", ".yml")):
+                nxt_raw = curr.parent / raw_txt
+                if nxt_raw.is_symlink() or os.path.islink(str(nxt_raw)):
+                    raise HTTPException(status_code=403, detail="Từ chối con trỏ trỏ tới symlink.")
+                nxt = nxt_raw.resolve()
+                if nxt.is_relative_to(repo_resolved) and nxt.is_file() and nxt != curr:
+                    curr = nxt
+                    continue
+            break
+
+        is_pointer = curr != entry_path
+        is_read_only = (
+            entry_path.name.lower() == "base.yaml"
+            or curr == sub_base_glossary
+            or not curr.is_relative_to(gloss_root)
+        )
+        return entry_path, curr, is_read_only, is_pointer
+
+    def _validate_glossary_yaml_text(yaml_content: str) -> Dict[str, Any]:
+        stripped = yaml_content.strip()
+        if "\n" not in stripped and stripped.endswith((".yaml", ".yml")):
+            raise ValueError("Nội dung YAML không được là dòng con trỏ đơn lẻ (.yaml).")
+        try:
+            parsed = yaml.safe_load(yaml_content)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Lỗi cú pháp YAML trong Glossary: {exc}") from exc
+        if parsed is None:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            raise ValueError("Cấu trúc gốc của Glossary phải là một bản đồ (mapping) YAML.")
+        if "terms" in parsed and parsed["terms"] is not None:
+            if not isinstance(parsed["terms"], list):
+                raise ValueError("Mục 'terms' phải là danh sách (list).")
+            for idx, t in enumerate(parsed["terms"], start=1):
+                if not isinstance(t, dict) or not str(t.get("ja") or "").strip() or not str(t.get("vi") or "").strip():
+                    raise ValueError(f"Mục terms #{idx} phải có đầy đủ khóa 'ja' và 'vi' khác rỗng.")
+        if "characters" in parsed and parsed["characters"] is not None:
+            if not isinstance(parsed["characters"], list):
+                raise ValueError("Mục 'characters' phải là danh sách (list).")
+            for idx, c in enumerate(parsed["characters"], start=1):
+                if not isinstance(c, dict):
+                    raise ValueError(f"Mục characters #{idx} phải là đối tượng từ điển.")
+        if "style_rules" in parsed and parsed["style_rules"] is not None and not isinstance(parsed["style_rules"], list):
+            raise ValueError("Mục 'style_rules' phải là danh sách chuỗi.")
+        if "address_rules" in parsed and parsed["address_rules"] is not None and not isinstance(parsed["address_rules"], dict):
+            raise ValueError("Mục 'address_rules' phải là bản đồ (mapping).")
+        return {
+            "terms_count": len(parsed.get("terms") or []),
+            "characters_count": len(parsed.get("characters") or []),
+        }
+
+    @app.get("/api/subtrans/glossary")
+    def api_get_glossary(name: str = Query(...)) -> Dict[str, Any]:
+        entry_p, resolved_p, is_ro, is_ptr = _resolve_glossary_entry(name)
+        text = resolved_p.read_text(encoding="utf-8")
+        return {
+            "ok": True,
+            "name": entry_p.name,
+            "resolved_name": resolved_p.name,
+            "path": str(entry_p),
+            "resolved_path": str(resolved_p),
+            "read_only": is_ro,
+            "is_pointer": is_ptr,
+            "yaml_content": text,
+        }
+
+    @app.put("/api/subtrans/glossary")
+    def api_save_glossary(req: SaveGlossaryRequest) -> Dict[str, Any]:
+        entry_p, resolved_p, is_ro, is_ptr = _resolve_glossary_entry(req.name)
+        if is_ro:
+            raise HTTPException(
+                status_code=403,
+                detail="Từ điển gốc (base.yaml / subtrans/glossary.yaml) được khóa chỉ-đọc để bảo vệ quy tắc nền.",
+            )
+        try:
+            stats = _validate_glossary_yaml_text(req.yaml_content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        tmp_g = resolved_p.parent / f".{resolved_p.name}.{os.getpid()}.tmp"
+        norm_text = req.yaml_content.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+        try:
+            tmp_g.write_text(norm_text, encoding="utf-8", newline="\n")
+            os.replace(tmp_g, resolved_p)
+        except Exception:
+            tmp_g.unlink(missing_ok=True)
+            raise
+        return {
+            "ok": True,
+            "name": entry_p.name,
+            "resolved_name": resolved_p.name,
+            "is_pointer": is_ptr,
+            **stats,
+        }
+
+    @app.delete("/api/subtrans/pending")
+    def api_delete_pending_sub(target: str = Query(..., min_length=1)) -> Dict[str, Any]:
+        cleaned_target = strip_wrapping_quotes(target)
+        if not cleaned_target or "\x00" in cleaned_target:
+            raise HTTPException(status_code=400, detail="Mục cần xóa khỏi pending_subs.json không hợp lệ.")
+        stem_t = os.path.splitext(os.path.basename(cleaned_target))[0]
+        cand_keys = {cleaned_target, stem_t, f"{stem_t}_4K"}
+        if stem_t.endswith("_4K"):
+            cand_keys.add(stem_t[:-3])
+
+        pending_file: Optional[Path] = None
+        raw_obj: Any = None
+        for p_cand in (root / "state" / "pending_subs.json", root / "pending_subs.json", root / "out" / "pending_subs.json"):
+            if p_cand.is_file():
+                pending_file = p_cand
+                try:
+                    raw_obj = json.loads(p_cand.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise HTTPException(status_code=500, detail=f"Không thể đọc pending_subs.json: {exc}") from exc
+                break
+
+        if pending_file is None:
+            raise HTTPException(status_code=404, detail="Không có tệp pending_subs.json nào đang tồn tại.")
+
+        is_wrapped_dict = isinstance(raw_obj, dict) and isinstance(raw_obj.get("items"), list)
+        items_list = list(raw_obj["items"] if is_wrapped_dict else (raw_obj if isinstance(raw_obj, list) else []))
+
+        def _matches_pending(it: Any) -> bool:
+            if not isinstance(it, dict):
+                return False
+            for field_k in ("base_name", "episode", "video_path", "ja_path"):
+                v_str = str(it.get(field_k) or "").strip()
+                if not v_str:
+                    continue
+                if v_str in cand_keys or os.path.basename(v_str) in cand_keys:
+                    return True
+                v_stem = os.path.splitext(os.path.basename(v_str))[0]
+                if v_stem in cand_keys:
+                    return True
+            return False
+
+        remaining = [it for it in items_list if not _matches_pending(it)]
+        removed_count = len(items_list) - len(remaining)
+        if removed_count == 0:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy mục '{cleaned_target}' trong pending_subs.json.")
+
+        out_obj: Any = {**raw_obj, "items": remaining} if is_wrapped_dict else remaining
+        tmp_pf = pending_file.parent / f".{pending_file.name}.{os.getpid()}.tmp"
+        try:
+            tmp_pf.write_text(json.dumps(out_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+            os.replace(tmp_pf, pending_file)
+        except Exception:
+            tmp_pf.unlink(missing_ok=True)
+            raise
+
+        return {
+            "ok": True,
+            "removed": removed_count,
+            "remaining_count": len(remaining),
+            "pending_subs": [x for x in remaining if isinstance(x, dict)],
         }
 
     audits_cache_lock = threading.Lock()

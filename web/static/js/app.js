@@ -146,6 +146,10 @@ function bootstrapStudio() {
   });
 
   modelsCtrl = initModelsPanel({
+    selectTabById: tabsCtrl.selectTabById,
+    onJobLaunched: () => {
+      fetchSnapshotFallback();
+    },
     onShowsUpdated: () => {
       queueCtrl?.refreshSchedule();
     },
@@ -342,17 +346,23 @@ function bootstrapStudio() {
       if (wasDryRun) {
         showToast("🧪 Hoàn tất kiểm thử Dry-Run (không xuất media hay trừ hạn mức API).", "info", 5200);
       } else {
+        const finType = String(live.job_type || lastJobRef?.job_type || "");
         const toastMsg =
-          lastEffectiveStage === "subtrans" ||
-          live.job_type === "subtrans" ||
-          live.job_type === "subs_pending"
-            ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
-            : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
+          finType === "build_trt"
+            ? "⚡ Hoàn tất biên dịch & xác thực TensorRT 10 FP16 Engine!"
+            : finType === "clean_temp"
+              ? "🧹 Hoàn tất dọn tệp tạm & gom biên bản kiểm định!"
+              : lastEffectiveStage === "subtrans" ||
+                  finType === "subtrans" ||
+                  finType === "subs_pending"
+                ? "✅ Hoàn tất dịch & xử lý phụ đề thành công!"
+                : "🎉 Hoàn tất xuất xưởng 4K & Mux Audit thành công!";
         showToast(toastMsg, "success", 6500);
       }
       compareCtrl?.refreshCandidates();
       subtransCtrl?.refreshAll({ force: true });
       modelsCtrl?.refresh();
+      queueCtrl?.refreshSchedule();
     }
     lastEffectiveStage = stage;
     if (stage === "idle") {
@@ -404,6 +414,9 @@ function bootstrapStudio() {
     const isSubtransWebJob =
       Boolean(activeWebJob) &&
       (activeWebJob.job_type === "subtrans" || activeWebJob.job_type === "subs_pending");
+    const isAuxMaintJob =
+      Boolean(activeWebJob) &&
+      (activeWebJob.job_type === "build_trt" || activeWebJob.job_type === "clean_temp");
 
     let busyReason = "";
     if (activeSource === "web") {
@@ -421,7 +434,11 @@ function bootstrapStudio() {
     subtransCtrl?.setSystemBusy?.(isRunning, busyReason);
 
     if (episodeTitle) {
-      if (isSubtransWebJob && isRunning) {
+      if (activeWebJob?.job_type === "build_trt" && isRunning) {
+        episodeTitle.textContent = `⚡ Đang biên dịch TensorRT 10 FP16 Engine: ${activeWebJob.queue_items?.[0] || live.model_id || ""}`;
+      } else if (activeWebJob?.job_type === "clean_temp" && isRunning) {
+        episodeTitle.textContent = `🧹 Đang dọn tệp tạm & gom biên bản kiểm định: ${activeWebJob.queue_items?.[0] || "out/"}`;
+      } else if (isSubtransWebJob && isRunning) {
         const subTarget =
           activeWebJob.job_type === "subs_pending"
             ? "pending_subs.json"
@@ -442,8 +459,8 @@ function bootstrapStudio() {
     }
 
     if (btnPauseGraceful instanceof HTMLButtonElement) {
-      const subtransOnlyNoGpu = isSubtransWebJob && !pipeline.gpu_lock?.locked;
-      btnPauseGraceful.disabled = !isRunning || pausePending || subtransOnlyNoGpu;
+      const nonChunkPauseJob = (isSubtransWebJob && !pipeline.gpu_lock?.locked) || isAuxMaintJob;
+      btnPauseGraceful.disabled = !isRunning || pausePending || nonChunkPauseJob;
     }
     if (btnClearPause instanceof HTMLButtonElement) {
       btnClearPause.hidden = !pausePending;

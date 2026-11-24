@@ -17,9 +17,11 @@ import uuid
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
 from web.fs_browser import (
+    AUTO_PARETO_MODEL_ID,
     VALID_GRAIN_RESTORE_POLICIES,
     VALID_NVENC_MULTIPASS_POLICIES,
     SafeLocalFSBrowser,
+    inspect_model_trt_cache,
     is_secret_filename,
     is_unc_path,
     strip_wrapping_quotes,
@@ -173,6 +175,13 @@ def _validate_subs_quality(val: Optional[str]) -> str:
         raise ValueError(
             f"Giá trị subs_quality '{val}' không hợp lệ (chỉ chấp nhận normal, fast hoặc high)."
         )
+    return norm
+
+
+def _validate_sound_cues(val: Optional[str]) -> str:
+    norm = (val if val is not None else "drop").strip().lower() or "drop"
+    if norm not in {"drop", "translate"}:
+        raise ValueError("sound_cues chỉ chấp nhận 'drop' hoặc 'translate'.")
     return norm
 
 
@@ -572,6 +581,28 @@ class JobManager:
                 deadline_dt += timedelta(days=1)
 
         routing_tables = self.fs_browser._load_routing_tables()
+        models_reg = routing_tables[0] if isinstance(routing_tables, tuple) and routing_tables else {}
+        trt_cache_dir = self.workspace_root / ".cache" / "trt_engines"
+        trt_ready_memo: Dict[str, bool] = {}
+
+        def _is_model_trt_ready(mid_check: str) -> bool:
+            if not use_tensorrt:
+                return True
+            if mid_check in trt_ready_memo:
+                return trt_ready_memo[mid_check]
+            if mid_check == AUTO_PARETO_MODEL_ID:
+                sub_ids = [
+                    k for k in ("animejanai-hd-v3-compact", "animejanai-hd-v3-ultracompact") if k in models_reg
+                ]
+                ready = bool(sub_ids) and all(_is_model_trt_ready(sid) for sid in sub_ids)
+            else:
+                m_info = models_reg.get(mid_check) if isinstance(models_reg, dict) else None
+                w_sha = str(m_info.get("sha256") or "") if isinstance(m_info, dict) else None
+                valid_engs, _ = inspect_model_trt_cache(trt_cache_dir, mid_check, expected_weights_sha256=w_sha)
+                ready = len(valid_engs) > 0
+            trt_ready_memo[mid_check] = ready
+            return ready
+
         out_base, explicit_out_file = _resolve_output_target(self.workspace_root, output_dir)
         sub_overhead = 300.0 if subs_after_upscale else 0.0
         if zero_disk and use_tensorrt:
@@ -723,6 +754,7 @@ class JobManager:
                 "can_run": can_run,
                 "is_partial": is_partial,
                 "already_done": already_done,
+                "trt_ready": _is_model_trt_ready(m_id),
                 "resumed_done_chunks": resumed_done_c,
                 "resumed_total_chunks": resumed_tot_c,
                 "decision": decision,
@@ -907,9 +939,11 @@ class JobManager:
         for item in raw_inputs:
             _validate_no_nul(str(item), "inputs")
         out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"))
+        glossary_val = _validate_output_dir(self.workspace_root, payload.get("glossary"), field="glossary") or ""
         batch_size = _validate_batch_size(payload.get("batch_size"))
 
         subs_quality = _validate_subs_quality(payload.get("subs_quality"))
+        sound_cues = _validate_sound_cues(payload.get("sound_cues"))
         deadline_norm = _validate_deadline(payload.get("deadline"))
         nvenc_mp_norm = _validate_nvenc_multipass(payload.get("nvenc_multipass"))
         grain_norm = _validate_grain_restore(payload.get("grain_restore"))
@@ -953,6 +987,14 @@ class JobManager:
             cmd.append("--no-subs")
         else:
             cmd.extend(["--subs-quality", subs_quality])
+            if glossary_val:
+                cmd.extend(["--glossary", glossary_val])
+            if payload.get("subs_upgrade"):
+                cmd.append("--subs-upgrade")
+            if payload.get("no_embed"):
+                cmd.append("--no-embed")
+            if sound_cues == "translate":
+                cmd.extend(["--sound-cues", "translate"])
             if payload.get("async_subs"):
                 cmd.append("--async-subs")
             if payload.get("prefer_whisper"):
@@ -1161,6 +1203,52 @@ class JobManager:
         if dry_run:
             cmd.append("--dry-run")
         return self._spawn_command("subs_pending", cmd, ["pending_subs.json"], payload, requires_gpu=False)
+
+    def start_build_trt_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Compile and SHA-256-verify TensorRT 10 FP16 engine via src/build_trt_engine.py subprocess."""
+        raw_model = str(payload.get("model_id") or "").strip()
+        _validate_no_nul(raw_model, "model_id")
+        if not raw_model:
+            raise ValueError("Vui lòng chọn ID mô hình cần biên dịch TensorRT.")
+        models_reg, _, _ = self.fs_browser._load_routing_tables()
+        if raw_model.lower() != "all" and raw_model not in models_reg:
+            raise ValueError(f"Mô hình '{raw_model}' không có trong danh mục models/models.yaml.")
+        force = bool(payload.get("force", False))
+        dry_run = bool(payload.get("dry_run", False))
+        self._ensure_ready_to_launch(requires_gpu=not dry_run)
+        cmd = [
+            self.python_executable,
+            str(self.workspace_root / "src" / "build_trt_engine.py"),
+            "--model",
+            raw_model,
+        ]
+        if force:
+            cmd.append("--force")
+        if dry_run:
+            cmd.append("--dry-run")
+        return self._spawn_command("build_trt", cmd, [raw_model], payload, requires_gpu=not dry_run)
+
+    def start_clean_temp_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Run global temporary artifact cleanup and audit folder organization via upscale.py --clean-temp."""
+        out_dir_val = _validate_output_dir(self.workspace_root, payload.get("output_dir"), field="output_dir")
+        dry_run = bool(payload.get("dry_run", False))
+        self._ensure_ready_to_launch(requires_gpu=False)
+        lock_state = check_active_gpu_lock(self.workspace_root)
+        if lock_state.get("locked") and not dry_run:
+            raise RuntimeError(
+                f"GPU đang bận xử lý (PID={lock_state.get('pid')}); từ chối dọn tệp tạm để bảo toàn phiên đang chạy."
+            )
+        cmd = [
+            self.python_executable,
+            str(self.workspace_root / "upscale.py"),
+            "--clean-temp",
+        ]
+        if out_dir_val:
+            cmd.extend(["-o", out_dir_val])
+        if dry_run:
+            cmd.append("--dry-run")
+        target_label = out_dir_val or "out/"
+        return self._spawn_command("clean_temp", cmd, [target_label], payload, requires_gpu=False)
 
     @staticmethod
     def _job_abort_token(job: Optional[Dict[str, Any]], proc: Optional[Any] = None) -> Optional[str]:

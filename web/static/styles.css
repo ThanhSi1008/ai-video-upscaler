@@ -1682,6 +1682,48 @@ textarea.code-textarea {
   gap: 0.5rem;
 }
 
+.pending-subs-box {
+  margin-block-start: 0.85rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-elevated);
+  display: grid;
+  gap: 0.5rem;
+}
+
+.pending-subs-box[hidden] {
+  display: none;
+}
+
+.pending-subs-head {
+  margin-block-end: 0;
+}
+
+.sub-heading {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.trt-cell-stack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: safe center;
+  gap: 0.35rem;
+}
+
+.glossary-dialog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: safe center;
+  gap: 0.55rem;
+}
+
+.glossary-dialog-toolbar select {
+  flex: 1 1 260px;
+}
+
 /* ==========================================================================
    NATIVE MODAL <dialog> (modern-web-guidance: dialog & light-dismiss-a-dialog)
    ========================================================================== */
@@ -1716,7 +1758,8 @@ dialog::backdrop {
   overscroll-behavior: contain;
 }
 
-#fs-picker-dialog[open] {
+#fs-picker-dialog[open],
+#glossary-editor-dialog[open] {
   grid-template-rows: auto minmax(9rem, 1fr) auto;
 }
 

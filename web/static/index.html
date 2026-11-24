@@ -364,6 +364,21 @@
                     </select>
                   </div>
 
+                  <div class="field-group">
+                    <label for="opt-glossary">Từ điển Thuật ngữ đi kèm (--glossary)</label>
+                    <select id="opt-glossary">
+                      <option value="">Tự động nhận diện theo tên phim</option>
+                    </select>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="opt-sound-cues">Xử lý Mô tả Âm thanh (--sound-cues)</label>
+                    <select id="opt-sound-cues">
+                      <option value="drop" selected>drop — Lược bỏ mô tả âm thanh (Khuyên dùng)</option>
+                      <option value="translate">translate — Dịch cả mô tả âm thanh</option>
+                    </select>
+                  </div>
+
                   <fieldset class="checkbox-fieldset">
                     <legend>Tùy chọn Pipeline &amp; Phụ đề</legend>
                     <label class="inline-check"><input type="checkbox" id="opt-zero-disk" checked> <span>Turbo Zero-Disk Pipe (0 PNG đĩa)</span></label>
@@ -372,6 +387,8 @@
                     <label class="inline-check"><input type="checkbox" id="opt-subs-after"> <span>Tự dịch &amp; nhúng phụ đề VI sau khi Upscale</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-async-subs"> <span>Dịch gối đầu song song tập kế (--async-subs)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-prefer-whisper"> <span>Ưu tiên Whisper 5.1 FC STT (--prefer-whisper)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-subs-upgrade"> <span>Nâng cấp bản dịch cũ lên model cao hơn (--subs-upgrade)</span></label>
+                    <label class="inline-check"><input type="checkbox" id="opt-no-embed"> <span>Chỉ xuất phụ đề rời, không nhúng vào MKV (--no-embed)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-force"> <span>Ghi đè nếu đã có bản _4K (--force)</span></label>
                     <label class="inline-check"><input type="checkbox" id="opt-dry-run"> <span>Chế độ mô phỏng lập lịch (--dry-run)</span></label>
                   </fieldset>
@@ -645,8 +662,19 @@
 
                   <div class="field-group">
                     <label for="sub-glossary-select">Từ điển Thuật ngữ (Glossary)</label>
-                    <select id="sub-glossary-select">
-                      <option value="">Tự động nhận diện theo tên phim</option>
+                    <div class="input-with-btn">
+                      <select id="sub-glossary-select">
+                        <option value="">Tự động nhận diện theo tên phim</option>
+                      </select>
+                      <button type="button" id="btn-open-glossary-editor" class="btn btn-secondary" title="Xem hoặc chỉnh sửa tệp từ điển YAML">📖 Xem / Sửa</button>
+                    </div>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="sub-format-select">Định dạng Phụ đề Xuất (--format)</label>
+                    <select id="sub-format-select">
+                      <option value="srt" selected>SRT (.srt — Chuẩn nhúng MKV)</option>
+                      <option value="ass">ASS (.ass — Phụ đề rời .srt/.ass)</option>
                     </select>
                   </div>
 
@@ -682,6 +710,13 @@
                     </button>
                   </div>
                 </form>
+
+                <div id="pending-subs-box" class="pending-subs-box" hidden>
+                  <div class="section-header-inline pending-subs-head">
+                    <h3 class="sub-heading">Hàng đợi Phụ đề Tồn đọng (pending_subs.json)</h3>
+                  </div>
+                  <div id="pending-subs-list" class="key-slots-list"></div>
+                </div>
               </section>
 
               <section class="card-panel" aria-labelledby="subtrans-quota-heading">
@@ -742,7 +777,10 @@
             <section class="card-panel">
               <div class="section-header-inline">
                 <h2 class="section-heading">Kho Kiểm định Thành phẩm 4K (Mux Integrity &amp; Output Sanity Audit)</h2>
-                <button type="button" id="btn-refresh-audits" class="btn btn-ghost">↻ Làm mới Kho Kiểm định</button>
+                <div class="button-cluster">
+                  <button type="button" id="btn-clean-temp" class="btn btn-secondary" title="Dọn dẹp các tệp trung gian dư thừa và gom biên bản kiểm định vào out/audit/">🧹 Dọn tệp tạm &amp; Gom Audit</button>
+                  <button type="button" id="btn-refresh-audits" class="btn btn-ghost">↻ Làm mới Kho Kiểm định</button>
+                </div>
               </div>
 
               <div tabindex="0" role="region" aria-labelledby="audits-table-caption" class="table-wrapper">
@@ -862,6 +900,36 @@
     <div class="dialog-body">
       <div id="audit-doc-switcher" class="button-cluster"></div>
       <pre id="audit-detail-pre" class="log-console" tabindex="0"><code id="audit-detail-code"></code></pre>
+    </div>
+  </dialog>
+
+  <!-- ===========================================================
+       MODAL DIALOG 3: GLOSSARY YAML VIEWER & VALIDATED EDITOR (closedby="any")
+       =========================================================== -->
+  <dialog id="glossary-editor-dialog" class="studio-dialog" closedby="any" aria-labelledby="glossary-dialog-title">
+    <div class="dialog-header">
+      <h2 id="glossary-dialog-title">Trình soạn thảo Từ điển Thuật ngữ (Glossary YAML)</h2>
+      <form method="dialog">
+        <button type="submit" value="close" class="btn btn-ghost" aria-label="Đóng hộp thoại từ điển">✕ Đóng</button>
+      </form>
+    </div>
+    <div class="dialog-body">
+      <div class="glossary-dialog-toolbar">
+        <label for="glossary-dialog-select" class="visually-hidden">Chọn tệp từ điển trong glossaries/</label>
+        <select id="glossary-dialog-select"></select>
+        <span id="glossary-readonly-badge" class="badge badge-warn" hidden>🔒 Từ điển gốc (Chỉ đọc)</span>
+        <span id="glossary-pointer-note" class="muted-meta" hidden></span>
+      </div>
+      <label for="glossary-yaml-editor" class="visually-hidden">Nội dung YAML của từ điển thuật ngữ</label>
+      <p id="glossary-yaml-error" class="field-error" role="alert" hidden></p>
+      <textarea id="glossary-yaml-editor" class="code-textarea" rows="15" spellcheck="false" aria-describedby="glossary-yaml-error"></textarea>
+    </div>
+    <div class="dialog-footer">
+      <span id="glossary-save-hint" class="muted-meta">Kiểm tra cấu trúc YAML Schema v2 trước khi lưu nguyên tử (LF).</span>
+      <div class="button-cluster">
+        <button type="button" id="btn-reload-glossary" class="btn btn-ghost">↺ Nạp lại</button>
+        <button type="button" id="btn-save-glossary" class="btn btn-primary">💾 Lưu Glossary</button>
+      </div>
     </div>
   </dialog>
 

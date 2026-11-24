@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -133,6 +135,92 @@ def is_upscaled_output_stem(stem: str) -> bool:
 
 
 _FORBIDDEN_WIN32_CHARS = frozenset('<>:"|?*')
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRT_SIDECAR_CACHE: Dict[tuple[str, int, int, int, str], bool] = {}
+
+
+def _hash_file_sha256_hex(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def verify_trt_engine_sidecar_stdlib(
+    engine_file: Path,
+    expected_weights_sha256: Optional[str] = None,
+) -> bool:
+    """Verify .engine file has a valid non-empty .sha256 sidecar matching engine & weights digests."""
+    try:
+        if not engine_file.is_file():
+            return False
+        ef_st = engine_file.stat()
+        if ef_st.st_size <= 0:
+            return False
+        sidecar = Path(f"{engine_file}.sha256")
+        if not sidecar.is_file():
+            return False
+        sc_st = sidecar.stat()
+        if sc_st.st_size <= 0:
+            return False
+        exp_w = str(expected_weights_sha256 or "").strip().lower()
+        cache_key = (str(engine_file.resolve()), ef_st.st_mtime_ns, ef_st.st_size, sc_st.st_mtime_ns, exp_w)
+        cached = _TRT_SIDECAR_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        raw = sidecar.read_text(encoding="utf-8").strip()
+        if not raw:
+            return False
+        if raw.startswith("{"):
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                return False
+            rec_eng = str(parsed.get("engine_sha256") or "").strip().lower()
+            rec_w = str(parsed.get("weights_sha256") or "").strip().lower()
+        else:
+            rec_eng = raw.split()[0].strip().lower()
+            rec_w = ""
+        if not _HEX64_RE.fullmatch(rec_eng):
+            return False
+        if exp_w and rec_w and rec_w != exp_w:
+            ok = False
+        else:
+            ok = _hash_file_sha256_hex(engine_file) == rec_eng
+        if len(_TRT_SIDECAR_CACHE) >= 512:
+            _TRT_SIDECAR_CACHE.clear()
+        _TRT_SIDECAR_CACHE[cache_key] = ok
+        return ok
+    except Exception:
+        return False
+
+
+def inspect_model_trt_cache(
+    trt_cache_dir: Path,
+    model_id: str,
+    expected_weights_sha256: Optional[str] = None,
+) -> tuple[List[str], List[str]]:
+    """Return (verified_engine_names, stale_unverified_engine_names) for model_id in trt_cache_dir."""
+    valid_engines: List[str] = []
+    stale_engines: List[str] = []
+    if not trt_cache_dir.is_dir():
+        return valid_engines, stale_engines
+    safe_id = str(model_id).replace(" ", "_").replace("/", "_")
+    prefixes = {safe_id}
+    if model_id == "animevideov3":
+        prefixes.add("realesr-animevideov3")
+    for ef in sorted(trt_cache_dir.glob("*.engine"), key=lambda p: p.name.lower()):
+        if not any(ef.name.startswith(f"{pfx}_") for pfx in prefixes):
+            continue
+        if verify_trt_engine_sidecar_stdlib(ef, expected_weights_sha256=expected_weights_sha256):
+            valid_engines.append(ef.name)
+        else:
+            stale_engines.append(ef.name)
+    return valid_engines, stale_engines
 
 
 def validate_win32_path_hygiene(p: Path, field: str = "path") -> None:
