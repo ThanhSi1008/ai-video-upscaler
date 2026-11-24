@@ -5864,7 +5864,7 @@ def test_abort_job_discards_aborting_token_on_unexpected_error(
 def test_qa_remediation_intra_chunk_progress_and_log_retention(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify B1 1Hz intra-chunk progress updates without mutating completed_chunks and Hygiene #3 log pruning."""
+    """Verify 1Hz intra-chunk progress updates without mutating completed_chunks and run-log pruning."""
     log_dir = tmp_path / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(logger_mod, "LOGS_DIR", str(log_dir))
@@ -5925,7 +5925,7 @@ def test_qa_remediation_intra_chunk_progress_and_log_retention(
 
 
 def test_qa_remediation_checkpoint_metadata_schedule_deduction_and_safe_delete(tmp_path: Path):
-    """Verify B2/B8a full checkpoint metadata & ETA deduction plus G1 safe /api/checkpoints/delete guards."""
+    """Verify full checkpoint metadata, completed-chunk ETA deduction, and safe /api/checkpoints/delete guards."""
     root = _seed_workspace(tmp_path / "qa_cp_ws")
     ep_path = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
     cp_dir = root / "out" / ".temp_[BD 1080p] Fate_Ep22"
@@ -6036,7 +6036,7 @@ def test_qa_remediation_checkpoint_metadata_schedule_deduction_and_safe_delete(t
 
 
 def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_flags(tmp_path: Path):
-    """Verify B4 (.srt / _4K rejection on upscale), B5 (subtrans dry_run), B6 (dominant folder_routing), B8d, U5, and UI tokens."""
+    """Verify .srt / _4K rejection on upscale, subtrans dry_run status, dominant folder_routing, blank compare, and UI tokens."""
     root = _seed_workspace(tmp_path / "qa_misc_ws")
     season_dir = root / "anime_season"
     srt_file = season_dir / "Fate_Ep22.ja.srt"
@@ -6053,13 +6053,13 @@ def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_fl
 
     app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
     with TestClient(app) as client:
-        # B4: Reject .srt and *_4K.mkv in upscale / preview / schedule
+        # Reject .srt and *_4K.mkv in upscale / preview / schedule
         for bad_input in (str(srt_file), str(already_4k)):
             assert client.post("/api/queue/preview-schedule", json={"inputs": [bad_input]}).status_code == 400
             assert client.post("/api/jobs/start", json={"inputs": [bad_input], "dry_run": True}).status_code == 400
             assert client.post("/api/jobs/preview", json={"video_path": bad_input}).status_code == 400
 
-        # B4 + B5: Allow both .srt and *_4K.mkv in subtrans, and reflect dry_run in live status
+        # Allow both .srt and *_4K.mkv in subtrans, and reflect dry_run in live status
         sub_ok = client.post("/api/jobs/subtrans", json={"input_path": str(srt_file), "dry_run": True})
         assert sub_ok.status_code == 200
         st_sub = client.get("/api/status").json()
@@ -6067,7 +6067,7 @@ def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_fl
         assert "Dry-Run" in st_sub["pipeline"]["live"]["stage_detail"]
         assert client.post("/api/jobs/abort").status_code == 200
 
-        # U5: --no-subs omits redundant subtitle flags
+        # --no-subs omits redundant subtitle flags
         spawned_cmds.clear()
         start_nosubs = client.post(
             "/api/jobs/start",
@@ -6080,12 +6080,12 @@ def test_qa_remediation_input_filtering_folder_routing_dryrun_compare_and_cli_fl
         assert "--auto-align-en" not in cmd_used
         assert client.post("/api/jobs/abort").status_code == 200
 
-        # B6: Folder routing reflects actual episodes inside folder
+        # Folder routing reflects actual episodes inside folder
         browse_res = client.get("/api/fs/browse", params={"path": str(season_dir)}).json()
         assert browse_res["folder_routing"] is not None
         assert browse_res["folder_routing"]["model_id"] != ""
 
-        # B8d: Blank compare-frames paths return HTTP 400 (not 403)
+        # Blank compare-frames paths return HTTP 400 (not 403)
         cmp_blank = client.post(
             "/api/preview/compare-frames",
             json={"source_path": "", "upscaled_path": "   ", "timestamp_sec": 1.0},
@@ -6242,3 +6242,142 @@ def test_reviewer_fixes_symlink_checkpoint_guard_unicode_quotes_preview_start_an
         r_del_ok = client.post("/api/checkpoints/delete", json={"path": str(cp_dir)})
         assert r_del_ok.status_code == 200
         assert not cp_dir.exists()
+
+
+def test_deep_external_symlink_ancestor_guard_strict_preview_start_and_stale_live_reset(tmp_path: Path):
+    """Verify deep symlink ancestors outside workspace_root, strict MM:SS/HH:MM:SS validation, and dead-PID live reset."""
+    from web.job_manager import parse_preview_start_value
+
+    root = _seed_workspace(tmp_path / "deep_guard_ws")
+    ep_file = root / "anime_season" / "[BD 1080p] Fate_Ep22.mkv"
+
+    # Real custom -o directory outside workspace_root nested 2+ levels below a directory target
+    ext_real_root = tmp_path / "external_real_drive"
+    ext_real_out = ext_real_root / "batch_01" / "season_02"
+    ext_cp = ext_real_out / ".temp_[BD 1080p] Fate_Ep22"
+    (ext_cp / "upscaled_segs").mkdir(parents=True, exist_ok=True)
+    (ext_cp / "upscaled_segs" / "up_0000.mp4").write_bytes(b"1" * 16384)
+    (ext_cp / "manifest.json").write_text(
+        json.dumps({"source_file": str(ep_file), "model_id": "animevideov3", "total_chunks": 2}),
+        encoding="utf-8",
+    )
+
+    spawned_cmds: List[List[str]] = []
+
+    def capture_factory(cmd: List[str], **_kw: Any) -> FakePopenProcess:
+        spawned_cmds.append(list(cmd))
+        return FakePopenProcess(cmd, pid=92345, running=False, return_code=0)
+
+    app = create_app(workspace_root=root, gpu_query_fn=_idle_gpu_metrics, popen_factory=capture_factory)
+    with TestClient(app) as client:
+        # 1. Stale dead-PID live_status.json in 'probing' with 0 checkpoints resets live.stage and stage_detail
+        (root / "logs" / "live_status.json").write_text(
+            json.dumps(
+                {
+                    "video_name": "StaleDeadRun",
+                    "pid": 99999992,
+                    "stage": "probing",
+                    "stage_detail": "Đang kiểm tra video nguồn & môi trường...",
+                    "active_chunk": 0,
+                    "active_chunk_fraction": 0.45,
+                    "eta_seconds": 120.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        st_idle = client.get("/api/status").json()["pipeline"]
+        assert st_idle["effective_stage"] == "idle"
+        assert st_idle["live"]["stage"] == "idle"
+        assert st_idle["live"]["last_stage"] == "probing"
+        assert st_idle["live"]["active_chunk"] is None
+        assert st_idle["live"]["active_chunk_fraction"] == 0.0
+        assert st_idle["live"]["eta_seconds"] is None
+        assert "Đang kiểm tra" not in st_idle["live"]["stage_detail"]
+        (root / "logs" / "live_status.json").unlink(missing_ok=True)
+
+        # Register ext_real_out in job history so ext_cp is a known external -o checkpoint
+        r_dry = client.post(
+            "/api/jobs/start",
+            json={"inputs": [str(ep_file)], "output_dir": str(ext_real_out), "dry_run": True},
+        )
+        assert r_dry.status_code == 200
+
+        # 2. Deep symlink/junction ancestor (3 levels above .temp_*) outside workspace_root MUST be rejected
+        ext_link_container = tmp_path / "external_attack_mount"
+        ext_link_container.mkdir(parents=True, exist_ok=True)
+        deep_link_root = ext_link_container / "linked_drive"
+        created_deep_link = False
+        try:
+            os.symlink(str(ext_real_root), str(deep_link_root), target_is_directory=True)
+            created_deep_link = True
+        except OSError:
+            if sys.platform == "win32":
+                import subprocess as _sp
+
+                r_mk = _sp.run(
+                    ["cmd", "/c", "mklink", "/J", str(deep_link_root), str(ext_real_root)],
+                    capture_output=True,
+                )
+                created_deep_link = r_mk.returncode == 0
+        assert created_deep_link, "Failed to create symlink or junction for deep ancestor checkpoint test"
+        try:
+            deep_attack_cp = deep_link_root / "batch_01" / "season_02" / ext_cp.name
+            res_deep = client.post("/api/checkpoints/delete", json={"path": str(deep_attack_cp)})
+            assert res_deep.status_code == 400
+            assert ext_cp.is_dir(), "Real external checkpoint must NOT be deleted via deep junction ancestor!"
+
+            dotdot_attack = f"{deep_link_root}{os.sep}..{os.sep}{ext_real_root.name}{os.sep}batch_01{os.sep}season_02{os.sep}{ext_cp.name}"
+            res_dotdot = client.post("/api/checkpoints/delete", json={"path": dotdot_attack})
+            assert res_dotdot.status_code == 400
+            assert ext_cp.is_dir()
+        finally:
+            try:
+                os.rmdir(deep_link_root) if deep_link_root.is_dir() and not deep_link_root.is_symlink() else deep_link_root.unlink()
+            except OSError:
+                pass
+
+        # Quote-wrapped UNC path must be rejected before filesystem traversal
+        res_unc_quoted = client.post(
+            "/api/checkpoints/delete",
+            json={"path": '"\\\\192.0.2.1\\share\\.temp_attack"'},
+        )
+        assert res_unc_quoted.status_code in (400, 422)
+
+        # Legitimate direct external -o checkpoint deletes cleanly
+        res_ext_ok = client.post("/api/checkpoints/delete", json={"path": str(ext_cp)})
+        assert res_ext_ok.status_code == 200
+        assert not ext_cp.exists()
+
+        # 3. Strict preview_start_sec validation rejects SS >= 60, MM >= 60 in HH:MM:SS, and non-integer HH/MM
+        for bad_ts in (
+            "14:60",
+            "14:75.5",
+            "01:60:00",
+            "01:02:60",
+            "1.5:20",
+            "1.5:02:03",
+            "01:2.5:03",
+            "-1:20",
+            "14: 20",
+            "25:00:00",
+            True,
+        ):
+            r_bad = client.post(
+                "/api/jobs/preview",
+                json={"video_path": str(ep_file), "seconds": 10, "preview_start_sec": bad_ts},
+            )
+            assert r_bad.status_code == 422, f"Expected 422 for invalid preview_start_sec={bad_ts!r}, got {r_bad.status_code}"
+            with pytest.raises(ValueError):
+                parse_preview_start_value(bad_ts)
+
+        # Valid 2-part movie minute >= 60 ('85:30' == 5130.0) and sub-second '14:20.375' == 860.375 succeed
+        for valid_ts, expected_sec in (("85:30", 5130.0), ("14:20.375", 860.375), ("01:02:03.25", 3723.25)):
+            spawned_cmds.clear()
+            r_ok = client.post(
+                "/api/jobs/preview",
+                json={"video_path": str(ep_file), "seconds": 10, "preview_start_sec": valid_ts},
+            )
+            assert r_ok.status_code == 200
+            cmd_p = spawned_cmds[-1]
+            assert "--preview-start" in cmd_p
+            assert float(cmd_p[cmd_p.index("--preview-start") + 1]) == pytest.approx(expected_sec)

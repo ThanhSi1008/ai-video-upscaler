@@ -96,11 +96,13 @@ def is_secret_filename(name: str) -> bool:
 
 
 def is_unc_path(raw: Optional[str]) -> bool:
-    """Return True if raw string targets a Windows/POSIX UNC network share (\\\\... or //...)." """
+    """Return True if raw string targets a Windows/POSIX UNC network share (\\\\... or //...)."""
     if not raw:
         return False
     s = str(raw).strip()
-    return s.startswith("\\\\") or s.startswith("//")
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s.startswith("\\\\") or s.startswith("//") or s.lower().startswith("\\\\?\\unc\\")
 
 
 def is_upscaled_output_stem(stem: str) -> bool:

@@ -114,7 +114,44 @@ def _has_valid_upscaled_output(out_4k: Path) -> bool:
 
 _VALID_SUBS_QUALITIES = {"normal", "fast", "high"}
 _DEADLINE_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_ASCII_INT_RE = re.compile(r"^[0-9]+$")
+_ASCII_NONNEG_FLOAT_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _VIDEO_FILE_SUFFIXES = {".mkv", ".mp4", ".webm", ".mov", ".avi", ".ts", ".m2ts"}
+
+
+def parse_preview_start_value(raw: Any) -> Optional[float]:
+    """Parse and validate preview_start_sec in seconds or strict MM:SS / HH:MM:SS format."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("preview_start_sec không được là kiểu boolean.")
+    if isinstance(raw, (int, float)):
+        sec = float(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) not in (2, 3):
+                raise ValueError("preview_start_sec phải là số giây hoặc MM:SS / HH:MM:SS.")
+            if not all(_ASCII_INT_RE.fullmatch(p) for p in parts[:-1]) or not _ASCII_NONNEG_FLOAT_RE.fullmatch(parts[-1]):
+                raise ValueError("Định dạng thời gian MM:SS / HH:MM:SS không hợp lệ (HH/MM phải là số nguyên >= 0).")
+            ss = float(parts[-1])
+            if ss >= 60.0:
+                raise ValueError("Số giây trong MM:SS / HH:MM:SS phải nhỏ hơn 60.")
+            if len(parts) == 2:
+                sec = int(parts[0]) * 60.0 + ss
+            else:
+                mm = int(parts[1])
+                if mm >= 60:
+                    raise ValueError("Số phút trong HH:MM:SS phải nhỏ hơn 60.")
+                sec = int(parts[0]) * 3600.0 + mm * 60.0 + ss
+        else:
+            sec = float(text)
+    else:
+        raise ValueError("preview_start_sec phải là số giây hoặc chuỗi MM:SS / HH:MM:SS.")
+    if not math.isfinite(sec) or sec < 0.0 or sec > 86400.0:
+        raise ValueError("preview_start_sec phải nằm trong khoảng 0..86400 giây.")
+    return round(sec, 3)
 
 
 def _validate_no_nul(val: Optional[str], field: str = "path") -> Optional[str]:
@@ -924,13 +961,7 @@ class JobManager:
         grain_norm = _validate_grain_restore(payload.get("grain_restore"))
         self._ensure_ready_to_launch(requires_gpu=True)
 
-        raw_preview_start = payload.get("preview_start_sec")
-        preview_start_f: Optional[float] = None
-        if raw_preview_start is not None and str(raw_preview_start).strip() != "":
-            ps_val = float(raw_preview_start)
-            if not math.isfinite(ps_val) or ps_val < 0.0:
-                raise ValueError("preview_start_sec phải là số giây hữu hạn >= 0.")
-            preview_start_f = round(ps_val, 3)
+        preview_start_f = parse_preview_start_value(payload.get("preview_start_sec"))
 
         cmd = [
             self.python_executable,

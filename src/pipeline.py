@@ -173,10 +173,19 @@ def run_upscale_pipeline(
 
     try:
         if is_preview:
-            max_dur = max(1, int(round(meta["duration"]))) if meta.get("duration") else int(preview_seconds)
+            has_valid_dur = bool(meta.get("duration") and float(meta["duration"]) > 0.0)
+            raw_dur = float(meta["duration"]) if has_valid_dur else float(preview_seconds)
+            max_dur = max(1, int(round(raw_dur))) if has_valid_dur else int(preview_seconds)
             preview_dur = min(int(preview_seconds), max_dur)
             if preview_start_sec_override is not None:
-                start_pt = max(0, min(int(round(float(preview_start_sec_override))), max(0, max_dur - preview_dur)))
+                ov_val = float(preview_start_sec_override)
+                if not math.isfinite(ov_val) or ov_val < 0.0:
+                    raise ValueError(f"preview_start_sec_override không hợp lệ: {preview_start_sec_override!r}")
+                if has_valid_dur:
+                    max_start_f = max(0.0, raw_dur - float(preview_dur))
+                    start_pt: float | int = round(max(0.0, min(ov_val, max_start_f)), 3)
+                else:
+                    start_pt = round(max(0.0, ov_val), 3)
             elif preview_dur >= max_dur:
                 start_pt = 0
             else:
@@ -1337,7 +1346,11 @@ def run_upscale_pipeline(
                                                         int(pre_bs),
                                                         max(2, int(getattr(pre_wrapped, "max_batch", pre_bs) or pre_bs)),
                                                     )
-                                                elif pre_cuda.device.type == "cuda" and torch.cuda.is_available():
+                                                elif (
+                                                    pre_cuda.device.type == "cuda"
+                                                    and torch.cuda.is_available()
+                                                    and not os.environ.get("PYTEST_CURRENT_TEST")
+                                                ):
                                                     free_pre, _ = torch.cuda.mem_get_info(pre_cuda.device)
                                                     is_heavy_arch = "cugan" in str(model_info.get("id", "")).lower()
                                                     if is_heavy_arch:

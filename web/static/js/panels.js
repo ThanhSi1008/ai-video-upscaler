@@ -143,8 +143,12 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
     let sec = Number.NaN;
     if (raw.includes(":")) {
       const parts = raw.split(":");
-      if ((parts.length === 2 || parts.length === 3) && parts.every((p) => /^\d+(\.\d+)?$/.test(p.trim()))) {
-        const nums = parts.map((p) => Number(p.trim()));
+      if (
+        (parts.length === 2 || parts.length === 3) &&
+        parts.slice(0, -1).every((p) => /^\d+$/.test(p)) &&
+        /^\d+(\.\d+)?$/.test(parts[parts.length - 1])
+      ) {
+        const nums = parts.map((p) => Number(p));
         const validParts =
           nums.every((n) => Number.isFinite(n) && n >= 0) &&
           (parts.length === 2 ? nums[1] < 60 : nums[1] < 60 && nums[2] < 60);
@@ -933,7 +937,8 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
       }
       syncStageBControls();
       syncStartUpscaleLabel();
-      const cpBatch = Number(opts.batchSize ?? opts.batch_size);
+      const rawCpBatch = opts.batchSize ?? opts.batch_size;
+      const cpBatch = rawCpBatch === null || rawCpBatch === undefined || rawCpBatch === "" ? Number.NaN : Number(rawCpBatch);
       if (
         Number.isInteger(cpBatch) &&
         cpBatch >= 1 &&
@@ -941,6 +946,14 @@ export function initQueuePanel({ selectTabById, onJobLaunched }) {
         optBatch instanceof HTMLInputElement
       ) {
         optBatch.value = String(cpBatch);
+        optBatch.setCustomValidity("");
+        setFieldError(optBatch, optBatchError, null);
+        cfgChanged = true;
+      } else if (
+        optBatch instanceof HTMLInputElement &&
+        validateBatchSizeInput({ focusOnError: false, toastOnError: false }) === null
+      ) {
+        optBatch.value = "8";
         optBatch.setCustomValidity("");
         setFieldError(optBatch, optBatchError, null);
         cfgChanged = true;

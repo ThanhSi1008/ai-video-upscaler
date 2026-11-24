@@ -46,7 +46,7 @@ from web.fs_browser import (
     match_show_pattern,
     match_show_rule,
 )
-from web.job_manager import MODEL_REFERENCE_FPS, JobManager
+from web.job_manager import MODEL_REFERENCE_FPS, JobManager, parse_preview_start_value
 from web.sse_hub import TelemetryHub, check_active_gpu_lock, scan_temp_checkpoints
 
 ALLOWED_OPEN_MEDIA_EXTS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
@@ -219,21 +219,7 @@ class StartPreviewRequest(BaseModel):
     @field_validator("preview_start_sec", mode="before")
     @classmethod
     def _validate_preview_start_type(cls, v: Any) -> Any:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
-        if isinstance(v, bool):
-            raise ValueError("preview_start_sec không được là kiểu boolean.")
-        if isinstance(v, str):
-            text = v.strip()
-            if ":" in text:
-                parts = text.split(":")
-                if len(parts) not in (2, 3):
-                    raise ValueError("preview_start_sec phải là số giây hoặc MM:SS / HH:MM:SS.")
-                nums = [float(p) for p in parts]
-                if any(n < 0 for n in nums):
-                    raise ValueError("preview_start_sec phải >= 0.")
-                return (nums[0] * 60.0 + nums[1]) if len(nums) == 2 else (nums[0] * 3600.0 + nums[1] * 60.0 + nums[2])
-        return v
+        return parse_preview_start_value(v)
 
     @field_validator("preview_start_sec")
     @classmethod
@@ -1695,8 +1681,8 @@ def create_app(
 
         if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
             cleaned = cleaned[1:-1].strip()
-        if not cleaned:
-            raise HTTPException(status_code=400, detail="Thiếu đường dẫn thư mục checkpoint (.temp_*).")
+        if not cleaned or is_unc_path(cleaned):
+            raise HTTPException(status_code=400, detail="Đường dẫn thư mục checkpoint (.temp_*) không hợp lệ.")
 
         raw_cand = Path(os.path.expanduser(cleaned))
         if not raw_cand.is_absolute():
@@ -1714,15 +1700,24 @@ def create_app(
 
         root_norm = os.path.normcase(os.path.abspath(str(root)))
         has_link_ancestor = False
+        if ".." in raw_cand.parts:
+            acc = Path(raw_cand.anchor) if raw_cand.is_absolute() else root
+            rel_parts = raw_cand.parts[1:] if raw_cand.is_absolute() else raw_cand.parts
+            for part in rel_parts:
+                if part == "..":
+                    acc = acc.parent
+                elif part != ".":
+                    acc = acc / part
+                    if _is_link_or_reparse(acc):
+                        has_link_ancestor = True
+                        break
         cur_par = raw_abs.parent
-        while True:
+        while not has_link_ancestor:
             cur_norm = os.path.normcase(str(cur_par))
             if cur_norm == root_norm or cur_par.parent == cur_par:
                 break
             if _is_link_or_reparse(cur_par):
                 has_link_ancestor = True
-                break
-            if not cur_norm.startswith(root_norm + os.sep) and cur_par != raw_abs.parent:
                 break
             cur_par = cur_par.parent
 

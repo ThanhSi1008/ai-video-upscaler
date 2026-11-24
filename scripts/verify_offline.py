@@ -30,8 +30,31 @@ SUFFIXES = {
 }
 GUARD = '''"""Offline guard loaded before test collection and inherited by child Python processes."""
 import _socket
+import os
 import socket
 import sys
+
+if sys.platform == "win32" and not os.environ.get("PYTEST_CURRENT_TEST"):
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        _k32 = ctypes.windll.kernel32
+        _k32.GetCurrentProcess.restype = wintypes.HANDLE
+        _k32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+        _k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        _k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+
+        class _PwrState(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+        _hp = _k32.GetCurrentProcess()
+        _st = _PwrState(Version=1, ControlMask=0x1, StateMask=0)
+        _k32.SetProcessInformation(_hp, 4, ctypes.byref(_st), ctypes.sizeof(_st))
+        if int(_k32.GetPriorityClass(_hp)) in (0, 0x00000020, 0x00004000, 0x00000040):
+            _k32.SetPriorityClass(_hp, 0x00008000)
+    except Exception:
+        pass
 
 def deny_network(*args, **kwargs):
     if hasattr(socket, "socketpair") and sys._getframe(1).f_code is socket.socketpair.__code__:

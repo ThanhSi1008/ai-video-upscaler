@@ -955,7 +955,25 @@ class TelemetryHub:
                 and not pid_alive
                 and not gpu_lock.get("locked")
             ):
+                stale_prev_stage = effective_stage
                 effective_stage = "paused" if checkpoints else "idle"
+                if live_data:
+                    live_data = dict(live_data)
+                    if stale_prev_stage not in {"starting", "initializing"}:
+                        live_data["last_stage"] = stale_prev_stage
+                    live_data["stage"] = effective_stage
+                    live_data["active_chunk_fraction"] = 0.0
+                    live_data["eta_seconds"] = None
+                    if effective_stage == "paused":
+                        v_label = str(live_data.get("video_name") or "").strip()
+                        live_data["stage_detail"] = (
+                            f"Phiên trước đã dừng ({v_label}) — có checkpoint sẵn sàng tiếp tục."
+                            if v_label
+                            else "Phiên trước đã dừng — có checkpoint sẵn sàng tiếp tục."
+                        )
+                    else:
+                        live_data["active_chunk"] = None
+                        live_data["stage_detail"] = "Hệ thống sẵn sàng chờ lệnh."
 
         return {
             "active_source": active_source,

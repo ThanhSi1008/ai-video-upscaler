@@ -19,6 +19,7 @@ DEFAULT_SKIP_STYLES = r"(?i)(^|[_\s\-])(op|ed|sign|song|karaoke|title|credit)([_
 DEFAULT_SKIP_STYLES_RE = re.compile(DEFAULT_SKIP_STYLES)
 TYPESET_TAG_REGEX = re.compile(r"\\(pos|move|org|clip|iclip|p[1-9])\b", re.IGNORECASE)
 ASS_TAG_REGEX = re.compile(r"\{[^\}]*\}")
+_HTML_TAG_REGEX = re.compile(r"<[^>]+>")
 _WS_REGEX = re.compile(r"\s+")
 _ITEM_SORT_KEY_01 = itemgetter(0, 1)
 NON_SPEAKER_ACTOR_REGEX = re.compile(
@@ -806,14 +807,61 @@ def detect_auto_offset(
     if not en_path:
         return 0, False, "Không có file phụ đề tiếng Anh tham chiếu", {}
 
-    try:
-        ja_ssa = pysubs2.load(ja_path)
-        en_ssa = pysubs2.load(en_path)
-    except Exception as e:
-        return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
-
     skip_re = DEFAULT_SKIP_STYLES_RE if skip_styles_regex == DEFAULT_SKIP_STYLES else re.compile(skip_styles_regex)
     style_skip_cache: Dict[str, bool] = {}
+    default_style_skipped = bool(skip_re.search("Default"))
+
+    def _try_fast_srt_items(file_path: str, check_fw_q: bool) -> Optional[List[Tuple[int, int, int, bool]]]:
+        if default_style_skipped or not str(file_path).lower().endswith(".srt"):
+            return None
+        try:
+            raw = Path(file_path).read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            return None
+        if raw.lstrip().startswith("[Script Info]"):
+            return None
+        if "\r" in raw:
+            raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        items_fast: List[Tuple[int, int, int, bool]] = []
+        saw_arrow = False
+        for blk in raw.split("\n\n"):
+            if "-->" not in blk:
+                continue
+            saw_arrow = True
+            lines = blk.strip("\n").split("\n")
+            ts_idx = 0 if "-->" in lines[0] else (1 if len(lines) > 1 and "-->" in lines[1] else -1)
+            if ts_idx < 0 or ts_idx + 1 >= len(lines):
+                return None
+            ts_line = lines[ts_idx]
+            arrow_pos = ts_line.find("-->")
+            l_ts = ts_line[:arrow_pos].strip()
+            r_ts = ts_line[arrow_pos + 3 :].strip().split(" ", 1)[0]
+            try:
+                lh, lm, l_rest = l_ts.split(":")
+                ls, lms = l_rest.split(",") if "," in l_rest else l_rest.split(".")
+                rh, rm, r_rest = r_ts.split(":")
+                rs, rms = r_rest.split(",") if "," in r_rest else r_rest.split(".")
+                s = int(lh) * 3600000 + int(lm) * 60000 + int(ls) * 1000 + int(lms)
+                end = int(rh) * 3600000 + int(rm) * 60000 + int(rs) * 1000 + int(rms)
+            except Exception:
+                return None
+            if end <= s:
+                continue
+            txt = "\n".join(lines[ts_idx + 1 :])
+            if "<" in txt:
+                txt = _HTML_TAG_REGEX.sub("", txt)
+            if "{" not in txt and "\\" not in txt:
+                if not txt.strip():
+                    continue
+            else:
+                if has_typesetting(txt) or not clean_subtitle_text(txt):
+                    continue
+            has_q = ("?" in txt or "？" in txt) if check_fw_q else ("?" in txt)
+            items_fast.append((s, end, end - s, has_q))
+        if not saw_arrow and raw.strip():
+            return None
+        items_fast.sort(key=_ITEM_SORT_KEY_01)
+        return items_fast
 
     def _extract_items(ssa: pysubs2.SSAFile, check_fw_q: bool) -> List[Tuple[int, int, int, bool]]:
         items: List[Tuple[int, int, int, bool]] = []
@@ -843,8 +891,15 @@ def detect_auto_offset(
         items.sort(key=_ITEM_SORT_KEY_01)
         return items
 
-    ja_items = _extract_items(ja_ssa, check_fw_q=True)
-    en_items = _extract_items(en_ssa, check_fw_q=False)
+    ja_items = _try_fast_srt_items(ja_path, check_fw_q=True)
+    en_items = _try_fast_srt_items(en_path, check_fw_q=False)
+    try:
+        if ja_items is None:
+            ja_items = _extract_items(pysubs2.load(ja_path), check_fw_q=True)
+        if en_items is None:
+            en_items = _extract_items(pysubs2.load(en_path), check_fw_q=False)
+    except Exception as e:
+        return 0, False, f"Lỗi đọc file phụ đề: {e}", {}
 
     if not ja_items or not en_items:
         return 0, False, "Không tìm thấy thoại hợp lệ trong file JA hoặc EN", {}
@@ -857,22 +912,38 @@ def detect_auto_offset(
     else:
         sample_ja = [ja_items[(i * n_ja) // 200] for i in range(200)]
 
-    # Coarse +/-600s scan using 0.2s bins and 3-bin smoothing to surface commercial-break peaks.
-    coarse_bins: Counter = Counter()
+    # Coarse +/-600s scan partitioned by has_q over a flat 0.2s integer bin array.
+    en_by_q: Tuple[List[Tuple[int, int]], List[Tuple[int, int]]] = ([], [])
+    en_starts_by_q: Tuple[List[int], List[int]] = ([], [])
+    for es, _ee, ed, eq in en_items:
+        q_idx = 1 if eq else 0
+        en_by_q[q_idx].append((es, ed))
+        en_starts_by_q[q_idx].append(es)
+
+    coarse_offset = 3002
+    coarse_arr = [0] * 6005
+    nonzero_bins: set[int] = set()
     for js, _je, jd, jq in sample_ja:
-        lo = bisect_left(en_starts, js - max_offset_ms)
-        hi = bisect_right(en_starts, js + max_offset_ms)
+        q_idx = 1 if jq else 0
+        q_starts = en_starts_by_q[q_idx]
+        if not q_starts:
+            continue
+        q_items = en_by_q[q_idx]
+        lo = bisect_left(q_starts, js - max_offset_ms)
+        hi = bisect_right(q_starts, js + max_offset_ms)
+        jd_max = jd * 4
         for k in range(lo, hi):
-            es, _ee, ed, eq = en_items[k]
-            if jq != eq:
+            es, ed = q_items[k]
+            if ed > jd_max or ed * 4 < jd:
                 continue
-            if (jd if jd < ed else ed) * 4 < (jd if jd > ed else ed):
-                continue
-            coarse_bins[round((es - js) / 200.0)] += 1
+            b_idx = round((es - js) * 0.005) + coarse_offset
+            if coarse_arr[b_idx] == 0:
+                nonzero_bins.add(b_idx)
+            coarse_arr[b_idx] += 1
 
     smoothed_scores = [
-        (coarse_bins.get(b - 1, 0) + cnt + coarse_bins.get(b + 1, 0), b * 0.2)
-        for b, cnt in coarse_bins.items()
+        (coarse_arr[b_i - 1] + coarse_arr[b_i] + coarse_arr[b_i + 1], (b_i - coarse_offset) * 0.2)
+        for b_i in nonzero_bins
     ]
     smoothed_scores.sort(key=lambda x: (-x[0], abs(x[1])))
 
@@ -1044,11 +1115,16 @@ def detect_auto_offset(
                 for idx, sp_ms in enumerate(candidate_splits):
                     cc = chunk_counters[idx]
                     left_counter.update(cc)
-                    right_counter.subtract(cc)
+                    for ck, cv in cc.items():
+                        rem_v = right_counter[ck] - cv
+                        if rem_v <= 0:
+                            right_counter.pop(ck, None)
+                        else:
+                            right_counter[ck] = rem_v
                     p_idx = split_pair_indices[idx]
                     l_cnt = p_idx
                     r_cnt = total_pairs - p_idx
-                    if l_cnt < 12 or r_cnt < 12:
+                    if l_cnt < 12 or r_cnt < 12 or not left_counter or not right_counter:
                         continue
                     l_mode_int, l_mode_cnt = left_counter.most_common(1)[0]
                     r_mode_int, r_mode_cnt = right_counter.most_common(1)[0]

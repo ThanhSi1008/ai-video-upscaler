@@ -139,7 +139,29 @@ def test_concat_lists_resolve_relative_paths_and_preview_start_parser(tmp_path: 
 
     assert _parse_preview_start_arg("860.5") == 860.5
     assert _parse_preview_start_arg("14:20") == 860.0
+    assert _parse_preview_start_arg("85:30") == 5130.0
     assert _parse_preview_start_arg("01:02:03.5") == 3723.5
+
+    import argparse
+    import pytest
+
+    for invalid_arg in (
+        "",
+        "14:60",
+        "14:75",
+        "01:60:00",
+        "01:02:60",
+        "1.5:20",
+        "1.5:02:03",
+        "01:2.5:03",
+        "-1:20",
+        "14: 20",
+        "25:00:00",
+        "nan",
+        "inf",
+    ):
+        with pytest.raises(argparse.ArgumentTypeError):
+            _parse_preview_start_arg(invalid_arg)
 
     # Verify directional s=5 filter matches calibrated FFmpeg vf_atadenoise.c (a=s) boundary (25 for heavy Y)
     c_frame = np.full((6, 4), 272 << 6, dtype=np.uint16)
@@ -182,3 +204,100 @@ def test_night_report_excludes_web_job_mirror_logs_and_lists_sessions(tmp_path: 
     sessions = list_night_report_sessions(workspace_root=tmp_path)
     assert "night1" in sessions
     assert "friday_batch" in sessions
+
+
+def test_pipeline_preview_start_override_preserves_subsecond_precision(tmp_path: Path, monkeypatch) -> None:
+    """Verify run_upscale_pipeline preserves sub-second preview_start_sec_override in ffmpeg -ss and live context."""
+    import contextlib
+    import subprocess
+    import pytest
+    import src.dedup as dedup_mod
+    import src.logger as logger_mod
+    import src.models_resolver as mr_mod
+    import src.pipeline as pipeline_mod
+
+    iso_root = tmp_path / "subsec_preview_ws"
+    (iso_root / "logs").mkdir(parents=True, exist_ok=True)
+    (iso_root / "models").mkdir(parents=True, exist_ok=True)
+    src_vid = iso_root / "Sample_Ep01.mkv"
+    src_vid.write_bytes(b"\x00" * 4096)
+    (iso_root / "shows.yaml").write_text("shows: []\n", encoding="utf-8")
+    repo_models = Path(__file__).resolve().parents[1] / "models" / "models.yaml"
+    (iso_root / "models" / "models.yaml").write_text(repo_models.read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(dedup_mod, "ROOT_DIR", str(iso_root))
+    monkeypatch.setattr(mr_mod, "ROOT_DIR", str(iso_root))
+    monkeypatch.setattr(logger_mod, "LOGS_DIR", str(iso_root / "logs"))
+    mr_mod._YAML_STAT_CACHE.clear()
+
+    recorded_cut_cmds: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kw):
+        recorded_cut_cmds.append(list(cmd))
+        out_clip = Path(cmd[-1])
+        out_clip.parent.mkdir(parents=True, exist_ok=True)
+        out_clip.write_bytes(b"\x00" * 2048)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    class _StopAfterLiveContext(RuntimeError):
+        pass
+
+    @contextlib.contextmanager
+    def fake_ramdisk(**_kw):
+        ram_d = iso_root / "ram"
+        ram_d.mkdir(parents=True, exist_ok=True)
+        yield str(ram_d)
+
+    monkeypatch.setattr(pipeline_mod, "validate_environment", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "acquire_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "release_gpu_lock", lambda: None)
+    monkeypatch.setattr(pipeline_mod, "run_preflight_checks", lambda **_kw: None)
+    monkeypatch.setattr(pipeline_mod, "RAMDisk", fake_ramdisk)
+    monkeypatch.setattr(pipeline_mod.subprocess, "run", fake_run)
+    fake_run._mock_name = "fake_run"  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        pipeline_mod,
+        "probe_video",
+        lambda _p: {
+            "duration": 30.75,
+            "nb_frames": 738,
+            "fps": 24.0,
+            "fps_num": 24,
+            "fps_den": 1,
+            "width": 1920,
+            "height": 1080,
+            "size_bytes": 4096,
+            "audio_count": 1,
+            "subtitle_count": 0,
+            "attachment_count": 0,
+            "chapter_count": 0,
+        },
+    )
+    monkeypatch.setattr(pipeline_mod, "is_valid_completed_4k_output", lambda _p: False)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "split_video_segments",
+        lambda *_a, **_kw: (_ for _ in ()).throw(_StopAfterLiveContext("stop")),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "RollingDedupPlanner",
+        lambda *_a, **_kw: (_ for _ in ()).throw(_StopAfterLiveContext("stop")),
+    )
+
+    out_dir = iso_root / "out"
+    with pytest.raises(_StopAfterLiveContext):
+        pipeline_mod.run_upscale_pipeline(
+            input_path=str(src_vid),
+            output_path=str(out_dir),
+            preview_seconds=10,
+            preview_start_sec_override=14.625,
+            zero_disk=True,
+        )
+
+    assert len(recorded_cut_cmds) == 1
+    cut_cmd = recorded_cut_cmds[0]
+    ss_val = float(cut_cmd[cut_cmd.index("-ss") + 1])
+    assert ss_val == pytest.approx(14.625)
+    live_snap = logger_mod.read_live_status()
+    assert live_snap["preview_start_sec"] == pytest.approx(14.625)
